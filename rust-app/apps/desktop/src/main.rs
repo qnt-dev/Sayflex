@@ -210,6 +210,41 @@ enum TranslationDelivery {
     Copy,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum VisualizerStyle {
+    #[default]
+    VoiceOrb,
+    SymmetricSpectrum,
+    FluidRibbon,
+}
+
+impl VisualizerStyle {
+    const fn next(self) -> Self {
+        match self {
+            Self::VoiceOrb => Self::SymmetricSpectrum,
+            Self::SymmetricSpectrum => Self::FluidRibbon,
+            Self::FluidRibbon => Self::VoiceOrb,
+        }
+    }
+
+    const fn index(self) -> i32 {
+        match self {
+            Self::VoiceOrb => 0,
+            Self::SymmetricSpectrum => 1,
+            Self::FluidRibbon => 2,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::VoiceOrb => "Visualizer: Voice Orb",
+            Self::SymmetricSpectrum => "Visualizer: Symmetric Spectrum",
+            Self::FluidRibbon => "Visualizer: Fluid Ribbon",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PendingTextAction {
     request_id: RequestId,
@@ -228,6 +263,13 @@ enum TranslationOrigin {
 
 struct PendingTranslation {
     origin: TranslationOrigin,
+}
+
+struct SelectionTranslationRequest {
+    request_id: RequestId,
+    target: TargetSnapshot,
+    text: String,
+    delivery: TranslationDelivery,
 }
 
 #[derive(Clone)]
@@ -259,6 +301,7 @@ enum IndicatorMode {
 
 struct IndicatorAnimation {
     bars: Rc<VecModel<f32>>,
+    style: VisualizerStyle,
     mode: IndicatorMode,
     target_level: f32,
     display_level: f32,
@@ -270,18 +313,29 @@ struct IndicatorFrame {
     heights: Vec<f32>,
     signal_opacity: f32,
     disc_opacity: f32,
+    orb_size: f32,
+    orb_glow: f32,
+    ribbon_y1: f32,
+    ribbon_y2: f32,
+    ribbon_y3: f32,
+    ribbon_y4: f32,
 }
 
 impl IndicatorAnimation {
     fn new(bars: Rc<VecModel<f32>>) -> Self {
         Self {
             bars,
+            style: VisualizerStyle::default(),
             mode: IndicatorMode::Hidden,
             target_level: 0.08,
             display_level: 0.08,
             phase: 0.0,
             last_frame: Instant::now(),
         }
+    }
+
+    fn set_style(&mut self, style: VisualizerStyle) {
+        self.style = style;
     }
 
     fn begin_listening(&mut self) {
@@ -323,9 +377,16 @@ impl IndicatorAnimation {
         self.bars.set_vec(frame.heights);
 
         if let Some(indicator) = indicator.upgrade() {
+            indicator.set_visualizer_style(self.style.index());
             indicator.set_processing(self.mode == IndicatorMode::Processing);
             indicator.set_signal_opacity(frame.signal_opacity);
             indicator.set_disc_opacity(frame.disc_opacity);
+            indicator.set_orb_size(frame.orb_size);
+            indicator.set_orb_glow(frame.orb_glow);
+            indicator.set_ribbon_y1(frame.ribbon_y1);
+            indicator.set_ribbon_y2(frame.ribbon_y2);
+            indicator.set_ribbon_y3(frame.ribbon_y3);
+            indicator.set_ribbon_y4(frame.ribbon_y4);
         }
     }
 
@@ -361,6 +422,12 @@ impl IndicatorAnimation {
                 IndicatorMode::Listening => 1.0,
                 IndicatorMode::Hidden => 0.0,
             },
+            orb_size: (9.0 + energy * 10.0 + processing_pulse * 1.5).clamp(8.0, 20.0),
+            orb_glow: (0.12 + energy * 0.38 + processing_pulse * 0.12).clamp(0.12, 0.62),
+            ribbon_y1: 9.5 + (self.phase * 0.93).sin() * energy * 6.5,
+            ribbon_y2: 9.5 + (self.phase * 0.93 + 1.35).sin() * energy * 7.4,
+            ribbon_y3: 9.5 + (self.phase * 0.93 + 2.7).sin() * energy * 6.8,
+            ribbon_y4: 9.5 + (self.phase * 0.93 + 4.05).sin() * energy * 5.8,
         }
     }
 }
@@ -376,6 +443,7 @@ struct AppState {
     selected_model_id: String,
     output_mode: SpeechOutputMode,
     fast_release_previews: bool,
+    visualizer_style: VisualizerStyle,
     input_ready: bool,
     speech_ready: bool,
     indicator_session: Option<SessionId>,
@@ -393,6 +461,7 @@ struct AppState {
     history_enabled: bool,
     pending_text_action: Option<PendingTextAction>,
     pending_translations: HashMap<RequestId, PendingTranslation>,
+    queued_selection_translation: Option<SelectionTranslationRequest>,
     preview_translation: Option<PreviewTranslation>,
     translation_history: Vec<TranslationHistoryEntry>,
 }
@@ -414,6 +483,7 @@ impl AppState {
             selected_model_id,
             output_mode,
             fast_release_previews: saved_settings.fast_release_previews,
+            visualizer_style: saved_settings.visualizer_style,
             input_ready: false,
             speech_ready: false,
             indicator_session: None,
@@ -430,6 +500,7 @@ impl AppState {
             translation_delivery: saved_settings.translation_delivery,
             pending_text_action: None,
             pending_translations: HashMap::new(),
+            queued_selection_translation: None,
             preview_translation: None,
             translation_history: Vec::new(),
             history_enabled: saved_settings.history_enabled,
@@ -485,14 +556,14 @@ impl AppState {
 fn main() -> Result<(), Box<dyn Error>> {
     rust_platform_windows::configure_safe_dll_search()?;
     configure_ui_backend()?;
-    if env::args().any(|argument| argument == "--indicator-preview") {
-        return run_indicator_preview();
+    if let Some(style) = indicator_preview_style() {
+        return run_indicator_preview(style);
     }
     if env::args().any(|argument| argument == "--action-preview") {
         return run_action_palette_preview();
     }
-    if env::args().any(|argument| argument == "--translation-preview") {
-        return run_translation_preview();
+    if let Some(long_text) = translation_preview_mode() {
+        return run_translation_preview(long_text);
     }
     if env::args().any(|argument| argument == "--layout-preview") {
         return run_layout_preview();
@@ -540,6 +611,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         restart_attempts: RefCell::new(HashMap::new()),
     });
     let saved_settings = load_settings();
+    indicator_animation
+        .borrow_mut()
+        .set_style(saved_settings.visualizer_style);
+    indicator.set_visualizer_style(saved_settings.visualizer_style.index());
     let selected_model_id = saved_settings
         .selected_model_id
         .clone()
@@ -573,7 +648,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             history_enabled: saved_settings.history_enabled,
         })?;
 
-    wire_settings(&settings, &translator, &state, &workers);
+    wire_settings(
+        &settings,
+        &translator,
+        &state,
+        &workers,
+        &indicator_animation,
+    );
     wire_tray(&tray, &settings, &translator, &state, &workers);
     wire_chooser(&chooser, &state, &workers);
     wire_action_palette(
@@ -629,12 +710,51 @@ fn new_indicator()
     Ok((indicator, animation))
 }
 
-fn run_indicator_preview() -> Result<(), Box<dyn Error>> {
+fn indicator_preview_style() -> Option<VisualizerStyle> {
+    env::args().find_map(|argument| match argument.as_str() {
+        "--indicator-preview" | "--indicator-preview=orb" => Some(VisualizerStyle::VoiceOrb),
+        "--indicator-preview=spectrum" => Some(VisualizerStyle::SymmetricSpectrum),
+        "--indicator-preview=ribbon" => Some(VisualizerStyle::FluidRibbon),
+        _ => None,
+    })
+}
+
+fn translation_preview_mode() -> Option<bool> {
+    env::args().find_map(|argument| match argument.as_str() {
+        "--translation-preview" => Some(false),
+        "--translation-preview=long" => Some(true),
+        _ => None,
+    })
+}
+
+fn run_indicator_preview(style: VisualizerStyle) -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.IndicatorPreview")?;
     let (indicator, animation) = new_indicator()?;
-    animation.borrow_mut().begin_listening();
-    show_indicator(&indicator, None);
+    {
+        let mut animation = animation.borrow_mut();
+        animation.set_style(style);
+        animation.begin_listening();
+    }
+    indicator.set_visualizer_style(style.index());
+    indicator.set_prepared(true);
+    indicator.show()?;
+    let indicator_weak = indicator.as_weak();
+    slint::spawn_local(async move {
+        if let Some(indicator) = indicator_weak.upgrade() {
+            let configured = indicator
+                .window()
+                .winit_window()
+                .await
+                .ok()
+                .as_deref()
+                .and_then(native_window_handle)
+                .is_some_and(|handle| configure_indicator_native_window(handle, None));
+            if !configured {
+                eprintln!("could not configure recording indicator preview");
+            }
+        }
+    })?;
 
     let timer = Timer::default();
     let indicator = indicator.as_weak();
@@ -713,20 +833,25 @@ fn run_action_palette_preview() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_translation_preview() -> Result<(), Box<dyn Error>> {
+fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.TranslationPreview")?;
     let preview = TranslationPreview::new()?;
-    let source = "The preview should grow with its content, not with a fixed empty canvas.";
-    let translated =
-        "Предпросмотр должен увеличиваться вместе с содержимым, а не оставлять пустой холст.";
+    let source = if long_text {
+        "A long translation should stay readable without turning the compact action card into a full workspace."
+    } else {
+        "The preview should grow with its content, not with a fixed empty canvas."
+    };
+    let translated = if long_text {
+        "Длинный перевод должен оставаться удобным для чтения. Карточка сохраняет компактную форму, а результат прокручивается внутри неё. Это позволяет быстро проверить смысл, не терять выбранное место в исходном приложении и не открывать отдельное большое рабочее окно. Прокрутка появляется только тогда, когда текст действительно не помещается. ".repeat(12)
+    } else {
+        "Предпросмотр должен увеличиваться вместе с содержимым, а не оставлять пустой холст."
+            .to_owned()
+    };
+    apply_translation_preview_layout(&preview, source, &translated);
     preview.set_source_text(source.into());
-    preview.set_translated_text(translated.into());
+    preview.set_translated_text(translated.clone().into());
     preview.set_direction_label("EN → RU · 94 ms".into());
-    preview.set_source_panel_height(adaptive_text_panel_height(source, 88, 2, 6, 15.0, 16.0));
-    preview.set_result_panel_height(adaptive_text_panel_height(
-        translated, 88, 2, 10, 17.0, 18.0,
-    ));
     preview.set_processing(false);
     preview.set_prepared(true);
     preview.on_replace(|| {
@@ -932,6 +1057,9 @@ fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn trusted_cuda_runtime_directory() -> Option<PathBuf> {
+    let program_files = env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok())?;
     let mut roots = Vec::new();
     if let Some(path) = env::var_os("CUDA_PATH") {
         roots.push(PathBuf::from(path));
@@ -942,8 +1070,26 @@ fn trusted_cuda_runtime_directory() -> Option<PathBuf> {
         .collect::<Vec<_>>();
     versioned.sort_by(|left, right| right.cmp(left));
     roots.extend(versioned);
+
+    let toolkit_root = program_files
+        .join("NVIDIA GPU Computing Toolkit")
+        .join("CUDA");
+    if let Ok(entries) = fs::read_dir(toolkit_root) {
+        let mut installed = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        installed.sort_by(|left, right| right.cmp(left));
+        roots.extend(installed);
+    }
+
     roots.into_iter().find_map(|root| {
-        let directory = root.join("bin").join("x64").canonicalize().ok()?;
+        let trusted_root = root.canonicalize().ok()?;
+        if !trusted_root.starts_with(&program_files) {
+            return None;
+        }
+        let directory = trusted_root.join("bin").join("x64").canonicalize().ok()?;
         (directory.join("cublas64_13.dll").is_file()
             && directory.join("cublasLt64_13.dll").is_file())
         .then_some(directory)
@@ -1394,9 +1540,12 @@ fn handle_text_action(
         }
         TextActionIntent::Translate => {
             begin_selection_translation(
-                request_id,
-                target,
-                text,
+                SelectionTranslationRequest {
+                    request_id,
+                    target,
+                    text,
+                    delivery: TranslationDelivery::Preview,
+                },
                 settings,
                 translation_preview,
                 state,
@@ -1404,12 +1553,13 @@ fn handle_text_action(
             );
         }
         TextActionIntent::Adaptive => {
-            let (layout_enabled, translation_enabled, mode) = {
+            let (layout_enabled, translation_enabled, mode, delivery) = {
                 let state = state.borrow();
                 (
                     state.layout_enabled,
                     state.translation_enabled,
                     state.text_action_mode,
+                    state.translation_delivery,
                 )
             };
             let enabled_count = usize::from(layout_enabled) + usize::from(translation_enabled);
@@ -1420,9 +1570,12 @@ fn handle_text_action(
             if enabled_count == 1 && mode == TextActionMode::Adaptive {
                 if translation_enabled {
                     begin_selection_translation(
-                        request_id,
-                        target,
-                        text,
+                        SelectionTranslationRequest {
+                            request_id,
+                            target,
+                            text,
+                            delivery,
+                        },
                         settings,
                         translation_preview,
                         state,
@@ -1505,28 +1658,53 @@ fn show_layout_chooser(
 }
 
 fn begin_selection_translation(
-    request_id: RequestId,
-    target: TargetSnapshot,
-    text: String,
+    request: SelectionTranslationRequest,
     settings: &slint::Weak<SettingsWindow>,
     translation_preview: &slint::Weak<TranslationPreview>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
 ) {
-    let (enabled, selected_tier, ready, delivery) = {
+    let SelectionTranslationRequest {
+        request_id,
+        target,
+        text,
+        delivery,
+    } = request;
+    let (enabled, selected_tier, ready) = {
         let state = state.borrow();
         (
             state.translation_enabled,
             state.selected_translation_tier,
             state.translation_ready,
-            state.translation_delivery,
         )
     };
     if !enabled {
+        if delivery == TranslationDelivery::Preview {
+            show_selection_translation_preview(
+                request_id,
+                target,
+                &text,
+                "Translation is disabled in Settings.",
+                "Unavailable",
+                true,
+                translation_preview,
+            );
+        }
         set_indicator_status(settings, "Translation is disabled in Actions.");
         return;
     }
     if selected_tier.is_none() {
+        if delivery == TranslationDelivery::Preview {
+            show_selection_translation_preview(
+                request_id,
+                target,
+                &text,
+                "Choose and download a translation model in Settings.",
+                "Model required",
+                true,
+                translation_preview,
+            );
+        }
         set_indicator_status(
             settings,
             "Choose and download a translation model in Settings first.",
@@ -1534,6 +1712,23 @@ fn begin_selection_translation(
         return;
     }
     if !ready {
+        if delivery == TranslationDelivery::Preview {
+            show_selection_translation_preview(
+                request_id,
+                target,
+                &text,
+                "Loading the local translation model…",
+                "Preparing locally",
+                true,
+                translation_preview,
+            );
+        }
+        state.borrow_mut().queued_selection_translation = Some(SelectionTranslationRequest {
+            request_id,
+            target,
+            text,
+            delivery,
+        });
         set_indicator_status(settings, "The translation model is still loading.");
         return;
     }
@@ -1544,20 +1739,15 @@ fn begin_selection_translation(
             origin: TranslationOrigin::Selection { target, delivery },
         },
     );
-    if delivery == TranslationDelivery::Preview
-        && let Some(preview) = translation_preview.upgrade()
-    {
-        preview.set_request_id(request_id.to_string().into());
-        preview.set_source_panel_height(adaptive_text_panel_height(&text, 88, 2, 6, 15.0, 16.0));
-        preview.set_result_panel_height(54.0);
-        preview.set_source_text(text.clone().into());
-        preview.set_translated_text("Translating locally…".into());
-        preview.set_processing(true);
-        let _ = preview.show();
-        prepare_shown_action_window(
-            slint_window_handle(preview.window()),
-            TRANSLATION_PREVIEW_WINDOW_TITLE,
-            target.window_handle,
+    if delivery == TranslationDelivery::Preview {
+        show_selection_translation_preview(
+            request_id,
+            target,
+            &text,
+            "Translating locally…",
+            "Detecting language…",
+            true,
+            translation_preview,
         );
     }
     if let Err(error) = workers
@@ -1574,6 +1764,32 @@ fn begin_selection_translation(
     } else {
         set_indicator_status(settings, "Translating locally…");
     }
+}
+
+fn show_selection_translation_preview(
+    request_id: RequestId,
+    target: TargetSnapshot,
+    source_text: &str,
+    result_text: &str,
+    direction_label: &str,
+    processing: bool,
+    translation_preview: &slint::Weak<TranslationPreview>,
+) {
+    let Some(preview) = translation_preview.upgrade() else {
+        return;
+    };
+    preview.set_request_id(request_id.to_string().into());
+    apply_translation_preview_layout(&preview, source_text, result_text);
+    preview.set_source_text(source_text.into());
+    preview.set_translated_text(result_text.into());
+    preview.set_direction_label(direction_label.into());
+    preview.set_processing(processing);
+    let _ = preview.show();
+    prepare_shown_action_window(
+        slint_window_handle(preview.window()),
+        TRANSLATION_PREVIEW_WINDOW_TITLE,
+        target.window_handle,
+    );
 }
 
 fn handle_speech_event(
@@ -1928,7 +2144,7 @@ fn handle_translation_event(
             tier,
             load_duration_ms,
         } => {
-            {
+            let queued_selection_translation = {
                 let mut state = state.borrow_mut();
                 state.selected_translation_tier = Some(tier);
                 state.translation_ready = true;
@@ -1938,7 +2154,8 @@ fn handle_translation_event(
                         model.installed = true;
                     }
                 }
-            }
+                state.queued_selection_translation.take()
+            };
             let _ = save_settings(&state.borrow());
             sync_translation_models(settings, state);
             sync_action_settings(settings, state);
@@ -1950,6 +2167,9 @@ fn handle_translation_event(
                 translator,
                 "Ready · language direction is detected locally.",
             );
+            if let Some(request) = queued_selection_translation {
+                begin_selection_translation(request, settings, translation_preview, state, workers);
+            }
         }
         TranslationWorkerEvent::ModelSelected { tier } => {
             {
@@ -2000,6 +2220,15 @@ fn handle_translation_event(
         } => {
             let pending =
                 request_id.and_then(|id| state.borrow_mut().pending_translations.remove(&id));
+            let queued_request_id = if request_id.is_none() {
+                state
+                    .borrow_mut()
+                    .queued_selection_translation
+                    .take()
+                    .map(|request| request.request_id)
+            } else {
+                None
+            };
             if matches!(
                 pending.as_ref().map(|pending| pending.origin),
                 Some(TranslationOrigin::Translator)
@@ -2008,19 +2237,15 @@ fn handle_translation_event(
             }
             if let Some(preview) = translation_preview.upgrade()
                 && request_id
+                    .or(queued_request_id)
                     .map(|id| preview.get_request_id() == id.to_string())
                     .unwrap_or(false)
             {
-                preview.set_processing(false);
+                preview.set_processing(true);
+                preview.set_direction_label("Translation failed".into());
                 let error_text = format!("{code}: {message}");
-                preview.set_result_panel_height(adaptive_text_panel_height(
-                    &error_text,
-                    88,
-                    2,
-                    7,
-                    17.0,
-                    18.0,
-                ));
+                let source_text = preview.get_source_text().to_string();
+                apply_translation_preview_layout(&preview, &source_text, &error_text);
                 preview.set_translated_text(error_text.into());
             }
             set_indicator_status(settings, &format!("{code}: {message}"));
@@ -2065,22 +2290,11 @@ fn route_translation_result(
                 });
                 if let Some(preview) = translation_preview.upgrade() {
                     preview.set_request_id(result.request_id.to_string().into());
-                    preview.set_source_panel_height(adaptive_text_panel_height(
+                    apply_translation_preview_layout(
+                        &preview,
                         &result.source_text,
-                        88,
-                        2,
-                        6,
-                        15.0,
-                        16.0,
-                    ));
-                    preview.set_result_panel_height(adaptive_text_panel_height(
                         &result.translated_text,
-                        88,
-                        2,
-                        10,
-                        17.0,
-                        18.0,
-                    ));
+                    );
                     preview.set_source_text(result.source_text.into());
                     preview.set_translated_text(result.translated_text.into());
                     preview.set_processing(false);
@@ -2118,6 +2332,7 @@ fn wire_settings(
     translator: &TranslatorWindow,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
+    indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
 ) {
     {
         let translator = translator.as_weak();
@@ -2190,6 +2405,25 @@ fn wire_settings(
                 .send(&TranslationWorkerCommand::SetHistoryEnabled { enabled });
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let indicator_animation = Rc::clone(indicator_animation);
+        settings.on_cycle_visualizer(move || {
+            let style = {
+                let mut state = state.borrow_mut();
+                state.visualizer_style = state.visualizer_style.next();
+                state.visualizer_style
+            };
+            indicator_animation.borrow_mut().set_style(style);
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+            set_indicator_status(
+                &settings_weak,
+                "Visualizer updated. The next dictation uses the selected style.",
+            );
         });
     }
     {
@@ -2524,10 +2758,14 @@ fn wire_action_palette(
             let Some(pending) = pending else {
                 return;
             };
+            let delivery = state.borrow().translation_delivery;
             begin_selection_translation(
-                pending.request_id,
-                pending.target,
-                pending.text,
+                SelectionTranslationRequest {
+                    request_id: pending.request_id,
+                    target: pending.target,
+                    text: pending.text,
+                    delivery,
+                },
                 &settings,
                 &preview,
                 &state,
@@ -2836,6 +3074,7 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
         }
         .into(),
     );
+    settings.set_visualizer_label(state.visualizer_style.label().into());
     settings.set_translation_ready(state.translation_ready);
     settings.set_history_enabled_label(
         if state.history_enabled {
@@ -2916,15 +3155,65 @@ fn adaptive_text_panel_height(
     line_height: f32,
     vertical_padding: f32,
 ) -> f32 {
-    let estimated_lines = text
-        .split('\n')
+    let estimated_lines =
+        estimated_wrapped_lines(text, characters_per_line).clamp(minimum_lines, maximum_lines);
+    estimated_lines as f32 * line_height + vertical_padding
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TranslationPreviewLayout {
+    card_width: f32,
+    source_panel_height: f32,
+    result_panel_height: f32,
+    result_content_height: f32,
+    result_scrollable: bool,
+}
+
+fn translation_preview_layout(source_text: &str, result_text: &str) -> TranslationPreviewLayout {
+    let content_characters = source_text.chars().count().max(result_text.chars().count());
+    let (card_width, characters_per_line) = match content_characters {
+        0..=48 => (360.0, 42),
+        49..=180 => (480.0, 62),
+        _ => (620.0, 82),
+    };
+
+    let source_lines = estimated_wrapped_lines(source_text, characters_per_line).clamp(1, 3);
+    let result_lines = estimated_wrapped_lines(result_text, characters_per_line).max(1);
+    let source_panel_height = source_lines as f32 * 14.0 + 12.0;
+    let result_text_height = result_lines as f32 * 18.0;
+    let result_panel_height = (result_text_height + 14.0).clamp(44.0, 300.0);
+    let visible_result_height = (result_panel_height - 14.0).max(18.0);
+    let result_content_height = result_text_height.max(visible_result_height);
+
+    TranslationPreviewLayout {
+        card_width,
+        source_panel_height,
+        result_panel_height,
+        result_content_height,
+        result_scrollable: result_content_height > visible_result_height + 0.5,
+    }
+}
+
+fn apply_translation_preview_layout(
+    preview: &TranslationPreview,
+    source_text: &str,
+    result_text: &str,
+) {
+    let layout = translation_preview_layout(source_text, result_text);
+    preview.set_card_width(layout.card_width);
+    preview.set_source_panel_height(layout.source_panel_height);
+    preview.set_result_panel_height(layout.result_panel_height);
+    preview.set_result_content_height(layout.result_content_height);
+    preview.set_result_scrollable(layout.result_scrollable);
+}
+
+fn estimated_wrapped_lines(text: &str, characters_per_line: usize) -> usize {
+    text.split('\n')
         .map(|line| {
             let characters = line.chars().count().max(1);
             characters.div_ceil(characters_per_line)
         })
-        .sum::<usize>()
-        .clamp(minimum_lines, maximum_lines);
-    estimated_lines as f32 * line_height + vertical_padding
+        .sum()
 }
 
 fn set_translation_status(translator: &slint::Weak<TranslatorWindow>, message: &str) {
@@ -3120,6 +3409,7 @@ struct SavedSettings {
     selected_model_id: Option<String>,
     output_mode: SpeechOutputMode,
     fast_release_previews: bool,
+    visualizer_style: VisualizerStyle,
     selected_translation_tier: Option<TranslationTier>,
     translation_enabled: bool,
     layout_enabled: bool,
@@ -3135,6 +3425,7 @@ impl Default for SavedSettings {
             selected_model_id: None,
             output_mode: SpeechOutputMode::default(),
             fast_release_previews: true,
+            visualizer_style: VisualizerStyle::default(),
             selected_translation_tier: None,
             translation_enabled: false,
             layout_enabled: true,
@@ -3165,6 +3456,11 @@ fn load_settings() -> SavedSettings {
         .and_then(|value| value.get("fast_release_previews"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
+    let visualizer_style = value
+        .as_ref()
+        .and_then(|value| value.get("visualizer_style"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
     let selected_translation_tier = value
         .as_ref()
         .and_then(|value| value.get("selected_translation_tier"))
@@ -3203,6 +3499,7 @@ fn load_settings() -> SavedSettings {
         selected_model_id,
         output_mode,
         fast_release_previews,
+        visualizer_style,
         selected_translation_tier,
         translation_enabled,
         layout_enabled,
@@ -3222,6 +3519,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
         "selected_model_id": &state.selected_model_id,
         "output_mode": state.output_mode,
         "fast_release_previews": state.fast_release_previews,
+        "visualizer_style": state.visualizer_style,
         "selected_translation_tier": state.selected_translation_tier,
         "translation_enabled": state.translation_enabled,
         "layout_enabled": state.layout_enabled,
@@ -3296,7 +3594,7 @@ mod indicator_animation_tests {
 
 #[cfg(test)]
 mod adaptive_popup_tests {
-    use super::adaptive_text_panel_height;
+    use super::{adaptive_text_panel_height, translation_preview_layout};
 
     #[test]
     fn short_text_uses_the_compact_minimum() {
@@ -3321,6 +3619,23 @@ mod adaptive_popup_tests {
             adaptive_text_panel_height("one\ntwo\nthree", 70, 1, 6, 15.0, 16.0),
             61.0
         );
+    }
+
+    #[test]
+    fn short_translation_stays_compact_without_a_scrollbar() {
+        let layout = translation_preview_layout("Hello", "Привет");
+        assert_eq!(layout.card_width, 360.0);
+        assert!(!layout.result_scrollable);
+        assert_eq!(layout.result_panel_height, 44.0);
+    }
+
+    #[test]
+    fn long_translation_is_capped_and_becomes_scrollable() {
+        let layout = translation_preview_layout("Source", &"translated text ".repeat(500));
+        assert_eq!(layout.card_width, 620.0);
+        assert_eq!(layout.result_panel_height, 300.0);
+        assert!(layout.result_content_height > layout.result_panel_height);
+        assert!(layout.result_scrollable);
     }
 }
 

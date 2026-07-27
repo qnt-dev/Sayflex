@@ -101,6 +101,8 @@ fn transcribe_wav_diagnostic() -> Result<()> {
     let duration_ms = samples.len() as u64 * 1000 / u64::from(specification.sample_rate.max(1));
     let recording = audio::RecordedAudio {
         session_id: SessionId::new(),
+        source_start_sample: 0,
+        source_total_samples: samples.len(),
         samples,
         sample_rate_hz: specification.sample_rate,
         duration_ms,

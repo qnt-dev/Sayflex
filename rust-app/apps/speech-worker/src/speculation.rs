@@ -35,7 +35,6 @@ struct ActiveSession {
     output_mode: SpeechOutputMode,
     started: Instant,
     last_preview_at: Option<Instant>,
-    last_preview_samples: usize,
     preview_count: u32,
     fast_release_previews: bool,
 }
@@ -73,7 +72,6 @@ impl SpeculationScheduler {
                                 output_mode,
                                 started: Instant::now(),
                                 last_preview_at: None,
-                                last_preview_samples: 0,
                                 preview_count: 0,
                                 fast_release_previews,
                             });
@@ -101,29 +99,25 @@ impl SpeculationScheduler {
                         || session
                             .last_preview_at
                             .is_some_and(|last| last.elapsed() < PREVIEW_COOLDOWN)
+                        || inference.preview_in_flight()
                     {
                         continue;
                     }
-                    let Some(recording) = snapshots.snapshot(session.session_id) else {
+                    let stable_source_sample_count = inference.stable_source_sample_count();
+                    let Some(recording) =
+                        snapshots.snapshot_from(session.session_id, stable_source_sample_count)
+                    else {
                         continue;
                     };
-                    inference.invalidate_preview_if_speech_resumed(session.session_id, &recording);
-                    let new_audio_ms = recording
-                        .samples
-                        .len()
-                        .saturating_sub(session.last_preview_samples)
-                        as u64
-                        * 1000
-                        / u64::from(recording.sample_rate_hz.max(1));
+                    let new_audio_ms = recording.segment_duration_ms();
                     if new_audio_ms < MIN_NEW_AUDIO_MS
                         || !has_trailing_silence(&recording, REQUIRED_TRAILING_SILENCE_MS)
                     {
                         continue;
                     }
-                    let sample_count = recording.samples.len();
+                    inference.invalidate_exact_preview_for_new_audio();
                     if inference.request_preview(recording, session.output_mode) {
                         session.last_preview_at = Some(Instant::now());
-                        session.last_preview_samples = sample_count;
                         session.preview_count = session.preview_count.saturating_add(1);
                     }
                 }

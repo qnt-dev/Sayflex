@@ -6,9 +6,10 @@
 - No translation model is bundled, preinstalled, or downloaded automatically.
 - The system locale only marks a relevant model as recommended. English
   systems do not receive a default recommendation.
-- `Ctrl+Alt+T` captures selected text once. In adaptive mode one enabled action
-  runs directly; two or more enabled actions open the command palette.
-- Translation can preview, copy, or replace the selected text.
+- `Ctrl+Alt+T` captures selected text once, translates immediately, and opens a
+  compact preview without an intermediate command palette.
+- The preview can copy the result or replace the original selected text.
+- `Ctrl+Alt+K` remains the dedicated keyboard-layout correction shortcut.
 - The full translator never needs access to another application's selection.
 - History and warm-engine retention are independent user settings.
 
@@ -20,7 +21,7 @@ Windows input host
              |
              v
 Slint desktop coordinator
-  request identity + delivery policy
+  request identity + compact preview
              |
              v
 Translation worker
@@ -28,7 +29,7 @@ Translation worker
              |
              v
 Input host
-  clipboard copy or target-checked replacement
+  explicit clipboard copy or target-checked replacement
 ```
 
 Translation inference never runs on the Slint event loop, the low-level

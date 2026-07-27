@@ -2,7 +2,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -21,6 +21,7 @@ use crate::{
 
 const MAX_REUSABLE_SILENCE_MS: u64 = 1_200;
 const MIN_SPECULATIVE_AUDIO_MS: u64 = 650;
+const MIN_FINAL_TAIL_AUDIO_MS: u64 = 180;
 
 #[derive(Debug, Clone, Copy)]
 struct PreviewCandidate {
@@ -65,6 +66,7 @@ pub struct InferenceHandle {
     active_session: Arc<Mutex<Option<SessionId>>>,
     candidate: Arc<Mutex<Option<PreviewCandidate>>>,
     preview_in_flight: Arc<AtomicBool>,
+    stable_source_sample_count: Arc<AtomicUsize>,
 }
 
 impl InferenceHandle {
@@ -77,6 +79,8 @@ impl InferenceHandle {
         let actor_generation = Arc::clone(&generation);
         let preview_in_flight = Arc::new(AtomicBool::new(false));
         let actor_preview_in_flight = Arc::clone(&preview_in_flight);
+        let stable_source_sample_count = Arc::new(AtomicUsize::new(0));
+        let actor_stable_source_sample_count = Arc::clone(&stable_source_sample_count);
         thread::Builder::new()
             .name("speech-inference".to_owned())
             .spawn(move || {
@@ -84,6 +88,7 @@ impl InferenceHandle {
                     receiver,
                     actor_generation,
                     actor_preview_in_flight,
+                    actor_stable_source_sample_count,
                     events,
                     history,
                 )
@@ -94,11 +99,12 @@ impl InferenceHandle {
             active_session: Arc::new(Mutex::new(None)),
             candidate: Arc::new(Mutex::new(None)),
             preview_in_flight,
+            stable_source_sample_count,
         })
     }
 
     pub fn load_model(&self, catalog_id: String, path: PathBuf, selected: bool) {
-        self.invalidate();
+        self.reset_segmented_session();
         if let Err(error) = self.commands.send(InferenceCommand::Load {
             catalog_id,
             path,
@@ -109,7 +115,7 @@ impl InferenceHandle {
     }
 
     pub fn begin_session(&self, session_id: SessionId) {
-        self.invalidate();
+        self.reset_segmented_session();
         *recover_lock(&self.active_session) = Some(session_id);
     }
 
@@ -118,12 +124,28 @@ impl InferenceHandle {
         if *active == Some(session_id) {
             *active = None;
             drop(active);
-            self.invalidate();
+            self.reset_segmented_session();
         }
     }
 
+    #[must_use]
+    pub fn preview_in_flight(&self) -> bool {
+        self.preview_in_flight.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn stable_source_sample_count(&self) -> usize {
+        self.stable_source_sample_count.load(Ordering::Acquire)
+    }
+
+    /// Marks the exact preview candidate stale while retaining its completed
+    /// transcript as a stable prefix for the next speech segment.
+    pub fn invalidate_exact_preview_for_new_audio(&self) {
+        self.invalidate_exact_preview();
+    }
+
     pub fn request_preview(&self, recording: RecordedAudio, output_mode: SpeechOutputMode) -> bool {
-        if recording.duration_ms < MIN_SPECULATIVE_AUDIO_MS
+        if recording.segment_duration_ms() < MIN_SPECULATIVE_AUDIO_MS
             || *recover_lock(&self.active_session) != Some(recording.session_id)
         {
             return false;
@@ -138,7 +160,7 @@ impl InferenceHandle {
         let generation = self.generation.load(Ordering::Acquire);
         let candidate = PreviewCandidate {
             session_id: recording.session_id,
-            source_sample_count: recording.samples.len(),
+            source_sample_count: recording.source_total_samples,
             sample_rate_hz: recording.sample_rate_hz,
             generation,
         };
@@ -158,21 +180,6 @@ impl InferenceHandle {
         }
     }
 
-    pub fn invalidate_preview_if_speech_resumed(
-        &self,
-        session_id: SessionId,
-        recording: &RecordedAudio,
-    ) {
-        let candidate = *recover_lock(&self.candidate);
-        let Some(candidate) = candidate.filter(|candidate| candidate.session_id == session_id)
-        else {
-            return;
-        };
-        if tail_contains_speech(recording, candidate.source_sample_count) {
-            self.invalidate();
-        }
-    }
-
     pub fn finalize(
         &self,
         recording: RecordedAudio,
@@ -189,7 +196,7 @@ impl InferenceHandle {
                 && reusable_tail(&recording, candidate.source_sample_count)
         });
         if !allow_speculative {
-            self.invalidate();
+            self.invalidate_exact_preview();
         }
         if let Err(error) = self.commands.send(InferenceCommand::Finalize {
             recording,
@@ -203,13 +210,18 @@ impl InferenceHandle {
     }
 
     pub fn shutdown(&self) {
-        self.invalidate();
+        self.reset_segmented_session();
         let _ = self.commands.send(InferenceCommand::Shutdown);
     }
 
-    fn invalidate(&self) {
+    fn invalidate_exact_preview(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         *recover_lock(&self.candidate) = None;
+    }
+
+    fn reset_segmented_session(&self) {
+        self.invalidate_exact_preview();
+        self.stable_source_sample_count.store(0, Ordering::Release);
     }
 }
 
@@ -217,6 +229,7 @@ fn inference_loop(
     commands: mpsc::Receiver<InferenceCommand>,
     generation: Arc<AtomicU64>,
     preview_in_flight: Arc<AtomicBool>,
+    stable_source_sample_count: Arc<AtomicUsize>,
     events: mpsc::Sender<SpeechWorkerEvent>,
     history: mpsc::Sender<HistoryCommand>,
 ) {
@@ -262,9 +275,22 @@ fn inference_loop(
                 if generation.load(Ordering::Acquire) != preview_generation {
                     continue;
                 }
-                let result = engine.transcribe(
+                let stable_prefix = latest_preview
+                    .as_ref()
+                    .filter(|preview| {
+                        preview.session_id == recording.session_id
+                            && preview.output_mode == output_mode
+                            && preview.transcript.source_sample_count
+                                == recording.source_start_sample
+                    })
+                    .map(|preview| preview.transcript.clone());
+                let prompt = stable_prefix
+                    .as_ref()
+                    .map(|prefix| context_prompt(&prefix.text));
+                let result = engine.transcribe_with_prompt(
                     &recording,
                     output_mode,
+                    prompt.as_deref(),
                     Some(AbortGeneration::new(
                         Arc::clone(&generation),
                         preview_generation,
@@ -274,7 +300,12 @@ fn inference_loop(
                     continue;
                 }
                 match result {
-                    Ok(transcript) => {
+                    Ok(segment) => {
+                        let transcript = stable_prefix.as_ref().map_or(segment.clone(), |prefix| {
+                            merge_engine_transcripts(prefix, segment)
+                        });
+                        stable_source_sample_count
+                            .store(transcript.source_sample_count, Ordering::Release);
                         latest_preview = Some(PreviewResult {
                             session_id: recording.session_id,
                             output_mode,
@@ -297,18 +328,31 @@ fn inference_loop(
                 release_started,
                 allow_speculative,
             } => {
-                let reusable = latest_preview.take().filter(|preview| {
-                    allow_speculative
-                        && preview.session_id == recording.session_id
+                let stable_prefix = latest_preview.take().filter(|preview| {
+                    preview.session_id == recording.session_id
                         && preview.output_mode == output_mode
+                        && preview.transcript.source_sample_count <= recording.source_total_samples
+                });
+                let exact_reuse = stable_prefix.as_ref().is_some_and(|preview| {
+                    allow_speculative
                         && preview.generation == generation.load(Ordering::Acquire)
-                        && preview.transcript.source_sample_count <= recording.samples.len()
                         && reusable_tail(&recording, preview.transcript.source_sample_count)
                 });
-                let (engine_result, speculative_reuse) = match reusable {
-                    Some(preview) => (Ok(preview.transcript), true),
-                    None => (engine.transcribe(&recording, output_mode, None), false),
+                let (engine_result, speculative_reuse) = match (exact_reuse, stable_prefix.as_ref())
+                {
+                    (true, Some(prefix)) => (Ok(prefix.transcript.clone()), true),
+                    (false, Some(prefix)) => (
+                        finalize_from_stable_prefix(
+                            &mut engine,
+                            &recording,
+                            output_mode,
+                            &prefix.transcript,
+                        ),
+                        true,
+                    ),
+                    _ => (engine.transcribe(&recording, output_mode, None), false),
                 };
+                stable_source_sample_count.store(0, Ordering::Release);
                 match engine_result {
                     Ok(result) => {
                         let created_unix_ms = crate::unix_ms();
@@ -351,6 +395,102 @@ fn inference_loop(
     }
 }
 
+fn finalize_from_stable_prefix(
+    engine: &mut WhisperEngine,
+    recording: &RecordedAudio,
+    output_mode: SpeechOutputMode,
+    prefix: &EngineTranscript,
+) -> anyhow::Result<EngineTranscript> {
+    if prefix.source_sample_count == recording.source_total_samples
+        || reusable_tail(recording, prefix.source_sample_count)
+    {
+        return Ok(prefix.clone());
+    }
+
+    let Some(tail) = recording.segment_from_absolute(prefix.source_sample_count) else {
+        return engine.transcribe(recording, output_mode, None);
+    };
+    // Whisper needs a small amount of audio to decode reliably. A sub-180 ms
+    // spoken tail is rare, but re-running the authoritative recording is safer
+    // than silently dropping a final syllable.
+    if tail.segment_duration_ms() < MIN_FINAL_TAIL_AUDIO_MS {
+        return engine.transcribe(recording, output_mode, None);
+    }
+    let prompt = context_prompt(&prefix.text);
+    match engine.transcribe_with_prompt(&tail, output_mode, Some(&prompt), None) {
+        Ok(segment) => Ok(merge_engine_transcripts(prefix, segment)),
+        Err(error) => {
+            eprintln!(
+                "segmented final tail was not usable; falling back to authoritative pass: {error:#}"
+            );
+            engine.transcribe(recording, output_mode, None)
+        }
+    }
+}
+
+fn merge_engine_transcripts(
+    prefix: &EngineTranscript,
+    mut segment: EngineTranscript,
+) -> EngineTranscript {
+    segment.text = join_transcript_text(&prefix.text, &segment.text);
+    if segment.language == "und" {
+        segment.language.clone_from(&prefix.language);
+    }
+    segment
+}
+
+fn context_prompt(text: &str) -> String {
+    const MAX_PROMPT_CHARS: usize = 240;
+    let mut reversed = text
+        .chars()
+        .rev()
+        .take(MAX_PROMPT_CHARS)
+        .collect::<Vec<_>>();
+    reversed.reverse();
+    reversed.into_iter().collect()
+}
+
+fn join_transcript_text(prefix: &str, segment: &str) -> String {
+    let prefix = prefix.trim();
+    let segment = segment.trim();
+    if prefix.is_empty() {
+        return segment.to_owned();
+    }
+    if segment.is_empty() {
+        return prefix.to_owned();
+    }
+
+    let previous = prefix.chars().next_back();
+    let next = segment.chars().next();
+    let joins_without_space = next.is_some_and(is_attached_punctuation)
+        || previous
+            .zip(next)
+            .is_some_and(|(left, right)| is_cjk_character(left) && is_cjk_character(right));
+    if joins_without_space {
+        format!("{prefix}{segment}")
+    } else {
+        format!("{prefix} {segment}")
+    }
+}
+
+fn is_attached_punctuation(value: char) -> bool {
+    matches!(
+        value,
+        '.' | ',' | '!' | '?' | ':' | ';' | ')' | ']' | '}' | '…' | '，' | '。' | '！' | '？'
+    )
+}
+
+fn is_cjk_character(value: char) -> bool {
+    matches!(
+        value as u32,
+        0x3040..=0x30ff
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xac00..=0xd7af
+            | 0xf900..=0xfaff
+    )
+}
+
 struct PreviewInFlightGuard<'a>(&'a AtomicBool);
 
 impl Drop for PreviewInFlightGuard<'_> {
@@ -364,20 +504,25 @@ fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn reusable_tail(recording: &RecordedAudio, source_sample_count: usize) -> bool {
-    if source_sample_count > recording.samples.len() {
+    if source_sample_count < recording.source_start_sample
+        || source_sample_count > recording.source_total_samples
+    {
         return false;
     }
-    let tail_samples = recording.samples.len() - source_sample_count;
+    let tail_samples = recording.source_total_samples - source_sample_count;
     let tail_ms = tail_samples as u64 * 1000 / u64::from(recording.sample_rate_hz.max(1));
     tail_ms <= MAX_REUSABLE_SILENCE_MS && !tail_contains_speech(recording, source_sample_count)
 }
 
 fn tail_contains_speech(recording: &RecordedAudio, source_sample_count: usize) -> bool {
-    if source_sample_count >= recording.samples.len() {
+    if source_sample_count < recording.source_start_sample
+        || source_sample_count >= recording.source_total_samples
+    {
         return false;
     }
-    let source = &recording.samples[..source_sample_count];
-    let tail = &recording.samples[source_sample_count..];
+    let local_source_sample_count = source_sample_count - recording.source_start_sample;
+    let source = &recording.samples[..local_source_sample_count];
+    let tail = &recording.samples[local_source_sample_count..];
     let reference_rms = rms(source);
     // This intentionally favors correctness over reuse. Noise can cause a full fallback;
     // quiet speech must never be discarded merely to hit a latency target.
@@ -392,7 +537,7 @@ pub fn has_trailing_silence(recording: &RecordedAudio, silence_ms: u64) -> bool 
         return false;
     }
     let split = recording.samples.len() - silence_samples;
-    !tail_contains_speech(recording, split)
+    !tail_contains_speech(recording, recording.source_start_sample + split)
 }
 
 fn rms(samples: &[f32]) -> f32 {
@@ -410,13 +555,15 @@ fn elapsed_ms(started: Instant) -> u64 {
 mod tests {
     use rust_protocol::SessionId;
 
-    use super::{has_trailing_silence, reusable_tail};
+    use super::{context_prompt, has_trailing_silence, join_transcript_text, reusable_tail};
     use crate::audio::RecordedAudio;
 
     fn recording(samples: Vec<f32>, rate: u32) -> RecordedAudio {
         RecordedAudio {
             session_id: SessionId::new(),
             duration_ms: samples.len() as u64 * 1000 / u64::from(rate),
+            source_start_sample: 0,
+            source_total_samples: samples.len(),
             samples,
             sample_rate_hz: rate,
         }
@@ -437,5 +584,26 @@ mod tests {
         samples.extend(vec![0.07; 2_000]);
         let audio = recording(samples, 16_000);
         assert!(!reusable_tail(&audio, 16_000));
+    }
+
+    #[test]
+    fn segmented_transcripts_join_without_damaging_punctuation_or_cjk() {
+        assert_eq!(
+            join_transcript_text("A completed phrase", "continues here."),
+            "A completed phrase continues here."
+        );
+        assert_eq!(
+            join_transcript_text("A completed phrase", ", with detail."),
+            "A completed phrase, with detail."
+        );
+        assert_eq!(join_transcript_text("你好", "世界"), "你好世界");
+    }
+
+    #[test]
+    fn context_prompt_is_bounded_to_recent_characters() {
+        let source = format!("old {}", "x".repeat(400));
+        let prompt = context_prompt(&source);
+        assert_eq!(prompt.chars().count(), 240);
+        assert!(prompt.chars().all(|character| character == 'x'));
     }
 }

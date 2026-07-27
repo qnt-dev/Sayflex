@@ -602,7 +602,7 @@ impl HotkeyState {
                 self.adaptive_t_down = true;
                 suppress = true;
                 action = Some(HookAction::SelectionRequested {
-                    intent: TextActionIntent::Adaptive,
+                    intent: TextActionIntent::Translate,
                 });
             }
         }
@@ -1039,7 +1039,7 @@ mod tests {
             (
                 VK_T,
                 HookAction::SelectionRequested {
-                    intent: TextActionIntent::Adaptive,
+                    intent: TextActionIntent::Translate,
                 },
             ),
             (

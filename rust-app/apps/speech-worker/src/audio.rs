@@ -27,7 +27,39 @@ pub struct RecordedAudio {
     pub session_id: SessionId,
     pub samples: Vec<f32>,
     pub sample_rate_hz: u32,
+    /// Absolute source position represented by `samples[0]`.
+    pub source_start_sample: usize,
+    /// Absolute source position immediately after the final sample available
+    /// when this recording or preview snapshot was created.
+    pub source_total_samples: usize,
+    /// Duration of the complete recording at snapshot time, not merely the
+    /// duration of `samples`.
     pub duration_ms: u64,
+}
+
+impl RecordedAudio {
+    #[must_use]
+    pub fn segment_duration_ms(&self) -> u64 {
+        self.samples.len() as u64 * 1000 / u64::from(self.sample_rate_hz.max(1))
+    }
+
+    #[must_use]
+    pub fn segment_from_absolute(&self, source_start_sample: usize) -> Option<Self> {
+        if source_start_sample < self.source_start_sample
+            || source_start_sample > self.source_total_samples
+        {
+            return None;
+        }
+        let local_start = source_start_sample - self.source_start_sample;
+        Some(Self {
+            session_id: self.session_id,
+            samples: self.samples.get(local_start..)?.to_vec(),
+            sample_rate_hz: self.sample_rate_hz,
+            source_start_sample,
+            source_total_samples: self.source_total_samples,
+            duration_ms: self.duration_ms,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -36,10 +68,18 @@ pub struct AudioSnapshotSource {
 }
 
 impl AudioSnapshotSource {
-    pub fn snapshot(&self, session_id: SessionId) -> Option<RecordedAudio> {
+    pub fn snapshot_from(
+        &self,
+        session_id: SessionId,
+        source_start_sample: usize,
+    ) -> Option<RecordedAudio> {
         let (reply, response) = mpsc::sync_channel(1);
         self.commands
-            .send(CaptureCommand::Snapshot { session_id, reply })
+            .send(CaptureCommand::Snapshot {
+                session_id,
+                source_start_sample,
+                reply,
+            })
             .ok()?;
         response
             .recv_timeout(Duration::from_millis(80))
@@ -71,6 +111,7 @@ enum CaptureCommand {
     },
     Snapshot {
         session_id: SessionId,
+        source_start_sample: usize,
         reply: mpsc::SyncSender<Option<RecordedAudio>>,
     },
     Shutdown,
@@ -304,12 +345,18 @@ fn capture_loop(
                 }
                 let _ = reply.send(cancelled);
             }
-            Ok(CaptureCommand::Snapshot { session_id, reply }) => {
+            Ok(CaptureCommand::Snapshot {
+                session_id,
+                source_start_sample,
+                reply,
+            }) => {
                 drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
                 let snapshot = active
                     .as_ref()
                     .filter(|capture| capture.session_id == session_id)
-                    .map(|capture| snapshot_audio(capture, sample_rate_hz));
+                    .and_then(|capture| {
+                        snapshot_audio(capture, sample_rate_hz, source_start_sample)
+                    });
                 let _ = reply.send(snapshot);
             }
             Ok(CaptureCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -372,20 +419,32 @@ fn finish_capture(
     let duration_ms = capture.samples.len() as u64 * 1000 / u64::from(sample_rate_hz.max(1));
     Ok(RecordedAudio {
         session_id: capture.session_id,
+        source_start_sample: 0,
+        source_total_samples: capture.samples.len(),
         samples: capture.samples,
         sample_rate_hz,
         duration_ms,
     })
 }
 
-fn snapshot_audio(capture: &ActiveCapture, sample_rate_hz: u32) -> RecordedAudio {
-    let duration_ms = capture.samples.len() as u64 * 1000 / u64::from(sample_rate_hz.max(1));
-    RecordedAudio {
-        session_id: capture.session_id,
-        samples: capture.samples.clone(),
-        sample_rate_hz,
-        duration_ms,
+fn snapshot_audio(
+    capture: &ActiveCapture,
+    sample_rate_hz: u32,
+    source_start_sample: usize,
+) -> Option<RecordedAudio> {
+    if source_start_sample > capture.samples.len() {
+        return None;
     }
+    let source_total_samples = capture.samples.len();
+    let duration_ms = source_total_samples as u64 * 1000 / u64::from(sample_rate_hz.max(1));
+    Some(RecordedAudio {
+        session_id: capture.session_id,
+        samples: capture.samples[source_start_sample..].to_vec(),
+        sample_rate_hz,
+        source_start_sample,
+        source_total_samples,
+        duration_ms,
+    })
 }
 
 pub fn resample_bandlimited(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
@@ -471,7 +530,9 @@ fn sinc(value: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::resample_bandlimited;
+    use rust_protocol::SessionId;
+
+    use super::{RecordedAudio, resample_bandlimited};
 
     #[test]
     fn resampler_preserves_duration() {
@@ -500,5 +561,26 @@ mod tests {
         };
         assert!(rms(&low) > 0.65);
         assert!(rms(&aliased) < 0.02);
+    }
+
+    #[test]
+    fn absolute_segments_preserve_total_timeline_and_copy_only_the_tail() {
+        let recording = RecordedAudio {
+            session_id: SessionId::new(),
+            samples: (0..16_000).map(|sample| sample as f32).collect(),
+            sample_rate_hz: 16_000,
+            source_start_sample: 32_000,
+            source_total_samples: 48_000,
+            duration_ms: 3_000,
+        };
+
+        let tail = recording.segment_from_absolute(40_000).unwrap();
+        assert_eq!(tail.source_start_sample, 40_000);
+        assert_eq!(tail.source_total_samples, 48_000);
+        assert_eq!(tail.duration_ms, 3_000);
+        assert_eq!(tail.segment_duration_ms(), 500);
+        assert_eq!(tail.samples.first(), Some(&8_000.0));
+        assert!(recording.segment_from_absolute(31_999).is_none());
+        assert!(recording.segment_from_absolute(48_001).is_none());
     }
 }

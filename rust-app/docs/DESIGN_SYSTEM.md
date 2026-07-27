@@ -111,6 +111,13 @@ outer padding
 This keeps short actions compact while preventing long selections from taking
 over the screen.
 
+The translation preview also adapts its width across three density bands.
+Source text is capped at three context lines. Result text grows naturally until
+the card reaches its maximum height; beyond that point a `Flickable` viewport
+and a two-pixel dark rail with a restrained orange thumb appear on the right.
+Mouse-wheel, touchpad, and drag scrolling remain available without activating
+or resizing the original editor.
+
 ## Interaction invariants
 
 - transient windows do not activate or take editor focus;

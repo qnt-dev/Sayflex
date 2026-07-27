@@ -34,9 +34,8 @@ same-user threat model, are documented in [`SECURITY.md`](SECURITY.md).
   exact session instead of inserting an older transcript.
 - `Ctrl + Alt + K` captures selected text and offers explicit RU/EN keyboard
   layout candidates. Ordinary text is never changed automatically.
-- `Ctrl + Alt + T` captures selected text once. With one enabled action it
-  runs directly; with several enabled actions it opens the text command
-  palette.
+- `Ctrl + Alt + T` captures selected text once, translates it locally, and
+  opens the compact preview immediately.
 
 The indicator is pre-created and shown from the input-host event pump, before
 model work begins. It is topmost, click-through and non-activating, so it does
@@ -62,27 +61,28 @@ pack; the system locale is used only to mark a recommendation. Translation
 can preview, copy or replace the selection.
 
 Translation and layout correction can be disabled independently.
-`Ctrl+Alt+T` can adapt when only one action is enabled or always show the
-palette. The translation worker can remain warm for the lowest latency or
-unload after every request to reduce memory. Voice and translation history
-can be disabled and cleared from Settings.
+`Ctrl+Alt+T` translates the selected text immediately into a compact Acrylic
+preview; `Ctrl+Alt+K` corrects keyboard layout. The translation worker can
+remain warm for the lowest latency or unload after every request to reduce
+memory. Voice and translation history can be disabled and cleared from
+Settings.
 
 CUDA is the preferred backend on the current RTX 3080 Ti machine. A separately
 built CPU worker is shipped as the fallback for systems without the required
 CUDA runtime.
 
-Release optimization defaults to **fastest** and prepares correctness-guarded
-transcripts during natural pauses. Users who prefer lower sustained GPU and
-battery use can select **efficient**, which limits a recording to two preview
-passes without unloading the already warmed model.
+Release optimization defaults to **fastest** and incrementally prepares only
+new audio after each eligible natural pause. Users who prefer lower sustained
+GPU and battery use can select **efficient**, which limits a recording to two
+prepared segments without unloading the already warmed model.
 
 ## Build, test and package
 
 ```powershell
-cd C:\PRDJKT\keyboop\rust-app
+cd C:\PRDJKT\qntflex\rust-app
 cargo test --workspace
 .\scripts\publish.ps1
-.\scripts\build-installer.ps1 -Version 0.5.1 -SkipPublish
+.\scripts\build-installer.ps1 -Version 0.5.2 -SkipPublish
 ```
 
 The measured warm-path design and benchmark gate are documented in
@@ -94,9 +94,12 @@ Transient windows have isolated visual preview modes that do not register the
 global hook or touch another application:
 
 ```powershell
-.\target\debug\rust-desktop.exe --indicator-preview
+.\target\debug\rust-desktop.exe --indicator-preview=orb
+.\target\debug\rust-desktop.exe --indicator-preview=spectrum
+.\target\debug\rust-desktop.exe --indicator-preview=ribbon
 .\target\debug\rust-desktop.exe --action-preview
 .\target\debug\rust-desktop.exe --translation-preview
+.\target\debug\rust-desktop.exe --translation-preview=long
 .\target\debug\rust-desktop.exe --layout-preview
 ```
 

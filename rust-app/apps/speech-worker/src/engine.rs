@@ -106,9 +106,13 @@ impl WhisperEngine {
         let silence = vec![0.0_f32; WARMUP_SAMPLES];
         // A failed silent decode does not invalidate a successfully loaded model. Some models
         // intentionally report "no speech" for this buffer after all compute backends are warm.
-        if let Err(error) =
-            self.run_whisper(&silence, SpeechOutputMode::OriginalLanguage, true, None)
-        {
+        if let Err(error) = self.run_whisper(
+            &silence,
+            SpeechOutputMode::OriginalLanguage,
+            true,
+            None,
+            None,
+        ) {
             eprintln!("speech engine warm-up completed without a transcript: {error:#}");
         }
 
@@ -125,8 +129,25 @@ impl WhisperEngine {
         output_mode: SpeechOutputMode,
         abort_generation: Option<AbortGeneration>,
     ) -> Result<EngineTranscript> {
-        if recording.duration_ms < 180 || recording.samples.is_empty() {
+        self.transcribe_with_prompt(recording, output_mode, None, abort_generation)
+    }
+
+    pub fn transcribe_with_prompt(
+        &mut self,
+        recording: &RecordedAudio,
+        output_mode: SpeechOutputMode,
+        initial_prompt: Option<&str>,
+        abort_generation: Option<AbortGeneration>,
+    ) -> Result<EngineTranscript> {
+        if recording.segment_duration_ms() < 180 || recording.samples.is_empty() {
             bail!("recording is too short");
+        }
+        if recording
+            .source_start_sample
+            .saturating_add(recording.samples.len())
+            != recording.source_total_samples
+        {
+            bail!("recording segment does not match its absolute source range");
         }
         if self.context.is_none() {
             bail!("Whisper model is not prepared");
@@ -147,13 +168,14 @@ impl WhisperEngine {
         );
         let preprocessing_ms = elapsed_ms(preprocessing_started);
         let inference_started = Instant::now();
-        let (text, language) = self.run_whisper(&audio, output_mode, false, abort_generation)?;
+        let (text, language) =
+            self.run_whisper(&audio, output_mode, false, initial_prompt, abort_generation)?;
 
         Ok(EngineTranscript {
             text,
             language,
             audio_duration_ms: recording.duration_ms,
-            source_sample_count: recording.samples.len(),
+            source_sample_count: recording.source_total_samples,
             preprocessing_ms,
             inference_ms: elapsed_ms(inference_started),
         })
@@ -164,6 +186,7 @@ impl WhisperEngine {
         audio: &[f32],
         output_mode: SpeechOutputMode,
         single_segment: bool,
+        initial_prompt: Option<&str>,
         abort_generation: Option<AbortGeneration>,
     ) -> Result<(String, String)> {
         let context = self
@@ -178,6 +201,9 @@ impl WhisperEngine {
         params.set_language(None);
         params.set_translate(output_mode == SpeechOutputMode::TranslateToEnglish);
         params.set_no_context(true);
+        if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.is_empty()) {
+            params.set_initial_prompt(prompt);
+        }
         params.set_no_timestamps(true);
         params.set_single_segment(single_segment);
         params.set_suppress_blank(true);
