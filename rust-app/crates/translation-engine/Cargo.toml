@@ -14,8 +14,8 @@ anyhow = "1.0.100"
 candle = { package = "candle-core", version = "0.11.0" }
 candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
-rust-model-manager = { version = "0.5.4", path = "../model-manager" }
-rust-protocol = { version = "0.5.4", path = "../protocol" }
+rust-model-manager = { version = "0.5.5", path = "../model-manager" }
+rust-protocol = { version = "0.5.5", path = "../protocol" }
 sentencepiece-rs = "0.2.2"
 serde.workspace = true
 serde_json.workspace = true

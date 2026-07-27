@@ -352,6 +352,8 @@ fn begin_selection_capture(
         .name("selection-capture".to_owned())
         .spawn(move || {
             let _busy_guard = SelectionBusyGuard;
+            let capture_started = Instant::now();
+            let copy_shortcut = target::selection_copy_shortcut(target);
             let result = if !wait_for_mask_clear(
                 selection_chord_mask(intent),
                 Duration::from_millis(1200),
@@ -359,16 +361,26 @@ fn begin_selection_capture(
             ) {
                 Err(clipboard::ClipboardError::CopyTimeout)
             } else if inject::is_foreground(target) {
-                let copy_shortcut = target::selection_copy_shortcut(target);
-                clipboard::capture_selection(|| {
-                    inject::copy_shortcut(copy_shortcut)
-                        .map_err(|_| clipboard::ClipboardError::InvalidData)
-                })
+                clipboard::capture_selection(
+                    || inject::is_foreground(target),
+                    || {
+                        inject::copy_shortcut(copy_shortcut)
+                            .map_err(|_| clipboard::ClipboardError::InvalidData)
+                    },
+                )
             } else {
                 Err(clipboard::ClipboardError::CopyTimeout)
             };
             match result {
                 Ok(text) if !text.trim().is_empty() => {
+                    eprintln!(
+                        "selection_capture request={} pid={} shortcut={copy_shortcut:?} \
+result=success chars={} elapsed_ms={}",
+                        request_id,
+                        target.process_id,
+                        text.chars().count(),
+                        capture_started.elapsed().as_millis(),
+                    );
                     let _ = events.send(InputHostEvent::SelectionCaptured {
                         request_id,
                         intent,
@@ -377,12 +389,26 @@ fn begin_selection_capture(
                     });
                 }
                 Ok(_) => {
+                    eprintln!(
+                        "selection_capture request={} pid={} shortcut={copy_shortcut:?} \
+result=empty elapsed_ms={}",
+                        request_id,
+                        target.process_id,
+                        capture_started.elapsed().as_millis(),
+                    );
                     let _ = events.send(InputHostEvent::SelectionCaptureFailed {
                         request_id,
                         message: "The selection is empty.".to_owned(),
                     });
                 }
                 Err(error) => {
+                    eprintln!(
+                        "selection_capture request={} pid={} shortcut={copy_shortcut:?} \
+result=failed error={error} elapsed_ms={}",
+                        request_id,
+                        target.process_id,
+                        capture_started.elapsed().as_millis(),
+                    );
                     let _ = events.send(InputHostEvent::SelectionCaptureFailed {
                         request_id,
                         message: error.to_string(),

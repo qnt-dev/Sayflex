@@ -19,6 +19,7 @@ use windows_sys::Win32::{
 pub enum SelectionCopyShortcut {
     ControlC,
     ControlShiftC,
+    ControlInsert,
 }
 
 pub fn capture_target() -> TargetSnapshot {
@@ -89,8 +90,10 @@ pub fn selection_copy_shortcut(target: TargetSnapshot) -> SelectionCopyShortcut 
 }
 
 fn selection_copy_shortcut_for_process(process_name: &str) -> SelectionCopyShortcut {
-    if is_wezterm(process_name) {
+    if uses_control_shift_c(process_name) {
         SelectionCopyShortcut::ControlShiftC
+    } else if uses_control_insert(process_name) {
+        SelectionCopyShortcut::ControlInsert
     } else {
         SelectionCopyShortcut::ControlC
     }
@@ -98,6 +101,26 @@ fn selection_copy_shortcut_for_process(process_name: &str) -> SelectionCopyShort
 
 fn is_wezterm(process_name: &str) -> bool {
     process_name.eq_ignore_ascii_case("wezterm-gui")
+}
+
+fn uses_control_shift_c(process_name: &str) -> bool {
+    [
+        "wezterm-gui",
+        "WindowsTerminal",
+        "OpenConsole",
+        "alacritty",
+        "kitty",
+        "tabby",
+        "Hyper",
+    ]
+    .iter()
+    .any(|candidate| process_name.eq_ignore_ascii_case(candidate))
+}
+
+fn uses_control_insert(process_name: &str) -> bool {
+    ["mintty", "putty", "puttytel"]
+        .iter()
+        .any(|candidate| process_name.eq_ignore_ascii_case(candidate))
 }
 
 fn process_name(process_id: u32) -> Option<String> {
@@ -174,5 +197,34 @@ mod tests {
             SelectionCopyShortcut::ControlC
         );
         assert!(!is_wezterm("notepad"));
+    }
+
+    #[test]
+    fn modern_terminal_hosts_use_their_non_interrupting_copy_shortcut() {
+        for process in [
+            "WindowsTerminal",
+            "OpenConsole",
+            "alacritty",
+            "kitty",
+            "tabby",
+            "Hyper",
+        ] {
+            assert_eq!(
+                selection_copy_shortcut_for_process(process),
+                SelectionCopyShortcut::ControlShiftC,
+                "{process}"
+            );
+        }
+    }
+
+    #[test]
+    fn classic_terminal_hosts_use_control_insert() {
+        for process in ["mintty", "putty", "puttytel"] {
+            assert_eq!(
+                selection_copy_shortcut_for_process(process),
+                SelectionCopyShortcut::ControlInsert,
+                "{process}"
+            );
+        }
     }
 }

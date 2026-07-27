@@ -7,7 +7,7 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-            SendInput, VK_C, VK_CONTROL, VK_SHIFT, VK_V,
+            SendInput, VK_C, VK_CONTROL, VK_INSERT, VK_SHIFT, VK_V,
         },
         WindowsAndMessaging::{GA_ROOT, GetAncestor, GetForegroundWindow},
     },
@@ -66,10 +66,11 @@ pub fn replace_selection(target: TargetSnapshot, text: &str) -> Result<(), Injec
 }
 
 pub fn copy_shortcut(shortcut: SelectionCopyShortcut) -> Result<(), InjectionError> {
-    send_control_shortcut(
-        VK_C,
-        matches!(shortcut, SelectionCopyShortcut::ControlShiftC),
-    )
+    match shortcut {
+        SelectionCopyShortcut::ControlC => send_control_shortcut(VK_C, false),
+        SelectionCopyShortcut::ControlShiftC => send_control_shortcut(VK_C, true),
+        SelectionCopyShortcut::ControlInsert => send_control_shortcut(VK_INSERT, false),
+    }
 }
 
 pub fn paste_shortcut() -> Result<(), InjectionError> {

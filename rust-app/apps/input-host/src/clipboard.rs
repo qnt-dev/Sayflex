@@ -1,6 +1,8 @@
 use std::{
     ffi::c_void,
-    mem, ptr, thread,
+    mem, ptr,
+    sync::atomic::{AtomicU64, Ordering},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -21,6 +23,8 @@ use windows_sys::{
     },
     core::IUnknown_Vtbl,
 };
+
+static SELECTION_PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Error)]
 pub enum ClipboardError {
@@ -197,30 +201,73 @@ pub fn get_text() -> Result<String, ClipboardError> {
 }
 
 pub fn capture_selection(
+    target_still_focused: impl Fn() -> bool,
     send_copy: impl FnOnce() -> Result<(), ClipboardError>,
 ) -> Result<String, ClipboardError> {
     let _apartment = ClipboardApartment::initialize()?;
     let mut snapshot = ClipboardSnapshot::capture()?;
-    let before = unsafe { GetClipboardSequenceNumber() };
+    if !target_still_focused() {
+        return Err(ClipboardError::TargetChanged);
+    }
+
+    // A sequence-number-only transaction cannot distinguish a failed copy
+    // from applications that leave the clipboard unchanged when the selected
+    // text is already present (common with terminal copy-on-select). Replace
+    // the clipboard with an excluded, process-unique probe first. A successful
+    // copy must replace that probe even when the selected text itself did not
+    // change.
+    let probe = selection_probe();
+    set_private_text(&probe)?;
+    let probe_sequence = unsafe { GetClipboardSequenceNumber() };
+    if !target_still_focused() {
+        restore_if_current(&mut snapshot, probe_sequence)?;
+        return Err(ClipboardError::TargetChanged);
+    }
+
     if let Err(error) = send_copy() {
-        if unsafe { GetClipboardSequenceNumber() } != before {
-            snapshot.restore()?;
-        }
+        restore_if_current(&mut snapshot, probe_sequence)?;
         return Err(error);
     }
-    let deadline = Instant::now() + Duration::from_millis(900);
-    while unsafe { GetClipboardSequenceNumber() } == before {
+
+    let deadline = Instant::now() + Duration::from_millis(1_500);
+    while unsafe { GetClipboardSequenceNumber() } == probe_sequence {
+        if !target_still_focused() {
+            restore_if_current(&mut snapshot, probe_sequence)?;
+            return Err(ClipboardError::TargetChanged);
+        }
         if Instant::now() >= deadline {
+            restore_if_current(&mut snapshot, probe_sequence)?;
             return Err(ClipboardError::CopyTimeout);
         }
-        thread::sleep(Duration::from_millis(12));
+        thread::sleep(Duration::from_millis(5));
     }
+
     let copied_sequence = unsafe { GetClipboardSequenceNumber() };
     let text = get_text();
-    if unsafe { GetClipboardSequenceNumber() } == copied_sequence {
+    restore_if_current(&mut snapshot, copied_sequence)?;
+    match text {
+        Ok(text) if text != probe => Ok(text),
+        Ok(_) => Err(ClipboardError::CopyTimeout),
+        Err(error) => Err(error),
+    }
+}
+
+fn selection_probe() -> String {
+    let sequence = SELECTION_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "\u{2063}qntflex-selection-probe-{}-{sequence}\u{2063}",
+        std::process::id()
+    )
+}
+
+fn restore_if_current(
+    snapshot: &mut ClipboardSnapshot,
+    expected_sequence: u32,
+) -> Result<(), ClipboardError> {
+    if unsafe { GetClipboardSequenceNumber() } == expected_sequence {
         snapshot.restore()?;
     }
-    text
+    Ok(())
 }
 
 pub fn dispatch_paste(

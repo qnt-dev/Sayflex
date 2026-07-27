@@ -3,7 +3,7 @@
   <assemblyIdentity
     name="RustVoice.Desktop"
     processorArchitecture="amd64"
-    version="0.5.4.0"
+    version="0.5.5.0"
     type="win32" />
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
