@@ -12,10 +12,10 @@ cuda = ["rust-translation-engine/cuda"]
 [dependencies]
 anyhow = "1.0.100"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
-rust-model-manager = { version = "0.5.3", path = "../../crates/model-manager" }
-rust-platform-windows = { version = "0.5.3", path = "../../crates/platform-windows" }
-rust-protocol = { version = "0.5.3", path = "../../crates/protocol" }
-rust-translation-engine = { version = "0.5.3", path = "../../crates/translation-engine" }
+rust-model-manager = { version = "0.5.4", path = "../../crates/model-manager" }
+rust-platform-windows = { version = "0.5.4", path = "../../crates/platform-windows" }
+rust-protocol = { version = "0.5.4", path = "../../crates/protocol" }
+rust-translation-engine = { version = "0.5.4", path = "../../crates/translation-engine" }
 serde.workspace = true
 serde_json.workspace = true
 sys-locale = "0.3.2"

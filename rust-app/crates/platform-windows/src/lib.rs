@@ -3,15 +3,20 @@ mod job;
 #[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
+mod popup_dismiss;
+#[cfg(windows)]
 mod single_instance;
 
 #[cfg(windows)]
 pub use job::WorkerJob;
 #[cfg(windows)]
 pub use overlay::{
-    configure_action_window, configure_overlay_window, configure_standard_window,
+    begin_window_drag, configure_action_window, configure_overlay_window,
+    configure_standard_window, configure_translation_window,
     restore_target_if_our_action_window_activated,
 };
+#[cfg(windows)]
+pub use popup_dismiss::{PopupDismissMonitor, activate_popup_dismiss, deactivate_popup_dismiss};
 #[cfg(windows)]
 pub use single_instance::SingleInstanceGuard;
 
@@ -41,6 +46,16 @@ pub fn configure_overlay_window(
 
 #[cfg(not(windows))]
 pub fn configure_action_window(_window_handle: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn configure_translation_window(_window_handle: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn begin_window_drag(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
 
@@ -84,3 +99,22 @@ impl WorkerJob {
 pub fn configure_safe_dll_search() -> std::io::Result<()> {
     Ok(())
 }
+
+#[cfg(not(windows))]
+pub struct PopupDismissMonitor;
+
+#[cfg(not(windows))]
+impl PopupDismissMonitor {
+    pub fn start(
+        _on_dismiss: impl Fn() + Send + 'static,
+        _on_pin_changed: impl Fn(bool) + Send + 'static,
+    ) -> Result<Self, String> {
+        Ok(Self)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn activate_popup_dismiss(_window_handle: u64) {}
+
+#[cfg(not(windows))]
+pub fn deactivate_popup_dismiss() {}

@@ -1114,7 +1114,7 @@ export component SettingsWindow inherits Window {
 
                 Eyebrow {
                     height: 16px;
-                    text: "RUST VOICE  ·  0.5.3";
+                    text: "RUST VOICE  ·  0.5.4";
                 }
                 Text {
                     height: 34px;
@@ -1588,10 +1588,11 @@ export component ActionPalette inherits Window {
 }
 
 export component TranslationPreview inherits Window {
+    // Kept for diagnostics and accessibility only. The window is frameless, so
+    // no title or chrome is rendered to the user.
     title: "Translation preview";
-    icon: @image-url("../assets/tray-icon.svg");
     width: root.card-width * 1px;
-    height: 103px + (root.source-panel-height + root.result-panel-height) * 1px;
+    height: 36px + root.result-panel-height * 1px;
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -1599,151 +1600,99 @@ export component TranslationPreview inherits Window {
 
     in-out property <string> request-id;
     in-out property <bool> prepared: false;
-    in-out property <string> source-text;
     in-out property <string> translated-text;
-    in-out property <string> direction-label: "Detecting language…";
-    in-out property <bool> processing: true;
-    in-out property <float> card-width: 420;
-    in-out property <float> source-panel-height: 58;
-    in-out property <float> result-panel-height: 68;
+    in-out property <bool> pinned: false;
+    in-out property <float> card-width: 320;
+    in-out property <float> result-panel-height: 48;
     in-out property <float> result-content-height: 52;
     in-out property <bool> result-scrollable: false;
-    callback replace();
-    callback copy();
-    callback dismiss();
+    callback begin-drag();
 
     Rectangle {
-        border-radius: 8px;
+        border-radius: 9px;
         border-width: 1px;
-        border-color: root.processing ? Theme.line : #e3995270;
-        background: Theme.glass;
+        border-color: #f0a45d50;
+        background: #0b0e1328;
+        clip: true;
         opacity: root.prepared ? 1 : 0;
 
-        VerticalLayout {
-            padding: 14px;
-            spacing: 7px;
-
-            HorizontalLayout {
-                height: 22px;
-                vertical-stretch: 0;
-                Text {
-                    text: "Translation";
-                    color: Theme.text;
-                    font-size: 14px;
-                    font-weight: 720;
-                }
-                Rectangle { horizontal-stretch: 1; }
-                Text {
-                    text: root.direction-label;
-                    color: root.processing ? Theme.text-muted : Theme.orange;
-                    font-size: 8px;
-                    font-weight: 650;
-                    vertical-alignment: center;
+        drag-area := TouchArea {
+            x: 0;
+            y: 0;
+            width: parent.width - 54px;
+            height: 32px;
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                    root.begin-drag();
                 }
             }
+        }
+
+        result-scroll := Flickable {
+            x: 15px;
+            y: 25px;
+            width: parent.width - (root.result-scrollable ? 38px : 30px);
+            height: parent.height - 38px;
+            viewport-width: self.width;
+            viewport-height: root.result-content-height * 1px;
+
+            Text {
+                width: result-scroll.width;
+                height: root.result-content-height * 1px;
+                text: root.translated-text;
+                color: #f5f3ef;
+                font-size: 14px;
+                font-weight: 470;
+                wrap: word-wrap;
+                vertical-alignment: top;
+            }
+        }
+
+        if root.result-scrollable: Rectangle {
+            x: parent.width - 8px;
+            y: 26px;
+            width: 2px;
+            height: parent.height - 39px;
+            border-radius: 1px;
+            background: #080a0d80;
 
             Rectangle {
-                height: root.source-panel-height * 1px;
-                vertical-stretch: 0;
-                border-radius: 4px;
-                border-width: 1px;
-                border-color: Theme.line;
-                background: #11141ac8;
-                Text {
-                    x: 10px;
-                    y: 6px;
-                    width: parent.width - 20px;
-                    height: parent.height - 12px;
-                    text: root.source-text;
-                    color: Theme.text-muted;
-                    font-size: 9px;
-                    wrap: word-wrap;
-                    overflow: elide;
-                }
+                width: 2px;
+                height: parent.height * (result-scroll.height / result-scroll.viewport-height) < 20px
+                    ? 20px
+                    : parent.height * (result-scroll.height / result-scroll.viewport-height);
+                y: (-result-scroll.viewport-y / (result-scroll.viewport-height - result-scroll.height))
+                    * (parent.height - self.height);
+                border-radius: 1px;
+                background: Theme.orange;
+                opacity: 0.7;
             }
+        }
 
-            Rectangle {
-                height: root.result-panel-height * 1px;
-                vertical-stretch: 0;
-                border-radius: 4px;
-                border-width: 1px;
-                border-color: root.processing ? Theme.line : Theme.orange;
-                background: root.processing ? #11141ac8 : #e3995214;
+        pin-button := Rectangle {
+            x: parent.width - 52px;
+            y: 7px;
+            width: 44px;
+            height: 24px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: root.pinned ? Theme.orange : #d7d3cc48;
+            background: root.pinned
+                ? Theme.orange
+                : pin-touch.has-hover
+                    ? #f0a45d20
+                    : #0c0f1450;
 
-                result-scroll := Flickable {
-                    x: 10px;
-                    y: 7px;
-                    width: parent.width - (root.result-scrollable ? 26px : 20px);
-                    height: parent.height - 16px;
-                    viewport-width: self.width;
-                    viewport-height: root.result-content-height * 1px;
-
-                    Text {
-                        width: result-scroll.width;
-                        height: root.result-content-height * 1px;
-                        text: root.translated-text;
-                        color: root.processing ? Theme.text-muted : Theme.text;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                        vertical-alignment: top;
-                    }
-                }
-
-                if root.result-scrollable: Rectangle {
-                    x: parent.width - 7px;
-                    y: 7px;
-                    width: 2px;
-                    height: parent.height - 14px;
-                    border-radius: 1px;
-                    background: #050608a8;
-
-                    Rectangle {
-                        width: 2px;
-                        height: parent.height * (result-scroll.height / result-scroll.viewport-height) < 22px
-                            ? 22px
-                            : parent.height * (result-scroll.height / result-scroll.viewport-height);
-                        y: (-result-scroll.viewport-y / (result-scroll.viewport-height - result-scroll.height))
-                            * (parent.height - self.height);
-                        border-radius: 1px;
-                        background: Theme.orange;
-                        opacity: 0.72;
-                    }
-                }
+            Text {
+                text: "PIN";
+                color: root.pinned ? #0b0e13 : #dedad3;
+                opacity: root.pinned ? 1 : (pin-touch.has-hover ? 0.92 : 0.62);
+                font-size: 10px;
+                font-weight: 650;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
-
-            HorizontalLayout {
-                height: 31px;
-                vertical-stretch: 0;
-                spacing: 6px;
-                Text {
-                    text: "Local · focus-safe";
-                    color: Theme.text-faint;
-                    font-size: 8px;
-                    vertical-alignment: center;
-                }
-                Rectangle { horizontal-stretch: 1; }
-                ActionButton {
-                    width: 60px;
-                    height: 31px;
-                    label: "CLOSE";
-                    clicked => { root.dismiss(); }
-                }
-                ActionButton {
-                    width: 64px;
-                    height: 31px;
-                    label: "COPY";
-                    enabled: !root.processing;
-                    clicked => { root.copy(); }
-                }
-                ActionButton {
-                    width: 82px;
-                    height: 31px;
-                    label: "REPLACE";
-                    accent: true;
-                    enabled: !root.processing;
-                    clicked => { root.replace(); }
-                }
-            }
+            pin-touch := TouchArea {}
         }
     }
 }

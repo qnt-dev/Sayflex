@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     error::Error,
     fs,
@@ -44,6 +44,8 @@ enum RuntimeEvent {
     Input(InputHostEvent),
     Speech(SpeechWorkerEvent),
     Translation(TranslationWorkerEvent),
+    DismissTranslationPreview,
+    TranslationPreviewPinChanged(bool),
     WorkerError(String),
     WorkerExited { kind: WorkerKind, message: String },
 }
@@ -246,12 +248,6 @@ struct PendingTextAction {
 }
 
 #[derive(Clone, Copy)]
-struct PendingSelectionCapture {
-    intent: TextActionIntent,
-    target: TargetSnapshot,
-}
-
-#[derive(Clone, Copy)]
 enum TranslationOrigin {
     Selection {
         target: TargetSnapshot,
@@ -269,13 +265,6 @@ struct SelectionTranslationRequest {
     target: TargetSnapshot,
     text: String,
     delivery: TranslationDelivery,
-}
-
-#[derive(Clone)]
-struct PreviewTranslation {
-    request_id: RequestId,
-    target: TargetSnapshot,
-    text: String,
 }
 
 struct PendingInsertLast {
@@ -459,10 +448,9 @@ struct AppState {
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
     pending_text_action: Option<PendingTextAction>,
-    pending_selection_captures: HashMap<RequestId, PendingSelectionCapture>,
+    pending_selection_captures: HashSet<RequestId>,
     pending_translations: HashMap<RequestId, PendingTranslation>,
     queued_selection_translation: Option<SelectionTranslationRequest>,
-    preview_translation: Option<PreviewTranslation>,
     translation_history: Vec<TranslationHistoryEntry>,
 }
 
@@ -499,10 +487,9 @@ impl AppState {
             text_action_mode: saved_settings.text_action_mode,
             translation_delivery: saved_settings.translation_delivery,
             pending_text_action: None,
-            pending_selection_captures: HashMap::new(),
+            pending_selection_captures: HashSet::new(),
             pending_translations: HashMap::new(),
             queued_selection_translation: None,
-            preview_translation: None,
             translation_history: Vec::new(),
             history_enabled: saved_settings.history_enabled,
         }
@@ -666,7 +653,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &state,
         &workers,
     );
-    wire_translation_preview(&translation_preview, &state, &workers);
+    wire_translation_preview(&translation_preview);
     wire_translator(&translator, &state, &workers);
     install_runtime_handler(RuntimeUi {
         settings: settings.as_weak(),
@@ -679,6 +666,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         workers: Rc::clone(&workers),
         indicator_animation: Rc::clone(&indicator_animation),
     });
+    let _popup_dismiss_monitor = match rust_platform_windows::PopupDismissMonitor::start(
+        || {
+            dispatch_runtime_event(RuntimeEvent::DismissTranslationPreview);
+        },
+        |pinned| {
+            dispatch_runtime_event(RuntimeEvent::TranslationPreviewPinChanged(pinned));
+        },
+    ) {
+        Ok(monitor) => Some(monitor),
+        Err(error) => {
+            eprintln!("translation popup click-away is unavailable: {error}");
+            None
+        }
+    };
     let animation_timer = start_indicator_animation(&indicator, &indicator_animation);
 
     if !env::args().any(|argument| argument == "--background") {
@@ -839,32 +840,16 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.TranslationPreview")?;
     let preview = TranslationPreview::new()?;
-    let source = if long_text {
-        "A long translation should stay readable without turning the compact action card into a full workspace."
-    } else {
-        "The preview should grow with its content, not with a fixed empty canvas."
-    };
     let translated = if long_text {
         "Длинный перевод должен оставаться удобным для чтения. Карточка сохраняет компактную форму, а результат прокручивается внутри неё. Это позволяет быстро проверить смысл, не терять выбранное место в исходном приложении и не открывать отдельное большое рабочее окно. Прокрутка появляется только тогда, когда текст действительно не помещается. ".repeat(12)
     } else {
         "Предпросмотр должен увеличиваться вместе с содержимым, а не оставлять пустой холст."
             .to_owned()
     };
-    apply_translation_preview_layout(&preview, source, &translated);
-    preview.set_source_text(source.into());
+    apply_translation_preview_layout(&preview, &translated);
     preview.set_translated_text(translated.clone().into());
-    preview.set_direction_label("EN → RU · 94 ms".into());
-    preview.set_processing(false);
     preview.set_prepared(true);
-    preview.on_replace(|| {
-        let _ = slint::quit_event_loop();
-    });
-    preview.on_copy(|| {
-        let _ = slint::quit_event_loop();
-    });
-    preview.on_dismiss(|| {
-        let _ = slint::quit_event_loop();
-    });
+    wire_translation_preview(&preview);
     preview.show()?;
     let preview_weak = preview.as_weak();
     slint::spawn_local(async move {
@@ -878,12 +863,30 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
                 .and_then(native_window_handle);
             if let Err(error) = handle
                 .ok_or_else(|| "native translation window is unavailable".to_owned())
-                .and_then(rust_platform_windows::configure_action_window)
+                .and_then(rust_platform_windows::configure_translation_window)
             {
                 eprintln!("could not configure translation preview: {error}");
+            } else if let Some(handle) = handle {
+                rust_platform_windows::activate_popup_dismiss(handle);
             }
         }
     })?;
+    let preview_for_pin = preview.as_weak();
+    let _popup_dismiss_monitor = rust_platform_windows::PopupDismissMonitor::start(
+        || {
+            let _ = slint::invoke_from_event_loop(|| {
+                let _ = slint::quit_event_loop();
+            });
+        },
+        move |pinned| {
+            let preview = preview_for_pin.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(preview) = preview.upgrade() {
+                    preview.set_pinned(pinned);
+                }
+            });
+        },
+    )?;
     slint::run_event_loop()?;
     Ok(())
 }
@@ -1144,6 +1147,18 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 &runtime.workers,
             );
         }
+        RuntimeEvent::DismissTranslationPreview => {
+            if let Some(preview) = runtime.translation_preview.upgrade() {
+                preview.set_pinned(false);
+                let _ = preview.hide();
+            }
+            rust_platform_windows::deactivate_popup_dismiss();
+        }
+        RuntimeEvent::TranslationPreviewPinChanged(pinned) => {
+            if let Some(preview) = runtime.translation_preview.upgrade() {
+                preview.set_pinned(pinned);
+            }
+        }
         RuntimeEvent::WorkerError(message) => {
             runtime.state.borrow_mut().indicator_session = None;
             runtime.indicator_animation.borrow_mut().stop();
@@ -1387,24 +1402,13 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
         }
         InputHostEvent::SelectionCaptureStarted {
             request_id,
-            intent,
-            target,
+            intent: _,
+            target: _,
         } => {
             state
                 .borrow_mut()
                 .pending_selection_captures
-                .insert(request_id, PendingSelectionCapture { intent, target });
-            if intent == TextActionIntent::Translate {
-                show_selection_translation_preview(
-                    request_id,
-                    target,
-                    "Selected text",
-                    "Reading the selection…",
-                    "Preparing locally",
-                    true,
-                    translation_preview,
-                );
-            }
+                .insert(request_id);
             set_indicator_status(settings, "Reading selected text…");
         }
         InputHostEvent::SelectionCaptured {
@@ -1434,27 +1438,10 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             request_id,
             message,
         } => {
-            let pending = state
+            let _pending = state
                 .borrow_mut()
                 .pending_selection_captures
                 .remove(&request_id);
-            if let Some(PendingSelectionCapture {
-                intent: TextActionIntent::Translate,
-                target,
-            }) = pending
-            {
-                show_selection_translation_preview(
-                    request_id,
-                    target,
-                    "Selected text",
-                    &format!(
-                        "Could not read the selection. Keep the source app focused and try again.\n\n{message}"
-                    ),
-                    "Selection unavailable",
-                    false,
-                    translation_preview,
-                );
-            }
             set_indicator_status(settings, &format!("Selection: {message}"));
         }
         InputHostEvent::InsertionDispatched {
@@ -1521,17 +1508,7 @@ inference_ms={} speculative_reuse={} method={}",
             );
         }
         InputHostEvent::SelectionReplaced { request_id } => {
-            if state
-                .borrow()
-                .preview_translation
-                .as_ref()
-                .is_some_and(|pending| pending.request_id == request_id)
-            {
-                state.borrow_mut().preview_translation = None;
-                if let Some(preview) = translation_preview.upgrade() {
-                    let _ = preview.hide();
-                }
-            }
+            let _ = request_id;
             set_indicator_status(settings, "Selected text was replaced.");
         }
         InputHostEvent::TextCopied { .. } => {
@@ -1542,13 +1519,6 @@ inference_ms={} speculative_reuse={} method={}",
             code,
             message,
         } => {
-            if code == "replace_selection"
-                && let Some(preview) = translation_preview.upgrade()
-            {
-                preview.set_processing(false);
-                preview
-                    .set_direction_label("Target focus changed · copy the result or retry".into());
-            }
             let owns_indicator = {
                 let mut state = state.borrow_mut();
                 if session_id.is_some() && state.indicator_session == session_id {
@@ -1712,7 +1682,7 @@ fn show_layout_chooser(
 fn begin_selection_translation(
     request: SelectionTranslationRequest,
     settings: &slint::Weak<SettingsWindow>,
-    translation_preview: &slint::Weak<TranslationPreview>,
+    _translation_preview: &slint::Weak<TranslationPreview>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
 ) {
@@ -1731,32 +1701,10 @@ fn begin_selection_translation(
         )
     };
     if !enabled {
-        if delivery == TranslationDelivery::Preview {
-            show_selection_translation_preview(
-                request_id,
-                target,
-                &text,
-                "Translation is disabled in Settings.",
-                "Unavailable",
-                true,
-                translation_preview,
-            );
-        }
         set_indicator_status(settings, "Translation is disabled in Actions.");
         return;
     }
     if selected_tier.is_none() {
-        if delivery == TranslationDelivery::Preview {
-            show_selection_translation_preview(
-                request_id,
-                target,
-                &text,
-                "Choose and download a translation model in Settings.",
-                "Model required",
-                true,
-                translation_preview,
-            );
-        }
         set_indicator_status(
             settings,
             "Choose and download a translation model in Settings first.",
@@ -1764,17 +1712,6 @@ fn begin_selection_translation(
         return;
     }
     if !ready {
-        if delivery == TranslationDelivery::Preview {
-            show_selection_translation_preview(
-                request_id,
-                target,
-                &text,
-                "Loading the local translation model…",
-                "Preparing locally",
-                true,
-                translation_preview,
-            );
-        }
         state.borrow_mut().queued_selection_translation = Some(SelectionTranslationRequest {
             request_id,
             target,
@@ -1791,17 +1728,6 @@ fn begin_selection_translation(
             origin: TranslationOrigin::Selection { target, delivery },
         },
     );
-    if delivery == TranslationDelivery::Preview {
-        show_selection_translation_preview(
-            request_id,
-            target,
-            &text,
-            "Translating locally…",
-            "Detecting language…",
-            true,
-            translation_preview,
-        );
-    }
     if let Err(error) = workers
         .translation
         .send(&TranslationWorkerCommand::Translate {
@@ -1821,23 +1747,18 @@ fn begin_selection_translation(
 fn show_selection_translation_preview(
     request_id: RequestId,
     target: TargetSnapshot,
-    source_text: &str,
-    result_text: &str,
-    direction_label: &str,
-    processing: bool,
+    translated_text: &str,
     translation_preview: &slint::Weak<TranslationPreview>,
 ) {
     let Some(preview) = translation_preview.upgrade() else {
         return;
     };
     preview.set_request_id(request_id.to_string().into());
-    apply_translation_preview_layout(&preview, source_text, result_text);
-    preview.set_source_text(source_text.into());
-    preview.set_translated_text(result_text.into());
-    preview.set_direction_label(direction_label.into());
-    preview.set_processing(processing);
+    preview.set_pinned(false);
+    apply_translation_preview_layout(&preview, translated_text);
+    preview.set_translated_text(translated_text.into());
     let _ = preview.show();
-    prepare_shown_action_window(
+    prepare_shown_translation_window(
         slint_window_handle(preview.window()),
         TRANSLATION_PREVIEW_WINDOW_TITLE,
         target.window_handle,
@@ -2287,19 +2208,7 @@ fn handle_translation_event(
             ) {
                 set_translation_status(translator, &format!("{code}: {message}"));
             }
-            if let Some(preview) = translation_preview.upgrade()
-                && request_id
-                    .or(queued_request_id)
-                    .map(|id| preview.get_request_id() == id.to_string())
-                    .unwrap_or(false)
-            {
-                preview.set_processing(true);
-                preview.set_direction_label("Translation failed".into());
-                let error_text = format!("{code}: {message}");
-                let source_text = preview.get_source_text().to_string();
-                apply_translation_preview_layout(&preview, &source_text, &error_text);
-                preview.set_translated_text(error_text.into());
-            }
+            let _ = (translation_preview, queued_request_id);
             set_indicator_status(settings, &format!("{code}: {message}"));
         }
     }
@@ -2335,31 +2244,12 @@ fn route_translation_result(
         }
         TranslationOrigin::Selection { target, delivery } => match delivery {
             TranslationDelivery::Preview => {
-                state.borrow_mut().preview_translation = Some(PreviewTranslation {
-                    request_id: result.request_id,
+                show_selection_translation_preview(
+                    result.request_id,
                     target,
-                    text: result.translated_text.clone(),
-                });
-                if let Some(preview) = translation_preview.upgrade() {
-                    preview.set_request_id(result.request_id.to_string().into());
-                    apply_translation_preview_layout(
-                        &preview,
-                        &result.source_text,
-                        &result.translated_text,
-                    );
-                    preview.set_source_text(result.source_text.into());
-                    preview.set_translated_text(result.translated_text.into());
-                    preview.set_processing(false);
-                    preview.set_direction_label(
-                        format!(
-                            "{} → {} · {} ms",
-                            result.source_language.code().to_uppercase(),
-                            result.target_language.code().to_uppercase(),
-                            result.processing_duration_ms
-                        )
-                        .into(),
-                    );
-                }
+                    &result.translated_text,
+                    translation_preview,
+                );
             }
             TranslationDelivery::Replace => {
                 let _ = workers.input.send(&InputHostCommand::ReplaceSelection {
@@ -2376,6 +2266,7 @@ fn route_translation_result(
             }
         },
     }
+    let _ = state;
     set_indicator_status(settings, "Translation completed locally.");
 }
 
@@ -2867,56 +2758,15 @@ fn wire_action_palette(
     }
 }
 
-fn wire_translation_preview(
-    preview: &TranslationPreview,
-    state: &Rc<RefCell<AppState>>,
-    workers: &Rc<Workers>,
-) {
+fn wire_translation_preview(preview: &TranslationPreview) {
     {
         let preview_weak = preview.as_weak();
-        let state = Rc::clone(state);
-        let workers = Rc::clone(workers);
-        preview.on_replace(move || {
-            let pending = state.borrow().preview_translation.clone();
-            let Some(pending) = pending else {
-                return;
-            };
-            if let Some(preview) = preview_weak.upgrade() {
-                preview.set_processing(true);
-                preview.set_direction_label("Replacing in the original selection…".into());
-            }
-            let _ = workers.input.send(&InputHostCommand::ReplaceSelection {
-                request_id: pending.request_id,
-                target: pending.target,
-                text: pending.text,
-            });
-        });
-    }
-    {
-        let preview_weak = preview.as_weak();
-        let state = Rc::clone(state);
-        let workers = Rc::clone(workers);
-        preview.on_copy(move || {
-            let pending = state.borrow_mut().preview_translation.take();
-            let Some(pending) = pending else {
-                return;
-            };
-            if let Some(preview) = preview_weak.upgrade() {
-                let _ = preview.hide();
-            }
-            let _ = workers.input.send(&InputHostCommand::CopyText {
-                request_id: pending.request_id,
-                text: pending.text,
-            });
-        });
-    }
-    {
-        let preview_weak = preview.as_weak();
-        let state = Rc::clone(state);
-        preview.on_dismiss(move || {
-            state.borrow_mut().preview_translation = None;
-            if let Some(preview) = preview_weak.upgrade() {
-                let _ = preview.hide();
+        preview.on_begin_drag(move || {
+            if let Some(preview) = preview_weak.upgrade()
+                && let Some(handle) = slint_window_handle(preview.window())
+                && let Err(error) = rust_platform_windows::begin_window_drag(handle)
+            {
+                eprintln!("could not begin translation popup drag: {error}");
             }
         });
     }
@@ -3217,48 +3067,68 @@ fn adaptive_text_panel_height(
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TranslationPreviewLayout {
     card_width: f32,
-    source_panel_height: f32,
     result_panel_height: f32,
     result_content_height: f32,
     result_scrollable: bool,
 }
 
-fn translation_preview_layout(source_text: &str, result_text: &str) -> TranslationPreviewLayout {
-    let content_characters = source_text.chars().count().max(result_text.chars().count());
+fn translation_preview_layout(result_text: &str) -> TranslationPreviewLayout {
+    let content_characters = result_text.chars().count();
     let (card_width, characters_per_line) = match content_characters {
-        0..=48 => (360.0, 42),
-        49..=180 => (480.0, 62),
-        _ => (620.0, 82),
+        0..=28 => (280.0, 30),
+        29..=140 => (400.0, 47),
+        _ => (560.0, 68),
     };
 
-    let source_lines = estimated_wrapped_lines(source_text, characters_per_line).clamp(1, 3);
     let result_lines = estimated_wrapped_lines(result_text, characters_per_line).max(1);
-    let source_panel_height = source_lines as f32 * 14.0 + 12.0;
-    let result_text_height = result_lines as f32 * 18.0;
-    let result_panel_height = (result_text_height + 14.0).clamp(44.0, 300.0);
-    let visible_result_height = (result_panel_height - 14.0).max(18.0);
+    let result_text_height = result_lines as f32 * 20.0;
+    let result_panel_height = (result_text_height + 14.0).clamp(40.0, 300.0);
+    let visible_result_height = (result_panel_height - 14.0).max(20.0);
     let result_content_height = result_text_height.max(visible_result_height);
 
     TranslationPreviewLayout {
         card_width,
-        source_panel_height,
         result_panel_height,
         result_content_height,
         result_scrollable: result_content_height > visible_result_height + 0.5,
     }
 }
 
-fn apply_translation_preview_layout(
-    preview: &TranslationPreview,
-    source_text: &str,
-    result_text: &str,
-) {
-    let layout = translation_preview_layout(source_text, result_text);
+fn apply_translation_preview_layout(preview: &TranslationPreview, result_text: &str) {
+    let layout = translation_preview_layout(result_text);
     preview.set_card_width(layout.card_width);
-    preview.set_source_panel_height(layout.source_panel_height);
     preview.set_result_panel_height(layout.result_panel_height);
     preview.set_result_content_height(layout.result_content_height);
     preview.set_result_scrollable(layout.result_scrollable);
+}
+
+fn prepare_shown_translation_window(
+    window_handle: Option<u64>,
+    window_title: &'static str,
+    target_window_handle: u64,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        let configured = window_handle
+            .ok_or_else(|| "native window handle is unavailable".to_owned())
+            .and_then(rust_platform_windows::configure_translation_window);
+        match configured {
+            Ok(()) => {
+                if let Some(window_handle) = window_handle {
+                    rust_platform_windows::activate_popup_dismiss(window_handle);
+                }
+            }
+            Err(error) => {
+                eprintln!("could not configure `{window_title}` as a translation popup: {error}");
+            }
+        }
+        if let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
+            target_window_handle,
+        ) {
+            eprintln!("could not restore action target for `{window_title}`: {error}");
+        }
+    }) {
+        eprintln!("could not finalize `{window_title}` after showing it: {error}");
+    }
 }
 
 fn estimated_wrapped_lines(text: &str, characters_per_line: usize) -> usize {
@@ -3377,7 +3247,7 @@ fn precreate_action_windows(
                     .as_deref()
                     .and_then(native_window_handle)
                     .is_some_and(|handle| {
-                        rust_platform_windows::configure_action_window(handle).is_ok()
+                        rust_platform_windows::configure_translation_window(handle).is_ok()
                     });
                 if !configured {
                     eprintln!("translation preview could not be configured as no-activate");
@@ -3703,16 +3573,16 @@ mod adaptive_popup_tests {
 
     #[test]
     fn short_translation_stays_compact_without_a_scrollbar() {
-        let layout = translation_preview_layout("Hello", "Привет");
-        assert_eq!(layout.card_width, 360.0);
+        let layout = translation_preview_layout("Привет");
+        assert_eq!(layout.card_width, 280.0);
         assert!(!layout.result_scrollable);
-        assert_eq!(layout.result_panel_height, 44.0);
+        assert_eq!(layout.result_panel_height, 40.0);
     }
 
     #[test]
     fn long_translation_is_capped_and_becomes_scrollable() {
-        let layout = translation_preview_layout("Source", &"translated text ".repeat(500));
-        assert_eq!(layout.card_width, 620.0);
+        let layout = translation_preview_layout(&"translated text ".repeat(500));
+        assert_eq!(layout.card_width, 560.0);
         assert_eq!(layout.result_panel_height, 300.0);
         assert!(layout.result_content_height > layout.result_panel_height);
         assert!(layout.result_scrollable);
