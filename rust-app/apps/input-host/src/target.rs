@@ -1,4 +1,4 @@
-use std::{mem, path::Path};
+use std::{ffi::c_void, mem, path::Path};
 
 use rust_protocol::TargetSnapshot;
 use windows_sys::Win32::{
@@ -29,6 +29,15 @@ pub fn capture_target() -> TargetSnapshot {
     }
     let root = unsafe { GetAncestor(foreground, GA_ROOT) };
     let top_level = if root.is_null() { foreground } else { root };
+    capture_window(top_level)
+}
+
+#[cfg(debug_assertions)]
+pub fn capture_window_handle(window_handle: u64) -> TargetSnapshot {
+    capture_window(window_handle as usize as *mut c_void)
+}
+
+fn capture_window(top_level: *mut c_void) -> TargetSnapshot {
     let mut process_id = 0_u32;
     let thread_id = unsafe { GetWindowThreadProcessId(top_level, &mut process_id) };
     let layout = unsafe { GetKeyboardLayout(thread_id) };
@@ -90,10 +99,10 @@ pub fn selection_copy_shortcut(target: TargetSnapshot) -> SelectionCopyShortcut 
 }
 
 fn selection_copy_shortcut_for_process(process_name: &str) -> SelectionCopyShortcut {
-    if uses_control_shift_c(process_name) {
-        SelectionCopyShortcut::ControlShiftC
-    } else if uses_control_insert(process_name) {
+    if is_wezterm(process_name) || uses_control_insert(process_name) {
         SelectionCopyShortcut::ControlInsert
+    } else if uses_control_shift_c(process_name) {
+        SelectionCopyShortcut::ControlShiftC
     } else {
         SelectionCopyShortcut::ControlC
     }
@@ -105,7 +114,6 @@ fn is_wezterm(process_name: &str) -> bool {
 
 fn uses_control_shift_c(process_name: &str) -> bool {
     [
-        "wezterm-gui",
         "WindowsTerminal",
         "OpenConsole",
         "alacritty",
@@ -182,11 +190,11 @@ mod tests {
     fn wezterm_never_uses_interrupt_as_its_copy_shortcut() {
         assert_eq!(
             selection_copy_shortcut_for_process("wezterm-gui"),
-            SelectionCopyShortcut::ControlShiftC
+            SelectionCopyShortcut::ControlInsert
         );
         assert_eq!(
             selection_copy_shortcut_for_process("WEZTERM-GUI"),
-            SelectionCopyShortcut::ControlShiftC
+            SelectionCopyShortcut::ControlInsert
         );
     }
 

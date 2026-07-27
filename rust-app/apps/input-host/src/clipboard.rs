@@ -1,8 +1,6 @@
 use std::{
     ffi::c_void,
-    mem, ptr,
-    sync::atomic::{AtomicU64, Ordering},
-    thread,
+    mem, ptr, thread,
     time::{Duration, Instant},
 };
 
@@ -24,8 +22,6 @@ use windows_sys::{
     core::IUnknown_Vtbl,
 };
 
-static SELECTION_PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Debug, Error)]
 pub enum ClipboardError {
     #[error("clipboard is busy")]
@@ -46,6 +42,18 @@ pub enum ClipboardError {
     Ole(i32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardCaptureMethod {
+    WindowMessage,
+    Shortcut,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClipboardCapture {
+    pub text: String,
+    pub method: ClipboardCaptureMethod,
+}
+
 pub struct ClipboardApartment {
     initialized: bool,
 }
@@ -63,7 +71,9 @@ impl ClipboardApartment {
 impl Drop for ClipboardApartment {
     fn drop(&mut self) {
         if self.initialized {
-            unsafe { OleUninitialize() };
+            unsafe {
+                OleUninitialize();
+            }
         }
     }
 }
@@ -202,62 +212,108 @@ pub fn get_text() -> Result<String, ClipboardError> {
 
 pub fn capture_selection(
     target_still_focused: impl Fn() -> bool,
-    send_copy: impl FnOnce() -> Result<(), ClipboardError>,
-) -> Result<String, ClipboardError> {
+    send_direct_copy: impl FnOnce() -> Result<(), ClipboardError>,
+    send_shortcut_copy: impl FnOnce() -> Result<(), ClipboardError>,
+) -> Result<ClipboardCapture, ClipboardError> {
     let _apartment = ClipboardApartment::initialize()?;
     let mut snapshot = ClipboardSnapshot::capture()?;
     if !target_still_focused() {
         return Err(ClipboardError::TargetChanged);
     }
 
-    // A sequence-number-only transaction cannot distinguish a failed copy
-    // from applications that leave the clipboard unchanged when the selected
-    // text is already present (common with terminal copy-on-select). Replace
-    // the clipboard with an excluded, process-unique probe first. A successful
-    // copy must replace that probe even when the selected text itself did not
-    // change.
-    let probe = selection_probe();
-    set_private_text(&probe)?;
-    let probe_sequence = unsafe { GetClipboardSequenceNumber() };
-    if !target_still_focused() {
-        restore_if_current(&mut snapshot, probe_sequence)?;
-        return Err(ClipboardError::TargetChanged);
-    }
-
-    if let Err(error) = send_copy() {
-        restore_if_current(&mut snapshot, probe_sequence)?;
-        return Err(error);
+    let original_sequence = unsafe { GetClipboardSequenceNumber() };
+    let _ = send_direct_copy();
+    let mut method = ClipboardCaptureMethod::WindowMessage;
+    // WM_COPY is a synchronous window message. If it returned without changing
+    // the clipboard, waiting cannot make it succeed; fall through immediately
+    // to the application's keyboard command.
+    if unsafe { GetClipboardSequenceNumber() } == original_sequence {
+        if !target_still_focused() {
+            return Err(ClipboardError::TargetChanged);
+        }
+        send_shortcut_copy()?;
+        method = ClipboardCaptureMethod::Shortcut;
     }
 
     let deadline = Instant::now() + Duration::from_millis(1_500);
-    while unsafe { GetClipboardSequenceNumber() } == probe_sequence {
+    while unsafe { GetClipboardSequenceNumber() } == original_sequence {
         if !target_still_focused() {
-            restore_if_current(&mut snapshot, probe_sequence)?;
             return Err(ClipboardError::TargetChanged);
         }
         if Instant::now() >= deadline {
-            restore_if_current(&mut snapshot, probe_sequence)?;
             return Err(ClipboardError::CopyTimeout);
         }
         thread::sleep(Duration::from_millis(5));
     }
 
-    let copied_sequence = unsafe { GetClipboardSequenceNumber() };
-    let text = get_text();
-    restore_if_current(&mut snapshot, copied_sequence)?;
+    let stable_for = if method == ClipboardCaptureMethod::Shortcut {
+        Duration::from_millis(40)
+    } else {
+        Duration::from_millis(20)
+    };
+    let mut private_sequence = None;
+    let text = claim_copied_text(
+        &target_still_focused,
+        stable_for,
+        Duration::from_millis(300),
+        &mut private_sequence,
+    );
     match text {
-        Ok(text) if text != probe => Ok(text),
-        Ok(_) => Err(ClipboardError::CopyTimeout),
-        Err(error) => Err(error),
+        Ok(text) => {
+            if let Some(sequence) = private_sequence {
+                restore_if_current(&mut snapshot, sequence)?;
+            }
+            Ok(ClipboardCapture { text, method })
+        }
+        Err(error) => {
+            if let Some(sequence) = private_sequence {
+                restore_if_current(&mut snapshot, sequence)?;
+            } else if target_still_focused() {
+                snapshot.restore()?;
+            }
+            Err(error)
+        }
     }
 }
 
-fn selection_probe() -> String {
-    let sequence = SELECTION_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "\u{2063}qntflex-selection-probe-{}-{sequence}\u{2063}",
-        std::process::id()
-    )
+fn claim_copied_text(
+    target_still_focused: &impl Fn() -> bool,
+    stable_for: Duration,
+    timeout: Duration,
+    private_sequence: &mut Option<u32>,
+) -> Result<String, ClipboardError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !target_still_focused() {
+            return Err(ClipboardError::TargetChanged);
+        }
+
+        // A foreign Copy command cannot attach the Windows privacy formats.
+        // Read its text immediately, re-own the same payload with those formats,
+        // and only then wait for any delayed duplicate Copy message.
+        let text = get_text()?;
+        set_private_text(&text)?;
+        let owned = unsafe { GetClipboardSequenceNumber() };
+        *private_sequence = Some(owned);
+        if stable_for.is_zero() {
+            return Ok(text);
+        }
+
+        let stable_since = Instant::now();
+        loop {
+            if !target_still_focused() {
+                return Err(ClipboardError::TargetChanged);
+            }
+            if stable_since.elapsed() >= stable_for || Instant::now() >= deadline {
+                return Ok(text);
+            }
+            thread::sleep(Duration::from_millis(3));
+            if unsafe { GetClipboardSequenceNumber() } != owned {
+                *private_sequence = None;
+                break;
+            }
+        }
+    }
 }
 
 fn restore_if_current(
@@ -321,24 +377,57 @@ impl PendingClipboardRestore {
 
 struct ClipboardSnapshot {
     data_object: *mut c_void,
+    fallback_text: Option<String>,
 }
 
 impl ClipboardSnapshot {
     fn capture() -> Result<Self, ClipboardError> {
-        let mut data_object = ptr::null_mut();
-        let result = unsafe { OleGetClipboard(&mut data_object) };
-        if result < 0 {
-            return Err(ClipboardError::Ole(result));
+        let fallback_text = get_text().ok();
+        let mut last_error = 0;
+        for attempt in 0..12 {
+            let mut data_object = ptr::null_mut();
+            // SAFETY: OLE is initialized on the current worker thread and the
+            // out-pointer is valid for the duration of the call.
+            let result = unsafe { OleGetClipboard(&mut data_object) };
+            if result >= 0 {
+                return Ok(Self {
+                    data_object,
+                    fallback_text,
+                });
+            }
+            last_error = result;
+            if attempt < 11 {
+                thread::sleep(Duration::from_millis(15));
+            }
         }
-        Ok(Self { data_object })
+        Err(ClipboardError::Ole(last_error))
     }
 
     fn restore(&mut self) -> Result<(), ClipboardError> {
-        let result = unsafe { OleSetClipboard(self.data_object) };
-        if result < 0 {
-            return Err(ClipboardError::Ole(result));
+        let mut last_error = 0;
+        for attempt in 0..12 {
+            // SAFETY: data_object is the AddRef'd IDataObject returned by
+            // OleGetClipboard while this apartment remains initialized.
+            let result = unsafe { OleSetClipboard(self.data_object) };
+            if result >= 0 {
+                if let Some(fallback) = &self.fallback_text {
+                    let text_was_restored = get_text().is_ok_and(|restored| restored == *fallback);
+                    if !text_was_restored {
+                        // Some transient clipboard owners expose an IDataObject
+                        // whose delayed text becomes unavailable after the owner
+                        // exits. Preserve at least the original text instead of
+                        // silently leaving the clipboard empty.
+                        set_text(fallback)?;
+                    }
+                }
+                return Ok(());
+            }
+            last_error = result;
+            if attempt < 11 {
+                thread::sleep(Duration::from_millis(15));
+            }
         }
-        Ok(())
+        Err(ClipboardError::Ole(last_error))
     }
 }
 
@@ -346,8 +435,9 @@ impl Drop for ClipboardSnapshot {
     fn drop(&mut self) {
         if !self.data_object.is_null() {
             unsafe {
-                // OleGetClipboard returns an AddRef'd IDataObject interface.
-                // Release exactly that reference; OleSetClipboard keeps its own.
+                // SAFETY: OleGetClipboard returned an AddRef'd IDataObject.
+                // OleSetClipboard retains its own reference when restoration
+                // succeeds, so this releases exactly our snapshot reference.
                 let vtable = *(self.data_object.cast::<*const IUnknown_Vtbl>());
                 ((*vtable).Release)(self.data_object);
             }

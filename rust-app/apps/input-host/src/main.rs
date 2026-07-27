@@ -4,8 +4,12 @@ mod clipboard;
 mod hotkeys;
 mod inject;
 mod insertion;
+mod selection_capture;
 mod target;
+mod uia_selection;
 
+#[cfg(debug_assertions)]
+use std::time::Instant;
 use std::{
     ffi::c_void,
     io::{self, BufRead, BufReader, BufWriter, Write},
@@ -25,6 +29,11 @@ use windows_sys::Win32::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     rust_platform_windows::configure_safe_dll_search()?;
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|argument| argument == "--selection-capture-smoke") {
+        return run_selection_capture_smoke();
+    }
+
     let (events, event_receiver) = mpsc::channel::<InputHostEvent>();
     let insertion = insertion::InsertionService::start(events.clone())?;
     hotkeys::initialize(events.clone())?;
@@ -70,6 +79,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn run_selection_capture_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(delay) = std::env::var("QNTFLEX_SELECTION_SMOKE_DELAY_MS") {
+        thread::sleep(std::time::Duration::from_millis(delay.parse()?));
+    }
+    let target = if let Ok(handle) = std::env::var("QNTFLEX_SELECTION_SMOKE_HWND") {
+        target::capture_window_handle(handle.parse()?)
+    } else {
+        target::capture_text_target()
+            .ok_or_else(|| io::Error::other("no unprotected foreground text target"))?
+    };
+    if let Ok(stable_ms) = std::env::var("QNTFLEX_SELECTION_SMOKE_STABLE_FOCUS_MS") {
+        wait_for_stable_foreground(
+            target,
+            std::time::Duration::from_millis(stable_ms.parse()?),
+            std::time::Duration::from_secs(20),
+        )?;
+    }
+    eprintln!(
+        "selection-smoke target pid={} hwnd={} hkl={:#x} shortcut={:?}",
+        target.process_id,
+        target.window_handle,
+        target.keyboard_layout,
+        target::selection_copy_shortcut(target),
+    );
+    let started = Instant::now();
+    let captured = selection_capture::capture(target)?;
+    serde_json::to_writer(
+        io::stdout().lock(),
+        &serde_json::json!({
+            "process_id": target.process_id,
+            "method": format!("{:?}", captured.method),
+            "elapsed_ms": started.elapsed().as_millis(),
+            "text": captured.text,
+        }),
+    )?;
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn wait_for_stable_foreground(
+    target: rust_protocol::TargetSnapshot,
+    stable_for: std::time::Duration,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut stable_since = None;
+    while Instant::now() < deadline {
+        if inject::is_foreground(target) {
+            let since = stable_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= stable_for {
+                return Ok(());
+            }
+        } else {
+            stable_since = None;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "target did not remain foreground for the required interval",
+    ))
 }
 
 struct HookGuard(*mut c_void);

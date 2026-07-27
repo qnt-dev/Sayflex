@@ -26,7 +26,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::{clipboard, inject, target};
+use crate::{clipboard, inject, selection_capture, target};
 
 const INPUT_CONTROL: u32 = 1 << 0;
 const INPUT_ALT: u32 = 1 << 1;
@@ -353,45 +353,38 @@ fn begin_selection_capture(
         .spawn(move || {
             let _busy_guard = SelectionBusyGuard;
             let capture_started = Instant::now();
-            let copy_shortcut = target::selection_copy_shortcut(target);
             let result = if !wait_for_mask_clear(
                 selection_chord_mask(intent),
                 Duration::from_millis(1200),
                 INPUT_RELEASE_STABILITY,
             ) {
-                Err(clipboard::ClipboardError::CopyTimeout)
-            } else if inject::is_foreground(target) {
-                clipboard::capture_selection(
-                    || inject::is_foreground(target),
-                    || {
-                        inject::copy_shortcut(copy_shortcut)
-                            .map_err(|_| clipboard::ClipboardError::InvalidData)
-                    },
-                )
+                Err(selection_capture::CaptureError::Clipboard(
+                    clipboard::ClipboardError::CopyTimeout,
+                ))
             } else {
-                Err(clipboard::ClipboardError::CopyTimeout)
+                selection_capture::capture(target)
             };
             match result {
-                Ok(text) if !text.trim().is_empty() => {
+                Ok(captured) if !captured.text.trim().is_empty() => {
                     eprintln!(
-                        "selection_capture request={} pid={} shortcut={copy_shortcut:?} \
+                        "selection_capture request={} pid={} method={:?} \
 result=success chars={} elapsed_ms={}",
                         request_id,
                         target.process_id,
-                        text.chars().count(),
+                        captured.method,
+                        captured.text.chars().count(),
                         capture_started.elapsed().as_millis(),
                     );
                     let _ = events.send(InputHostEvent::SelectionCaptured {
                         request_id,
                         intent,
                         target,
-                        text,
+                        text: captured.text,
                     });
                 }
                 Ok(_) => {
                     eprintln!(
-                        "selection_capture request={} pid={} shortcut={copy_shortcut:?} \
-result=empty elapsed_ms={}",
+                        "selection_capture request={} pid={} result=empty elapsed_ms={}",
                         request_id,
                         target.process_id,
                         capture_started.elapsed().as_millis(),
@@ -403,15 +396,20 @@ result=empty elapsed_ms={}",
                 }
                 Err(error) => {
                     eprintln!(
-                        "selection_capture request={} pid={} shortcut={copy_shortcut:?} \
-result=failed error={error} elapsed_ms={}",
+                        "selection_capture request={} pid={} result=failed error={error} \
+elapsed_ms={}",
                         request_id,
                         target.process_id,
                         capture_started.elapsed().as_millis(),
                     );
                     let _ = events.send(InputHostEvent::SelectionCaptureFailed {
                         request_id,
-                        message: error.to_string(),
+                        message: match error {
+                            selection_capture::CaptureError::Protected => {
+                                "Selected text is protected.".to_owned()
+                            }
+                            selection_capture::CaptureError::Clipboard(error) => error.to_string(),
+                        },
                     });
                 }
             }

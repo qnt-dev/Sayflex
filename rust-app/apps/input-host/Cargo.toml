@@ -10,4 +10,5 @@ rust-platform-windows = { version = "0.5.5", path = "../../crates/platform-windo
 rust-protocol = { version = "0.5.5", path = "../../crates/protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
+windows.workspace = true
 windows-sys.workspace = true

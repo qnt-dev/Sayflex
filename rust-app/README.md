@@ -37,6 +37,16 @@ same-user threat model, are documented in [`SECURITY.md`](SECURITY.md).
 - `Ctrl + Alt + T` captures selected text once, translates it locally, and
   opens the compact preview immediately.
 
+Selected text is resolved through a bounded capability cascade: UI Automation
+`TextPattern`, synchronous `WM_COPY` for native edit controls, then the
+non-destructive Copy shortcut for the target application family. Modern
+terminals generally use `Ctrl+Shift+C`; WezTerm and classic terminal clients
+use the layout-independent `Ctrl+Insert`; ordinary editors use `Ctrl+C`.
+Clipboard fallback accepts a result only after the clipboard sequence changes
+and restores the original data object after the copy transaction becomes
+stable. Password fields, secure desktop and higher-integrity targets fail
+closed.
+
 The indicator is pre-created and shown from the input-host event pump, before
 model work begins. It is topmost, click-through and non-activating, so it does
 not replace the recorded target window.
@@ -82,7 +92,7 @@ prepared segments without unloading the already warmed model.
 cd C:\PRDJKT\qntflex\rust-app
 cargo test --workspace
 .\scripts\publish.ps1
-.\scripts\build-installer.ps1 -Version 0.5.2 -SkipPublish
+.\scripts\build-installer.ps1 -Version 0.5.6 -SkipPublish
 ```
 
 The measured warm-path design and benchmark gate are documented in
@@ -101,6 +111,20 @@ global hook or touch another application:
 .\target\debug\rust-desktop.exe --translation-preview
 .\target\debug\rust-desktop.exe --translation-preview=long
 .\target\debug\rust-desktop.exe --layout-preview
+```
+
+Three controlled selection fixtures exercise UI Automation, native-message and
+keyboard-shortcut capture without depending on a user's document:
+
+```powershell
+$env:QNTFLEX_RUN_SELECTION_SMOKE = '1'
+$env:QNTFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER = 'QNTFLEX_CLIPBOARD_SENTINEL'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-uia-fixture.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-fixture.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-shortcut-fixture.ps1
+Get-Content .\target\uia-smoke.out
+Get-Content .\target\window-message-smoke.out
+Get-Content .\target\shortcut-smoke.out
 ```
 
 The installer is emitted under `rust-app\dist`; it does not overwrite the

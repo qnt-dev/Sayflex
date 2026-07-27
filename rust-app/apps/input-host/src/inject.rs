@@ -6,10 +6,14 @@ use windows_sys::Win32::{
     Foundation::GetLastError,
     UI::{
         Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-            SendInput, VK_C, VK_CONTROL, VK_INSERT, VK_SHIFT, VK_V,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+            KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput,
+            VK_C, VK_CONTROL, VK_INSERT, VK_SHIFT, VK_V,
         },
-        WindowsAndMessaging::{GA_ROOT, GetAncestor, GetForegroundWindow},
+        WindowsAndMessaging::{
+            GA_ROOT, GUITHREADINFO, GetAncestor, GetForegroundWindow, GetGUIThreadInfo,
+            SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_COPY,
+        },
     },
 };
 
@@ -73,6 +77,49 @@ pub fn copy_shortcut(shortcut: SelectionCopyShortcut) -> Result<(), InjectionErr
     }
 }
 
+pub fn copy_message(target: TargetSnapshot) -> Result<(), InjectionError> {
+    if !is_foreground(target) {
+        return Err(InjectionError::TargetChanged);
+    }
+    let mut information = GUITHREADINFO {
+        cbSize: mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: information has the required cbSize and target.thread_id came
+    // from the captured foreground window.
+    if unsafe { GetGUIThreadInfo(target.thread_id, &mut information) } == 0
+        || information.hwndFocus.is_null()
+    {
+        return Err(InjectionError::TargetChanged);
+    }
+    let mut ignored = 0_usize;
+    // SAFETY: hwndFocus is the focused target-thread window returned above.
+    // WM_COPY carries no pointer payload, and SendMessageTimeout bounds a hung
+    // target to 100 ms.
+    let result = unsafe {
+        SendMessageTimeoutW(
+            information.hwndFocus,
+            WM_COPY,
+            0,
+            0,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            100,
+            &mut ignored,
+        )
+    };
+    if result == 0 {
+        // SAFETY: reads the calling thread's last-error value immediately
+        // after the failed Win32 call.
+        Err(InjectionError::Partial {
+            sent: 0,
+            expected: 1,
+            win32: unsafe { GetLastError() },
+        })
+    } else {
+        Ok(())
+    }
+}
+
 pub fn paste_shortcut() -> Result<(), InjectionError> {
     send_control_shortcut(VK_V, false)
 }
@@ -105,14 +152,20 @@ fn unicode_input(unit: u16, key_up: bool) -> INPUT {
     }
 }
 
-fn virtual_key(virtual_key: u16, key_up: bool) -> INPUT {
+fn scan_code_key(virtual_key: u16, key_up: bool) -> INPUT {
+    // SAFETY: MapVirtualKeyW has no pointer parameters. VK-to-scan translation
+    // produces the physical metadata required by Raw Input applications.
+    let mapped = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC_EX) };
+    let extended = matches!(mapped & 0xff00, 0xe000 | 0xe100);
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: virtual_key,
-                wScan: 0,
-                dwFlags: if key_up { KEYEVENTF_KEYUP } else { 0 },
+                wVk: 0,
+                wScan: (mapped & 0xff) as u16,
+                dwFlags: KEYEVENTF_SCANCODE
+                    | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 }
+                    | if key_up { KEYEVENTF_KEYUP } else { 0 },
                 time: 0,
                 dwExtraInfo: SYNTHETIC_MARKER,
             },
@@ -124,19 +177,19 @@ fn send_control_shortcut(key: u16, with_shift: bool) -> Result<(), InjectionErro
     ensure_injection_safe()?;
     let inputs = if with_shift {
         vec![
-            virtual_key(VK_CONTROL, false),
-            virtual_key(VK_SHIFT, false),
-            virtual_key(key, false),
-            virtual_key(key, true),
-            virtual_key(VK_SHIFT, true),
-            virtual_key(VK_CONTROL, true),
+            scan_code_key(VK_CONTROL, false),
+            scan_code_key(VK_SHIFT, false),
+            scan_code_key(key, false),
+            scan_code_key(key, true),
+            scan_code_key(VK_SHIFT, true),
+            scan_code_key(VK_CONTROL, true),
         ]
     } else {
         vec![
-            virtual_key(VK_CONTROL, false),
-            virtual_key(key, false),
-            virtual_key(key, true),
-            virtual_key(VK_CONTROL, true),
+            scan_code_key(VK_CONTROL, false),
+            scan_code_key(key, false),
+            scan_code_key(key, true),
+            scan_code_key(VK_CONTROL, true),
         ]
     };
     match send(&inputs) {
@@ -149,12 +202,12 @@ fn send_control_shortcut(key: u16, with_shift: bool) -> Result<(), InjectionErro
                 let key_down_at = if with_shift { 3 } else { 2 };
                 let key_up_at = key_down_at + 1;
                 if sent >= key_down_at && sent < key_up_at {
-                    owned_key_ups.push(virtual_key(key, true));
+                    owned_key_ups.push(scan_code_key(key, true));
                 }
                 if with_shift && (2..5).contains(&sent) {
-                    owned_key_ups.push(virtual_key(VK_SHIFT, true));
+                    owned_key_ups.push(scan_code_key(VK_SHIFT, true));
                 }
-                owned_key_ups.push(virtual_key(VK_CONTROL, true));
+                owned_key_ups.push(scan_code_key(VK_CONTROL, true));
                 release_owned_keys_best_effort(&owned_key_ups);
             }
             Err(error)

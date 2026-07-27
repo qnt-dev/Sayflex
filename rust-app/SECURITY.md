@@ -11,9 +11,18 @@ on the user's machine.
 - Debug input traces are restricted to the configured command keys and gesture
   transitions. They do not record arbitrary keyboard scan codes or typed text.
 - Temporary clipboard payloads used for paste opt out of Windows clipboard
-  monitoring, clipboard history, and cloud clipboard. The previous `IDataObject`
-  is restored only while the temporary clipboard sequence is still current, so
-  a newer clipboard change made by the user is never overwritten.
+  monitoring, clipboard history, and cloud clipboard. The original OLE data
+  object is restored only while the temporary clipboard sequence is still
+  current, so a newer clipboard change made by the user is never overwritten.
+  A separately captured Unicode-text fallback prevents an unavailable
+  short-lived clipboard owner from leaving the clipboard empty.
+- Selected-text capture first uses UI Automation and therefore does not touch
+  the clipboard when the target exposes `TextPattern`. A Copy fallback briefly
+  lets the target application own the clipboard; the input host immediately
+  re-owns the copied text with history/cloud exclusion formats, waits for
+  delayed duplicate Copy messages, and restores the original formats. Windows
+  exposes no API that can retroactively guarantee an external clipboard monitor
+  did not observe that first target-owned sequence.
 - Explicit **Copy** commands intentionally create a normal clipboard item.
 - Dictation and translation history can be disabled and cleared in the
   application. Clear removes the primary, recovery, temporary, and quarantined

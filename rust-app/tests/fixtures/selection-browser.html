@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Qntflex Browser Selection Fixture</title>
+    <style>
+      body {
+        margin: 40px;
+        background: #15171b;
+        color: #f5f5f5;
+        font: 18px/1.5 "Segoe UI", sans-serif;
+      }
+      textarea {
+        width: 680px;
+        height: 180px;
+        padding: 16px;
+        border: 1px solid #f5c542;
+        border-radius: 8px;
+        background: #0d0f12;
+        color: inherit;
+        font: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <textarea autofocus>QNTFLEX_BROWSER_SELECTION_TEXT</textarea>
+    <script>
+      const editor = document.querySelector("textarea");
+      editor.focus();
+      editor.select();
+    </script>
+  </body>
+</html>
