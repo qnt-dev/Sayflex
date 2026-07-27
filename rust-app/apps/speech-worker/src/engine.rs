@@ -14,7 +14,7 @@ use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, get_lang_str,
 };
 
-use crate::audio::{RecordedAudio, resample_linear};
+use crate::audio::{RecordedAudio, resample_bandlimited};
 
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 const WARMUP_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize;
@@ -123,7 +123,6 @@ impl WhisperEngine {
         &mut self,
         recording: &RecordedAudio,
         output_mode: SpeechOutputMode,
-        speculative: bool,
         abort_generation: Option<AbortGeneration>,
     ) -> Result<EngineTranscript> {
         if recording.duration_ms < 180 || recording.samples.is_empty() {
@@ -141,15 +140,14 @@ impl WhisperEngine {
         }
 
         let preprocessing_started = Instant::now();
-        let audio = resample_linear(
+        let audio = resample_bandlimited(
             &recording.samples,
             recording.sample_rate_hz,
             WHISPER_SAMPLE_RATE,
         );
         let preprocessing_ms = elapsed_ms(preprocessing_started);
         let inference_started = Instant::now();
-        let (text, language) =
-            self.run_whisper(&audio, output_mode, speculative, abort_generation)?;
+        let (text, language) = self.run_whisper(&audio, output_mode, false, abort_generation)?;
 
         Ok(EngineTranscript {
             text,

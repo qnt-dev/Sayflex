@@ -1,9 +1,9 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, SyncSender, TrySendError},
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Sender},
     },
     thread,
     time::Instant,
@@ -60,10 +60,11 @@ enum InferenceCommand {
 
 #[derive(Clone)]
 pub struct InferenceHandle {
-    commands: SyncSender<InferenceCommand>,
+    commands: Sender<InferenceCommand>,
     generation: Arc<AtomicU64>,
     active_session: Arc<Mutex<Option<SessionId>>>,
     candidate: Arc<Mutex<Option<PreviewCandidate>>>,
+    preview_in_flight: Arc<AtomicBool>,
 }
 
 impl InferenceHandle {
@@ -71,17 +72,28 @@ impl InferenceHandle {
         events: mpsc::Sender<SpeechWorkerEvent>,
         history: mpsc::Sender<HistoryCommand>,
     ) -> std::io::Result<Self> {
-        let (commands, receiver) = mpsc::sync_channel(4);
+        let (commands, receiver) = mpsc::channel();
         let generation = Arc::new(AtomicU64::new(1));
         let actor_generation = Arc::clone(&generation);
+        let preview_in_flight = Arc::new(AtomicBool::new(false));
+        let actor_preview_in_flight = Arc::clone(&preview_in_flight);
         thread::Builder::new()
             .name("speech-inference".to_owned())
-            .spawn(move || inference_loop(receiver, actor_generation, events, history))?;
+            .spawn(move || {
+                inference_loop(
+                    receiver,
+                    actor_generation,
+                    actor_preview_in_flight,
+                    events,
+                    history,
+                )
+            })?;
         Ok(Self {
             commands,
             generation,
             active_session: Arc::new(Mutex::new(None)),
             candidate: Arc::new(Mutex::new(None)),
+            preview_in_flight,
         })
     }
 
@@ -98,17 +110,11 @@ impl InferenceHandle {
 
     pub fn begin_session(&self, session_id: SessionId) {
         self.invalidate();
-        *self
-            .active_session
-            .lock()
-            .expect("inference active-session mutex poisoned") = Some(session_id);
+        *recover_lock(&self.active_session) = Some(session_id);
     }
 
     pub fn cancel_session(&self, session_id: SessionId) {
-        let mut active = self
-            .active_session
-            .lock()
-            .expect("inference active-session mutex poisoned");
+        let mut active = recover_lock(&self.active_session);
         if *active == Some(session_id) {
             *active = None;
             drop(active);
@@ -118,11 +124,14 @@ impl InferenceHandle {
 
     pub fn request_preview(&self, recording: RecordedAudio, output_mode: SpeechOutputMode) -> bool {
         if recording.duration_ms < MIN_SPECULATIVE_AUDIO_MS
-            || *self
-                .active_session
-                .lock()
-                .expect("inference active-session mutex poisoned")
-                != Some(recording.session_id)
+            || *recover_lock(&self.active_session) != Some(recording.session_id)
+        {
+            return false;
+        }
+        if self
+            .preview_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
             return false;
         }
@@ -133,20 +142,19 @@ impl InferenceHandle {
             sample_rate_hz: recording.sample_rate_hz,
             generation,
         };
-        match self.commands.try_send(InferenceCommand::Preview {
+        match self.commands.send(InferenceCommand::Preview {
             recording,
             output_mode,
             generation,
         }) {
             Ok(()) => {
-                *self
-                    .candidate
-                    .lock()
-                    .expect("inference candidate mutex poisoned") = Some(candidate);
+                *recover_lock(&self.candidate) = Some(candidate);
                 true
             }
-            Err(TrySendError::Full(_)) => false,
-            Err(TrySendError::Disconnected(_)) => false,
+            Err(_) => {
+                self.preview_in_flight.store(false, Ordering::Release);
+                false
+            }
         }
     }
 
@@ -155,10 +163,7 @@ impl InferenceHandle {
         session_id: SessionId,
         recording: &RecordedAudio,
     ) {
-        let candidate = *self
-            .candidate
-            .lock()
-            .expect("inference candidate mutex poisoned");
+        let candidate = *recover_lock(&self.candidate);
         let Some(candidate) = candidate.filter(|candidate| candidate.session_id == session_id)
         else {
             return;
@@ -175,14 +180,8 @@ impl InferenceHandle {
         audio_finalize_ms: u64,
         release_started: Instant,
     ) {
-        *self
-            .active_session
-            .lock()
-            .expect("inference active-session mutex poisoned") = None;
-        let candidate = *self
-            .candidate
-            .lock()
-            .expect("inference candidate mutex poisoned");
+        *recover_lock(&self.active_session) = None;
+        let candidate = *recover_lock(&self.candidate);
         let allow_speculative = candidate.is_some_and(|candidate| {
             candidate.session_id == recording.session_id
                 && candidate.generation == self.generation.load(Ordering::Acquire)
@@ -210,16 +209,14 @@ impl InferenceHandle {
 
     fn invalidate(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
-        *self
-            .candidate
-            .lock()
-            .expect("inference candidate mutex poisoned") = None;
+        *recover_lock(&self.candidate) = None;
     }
 }
 
 fn inference_loop(
     commands: mpsc::Receiver<InferenceCommand>,
     generation: Arc<AtomicU64>,
+    preview_in_flight: Arc<AtomicBool>,
     events: mpsc::Sender<SpeechWorkerEvent>,
     history: mpsc::Sender<HistoryCommand>,
 ) {
@@ -261,13 +258,13 @@ fn inference_loop(
                 output_mode,
                 generation: preview_generation,
             } => {
+                let _preview_guard = PreviewInFlightGuard(&preview_in_flight);
                 if generation.load(Ordering::Acquire) != preview_generation {
                     continue;
                 }
                 let result = engine.transcribe(
                     &recording,
                     output_mode,
-                    true,
                     Some(AbortGeneration::new(
                         Arc::clone(&generation),
                         preview_generation,
@@ -310,10 +307,7 @@ fn inference_loop(
                 });
                 let (engine_result, speculative_reuse) = match reusable {
                     Some(preview) => (Ok(preview.transcript), true),
-                    None => (
-                        engine.transcribe(&recording, output_mode, false, None),
-                        false,
-                    ),
+                    None => (engine.transcribe(&recording, output_mode, None), false),
                 };
                 match engine_result {
                     Ok(result) => {
@@ -355,6 +349,18 @@ fn inference_loop(
             InferenceCommand::Shutdown => break,
         }
     }
+}
+
+struct PreviewInFlightGuard<'a>(&'a AtomicBool);
+
+impl Drop for PreviewInFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn reusable_tail(recording: &RecordedAudio, source_sample_count: usize) -> bool {

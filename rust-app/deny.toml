@@ -1,0 +1,41 @@
+[graph]
+targets = [
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is transitive through Candle gemm/tokenizers and has no safe upgrade; no runtime vulnerability is reported" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is transitive through Slint/winit and has no safe upgrade; track replacement in the upstream UI stack" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is transitive through Slint usvg and has no safe upgrade; track replacement in the upstream UI stack" },
+]
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LicenseRef-Slint-Royalty-free-2.0",
+    "MIT",
+    "NCSA",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

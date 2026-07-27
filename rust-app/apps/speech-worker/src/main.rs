@@ -31,6 +31,7 @@ use rust_protocol::{
 use speculation::SpeculationScheduler;
 
 fn main() -> Result<()> {
+    rust_platform_windows::configure_safe_dll_search()?;
     if env::args().nth(1).as_deref() == Some("--transcribe-wav") {
         return transcribe_wav_diagnostic();
     }
@@ -107,7 +108,7 @@ fn transcribe_wav_diagnostic() -> Result<()> {
     let mut engine = WhisperEngine::new();
     engine.prepare(Path::new(&model_path))?;
     let started = Instant::now();
-    let result = engine.transcribe(&recording, output_mode, false, None)?;
+    let result = engine.transcribe(&recording, output_mode, None)?;
     let transcript = Transcript {
         session_id: recording.session_id,
         text: result.text,
@@ -138,6 +139,7 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
     let inference = InferenceHandle::start(events.clone(), history.clone())?;
     let speculation = SpeculationScheduler::start(recorder.snapshot_source(), inference.clone())?;
     let mut output_mode = SpeechOutputMode::OriginalLanguage;
+    let mut fast_release_previews = true;
 
     let stdin = io::stdin();
     for line in BufReader::new(stdin.lock()).lines() {
@@ -163,11 +165,13 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
                 selected_model_id: requested,
                 output_mode: requested_output_mode,
                 history_enabled,
+                fast_release_previews: requested_fast_release_previews,
             } => {
                 let _ = history.send(HistoryCommand::SetEnabled {
                     enabled: history_enabled,
                 });
                 output_mode = requested_output_mode;
+                fast_release_previews = requested_fast_release_previews;
                 let selected_model_id = if catalog.find(&requested).is_some() {
                     requested
                 } else {
@@ -198,7 +202,7 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
             } => match recorder.begin(session_id) {
                 Ok(()) => {
                     inference.begin_session(session_id);
-                    speculation.begin(session_id, output_mode);
+                    speculation.begin(session_id, output_mode, fast_release_previews);
                     let _ = events.send(SpeechWorkerEvent::Listening { session_id });
                 }
                 Err(error) => {
@@ -269,6 +273,9 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
                 output_mode: requested,
             } => {
                 output_mode = requested;
+            }
+            SpeechWorkerCommand::SetFastReleasePreviews { enabled } => {
+                fast_release_previews = enabled;
             }
             SpeechWorkerCommand::GetHistory { limit } => {
                 let _ = history.send(HistoryCommand::Latest { limit });

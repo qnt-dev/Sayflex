@@ -27,6 +27,14 @@ pub enum HistoryCommand {
 pub fn start(path: PathBuf, events: Sender<SpeechWorkerEvent>) -> Result<Sender<HistoryCommand>> {
     // Open synchronously so startup reports corrupt/unreadable history deterministically.
     let mut store = HistoryStore::open(path)?;
+    if let Some(message) = store.take_recovery_message() {
+        let _ = events.send(SpeechWorkerEvent::Failed {
+            session_id: None,
+            code: "history_recovered".to_owned(),
+            message,
+            retryable: true,
+        });
+    }
     let mut enabled = true;
     let (commands, receiver) = mpsc::channel();
     thread::Builder::new()

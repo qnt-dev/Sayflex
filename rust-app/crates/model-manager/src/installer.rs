@@ -95,7 +95,10 @@ impl ModelInstaller {
         fs::create_dir_all(&self.root)?;
         let final_path = self.model_path(model);
         let temporary_path = final_path.with_extension("download");
-        if temporary_path.exists() {
+        if temporary_path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > model.artifact.bytes)
+        {
             fs::remove_file(&temporary_path)?;
         }
 
@@ -127,7 +130,13 @@ impl ModelInstaller {
             Ok(final_path)
         })();
 
-        if result.is_err() && temporary_path.exists() {
+        if result.as_ref().is_err_and(|error| {
+            !matches!(
+                error,
+                ModelInstallError::Download(_) | ModelInstallError::Io(_)
+            )
+        }) && temporary_path.exists()
+        {
             let _ = fs::remove_file(&temporary_path);
         }
         result
@@ -281,6 +290,7 @@ mod tests {
     use crate::{ModelArtifact, ModelDescriptor, ModelTier};
 
     struct BytesFetcher(Vec<u8>);
+    struct InterruptedFetcher;
 
     impl ArtifactFetcher for BytesFetcher {
         fn fetch(
@@ -298,6 +308,21 @@ mod tests {
                 total_bytes: expected_bytes,
             });
             Ok(())
+        }
+    }
+
+    impl ArtifactFetcher for InterruptedFetcher {
+        fn fetch(
+            &self,
+            _url: &str,
+            destination: &Path,
+            _expected_bytes: u64,
+            _progress: &mut dyn FnMut(DownloadProgress),
+        ) -> Result<(), ModelInstallError> {
+            fs::write(destination, b"hel")?;
+            Err(ModelInstallError::Download(
+                "connection interrupted".to_owned(),
+            ))
         }
     }
 
@@ -374,6 +399,22 @@ mod tests {
                 .model_path(&model)
                 .with_extension("previous")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn interrupted_download_is_preserved_for_http_range_resume() {
+        let directory = tempdir().unwrap();
+        let installer = ModelInstaller::new(directory.path().to_owned());
+        let model = model();
+
+        assert!(matches!(
+            installer.ensure_installed(&model, &InterruptedFetcher, |_| {}),
+            Err(ModelInstallError::Download(_))
+        ));
+        assert_eq!(
+            fs::read(installer.model_path(&model).with_extension("download")).unwrap(),
+            b"hel"
         );
     }
 }

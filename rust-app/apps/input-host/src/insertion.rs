@@ -1,5 +1,6 @@
 use std::{
-    sync::mpsc::{self, Sender},
+    io,
+    sync::mpsc::{self, RecvTimeoutError, Sender},
     thread,
     time::{Duration, Instant},
 };
@@ -45,28 +46,64 @@ pub struct InsertionService {
 impl InsertionService {
     pub fn start(events: Sender<InputHostEvent>) -> std::io::Result<Self> {
         let (commands, receiver) = mpsc::channel();
+        let (startup, startup_result) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("input-insertion-worker".to_owned())
             .spawn(move || {
-                for command in receiver {
+                let apartment = match clipboard::ClipboardApartment::initialize() {
+                    Ok(apartment) => {
+                        let _ = startup.send(Ok(()));
+                        apartment
+                    }
+                    Err(error) => {
+                        let _ = startup.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let _apartment = apartment;
+                let mut pending_restore: Option<ScheduledClipboardRestore> = None;
+                loop {
+                    let command = if let Some(pending) = pending_restore.as_ref() {
+                        let remaining = pending.deadline.saturating_duration_since(Instant::now());
+                        match receiver.recv_timeout(remaining) {
+                            Ok(command) => Some(command),
+                            Err(RecvTimeoutError::Timeout) => {
+                                settle_clipboard_restore(&events, pending_restore.take());
+                                continue;
+                            }
+                            Err(RecvTimeoutError::Disconnected) => None,
+                        }
+                    } else {
+                        receiver.recv().ok()
+                    };
+                    let Some(command) = command else {
+                        settle_clipboard_restore(&events, pending_restore.take());
+                        break;
+                    };
+                    // A new operation must observe the user's original clipboard, not
+                    // the temporary payload from a preceding paste.
+                    settle_clipboard_restore(&events, pending_restore.take());
                     match command {
                         InsertionCommand::Insert {
                             transcript,
                             target,
                             add_trailing_space,
                         } => {
-                            if let Err(error) = insert_transcript(
+                            match insert_transcript(
                                 &events,
                                 transcript.session_id,
                                 target,
                                 &transcript.text,
                                 add_trailing_space,
                             ) {
-                                let _ = events.send(InputHostEvent::Failed {
-                                    session_id: Some(transcript.session_id),
-                                    code: "insert_transcript".to_owned(),
-                                    message: error,
-                                });
+                                Ok(restore) => pending_restore = restore,
+                                Err(error) => {
+                                    let _ = events.send(InputHostEvent::Failed {
+                                        session_id: Some(transcript.session_id),
+                                        code: "insert_transcript".to_owned(),
+                                        message: error,
+                                    });
+                                }
                             }
                         }
                         InsertionCommand::Copy { transcript } => {
@@ -103,22 +140,30 @@ impl InsertionService {
                             request_id,
                             target,
                             text,
-                        } => {
-                            if let Err(error) =
-                                replace_selection(&events, request_id, target, &text)
-                            {
+                        } => match replace_selection(&events, request_id, target, &text) {
+                            Ok(restore) => pending_restore = restore,
+                            Err(error) => {
                                 let _ = events.send(InputHostEvent::Failed {
                                     session_id: None,
                                     code: "replace_selection".to_owned(),
                                     message: error,
                                 });
                             }
+                        },
+                        InsertionCommand::Shutdown => {
+                            settle_clipboard_restore(&events, pending_restore.take());
+                            break;
                         }
-                        InsertionCommand::Shutdown => break,
                     }
                 }
             })?;
-        Ok(Self { commands })
+        match startup_result.recv() {
+            Ok(Ok(())) => Ok(Self { commands }),
+            Ok(Err(message)) => Err(io::Error::other(message)),
+            Err(error) => Err(io::Error::other(format!(
+                "insertion worker startup channel closed: {error}"
+            ))),
+        }
     }
 
     pub fn insert(&self, transcript: Transcript, target: TargetSnapshot, add_trailing_space: bool) {
@@ -152,13 +197,43 @@ impl InsertionService {
     }
 }
 
+struct ScheduledClipboardRestore {
+    pending: clipboard::PendingClipboardRestore,
+    deadline: Instant,
+    session_id: Option<SessionId>,
+}
+
+impl ScheduledClipboardRestore {
+    fn new(pending: clipboard::PendingClipboardRestore, session_id: Option<SessionId>) -> Self {
+        Self {
+            pending,
+            deadline: Instant::now() + CLIPBOARD_RESTORE_DELAY,
+            session_id,
+        }
+    }
+}
+
+fn settle_clipboard_restore(
+    events: &Sender<InputHostEvent>,
+    scheduled: Option<ScheduledClipboardRestore>,
+) {
+    let Some(scheduled) = scheduled else {
+        return;
+    };
+    if let Err(error) = scheduled.pending.restore() {
+        eprintln!("clipboard restoration failed: {error}");
+    } else if let Some(session_id) = scheduled.session_id {
+        let _ = events.send(InputHostEvent::ClipboardRestored { session_id });
+    }
+}
+
 fn insert_transcript(
     events: &Sender<InputHostEvent>,
     session_id: SessionId,
     target_snapshot: TargetSnapshot,
     text: &str,
     add_trailing_space: bool,
-) -> Result<(), String> {
+) -> Result<Option<ScheduledClipboardRestore>, String> {
     let started = Instant::now();
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err(
@@ -170,7 +245,7 @@ fn insert_transcript(
         inject::insert_text(target_snapshot, text, add_trailing_space)
             .map_err(|error| error.to_string())?;
         send_dispatched(events, session_id, InsertionMethod::UnicodeInput, started);
-        return Ok(());
+        return Ok(None);
     }
 
     match clipboard::dispatch_paste(
@@ -180,15 +255,11 @@ fn insert_transcript(
         add_trailing_space,
     ) {
         Ok(pending_restore) => {
-            // Paste has already been placed in the target. Clipboard restoration is a
-            // background durability concern and is intentionally outside visible latency.
             send_dispatched(events, session_id, InsertionMethod::ClipboardPaste, started);
-            if let Err(error) = pending_restore.restore_after(CLIPBOARD_RESTORE_DELAY) {
-                eprintln!("clipboard restoration failed for {session_id}: {error}");
-            } else {
-                let _ = events.send(InputHostEvent::ClipboardRestored { session_id });
-            }
-            Ok(())
+            Ok(Some(ScheduledClipboardRestore::new(
+                pending_restore,
+                Some(session_id),
+            )))
         }
         Err(clipboard_error) if inject::is_foreground(target_snapshot) => {
             inject::insert_text(target_snapshot, text, add_trailing_space).map_err(
@@ -197,7 +268,7 @@ fn insert_transcript(
                 },
             )?;
             send_dispatched(events, session_id, InsertionMethod::UnicodeInput, started);
-            Ok(())
+            Ok(None)
         }
         Err(error) => Err(error.to_string()),
     }
@@ -208,7 +279,7 @@ fn replace_selection(
     request_id: RequestId,
     target_snapshot: TargetSnapshot,
     text: &str,
-) -> Result<(), String> {
+) -> Result<Option<ScheduledClipboardRestore>, String> {
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err("physical modifier keys did not become idle".to_owned());
     }
@@ -216,7 +287,7 @@ fn replace_selection(
     if target::prefer_direct_unicode(target_snapshot) {
         inject::replace_selection(target_snapshot, text).map_err(|error| error.to_string())?;
         let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
-        return Ok(());
+        return Ok(None);
     }
 
     match clipboard::dispatch_paste(
@@ -226,20 +297,15 @@ fn replace_selection(
         false,
     ) {
         Ok(pending_restore) => {
-            // Replacement is complete as soon as paste is dispatched. Restore
-            // the user's clipboard afterward without extending visible latency.
             let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
-            if let Err(error) = pending_restore.restore_after(CLIPBOARD_RESTORE_DELAY) {
-                eprintln!("clipboard restoration failed for text action {request_id}: {error}");
-            }
-            Ok(())
+            Ok(Some(ScheduledClipboardRestore::new(pending_restore, None)))
         }
         Err(clipboard_error) if inject::is_foreground(target_snapshot) => {
             inject::replace_selection(target_snapshot, text).map_err(|injection_error| {
                 format!("{clipboard_error}; Unicode fallback failed: {injection_error}")
             })?;
             let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
-            Ok(())
+            Ok(None)
         }
         Err(error) => Err(error.to_string()),
     }

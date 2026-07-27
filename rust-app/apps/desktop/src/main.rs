@@ -24,13 +24,15 @@ use rust_protocol::{
     TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use slint::winit_030::WinitWindowAccessor;
+use slint::winit_030::{
+    WinitWindowAccessor,
+    winit::raw_window_handle::{HasWindowHandle, RawWindowHandle},
+};
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 slint::include_modules!();
 
 const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
-const INDICATOR_WINDOW_TITLE: &str = "Rust Recording Indicator";
 const SELECTION_WINDOW_TITLE: &str = "Correct keyboard layout";
 const ACTION_PALETTE_WINDOW_TITLE: &str = "Text actions";
 const TRANSLATION_PREVIEW_WINDOW_TITLE: &str = "Translation preview";
@@ -43,6 +45,14 @@ enum RuntimeEvent {
     Speech(SpeechWorkerEvent),
     Translation(TranslationWorkerEvent),
     WorkerError(String),
+    WorkerExited { kind: WorkerKind, message: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WorkerKind {
+    Input,
+    Speech,
+    Translation,
 }
 
 type UiEventHandler = Box<dyn FnMut(RuntimeEvent)>;
@@ -75,15 +85,21 @@ impl JsonWriter {
         writer.write_all(b"\n").map_err(|error| error.to_string())?;
         writer.flush().map_err(|error| error.to_string())
     }
+
+    fn replace_with(&self, replacement: Self) {
+        *self.stdin.borrow_mut() = replacement.stdin.into_inner();
+    }
 }
 
 struct Workers {
+    _job: rust_platform_windows::WorkerJob,
     input: JsonWriter,
     speech: JsonWriter,
     translation: JsonWriter,
     input_child: RefCell<Child>,
     speech_child: RefCell<Child>,
     translation_child: RefCell<Child>,
+    restart_attempts: RefCell<HashMap<WorkerKind, Vec<Instant>>>,
 }
 
 impl Workers {
@@ -92,6 +108,66 @@ impl Workers {
         let _ = self.speech.send(&SpeechWorkerCommand::Shutdown);
         let _ = self.translation.send(&TranslationWorkerCommand::Shutdown);
     }
+
+    fn restart(&self, kind: WorkerKind) -> Result<(), String> {
+        let now = Instant::now();
+        {
+            let mut attempts = self.restart_attempts.borrow_mut();
+            let attempts = attempts.entry(kind).or_default();
+            attempts.retain(|attempt| now.duration_since(*attempt) < Duration::from_secs(60));
+            if attempts.len() >= 3 {
+                return Err(format!(
+                    "{kind:?} worker stopped at least three times in one minute"
+                ));
+            }
+            attempts.push(now);
+        }
+
+        match kind {
+            WorkerKind::Input => {
+                let (child, writer) = spawn_worker(
+                    &self._job,
+                    WorkerKind::Input,
+                    "rust-input-host.exe",
+                    RuntimeEvent::Input,
+                )
+                .map_err(|error| error.to_string())?;
+                self.input.replace_with(writer);
+                replace_child(&self.input_child, child);
+            }
+            WorkerKind::Speech => {
+                let (child, writer) = spawn_worker(
+                    &self._job,
+                    WorkerKind::Speech,
+                    "rust-speech-worker.exe",
+                    RuntimeEvent::Speech,
+                )
+                .map_err(|error| error.to_string())?;
+                self.speech.replace_with(writer);
+                replace_child(&self.speech_child, child);
+            }
+            WorkerKind::Translation => {
+                let (child, writer) = spawn_worker(
+                    &self._job,
+                    WorkerKind::Translation,
+                    "rust-translation-worker.exe",
+                    RuntimeEvent::Translation,
+                )
+                .map_err(|error| error.to_string())?;
+                self.translation.replace_with(writer);
+                replace_child(&self.translation_child, child);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn replace_child(slot: &RefCell<Child>, replacement: Child) {
+    let mut previous = slot.replace(replacement);
+    if previous.try_wait().ok().flatten().is_none() {
+        let _ = previous.kill();
+    }
+    let _ = previous.wait();
 }
 
 impl Drop for Workers {
@@ -299,6 +375,7 @@ struct AppState {
     models: Vec<ModelSummary>,
     selected_model_id: String,
     output_mode: SpeechOutputMode,
+    fast_release_previews: bool,
     input_ready: bool,
     speech_ready: bool,
     indicator_session: Option<SessionId>,
@@ -336,6 +413,7 @@ impl AppState {
             models: Vec::new(),
             selected_model_id,
             output_mode,
+            fast_release_previews: saved_settings.fast_release_previews,
             input_ready: false,
             speech_ready: false,
             indicator_session: None,
@@ -405,6 +483,7 @@ impl AppState {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    rust_platform_windows::configure_safe_dll_search()?;
     configure_ui_backend()?;
     if env::args().any(|argument| argument == "--indicator-preview") {
         return run_indicator_preview();
@@ -431,17 +510,34 @@ fn main() -> Result<(), Box<dyn Error>> {
     precreate_indicator(&indicator);
     precreate_action_windows(&chooser, &action_palette, &translation_preview);
 
-    let (input_child, input) = spawn_worker("rust-input-host.exe", RuntimeEvent::Input)?;
-    let (speech_child, speech) = spawn_worker("rust-speech-worker.exe", RuntimeEvent::Speech)?;
-    let (translation_child, translation) =
-        spawn_worker("rust-translation-worker.exe", RuntimeEvent::Translation)?;
+    let worker_job = rust_platform_windows::WorkerJob::new()?;
+    let (input_child, input) = spawn_worker(
+        &worker_job,
+        WorkerKind::Input,
+        "rust-input-host.exe",
+        RuntimeEvent::Input,
+    )?;
+    let (speech_child, speech) = spawn_worker(
+        &worker_job,
+        WorkerKind::Speech,
+        "rust-speech-worker.exe",
+        RuntimeEvent::Speech,
+    )?;
+    let (translation_child, translation) = spawn_worker(
+        &worker_job,
+        WorkerKind::Translation,
+        "rust-translation-worker.exe",
+        RuntimeEvent::Translation,
+    )?;
     let workers = Rc::new(Workers {
+        _job: worker_job,
         input,
         speech,
         translation,
         input_child: RefCell::new(input_child),
         speech_child: RefCell::new(speech_child),
         translation_child: RefCell::new(translation_child),
+        restart_attempts: RefCell::new(HashMap::new()),
     });
     let saved_settings = load_settings();
     let selected_model_id = saved_settings
@@ -467,6 +563,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         selected_model_id,
         output_mode,
         history_enabled: saved_settings.history_enabled,
+        fast_release_previews: saved_settings.fast_release_previews,
     })?;
     workers
         .translation
@@ -597,9 +694,16 @@ fn run_action_palette_preview() -> Result<(), Box<dyn Error>> {
     let palette_weak = palette.as_weak();
     slint::spawn_local(async move {
         if let Some(palette) = palette_weak.upgrade() {
-            let _ = palette.window().winit_window().await;
-            if let Err(error) =
-                rust_platform_windows::configure_action_window(ACTION_PALETTE_WINDOW_TITLE)
+            let handle = palette
+                .window()
+                .winit_window()
+                .await
+                .ok()
+                .as_deref()
+                .and_then(native_window_handle);
+            if let Err(error) = handle
+                .ok_or_else(|| "native action window is unavailable".to_owned())
+                .and_then(rust_platform_windows::configure_action_window)
             {
                 eprintln!("could not configure action preview: {error}");
             }
@@ -638,9 +742,16 @@ fn run_translation_preview() -> Result<(), Box<dyn Error>> {
     let preview_weak = preview.as_weak();
     slint::spawn_local(async move {
         if let Some(preview) = preview_weak.upgrade() {
-            let _ = preview.window().winit_window().await;
-            if let Err(error) =
-                rust_platform_windows::configure_action_window(TRANSLATION_PREVIEW_WINDOW_TITLE)
+            let handle = preview
+                .window()
+                .winit_window()
+                .await
+                .ok()
+                .as_deref()
+                .and_then(native_window_handle);
+            if let Err(error) = handle
+                .ok_or_else(|| "native translation window is unavailable".to_owned())
+                .and_then(rust_platform_windows::configure_action_window)
             {
                 eprintln!("could not configure translation preview: {error}");
             }
@@ -674,9 +785,16 @@ fn run_layout_preview() -> Result<(), Box<dyn Error>> {
     let chooser_weak = chooser.as_weak();
     slint::spawn_local(async move {
         if let Some(chooser) = chooser_weak.upgrade() {
-            let _ = chooser.window().winit_window().await;
-            if let Err(error) =
-                rust_platform_windows::configure_action_window(SELECTION_WINDOW_TITLE)
+            let handle = chooser
+                .window()
+                .winit_window()
+                .await
+                .ok()
+                .as_deref()
+                .and_then(native_window_handle);
+            if let Err(error) = handle
+                .ok_or_else(|| "native selection window is unavailable".to_owned())
+                .and_then(rust_platform_windows::configure_action_window)
             {
                 eprintln!("could not configure layout preview: {error}");
             }
@@ -687,6 +805,8 @@ fn run_layout_preview() -> Result<(), Box<dyn Error>> {
 }
 
 fn spawn_worker<T>(
+    worker_job: &rust_platform_windows::WorkerJob,
+    kind: WorkerKind,
     executable: &str,
     wrap: fn(T) -> RuntimeEvent,
 ) -> Result<(Child, JsonWriter), Box<dyn Error>>
@@ -699,12 +819,28 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if path
+        .file_name()
+        .is_some_and(|name| name == "rust-speech-worker-cuda.exe")
+    {
+        let cuda = trusted_cuda_runtime_directory()
+            .ok_or("the CUDA worker was selected without a trusted CUDA runtime")?;
+        // The CUDA executable imports cuBLAS before Rust main() can harden dynamic
+        // DLL loading. Give that child only the validated toolkit directory instead
+        // of inheriting arbitrary user-writable PATH entries.
+        command.env("PATH", cuda);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = command.spawn()?;
+    if let Err(error) = worker_job.assign(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("could not contain {executable} in the worker job: {error}").into());
+    }
     let stdin = child.stdin.take().ok_or("worker stdin is unavailable")?;
     let stdout = child.stdout.take().ok_or("worker stdout is unavailable")?;
     let stderr = child.stderr.take().ok_or("worker stderr is unavailable")?;
@@ -713,13 +849,12 @@ where
     std::thread::Builder::new()
         .name(format!("{executable}-events"))
         .spawn(move || {
+            let mut exit_message = format!("{output_name} closed its event stream");
             for line in BufReader::new(stdout).lines() {
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
-                        dispatch_runtime_event(RuntimeEvent::WorkerError(format!(
-                            "{output_name} output failed: {error}"
-                        )));
+                        exit_message = format!("{output_name} output failed: {error}");
                         break;
                     }
                 };
@@ -734,6 +869,10 @@ where
                     }
                 }
             }
+            dispatch_runtime_event(RuntimeEvent::WorkerExited {
+                kind,
+                message: exit_message,
+            });
         })?;
 
     let diagnostics_name = executable.to_owned();
@@ -772,7 +911,7 @@ fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
         .ok_or("desktop executable has no parent directory")?;
     if executable == "rust-speech-worker.exe" {
         let cuda = parent.join("rust-speech-worker-cuda.exe");
-        if cuda.exists() && cuda_runtime_available() {
+        if cuda.exists() && trusted_cuda_runtime_directory().is_some() {
             return Ok(cuda);
         }
         let cpu = parent.join("rust-speech-worker-cpu.exe");
@@ -792,9 +931,22 @@ fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
     .into())
 }
 
-fn cuda_runtime_available() -> bool {
-    env::var_os("PATH").is_some_and(|path| {
-        env::split_paths(&path).any(|directory| directory.join("cublas64_13.dll").exists())
+fn trusted_cuda_runtime_directory() -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(path) = env::var_os("CUDA_PATH") {
+        roots.push(PathBuf::from(path));
+    }
+    let mut versioned = env::vars_os()
+        .filter(|(name, _)| name.to_string_lossy().starts_with("CUDA_PATH_V"))
+        .map(|(_, path)| PathBuf::from(path))
+        .collect::<Vec<_>>();
+    versioned.sort_by(|left, right| right.cmp(left));
+    roots.extend(versioned);
+    roots.into_iter().find_map(|root| {
+        let directory = root.join("bin").join("x64").canonicalize().ok()?;
+        (directory.join("cublas64_13.dll").is_file()
+            && directory.join("cublasLt64_13.dll").is_file())
+        .then_some(directory)
     })
 }
 
@@ -853,6 +1005,87 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Worker error".into());
                 settings.set_indicator_status(message.into());
+            }
+        }
+        RuntimeEvent::WorkerExited { kind, message } => {
+            handle_worker_exit(kind, &message, runtime);
+        }
+    }
+}
+
+fn handle_worker_exit(kind: WorkerKind, message: &str, runtime: &RuntimeUi) {
+    let active_session = {
+        let mut state = runtime.state.borrow_mut();
+        match kind {
+            WorkerKind::Input => state.input_ready = false,
+            WorkerKind::Speech => state.speech_ready = false,
+            WorkerKind::Translation => {
+                state.translation_ready = false;
+                state.pending_translations.clear();
+            }
+        }
+        let active = state.indicator_session.take();
+        if let Some(session_id) = active {
+            let _ = state.registry.fail(session_id);
+            state.targets.remove(&session_id);
+            state.release_started.remove(&session_id);
+        }
+        active
+    };
+    if kind != WorkerKind::Speech
+        && let Some(session_id) = active_session
+    {
+        let _ = runtime
+            .workers
+            .speech
+            .send(&SpeechWorkerCommand::Cancel { session_id });
+    }
+    runtime.indicator_animation.borrow_mut().stop();
+    if let Some(indicator) = runtime.indicator.upgrade() {
+        let _ = indicator.hide();
+    }
+
+    match runtime.workers.restart(kind) {
+        Ok(()) => {
+            let initialization = match kind {
+                WorkerKind::Input => Ok(()),
+                WorkerKind::Speech => {
+                    let state = runtime.state.borrow();
+                    runtime
+                        .workers
+                        .speech
+                        .send(&SpeechWorkerCommand::Initialize {
+                            selected_model_id: state.selected_model_id.clone(),
+                            output_mode: state.output_mode,
+                            history_enabled: state.history_enabled,
+                            fast_release_previews: state.fast_release_previews,
+                        })
+                }
+                WorkerKind::Translation => {
+                    let state = runtime.state.borrow();
+                    runtime
+                        .workers
+                        .translation
+                        .send(&TranslationWorkerCommand::Initialize {
+                            selected_tier: state.selected_translation_tier,
+                            keep_warm: state.translation_keep_warm,
+                            history_enabled: state.history_enabled,
+                        })
+                }
+            };
+            if let Some(settings) = runtime.settings.upgrade() {
+                settings.set_runtime_status("Recovering worker".into());
+                let detail = initialization.map_or_else(
+                    |error| format!("{message}; restart initialization failed: {error}"),
+                    |()| format!("{message}; worker restarted automatically"),
+                );
+                settings.set_indicator_status(detail.into());
+            }
+        }
+        Err(error) => {
+            if let Some(settings) = runtime.settings.upgrade() {
+                settings.set_runtime_status("Worker unavailable".into());
+                settings.set_indicator_status(format!("{message}; {error}").into());
             }
         }
     }
@@ -1214,7 +1447,11 @@ fn handle_text_action(
                 palette.set_translation_enabled(translation_enabled);
                 palette.set_layout_enabled(layout_enabled);
                 let _ = palette.show();
-                prepare_shown_action_window(ACTION_PALETTE_WINDOW_TITLE, target.window_handle);
+                prepare_shown_action_window(
+                    slint_window_handle(palette.window()),
+                    ACTION_PALETTE_WINDOW_TITLE,
+                    target.window_handle,
+                );
             }
         }
     }
@@ -1259,7 +1496,11 @@ fn show_layout_chooser(
             candidates,
         });
         let _ = chooser.show();
-        prepare_shown_action_window(SELECTION_WINDOW_TITLE, target.window_handle);
+        prepare_shown_action_window(
+            slint_window_handle(chooser.window()),
+            SELECTION_WINDOW_TITLE,
+            target.window_handle,
+        );
     }
 }
 
@@ -1313,7 +1554,11 @@ fn begin_selection_translation(
         preview.set_translated_text("Translating locally…".into());
         preview.set_processing(true);
         let _ = preview.show();
-        prepare_shown_action_window(TRANSLATION_PREVIEW_WINDOW_TITLE, target.window_handle);
+        prepare_shown_action_window(
+            slint_window_handle(preview.window()),
+            TRANSLATION_PREVIEW_WINDOW_TITLE,
+            target.window_handle,
+        );
     }
     if let Err(error) = workers
         .translation
@@ -2026,6 +2271,23 @@ fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
+        settings.on_toggle_release_optimization(move || {
+            let enabled = {
+                let mut state = state.borrow_mut();
+                state.fast_release_previews = !state.fast_release_previews;
+                state.fast_release_previews
+            };
+            let _ = workers
+                .speech
+                .send(&SpeechWorkerCommand::SetFastReleasePreviews { enabled });
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
         settings.on_select_translation_model(move |index| {
             let Some(model) = usize::try_from(index)
                 .ok()
@@ -2566,6 +2828,14 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
         }
         .into(),
     );
+    settings.set_release_optimization_label(
+        if state.fast_release_previews {
+            "Release optimization: fastest"
+        } else {
+            "Release optimization: efficient"
+        }
+        .into(),
+    );
     settings.set_translation_ready(state.translation_ready);
     settings.set_history_enabled_label(
         if state.history_enabled {
@@ -2663,13 +2933,20 @@ fn set_translation_status(translator: &slint::Weak<TranslatorWindow>, message: &
     }
 }
 
-fn prepare_shown_action_window(window_title: &'static str, target_window_handle: u64) {
+fn prepare_shown_action_window(
+    window_handle: Option<u64>,
+    window_title: &'static str,
+    target_window_handle: u64,
+) {
     // winit can restore its default extended styles when a hidden window is
     // shown again. Queue native finalization behind the current UI operation
     // so it runs after winit has committed visibility and cannot be overwritten
     // by that same show transaction.
     if let Err(error) = slint::invoke_from_event_loop(move || {
-        if let Err(error) = rust_platform_windows::configure_action_window(window_title) {
+        if let Err(error) = window_handle
+            .ok_or_else(|| "native window handle is unavailable".to_owned())
+            .and_then(rust_platform_windows::configure_action_window)
+        {
             eprintln!("could not configure `{window_title}` as an action window: {error}");
         }
         if let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
@@ -2692,9 +2969,16 @@ fn precreate_action_windows(
         let chooser = chooser.as_weak();
         let _ = slint::spawn_local(async move {
             if let Some(chooser) = chooser.upgrade() {
-                let configured = chooser.window().winit_window().await.is_ok()
-                    && rust_platform_windows::configure_action_window(SELECTION_WINDOW_TITLE)
-                        .is_ok();
+                let configured = chooser
+                    .window()
+                    .winit_window()
+                    .await
+                    .ok()
+                    .as_deref()
+                    .and_then(native_window_handle)
+                    .is_some_and(|handle| {
+                        rust_platform_windows::configure_action_window(handle).is_ok()
+                    });
                 if !configured {
                     eprintln!("selection action window could not be configured as no-activate");
                 }
@@ -2709,9 +2993,16 @@ fn precreate_action_windows(
         let palette = palette.as_weak();
         let _ = slint::spawn_local(async move {
             if let Some(palette) = palette.upgrade() {
-                let configured = palette.window().winit_window().await.is_ok()
-                    && rust_platform_windows::configure_action_window(ACTION_PALETTE_WINDOW_TITLE)
-                        .is_ok();
+                let configured = palette
+                    .window()
+                    .winit_window()
+                    .await
+                    .ok()
+                    .as_deref()
+                    .and_then(native_window_handle)
+                    .is_some_and(|handle| {
+                        rust_platform_windows::configure_action_window(handle).is_ok()
+                    });
                 if !configured {
                     eprintln!("text action palette could not be configured as no-activate");
                 }
@@ -2726,11 +3017,16 @@ fn precreate_action_windows(
         let preview = preview.as_weak();
         let _ = slint::spawn_local(async move {
             if let Some(preview) = preview.upgrade() {
-                let configured = preview.window().winit_window().await.is_ok()
-                    && rust_platform_windows::configure_action_window(
-                        TRANSLATION_PREVIEW_WINDOW_TITLE,
-                    )
-                    .is_ok();
+                let configured = preview
+                    .window()
+                    .winit_window()
+                    .await
+                    .ok()
+                    .as_deref()
+                    .and_then(native_window_handle)
+                    .is_some_and(|handle| {
+                        rust_platform_windows::configure_action_window(handle).is_ok()
+                    });
                 if !configured {
                     eprintln!("translation preview could not be configured as no-activate");
                 }
@@ -2749,7 +3045,8 @@ fn precreate_indicator(indicator: &RecordingIndicator) {
         let schedule_result = slint::spawn_local(async move {
             if let Some(indicator) = indicator.upgrade() {
                 let prepared = match indicator.window().winit_window().await {
-                    Ok(_) => configure_indicator_native_window(None),
+                    Ok(window) => native_window_handle(&window)
+                        .is_some_and(|handle| configure_indicator_native_window(handle, None)),
                     Err(_) => false,
                 };
                 let _ = indicator.hide();
@@ -2767,14 +3064,10 @@ fn precreate_indicator(indicator: &RecordingIndicator) {
 fn show_indicator(indicator: &RecordingIndicator, target_window_handle: Option<u64>) {
     let prepared = configure_indicator_window(indicator, target_window_handle);
     indicator.set_prepared(prepared);
-    if indicator.show().is_ok() && !prepared {
-        let indicator = indicator.as_weak();
-        Timer::single_shot(Duration::from_millis(16), move || {
-            if let Some(indicator) = indicator.upgrade() {
-                let prepared = configure_indicator_window(&indicator, target_window_handle);
-                indicator.set_prepared(prepared);
-            }
-        });
+    if prepared {
+        let _ = indicator.show();
+    } else {
+        eprintln!("recording indicator was not shown because native setup failed");
     }
 }
 
@@ -2782,12 +3075,26 @@ fn configure_indicator_window(
     indicator: &RecordingIndicator,
     target_window_handle: Option<u64>,
 ) -> bool {
-    indicator.window().has_winit_window() && configure_indicator_native_window(target_window_handle)
+    slint_window_handle(indicator.window())
+        .is_some_and(|handle| configure_indicator_native_window(handle, target_window_handle))
 }
 
-fn configure_indicator_native_window(target_window_handle: Option<u64>) -> bool {
-    rust_platform_windows::configure_overlay_window(INDICATOR_WINDOW_TITLE, target_window_handle)
-        .is_ok()
+fn configure_indicator_native_window(
+    window_handle: u64,
+    target_window_handle: Option<u64>,
+) -> bool {
+    rust_platform_windows::configure_overlay_window(window_handle, target_window_handle).is_ok()
+}
+
+fn slint_window_handle(window: &slint::Window) -> Option<u64> {
+    window.with_winit_window(native_window_handle).flatten()
+}
+
+fn native_window_handle(window: &slint::winit_030::winit::window::Window) -> Option<u64> {
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as u64),
+        _ => None,
+    }
 }
 
 fn short_id(session_id: SessionId) -> String {
@@ -2812,6 +3119,7 @@ fn settings_path() -> PathBuf {
 struct SavedSettings {
     selected_model_id: Option<String>,
     output_mode: SpeechOutputMode,
+    fast_release_previews: bool,
     selected_translation_tier: Option<TranslationTier>,
     translation_enabled: bool,
     layout_enabled: bool,
@@ -2826,6 +3134,7 @@ impl Default for SavedSettings {
         Self {
             selected_model_id: None,
             output_mode: SpeechOutputMode::default(),
+            fast_release_previews: true,
             selected_translation_tier: None,
             translation_enabled: false,
             layout_enabled: true,
@@ -2851,6 +3160,11 @@ fn load_settings() -> SavedSettings {
         .and_then(|value| value.get("output_mode"))
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
+    let fast_release_previews = value
+        .as_ref()
+        .and_then(|value| value.get("fast_release_previews"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
     let selected_translation_tier = value
         .as_ref()
         .and_then(|value| value.get("selected_translation_tier"))
@@ -2888,6 +3202,7 @@ fn load_settings() -> SavedSettings {
     SavedSettings {
         selected_model_id,
         output_mode,
+        fast_release_previews,
         selected_translation_tier,
         translation_enabled,
         layout_enabled,
@@ -2906,6 +3221,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "selected_model_id": &state.selected_model_id,
         "output_mode": state.output_mode,
+        "fast_release_previews": state.fast_release_previews,
         "selected_translation_tier": state.selected_translation_tier,
         "translation_enabled": state.translation_enabled,
         "layout_enabled": state.layout_enabled,

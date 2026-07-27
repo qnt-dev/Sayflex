@@ -18,7 +18,8 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use rust_protocol::{SessionId, SpeechWorkerEvent};
 
 const AUDIO_RING_SECONDS: usize = 8;
-const CAPTURE_RESERVE_SECONDS: usize = 60;
+const CAPTURE_RESERVE_SECONDS: usize = 15;
+const MAX_CAPTURE_SECONDS: usize = 5 * 60;
 const LEVEL_INTERVAL: Duration = Duration::from_millis(32);
 
 #[derive(Debug, Clone)]
@@ -52,6 +53,7 @@ struct ActiveCapture {
     samples: Vec<f32>,
     last_level_report: Instant,
     peak_since_report: f32,
+    limit_reported: bool,
 }
 
 enum CaptureCommand {
@@ -256,8 +258,15 @@ fn capture_loop(
 ) {
     let mut active: Option<ActiveCapture> = None;
     loop {
-        drain_audio(&mut consumer, active.as_mut(), &events);
-        match commands.recv_timeout(Duration::from_millis(2)) {
+        drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
+        let command = if active.is_some() {
+            commands.recv_timeout(Duration::from_millis(2))
+        } else {
+            commands
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+        };
+        match command {
             Ok(CaptureCommand::Begin { session_id, reply }) => {
                 drain_discard(&mut consumer);
                 dropped_samples.store(0, Ordering::Release);
@@ -270,11 +279,12 @@ fn capture_loop(
                     samples: Vec::with_capacity(sample_rate_hz as usize * CAPTURE_RESERVE_SECONDS),
                     last_level_report: Instant::now() - LEVEL_INTERVAL,
                     peak_since_report: 0.0,
+                    limit_reported: false,
                 });
                 let _ = reply.send(Ok(()));
             }
             Ok(CaptureCommand::End { session_id, reply }) => {
-                drain_audio(&mut consumer, active.as_mut(), &events);
+                drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
                 let result = finish_capture(&mut active, session_id, sample_rate_hz);
                 let dropped = dropped_samples.swap(0, Ordering::AcqRel);
                 if dropped > 0 {
@@ -295,7 +305,7 @@ fn capture_loop(
                 let _ = reply.send(cancelled);
             }
             Ok(CaptureCommand::Snapshot { session_id, reply }) => {
-                drain_audio(&mut consumer, active.as_mut(), &events);
+                drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
                 let snapshot = active
                     .as_ref()
                     .filter(|capture| capture.session_id == session_id)
@@ -312,14 +322,26 @@ fn drain_audio(
     consumer: &mut Consumer<f32>,
     active: Option<&mut ActiveCapture>,
     events: &Sender<SpeechWorkerEvent>,
+    sample_rate_hz: u32,
 ) {
     let Some(active) = active else {
         drain_discard(consumer);
         return;
     };
+    let max_samples = sample_rate_hz as usize * MAX_CAPTURE_SECONDS;
     while let Ok(sample) = consumer.pop() {
         active.peak_since_report = active.peak_since_report.max(sample.abs());
-        active.samples.push(sample);
+        if active.samples.len() < max_samples {
+            active.samples.push(sample);
+        } else if !active.limit_reported {
+            active.limit_reported = true;
+            let _ = events.send(SpeechWorkerEvent::Failed {
+                session_id: Some(active.session_id),
+                code: "recording_limit".to_owned(),
+                message: "The five-minute recording limit was reached.".to_owned(),
+                retryable: false,
+            });
+        }
     }
     if active.last_level_report.elapsed() >= LEVEL_INTERVAL {
         active.last_level_report = Instant::now();
@@ -366,7 +388,7 @@ fn snapshot_audio(capture: &ActiveCapture, sample_rate_hz: u32) -> RecordedAudio
     }
 }
 
-pub fn resample_linear(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
+pub fn resample_bandlimited(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
     if input.is_empty() || source_rate == 0 || target_rate == 0 {
         return Vec::new();
     }
@@ -374,27 +396,109 @@ pub fn resample_linear(input: &[f32], source_rate: u32, target_rate: u32) -> Vec
         return input.to_vec();
     }
 
+    const HALF_TAPS: isize = 16;
+    let divisor = greatest_common_divisor(source_rate, target_rate);
+    let input_step = u64::from(source_rate / divisor);
+    let phase_count = usize::try_from(target_rate / divisor).unwrap_or(1).max(1);
+    let cutoff = (f64::from(target_rate) / f64::from(source_rate)).min(1.0) * 0.94;
+    let kernels = (0..phase_count)
+        .map(|phase| {
+            let fraction = phase as f64 / phase_count as f64;
+            let mut kernel = (-HALF_TAPS..=HALF_TAPS)
+                .map(|tap| {
+                    let distance = tap as f64 - fraction;
+                    let normalized = distance / (HALF_TAPS as f64 + 1.0);
+                    let window = 0.42
+                        + 0.5 * (std::f64::consts::PI * normalized).cos()
+                        + 0.08 * (2.0 * std::f64::consts::PI * normalized).cos();
+                    (cutoff * sinc(cutoff * distance) * window) as f32
+                })
+                .collect::<Vec<_>>();
+            let sum = kernel.iter().sum::<f32>();
+            if sum.abs() > f32::EPSILON {
+                for coefficient in &mut kernel {
+                    *coefficient /= sum;
+                }
+            }
+            kernel
+        })
+        .collect::<Vec<_>>();
+
     let output_len =
         ((input.len() as u64 * u64::from(target_rate)) / u64::from(source_rate)) as usize;
     let mut output = Vec::with_capacity(output_len);
-    let source_per_output = source_rate as f64 / target_rate as f64;
+    let phase_denominator = phase_count as u64;
     for output_index in 0..output_len {
-        let position = output_index as f64 * source_per_output;
-        let left = position.floor() as usize;
-        let right = (left + 1).min(input.len() - 1);
-        let fraction = (position - left as f64) as f32;
-        output.push(input[left] + ((input[right] - input[left]) * fraction));
+        let position_numerator = output_index as u64 * input_step;
+        let center = (position_numerator / phase_denominator) as isize;
+        let phase = (position_numerator % phase_denominator) as usize;
+        let mut value = 0.0_f32;
+        let mut used_weight = 0.0_f32;
+        for (offset, coefficient) in (-HALF_TAPS..=HALF_TAPS).zip(&kernels[phase]) {
+            let source_index = center + offset;
+            if let Some(sample) = usize::try_from(source_index)
+                .ok()
+                .and_then(|index| input.get(index))
+            {
+                value += sample * coefficient;
+                used_weight += coefficient;
+            }
+        }
+        output.push(if used_weight.abs() > 1.0e-6 {
+            value / used_weight
+        } else {
+            0.0
+        });
     }
     output
 }
 
+fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left.max(1)
+}
+
+fn sinc(value: f64) -> f64 {
+    if value.abs() < 1.0e-12 {
+        1.0
+    } else {
+        let radians = std::f64::consts::PI * value;
+        radians.sin() / radians
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resample_linear;
+    use super::resample_bandlimited;
 
     #[test]
     fn resampler_preserves_duration() {
         let source = vec![0.0_f32; 48_000];
-        assert_eq!(resample_linear(&source, 48_000, 16_000).len(), 16_000);
+        assert_eq!(resample_bandlimited(&source, 48_000, 16_000).len(), 16_000);
+    }
+
+    #[test]
+    fn downsampling_rejects_energy_above_the_target_nyquist_frequency() {
+        let sine = |frequency: f32| {
+            (0..48_000)
+                .map(|index| {
+                    (2.0 * std::f32::consts::PI * frequency * index as f32 / 48_000.0).sin()
+                })
+                .collect::<Vec<_>>()
+        };
+        let low = resample_bandlimited(&sine(1_000.0), 48_000, 16_000);
+        let aliased = resample_bandlimited(&sine(12_000.0), 48_000, 16_000);
+        let rms = |samples: &[f32]| {
+            (samples[64..samples.len() - 64]
+                .iter()
+                .map(|sample| sample * sample)
+                .sum::<f32>()
+                / (samples.len() - 128) as f32)
+                .sqrt()
+        };
+        assert!(rms(&low) > 0.65);
+        assert!(rms(&aliased) < 0.02);
     }
 }

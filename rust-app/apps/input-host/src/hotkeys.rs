@@ -16,9 +16,8 @@ use windows_sys::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
-            MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_K,
-            VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT,
-            VK_RWIN, VK_SHIFT, VK_SPACE, VK_T, VK_V,
+            GetAsyncKeyState, VK_CONTROL, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+            VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_T, VK_V,
         },
         WindowsAndMessaging::{
             CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
@@ -36,17 +35,22 @@ const INPUT_WINDOWS: u32 = 1 << 3;
 const INPUT_SPACE: u32 = 1 << 4;
 const INPUT_K: u32 = 1 << 5;
 const INPUT_V: u32 = 1 << 6;
-const INJECTION_UNSAFE: u32 =
-    INPUT_CONTROL | INPUT_ALT | INPUT_SHIFT | INPUT_WINDOWS | INPUT_SPACE | INPUT_V;
-const SELECTION_CHORD: u32 = INPUT_CONTROL | INPUT_ALT | INPUT_K;
+const INPUT_T: u32 = 1 << 7;
+const INJECTION_UNSAFE: u32 = INPUT_CONTROL
+    | INPUT_ALT
+    | INPUT_SHIFT
+    | INPUT_WINDOWS
+    | INPUT_SPACE
+    | INPUT_K
+    | INPUT_V
+    | INPUT_T;
 const INPUT_RELEASE_STABILITY: Duration = Duration::from_millis(30);
-const INSERT_LAST_HOTKEY_ID: i32 = 0x5256;
-const TEXT_ACTION_HOTKEY_ID: i32 = 0x5254;
 
 static ACTIONS: OnceLock<Sender<HookAction>> = OnceLock::new();
 static PHYSICAL_INPUT: AtomicU32 = AtomicU32::new(0);
 static MONOTONIC_ORIGIN: OnceLock<Instant> = OnceLock::new();
 static LAST_PHYSICAL_CHANGE_US: AtomicU64 = AtomicU64::new(0);
+static LAST_HOOK_EVENT_US: AtomicU64 = AtomicU64::new(0);
 static SELECTION_BUSY: AtomicBool = AtomicBool::new(false);
 
 #[cfg(debug_assertions)]
@@ -115,6 +119,8 @@ struct HotkeyState {
     gesture: GestureState,
     next_gesture_id: u64,
     selection_k_down: bool,
+    insert_v_down: bool,
+    adaptive_t_down: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,7 +138,6 @@ struct HookTrace {
     sequence_number: u64,
     timestamp_unix_ms: u64,
     vk: u16,
-    scan_code: u32,
     key_down: bool,
     key_up: bool,
     origin: EventOrigin,
@@ -170,61 +175,6 @@ pub fn initialize(events: Sender<InputHostEvent>) -> io::Result<()> {
     Ok(())
 }
 
-pub fn register_command_hotkeys() -> Vec<String> {
-    let modifiers = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
-    let mut failures = Vec::new();
-    if unsafe {
-        RegisterHotKey(
-            std::ptr::null_mut(),
-            INSERT_LAST_HOTKEY_ID,
-            modifiers,
-            u32::from(VK_V),
-        )
-    } == 0
-    {
-        failures.push(format!(
-            "Ctrl+Alt+V is unavailable: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    if unsafe {
-        RegisterHotKey(
-            std::ptr::null_mut(),
-            TEXT_ACTION_HOTKEY_ID,
-            modifiers,
-            u32::from(VK_T),
-        )
-    } == 0
-    {
-        failures.push(format!(
-            "Ctrl+Alt+T is unavailable: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    failures
-}
-
-pub fn unregister_command_hotkeys() {
-    unsafe {
-        let _ = UnregisterHotKey(std::ptr::null_mut(), INSERT_LAST_HOTKEY_ID);
-        let _ = UnregisterHotKey(std::ptr::null_mut(), TEXT_ACTION_HOTKEY_ID);
-    }
-}
-
-pub fn handle_registered_hotkey(id: usize) -> bool {
-    registered_hotkey_action(id).is_some_and(dispatch_hook_action)
-}
-
-fn registered_hotkey_action(id: usize) -> Option<HookAction> {
-    match id as i32 {
-        INSERT_LAST_HOTKEY_ID => Some(HookAction::InsertLastRequested),
-        TEXT_ACTION_HOTKEY_ID => Some(HookAction::SelectionRequested {
-            intent: TextActionIntent::Adaptive,
-        }),
-        _ => None,
-    }
-}
-
 pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
     if code < 0 {
         return unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) };
@@ -244,13 +194,24 @@ pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LP
         return unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) };
     }
 
-    let (mut decision, physical_mask) = HOOK_STATE.with(|state| {
+    let now = monotonic_us();
+    let previous_hook_event = LAST_HOOK_EVENT_US.swap(now, Ordering::AcqRel);
+    let needs_reconciliation =
+        previous_hook_event == 0 || now.saturating_sub(previous_hook_event) >= 1_000_000;
+    let (recovery_action, mut decision, physical_mask) = HOOK_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        let recovery_action = needs_reconciliation
+            .then(|| PhysicalKeys::from_async_except(input.vkCode as u16, &state.keys))
+            .and_then(|keys| state.reconcile(keys));
         let decision = state.process_event(input.vkCode as u16, key_down, key_up);
-        (decision, state.keys.input_mask())
+        (recovery_action, decision, state.keys.input_mask())
     });
     PHYSICAL_INPUT.store(physical_mask, Ordering::Release);
-    LAST_PHYSICAL_CHANGE_US.store(monotonic_us(), Ordering::Release);
+    LAST_PHYSICAL_CHANGE_US.store(now, Ordering::Release);
+
+    if let Some(action) = recovery_action {
+        let _ = dispatch_hook_action(action);
+    }
 
     if let Some(action) = decision.action
         && !dispatch_hook_action(action)
@@ -303,7 +264,15 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
         match action {
             HookAction::DictationStarted { gesture_id } => {
                 let session_id = SessionId::new();
-                let target = target::capture_target();
+                let Some(target) = target::capture_text_target() else {
+                    let _ = events.send(InputHostEvent::Failed {
+                        session_id: None,
+                        code: "protected_field".to_owned(),
+                        message: "Dictation is disabled in password or protected fields."
+                            .to_owned(),
+                    });
+                    continue;
+                };
                 sessions.insert(gesture_id, (session_id, target));
                 if events
                     .send(InputHostEvent::DictationBegin {
@@ -330,19 +299,33 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
                 }
             }
             HookAction::InsertLastRequested => {
+                let Some(target) = target::capture_text_target() else {
+                    let _ = events.send(InputHostEvent::Failed {
+                        session_id: None,
+                        code: "protected_field".to_owned(),
+                        message: "Text insertion is disabled in password or protected fields."
+                            .to_owned(),
+                    });
+                    continue;
+                };
                 if events
-                    .send(InputHostEvent::InsertLastRequested {
-                        target: target::capture_target(),
-                    })
+                    .send(InputHostEvent::InsertLastRequested { target })
                     .is_err()
                 {
                     break;
                 }
             }
             HookAction::SelectionRequested { intent } => {
-                if let Err(error) =
-                    begin_selection_capture(intent, target::capture_target(), events.clone())
-                {
+                let Some(target) = target::capture_text_target() else {
+                    SELECTION_BUSY.store(false, Ordering::Release);
+                    let _ = events.send(InputHostEvent::SelectionCaptureFailed {
+                        request_id: RequestId::new(),
+                        message: "Selected-text actions are disabled in protected fields."
+                            .to_owned(),
+                    });
+                    continue;
+                };
+                if let Err(error) = begin_selection_capture(intent, target, events.clone()) {
                     SELECTION_BUSY.store(false, Ordering::Release);
                     let _ = events.send(InputHostEvent::SelectionCaptureFailed {
                         request_id: RequestId::new(),
@@ -363,8 +346,9 @@ fn begin_selection_capture(
     thread::Builder::new()
         .name("selection-capture".to_owned())
         .spawn(move || {
+            let _busy_guard = SelectionBusyGuard;
             let result = if !wait_for_mask_clear(
-                SELECTION_CHORD,
+                selection_chord_mask(intent),
                 Duration::from_millis(1200),
                 INPUT_RELEASE_STABILITY,
             ) {
@@ -400,9 +384,16 @@ fn begin_selection_capture(
                     });
                 }
             }
-            SELECTION_BUSY.store(false, Ordering::Release);
         })
         .map(|_| ())
+}
+
+struct SelectionBusyGuard;
+
+impl Drop for SelectionBusyGuard {
+    fn drop(&mut self) {
+        SELECTION_BUSY.store(false, Ordering::Release);
+    }
 }
 
 #[must_use]
@@ -417,6 +408,7 @@ pub fn wait_until_injection_safe(timeout: Duration) -> bool {
 
 fn wait_for_mask_clear(mask: u32, timeout: Duration, stable_for: Duration) -> bool {
     let started = Instant::now();
+    let mut reconciled = false;
     loop {
         if PHYSICAL_INPUT.load(Ordering::Acquire) & mask == 0 {
             let last_change = LAST_PHYSICAL_CHANGE_US.load(Ordering::Acquire);
@@ -425,11 +417,33 @@ fn wait_for_mask_clear(mask: u32, timeout: Duration, stable_for: Duration) -> bo
                 return true;
             }
         }
+        // LL hooks do not observe key releases on the secure desktop. Reconcile
+        // only after the normal release window has elapsed, and force the
+        // hook-thread state to reconcile on its next physical event as well.
+        if !reconciled && started.elapsed() >= Duration::from_millis(75) {
+            reconciled = true;
+            let sampled =
+                PhysicalKeys::from_async_except(u16::MAX, &PhysicalKeys::default()).input_mask();
+            let previous = PHYSICAL_INPUT.swap(sampled, Ordering::AcqRel);
+            if sampled != previous {
+                LAST_PHYSICAL_CHANGE_US.store(monotonic_us(), Ordering::Release);
+                LAST_HOOK_EVENT_US.store(0, Ordering::Release);
+            }
+        }
         if started.elapsed() >= timeout {
             return false;
         }
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+const fn selection_chord_mask(intent: TextActionIntent) -> u32 {
+    INPUT_CONTROL
+        | INPUT_ALT
+        | match intent {
+            TextActionIntent::CorrectLayout => INPUT_K,
+            TextActionIntent::Adaptive | TextActionIntent::Translate => INPUT_T,
+        }
 }
 
 fn monotonic_us() -> u64 {
@@ -442,6 +456,35 @@ fn monotonic_us() -> u64 {
 }
 
 impl HotkeyState {
+    fn reconcile(&mut self, keys: PhysicalKeys) -> Option<HookAction> {
+        self.keys = keys;
+        self.selection_k_down &= self.keys.is_down(VK_K);
+        self.insert_v_down &= self.keys.is_down(VK_V);
+        self.adaptive_t_down &= self.keys.is_down(VK_T);
+        match self.gesture {
+            GestureState::Active { gesture_id }
+                if !self.keys.command_modifiers() || !self.keys.is_down(VK_SPACE) =>
+            {
+                let reason = if !self.keys.is_down(VK_SPACE) {
+                    EndReason::TriggerReleased
+                } else {
+                    EndReason::RequiredModifierReleased
+                };
+                self.gesture = if self.keys.dictation_chord_released() {
+                    GestureState::Idle
+                } else {
+                    GestureState::Draining { gesture_id }
+                };
+                Some(HookAction::DictationEnded { gesture_id, reason })
+            }
+            GestureState::Draining { .. } if self.keys.dictation_chord_released() => {
+                self.gesture = GestureState::Idle;
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn process_event(&mut self, virtual_key: u16, key_down: bool, key_up: bool) -> HookDecision {
         let state_before = self.gesture.name();
         let was_down = self.keys.is_down(virtual_key);
@@ -455,8 +498,7 @@ impl HotkeyState {
                 if virtual_key == VK_SPACE
                     && key_down
                     && !repeated
-                    && self.keys.control()
-                    && self.keys.alt()
+                    && self.keys.command_modifiers()
                     && !self.keys.shift()
                     && !self.keys.windows()
                 {
@@ -473,8 +515,8 @@ impl HotkeyState {
                 }
                 let trigger_released = virtual_key == VK_SPACE && key_up;
                 let required_modifier_released = key_up
-                    && (is_control(virtual_key) || is_alt(virtual_key))
-                    && (!self.keys.control() || !self.keys.alt());
+                    && (is_command_control(virtual_key) || is_command_alt(virtual_key))
+                    && !self.keys.command_modifiers();
                 if trigger_released || required_modifier_released {
                     let reason = if trigger_released {
                         EndReason::TriggerReleased
@@ -510,21 +552,58 @@ impl HotkeyState {
         }
 
         if virtual_key == VK_K {
-            if key_down && !repeated && !self.selection_k_down {
-                if self.keys.control()
-                    && !self.keys.shift()
-                    && self.keys.alt()
-                    && !self.keys.windows()
-                {
-                    self.selection_k_down = true;
-                    suppress = true;
-                    action = Some(HookAction::SelectionRequested {
-                        intent: TextActionIntent::CorrectLayout,
-                    });
-                }
-            } else if key_up && self.selection_k_down {
-                self.selection_k_down = false;
+            if self.selection_k_down {
                 suppress = true;
+                if key_up {
+                    self.selection_k_down = false;
+                }
+            } else if key_down
+                && !repeated
+                && self.keys.command_modifiers()
+                && !self.keys.shift()
+                && !self.keys.windows()
+            {
+                self.selection_k_down = true;
+                suppress = true;
+                action = Some(HookAction::SelectionRequested {
+                    intent: TextActionIntent::CorrectLayout,
+                });
+            }
+        }
+        if virtual_key == VK_V {
+            if self.insert_v_down {
+                suppress = true;
+                if key_up {
+                    self.insert_v_down = false;
+                }
+            } else if key_down
+                && !repeated
+                && self.keys.command_modifiers()
+                && !self.keys.shift()
+                && !self.keys.windows()
+            {
+                self.insert_v_down = true;
+                suppress = true;
+                action = Some(HookAction::InsertLastRequested);
+            }
+        }
+        if virtual_key == VK_T {
+            if self.adaptive_t_down {
+                suppress = true;
+                if key_up {
+                    self.adaptive_t_down = false;
+                }
+            } else if key_down
+                && !repeated
+                && self.keys.command_modifiers()
+                && !self.keys.shift()
+                && !self.keys.windows()
+            {
+                self.adaptive_t_down = true;
+                suppress = true;
+                action = Some(HookAction::SelectionRequested {
+                    intent: TextActionIntent::Adaptive,
+                });
             }
         }
 
@@ -555,6 +634,35 @@ impl GestureState {
 }
 
 impl PhysicalKeys {
+    fn from_async_except(excluded_key: u16, previous: &Self) -> Self {
+        let mut keys = Self::default();
+        for virtual_key in [
+            VK_CONTROL,
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_MENU,
+            VK_LMENU,
+            VK_RMENU,
+            VK_SHIFT,
+            VK_LSHIFT,
+            VK_RSHIFT,
+            VK_LWIN,
+            VK_RWIN,
+            VK_SPACE,
+            VK_K,
+            VK_V,
+            VK_T,
+        ] {
+            let down = if virtual_key == excluded_key {
+                previous.is_down(virtual_key)
+            } else {
+                (unsafe { GetAsyncKeyState(i32::from(virtual_key)) }) < 0
+            };
+            keys.down[usize::from(virtual_key)] = down;
+        }
+        keys
+    }
+
     fn is_down(&self, virtual_key: u16) -> bool {
         self.down
             .get(usize::from(virtual_key))
@@ -584,6 +692,18 @@ impl PhysicalKeys {
         self.any(&[VK_MENU, VK_LMENU, VK_RMENU])
     }
 
+    fn command_control(&self) -> bool {
+        self.any(&[VK_CONTROL, VK_LCONTROL]) && !self.is_down(VK_RCONTROL)
+    }
+
+    fn command_alt(&self) -> bool {
+        self.any(&[VK_MENU, VK_LMENU]) && !self.is_down(VK_RMENU)
+    }
+
+    fn command_modifiers(&self) -> bool {
+        self.command_control() && self.command_alt()
+    }
+
     fn shift(&self) -> bool {
         self.any(&[VK_SHIFT, VK_LSHIFT, VK_RSHIFT])
     }
@@ -593,7 +713,7 @@ impl PhysicalKeys {
     }
 
     fn dictation_chord_released(&self) -> bool {
-        !self.control() && !self.alt() && !self.is_down(VK_SPACE)
+        !self.command_control() && !self.command_alt() && !self.is_down(VK_SPACE)
     }
 
     fn input_mask(&self) -> u32 {
@@ -619,16 +739,19 @@ impl PhysicalKeys {
         if self.is_down(VK_V) {
             mask |= INPUT_V;
         }
+        if self.is_down(VK_T) {
+            mask |= INPUT_T;
+        }
         mask
     }
 }
 
-fn is_control(virtual_key: u16) -> bool {
-    matches!(virtual_key, VK_CONTROL | VK_LCONTROL | VK_RCONTROL)
+fn is_command_control(virtual_key: u16) -> bool {
+    matches!(virtual_key, VK_CONTROL | VK_LCONTROL)
 }
 
-fn is_alt(virtual_key: u16) -> bool {
-    matches!(virtual_key, VK_MENU | VK_LMENU | VK_RMENU)
+fn is_command_alt(virtual_key: u16) -> bool {
+    matches!(virtual_key, VK_MENU | VK_LMENU)
 }
 
 fn unix_ms() -> u64 {
@@ -645,11 +768,13 @@ fn trace_physical_event(
     key_up: bool,
     decision: HookDecision,
 ) {
+    if !should_trace(input.vkCode as u16, decision) {
+        return;
+    }
     emit_trace(HookTrace {
         sequence_number: TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         timestamp_unix_ms: unix_ms(),
         vk: input.vkCode as u16,
-        scan_code: input.scanCode,
         key_down,
         key_up,
         origin: EventOrigin::Physical,
@@ -679,12 +804,14 @@ fn trace_injected_event(
     key_up: bool,
     origin: EventOrigin,
 ) {
+    if !is_hotkey_key(input.vkCode as u16) {
+        return;
+    }
     let state = HOOK_STATE.with(|state| state.borrow().gesture.name());
     emit_trace(HookTrace {
         sequence_number: TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         timestamp_unix_ms: unix_ms(),
         vk: input.vkCode as u16,
-        scan_code: input.scanCode,
         key_down,
         key_up,
         origin,
@@ -714,15 +841,44 @@ fn emit_trace(trace: HookTrace) {
 }
 
 #[cfg(debug_assertions)]
+fn should_trace(virtual_key: u16, decision: HookDecision) -> bool {
+    is_hotkey_key(virtual_key)
+        || decision.suppress
+        || decision.action.is_some()
+        || decision.state_before != decision.state_after
+}
+
+#[cfg(debug_assertions)]
+const fn is_hotkey_key(virtual_key: u16) -> bool {
+    matches!(
+        virtual_key,
+        VK_CONTROL
+            | VK_LCONTROL
+            | VK_RCONTROL
+            | VK_MENU
+            | VK_LMENU
+            | VK_RMENU
+            | VK_SHIFT
+            | VK_LSHIFT
+            | VK_RSHIFT
+            | VK_LWIN
+            | VK_RWIN
+            | VK_SPACE
+            | VK_K
+            | VK_V
+            | VK_T
+    )
+}
+
+#[cfg(debug_assertions)]
 fn write_trace(trace: HookTrace) {
     eprintln!(
-        "input_trace sequence={} timestamp_ms={} vk={} scan_code={} down={} up={} \
+        "input_trace sequence={} timestamp_ms={} vk={} down={} up={} \
 origin={:?} state_before={:?} state_after={:?} repeated={} suppressed={} \
 gesture_id={:?} action={:?}",
         trace.sequence_number,
         trace.timestamp_unix_ms,
         trace.vk,
-        trace.scan_code,
         trace.key_down,
         trace.key_up,
         trace.origin,
@@ -749,8 +905,8 @@ mod tests {
     use rust_protocol::TextActionIntent;
 
     use super::{
-        EndReason, EventOrigin, GestureState, HookAction, HotkeyState, TEXT_ACTION_HOTKEY_ID,
-        classify_event, registered_hotkey_action,
+        EndReason, EventOrigin, GestureState, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL,
+        INPUT_K, INPUT_T, PhysicalKeys, classify_event, selection_chord_mask,
     };
     use crate::inject::SYNTHETIC_MARKER;
     use windows_sys::Win32::UI::{
@@ -772,16 +928,6 @@ mod tests {
             ) => Some(gesture_id),
             _ => None,
         }
-    }
-
-    #[test]
-    fn registered_text_action_hotkey_routes_to_adaptive_selection() {
-        assert_eq!(
-            registered_hotkey_action(TEXT_ACTION_HOTKEY_ID as usize),
-            Some(HookAction::SelectionRequested {
-                intent: TextActionIntent::Adaptive,
-            })
-        );
     }
 
     #[test]
@@ -873,17 +1019,50 @@ mod tests {
     }
 
     #[test]
-    fn left_and_right_modifiers_are_tracked_independently() {
-        let mut state = HotkeyState::default();
-        event(&mut state, VK_LCONTROL, true);
-        event(&mut state, VK_RCONTROL, true);
-        event(&mut state, VK_LMENU, true);
-        event(&mut state, VK_RMENU, true);
-        event(&mut state, VK_SPACE, true);
+    fn right_alt_or_right_control_never_activates_the_command_chord() {
+        for (control, alt) in [(VK_LCONTROL, VK_RMENU), (VK_RCONTROL, VK_LMENU)] {
+            let mut state = HotkeyState::default();
+            event(&mut state, control, true);
+            event(&mut state, alt, true);
+            let space = event(&mut state, VK_SPACE, true);
+            assert!(!space.suppress);
+            assert!(space.action.is_none());
+        }
+    }
 
-        assert!(event(&mut state, VK_LCONTROL, false).action.is_none());
-        assert!(event(&mut state, VK_LMENU, false).action.is_none());
-        assert!(event(&mut state, VK_RCONTROL, false).action.is_some());
+    #[test]
+    fn command_keys_emit_once_and_are_suppressed_until_release() {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_K, VK_T, VK_V};
+
+        let cases = [
+            (VK_V, HookAction::InsertLastRequested),
+            (
+                VK_T,
+                HookAction::SelectionRequested {
+                    intent: TextActionIntent::Adaptive,
+                },
+            ),
+            (
+                VK_K,
+                HookAction::SelectionRequested {
+                    intent: TextActionIntent::CorrectLayout,
+                },
+            ),
+        ];
+        for (key, expected) in cases {
+            let mut state = HotkeyState::default();
+            event(&mut state, VK_LCONTROL, true);
+            event(&mut state, VK_LMENU, true);
+            let first = event(&mut state, key, true);
+            assert!(first.suppress);
+            assert_eq!(first.action, Some(expected));
+            let repeat = event(&mut state, key, true);
+            assert!(repeat.suppress);
+            assert!(repeat.action.is_none());
+            let release = event(&mut state, key, false);
+            assert!(release.suppress);
+            assert!(release.action.is_none());
+        }
     }
 
     #[test]
@@ -921,6 +1100,26 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_ends_a_gesture_after_events_were_lost() {
+        let mut state = HotkeyState::default();
+        event(&mut state, VK_LCONTROL, true);
+        event(&mut state, VK_LMENU, true);
+        let begin = event(&mut state, VK_SPACE, true);
+        let expected_id = gesture_id(begin.action);
+
+        let recovered = state.reconcile(PhysicalKeys::default());
+        assert_eq!(gesture_id(recovered), expected_id);
+        assert!(matches!(
+            recovered,
+            Some(HookAction::DictationEnded {
+                reason: EndReason::TriggerReleased,
+                ..
+            })
+        ));
+        assert_eq!(state.gesture, GestureState::Idle);
+    }
+
+    #[test]
     fn injected_events_are_classified_without_becoming_physical() {
         assert_eq!(
             classify_event(LLKHF_INJECTED, SYNTHETIC_MARKER),
@@ -931,5 +1130,21 @@ mod tests {
             EventOrigin::ForeignInjected
         );
         assert_eq!(classify_event(0, 0), EventOrigin::Physical);
+    }
+
+    #[test]
+    fn selection_capture_waits_for_the_actual_trigger_key() {
+        assert_eq!(
+            selection_chord_mask(TextActionIntent::CorrectLayout),
+            INPUT_CONTROL | INPUT_ALT | INPUT_K
+        );
+        assert_eq!(
+            selection_chord_mask(TextActionIntent::Adaptive),
+            INPUT_CONTROL | INPUT_ALT | INPUT_T
+        );
+        assert_eq!(
+            selection_chord_mask(TextActionIntent::Translate),
+            INPUT_CONTROL | INPUT_ALT | INPUT_T
+        );
     }
 }

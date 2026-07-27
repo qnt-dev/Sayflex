@@ -7,6 +7,7 @@ mod insertion;
 mod target;
 
 use std::{
+    ffi::c_void,
     io::{self, BufRead, BufReader, BufWriter, Write},
     ptr,
     sync::mpsc,
@@ -17,36 +18,39 @@ use rust_protocol::{InputHostCommand, InputHostEvent, PROTOCOL_VERSION};
 use windows_sys::Win32::{
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
     UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, MSG, PostThreadMessageW, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_HOTKEY, WM_QUIT,
+        DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_QUIT,
     },
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    rust_platform_windows::configure_safe_dll_search()?;
     let (events, event_receiver) = mpsc::channel::<InputHostEvent>();
+    let insertion = insertion::InsertionService::start(events.clone())?;
     hotkeys::initialize(events.clone())?;
     thread::Builder::new()
         .name("input-host-json-output".to_owned())
         .spawn(move || write_events(event_receiver))?;
 
+    // PostThreadMessage requires the destination thread to already own a message
+    // queue. Force its creation before any worker capable of requesting shutdown
+    // is started.
+    let mut queue_probe = MSG::default();
+    unsafe {
+        let _ = PeekMessageW(&mut queue_probe, ptr::null_mut(), 0, 0, PM_NOREMOVE);
+    }
     let hook_thread_id = unsafe { GetCurrentThreadId() };
-    let command_events = events.clone();
-    thread::Builder::new()
-        .name("input-host-json-input".to_owned())
-        .spawn(move || read_commands(hook_thread_id, command_events))?;
     let module = unsafe { GetModuleHandleW(ptr::null()) };
     let hook =
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hotkeys::keyboard_hook), module, 0) };
     if hook.is_null() {
         return Err(io::Error::last_os_error().into());
     }
-    for message in hotkeys::register_command_hotkeys() {
-        let _ = events.send(InputHostEvent::Failed {
-            session_id: None,
-            code: "register_command_hotkeys".to_owned(),
-            message,
-        });
-    }
+    let _hook_guard = HookGuard(hook);
+    let command_events = events.clone();
+    thread::Builder::new()
+        .name("input-host-json-input".to_owned())
+        .spawn(move || read_commands(hook_thread_id, command_events, insertion))?;
     let _ = events.send(InputHostEvent::Ready {
         protocol_version: PROTOCOL_VERSION,
     });
@@ -54,22 +58,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut message = MSG::default();
     loop {
         let result = unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) };
-        if result <= 0 {
+        if result == 0 {
             break;
         }
-        if message.message == WM_HOTKEY && hotkeys::handle_registered_hotkey(message.wParam) {
-            continue;
+        if result == -1 {
+            return Err(io::Error::last_os_error().into());
         }
         unsafe {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
     }
-    hotkeys::unregister_command_hotkeys();
-    unsafe {
-        let _ = UnhookWindowsHookEx(hook);
-    }
     Ok(())
+}
+
+struct HookGuard(*mut c_void);
+
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.0);
+        }
+    }
 }
 
 fn write_events(receiver: mpsc::Receiver<InputHostEvent>) {
@@ -85,18 +95,11 @@ fn write_events(receiver: mpsc::Receiver<InputHostEvent>) {
     }
 }
 
-fn read_commands(hook_thread_id: u32, events: mpsc::Sender<InputHostEvent>) {
-    let insertion = match insertion::InsertionService::start(events.clone()) {
-        Ok(service) => service,
-        Err(error) => {
-            let _ = events.send(InputHostEvent::Failed {
-                session_id: None,
-                code: "insertion_worker".to_owned(),
-                message: error.to_string(),
-            });
-            return;
-        }
-    };
+fn read_commands(
+    hook_thread_id: u32,
+    events: mpsc::Sender<InputHostEvent>,
+    insertion: insertion::InsertionService,
+) {
     let stdin = io::stdin();
     for line in BufReader::new(stdin.lock()).lines() {
         let Ok(line) = line else {
@@ -138,14 +141,18 @@ fn read_commands(hook_thread_id: u32, events: mpsc::Sender<InputHostEvent>) {
             InputHostCommand::CancelSelection { .. } => {}
             InputHostCommand::Shutdown => {
                 insertion.shutdown();
-                unsafe {
-                    let _ = PostThreadMessageW(hook_thread_id, WM_QUIT, 0, 0);
-                }
                 break;
             }
         }
     }
+    insertion.shutdown();
     unsafe {
-        let _ = PostThreadMessageW(hook_thread_id, WM_QUIT, 0, 0);
+        if PostThreadMessageW(hook_thread_id, WM_QUIT, 0, 0) == 0 {
+            let _ = events.send(InputHostEvent::Failed {
+                session_id: None,
+                code: "input_host_shutdown".to_owned(),
+                message: io::Error::last_os_error().to_string(),
+            });
+        }
     }
 }

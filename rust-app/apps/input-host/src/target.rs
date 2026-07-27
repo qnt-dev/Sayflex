@@ -9,8 +9,8 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::GetKeyboardLayout,
         WindowsAndMessaging::{
-            GA_ROOT, GUITHREADINFO, GetAncestor, GetForegroundWindow, GetGUIThreadInfo,
-            GetWindowThreadProcessId,
+            ES_PASSWORD, GA_ROOT, GUITHREADINFO, GWL_STYLE, GetAncestor, GetClassNameW,
+            GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW, GetWindowThreadProcessId,
         },
     },
 };
@@ -37,6 +37,42 @@ pub fn capture_target() -> TargetSnapshot {
         thread_id,
         keyboard_layout: layout as usize as u64,
     }
+}
+
+pub fn capture_text_target() -> Option<TargetSnapshot> {
+    let target = capture_target();
+    if target.window_handle == 0 || target.process_id == 0 || focused_control_is_password(target) {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn focused_control_is_password(target: TargetSnapshot) -> bool {
+    let mut information = GUITHREADINFO {
+        cbSize: mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetGUIThreadInfo(target.thread_id, &mut information) } == 0
+        || information.hwndFocus.is_null()
+    {
+        return false;
+    }
+    let mut class_name = [0_u16; 128];
+    let copied = unsafe {
+        GetClassNameW(
+            information.hwndFocus,
+            class_name.as_mut_ptr(),
+            class_name.len() as i32,
+        )
+    };
+    if copied <= 0 {
+        return false;
+    }
+    let class_name = String::from_utf16_lossy(&class_name[..copied as usize]).to_ascii_lowercase();
+    let is_edit = class_name == "edit" || class_name.contains("richedit");
+    let style = unsafe { GetWindowLongPtrW(information.hwndFocus, GWL_STYLE) };
+    is_edit && style & ES_PASSWORD as isize != 0
 }
 
 pub fn prefer_direct_unicode(target: TargetSnapshot) -> bool {

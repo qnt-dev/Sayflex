@@ -6,7 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rust-protocol = { path = "../../crates/protocol" }
+rust-platform-windows = { version = "0.5.1", path = "../../crates/platform-windows" }
+rust-protocol = { version = "0.5.1", path = "../../crates/protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
 windows-sys.workspace = true

@@ -1,19 +1,25 @@
 use std::{
+    ffi::c_void,
     mem, ptr, thread,
     time::{Duration, Instant},
 };
 
 use thiserror::Error;
-use windows_sys::Win32::{
-    Foundation::{GlobalFree, HANDLE},
-    System::{
-        DataExchange::{
-            CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-            GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
+use windows_sys::{
+    Win32::{
+        Foundation::GlobalFree,
+        System::{
+            DataExchange::{
+                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
+                OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+            },
+            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
+            Ole::{
+                CF_UNICODETEXT, OleGetClipboard, OleInitialize, OleSetClipboard, OleUninitialize,
+            },
         },
-        Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
-        Ole::{CF_UNICODETEXT, OleDuplicateData},
     },
+    core::IUnknown_Vtbl,
 };
 
 #[derive(Debug, Error)]
@@ -32,44 +38,141 @@ pub enum ClipboardError {
     TargetChanged,
     #[error("paste injection failed")]
     Paste,
+    #[error("OLE clipboard operation failed with HRESULT {0:#010x}")]
+    Ole(i32),
+}
+
+pub struct ClipboardApartment {
+    initialized: bool,
+}
+
+impl ClipboardApartment {
+    pub fn initialize() -> Result<Self, ClipboardError> {
+        let result = unsafe { OleInitialize(ptr::null()) };
+        if result < 0 {
+            return Err(ClipboardError::Ole(result));
+        }
+        Ok(Self { initialized: true })
+    }
+}
+
+impl Drop for ClipboardApartment {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe { OleUninitialize() };
+        }
+    }
 }
 
 pub fn set_text(text: &str) -> Result<(), ClipboardError> {
-    let utf16 = text.encode_utf16().chain([0]).collect::<Vec<_>>();
-    let bytes = utf16.len() * mem::size_of::<u16>();
-    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
-    if handle.is_null() {
-        return Err(ClipboardError::Allocation);
+    set_text_with_policy(text, ClipboardPolicy::Normal)
+}
+
+fn set_private_text(text: &str) -> Result<(), ClipboardError> {
+    set_text_with_policy(text, ClipboardPolicy::EphemeralPrivate)
+}
+
+#[derive(Clone, Copy)]
+enum ClipboardPolicy {
+    Normal,
+    EphemeralPrivate,
+}
+
+fn set_text_with_policy(text: &str, policy: ClipboardPolicy) -> Result<(), ClipboardError> {
+    let mut payloads = vec![(
+        u32::from(CF_UNICODETEXT),
+        GlobalAllocation::from_utf16(text)?,
+    )];
+    if matches!(policy, ClipboardPolicy::EphemeralPrivate) {
+        payloads.extend(private_format_payloads()?);
     }
 
-    let pointer = unsafe { GlobalLock(handle) }.cast::<u16>();
-    if pointer.is_null() {
-        unsafe {
-            GlobalFree(handle);
-        }
-        return Err(ClipboardError::Allocation);
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(utf16.as_ptr(), pointer, utf16.len());
-        let _ = GlobalUnlock(handle);
-    }
-
-    if let Err(error) = with_open_clipboard(|| {
+    with_open_clipboard(|| {
         if unsafe { EmptyClipboard() } == 0 {
             return Err(ClipboardError::Busy);
         }
-        let accepted = unsafe { SetClipboardData(CF_UNICODETEXT.into(), handle) };
-        if accepted.is_null() {
-            return Err(ClipboardError::Allocation);
+        for (format, payload) in &mut payloads {
+            let accepted = unsafe { SetClipboardData(*format, payload.handle) };
+            if accepted.is_null() {
+                // Remove any formats already transferred during this transaction.
+                // EmptyClipboard owns and releases those handles now.
+                unsafe {
+                    let _ = EmptyClipboard();
+                }
+                return Err(ClipboardError::Allocation);
+            }
+            payload.release_to_clipboard();
         }
         Ok(())
-    }) {
-        unsafe {
-            GlobalFree(handle);
-        }
-        return Err(error);
+    })
+}
+
+fn private_format_payloads() -> Result<Vec<(u32, GlobalAllocation)>, ClipboardError> {
+    let definitions = [
+        ("ExcludeClipboardContentFromMonitorProcessing", 1_u32),
+        ("CanIncludeInClipboardHistory", 0_u32),
+        ("CanUploadToCloudClipboard", 0_u32),
+    ];
+    definitions
+        .into_iter()
+        .map(|(name, value)| {
+            let wide = name.encode_utf16().chain([0]).collect::<Vec<_>>();
+            let format = unsafe { RegisterClipboardFormatW(wide.as_ptr()) };
+            if format == 0 {
+                return Err(ClipboardError::Allocation);
+            }
+            Ok((format, GlobalAllocation::from_u32(value)?))
+        })
+        .collect()
+}
+
+struct GlobalAllocation {
+    handle: *mut c_void,
+}
+
+impl GlobalAllocation {
+    fn from_utf16(text: &str) -> Result<Self, ClipboardError> {
+        let utf16 = text.encode_utf16().chain([0]).collect::<Vec<_>>();
+        Self::from_bytes(
+            utf16.as_ptr().cast::<u8>(),
+            utf16.len() * mem::size_of::<u16>(),
+        )
     }
-    Ok(())
+
+    fn from_u32(value: u32) -> Result<Self, ClipboardError> {
+        Self::from_bytes((&raw const value).cast::<u8>(), mem::size_of::<u32>())
+    }
+
+    fn from_bytes(source: *const u8, bytes: usize) -> Result<Self, ClipboardError> {
+        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
+        if handle.is_null() {
+            return Err(ClipboardError::Allocation);
+        }
+        let allocation = Self { handle };
+        let destination = unsafe { GlobalLock(allocation.handle) }.cast::<u8>();
+        if destination.is_null() {
+            return Err(ClipboardError::Allocation);
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(source, destination, bytes);
+            let _ = GlobalUnlock(allocation.handle);
+        }
+        Ok(allocation)
+    }
+
+    fn release_to_clipboard(&mut self) {
+        self.handle = ptr::null_mut();
+    }
+}
+
+impl Drop for GlobalAllocation {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                let _ = GlobalFree(self.handle);
+            }
+        }
+    }
 }
 
 pub fn get_text() -> Result<String, ClipboardError> {
@@ -96,9 +199,15 @@ pub fn get_text() -> Result<String, ClipboardError> {
 pub fn capture_selection(
     send_copy: impl FnOnce() -> Result<(), ClipboardError>,
 ) -> Result<String, ClipboardError> {
+    let _apartment = ClipboardApartment::initialize()?;
     let mut snapshot = ClipboardSnapshot::capture()?;
     let before = unsafe { GetClipboardSequenceNumber() };
-    send_copy()?;
+    if let Err(error) = send_copy() {
+        if unsafe { GetClipboardSequenceNumber() } != before {
+            snapshot.restore()?;
+        }
+        return Err(error);
+    }
     let deadline = Instant::now() + Duration::from_millis(900);
     while unsafe { GetClipboardSequenceNumber() } == before {
         if Instant::now() >= deadline {
@@ -107,11 +216,11 @@ pub fn capture_selection(
         thread::sleep(Duration::from_millis(12));
     }
     let copied_sequence = unsafe { GetClipboardSequenceNumber() };
-    let text = get_text()?;
+    let text = get_text();
     if unsafe { GetClipboardSequenceNumber() } == copied_sequence {
         snapshot.restore()?;
     }
-    Ok(text)
+    text
 }
 
 pub fn dispatch_paste(
@@ -129,7 +238,7 @@ pub fn dispatch_paste(
     } else {
         text.to_owned()
     };
-    set_text(&complete)?;
+    set_private_text(&complete)?;
     let replacement_sequence = unsafe { GetClipboardSequenceNumber() };
     if !target_still_focused() {
         if unsafe { GetClipboardSequenceNumber() } == replacement_sequence {
@@ -137,7 +246,12 @@ pub fn dispatch_paste(
         }
         return Err(ClipboardError::TargetChanged);
     }
-    send_paste()?;
+    if let Err(error) = send_paste() {
+        if unsafe { GetClipboardSequenceNumber() } == replacement_sequence {
+            snapshot.restore()?;
+        }
+        return Err(error);
+    }
     Ok(PendingClipboardRestore {
         snapshot,
         replacement_sequence,
@@ -150,8 +264,7 @@ pub struct PendingClipboardRestore {
 }
 
 impl PendingClipboardRestore {
-    pub fn restore_after(mut self, delay: Duration) -> Result<(), ClipboardError> {
-        thread::sleep(delay);
+    pub fn restore(mut self) -> Result<(), ClipboardError> {
         if unsafe { GetClipboardSequenceNumber() } == self.replacement_sequence {
             self.snapshot.restore()?;
         }
@@ -160,59 +273,38 @@ impl PendingClipboardRestore {
 }
 
 struct ClipboardSnapshot {
-    formats: Vec<(u32, HANDLE)>,
+    data_object: *mut c_void,
 }
 
 impl ClipboardSnapshot {
     fn capture() -> Result<Self, ClipboardError> {
-        with_open_clipboard(|| {
-            let mut formats = Vec::new();
-            let mut format = 0_u32;
-            loop {
-                format = unsafe { EnumClipboardFormats(format) };
-                if format == 0 {
-                    break;
-                }
-                let source = unsafe { GetClipboardData(format) };
-                if source.is_null() {
-                    continue;
-                }
-                let duplicate = unsafe { OleDuplicateData(source, format as u16, 0) };
-                if !duplicate.is_null() {
-                    formats.push((format, duplicate));
-                }
-            }
-            Ok(Self { formats })
-        })
+        let mut data_object = ptr::null_mut();
+        let result = unsafe { OleGetClipboard(&mut data_object) };
+        if result < 0 {
+            return Err(ClipboardError::Ole(result));
+        }
+        Ok(Self { data_object })
     }
 
     fn restore(&mut self) -> Result<(), ClipboardError> {
-        with_open_clipboard(|| {
-            if unsafe { EmptyClipboard() } == 0 {
-                return Err(ClipboardError::Busy);
-            }
-            for (format, handle) in &mut self.formats {
-                if handle.is_null() {
-                    continue;
-                }
-                if !unsafe { SetClipboardData(*format, *handle) }.is_null() {
-                    *handle = ptr::null_mut();
-                }
-            }
-            Ok(())
-        })
+        let result = unsafe { OleSetClipboard(self.data_object) };
+        if result < 0 {
+            return Err(ClipboardError::Ole(result));
+        }
+        Ok(())
     }
 }
 
 impl Drop for ClipboardSnapshot {
     fn drop(&mut self) {
-        for (_, handle) in &mut self.formats {
-            if !handle.is_null() {
-                unsafe {
-                    GlobalFree(*handle);
-                }
-                *handle = ptr::null_mut();
+        if !self.data_object.is_null() {
+            unsafe {
+                // OleGetClipboard returns an AddRef'd IDataObject interface.
+                // Release exactly that reference; OleSetClipboard keeps its own.
+                let vtable = *(self.data_object.cast::<*const IUnknown_Vtbl>());
+                ((*vtable).Release)(self.data_object);
             }
+            self.data_object = ptr::null_mut();
         }
     }
 }

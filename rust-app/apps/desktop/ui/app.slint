@@ -1,4 +1,4 @@
-import { ListView, TextEdit } from "std-widgets.slint";
+import { AboutSlint, ListView, TextEdit } from "std-widgets.slint";
 
 export struct ModelRow {
     title: string,
@@ -229,6 +229,7 @@ export component SettingsWindow inherits Window {
     in-out property <string> runtime-status: "Starting workers…";
     in-out property <string> indicator-status: "Idle";
     in-out property <string> output-mode-label: "Output: original language";
+    in-out property <string> release-optimization-label: "Release optimization: fastest";
     in property <[ModelRow]> model-rows;
     in property <[ModelRow]> translation-model-rows;
     in property <[HistoryRow]> history-rows;
@@ -245,6 +246,7 @@ export component SettingsWindow inherits Window {
     callback refresh-history();
     callback copy-history(int);
     callback toggle-output-mode();
+    callback toggle-release-optimization();
     callback toggle-translation-enabled();
     callback toggle-layout-enabled();
     callback cycle-text-action-mode();
@@ -695,6 +697,46 @@ export component SettingsWindow inherits Window {
                         }
                     }
                 }
+
+                Rectangle {
+                    height: 68px;
+                    vertical-stretch: 0;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    background: Theme.panel;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 10px;
+                        spacing: 12px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: "Release latency";
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 650;
+                            }
+                            Text {
+                                text: "Prepare results during natural pauses. Efficient mode uses less GPU and battery.";
+                                color: Theme.text-faint;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        ActionButton {
+                            width: 210px;
+                            height: 34px;
+                            label: root.release-optimization-label;
+                            accent: root.release-optimization-label == "Release optimization: fastest";
+                            clicked => { root.toggle-release-optimization(); }
+                        }
+                    }
+                }
             }
 
             if root.active-page == 2 || root.active-page == 3 : VerticalLayout {
@@ -1025,12 +1067,11 @@ export component SettingsWindow inherits Window {
 
                 Rectangle { vertical-stretch: 1; }
 
-                Text {
-                    height: 20px;
+                AboutSlint {
+                    width: 180px;
+                    height: 76px;
                     vertical-stretch: 0;
-                    text: "Rust + Slint  ·  Windows local build";
-                    color: Theme.text-faint;
-                    font-size: 10px;
+                    horizontal-stretch: 0;
                 }
             }
         }

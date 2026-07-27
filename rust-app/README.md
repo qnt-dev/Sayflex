@@ -6,7 +6,7 @@ build dependency of this workspace.
 
 ## Process architecture
 
-The release contains four failure-isolated executables:
+The release contains four failure-isolated process roles and five executables:
 
 - `rust-desktop.exe` — Slint settings, tray, history, model selection and
   recording/selection overlays.
@@ -20,6 +20,10 @@ The release contains four failure-isolated executables:
 Every recording has a UUID that is carried through hotkey, audio, inference,
 history, insertion and recovery. No operation reads a mutable global “last
 text” value while a session is completing.
+
+The concrete privacy and trust boundaries, including clipboard behavior,
+history retention, model verification, elevated applications, and the
+same-user threat model, are documented in [`SECURITY.md`](SECURITY.md).
 
 ## Windows hotkeys
 
@@ -67,13 +71,18 @@ CUDA is the preferred backend on the current RTX 3080 Ti machine. A separately
 built CPU worker is shipped as the fallback for systems without the required
 CUDA runtime.
 
+Release optimization defaults to **fastest** and prepares correctness-guarded
+transcripts during natural pauses. Users who prefer lower sustained GPU and
+battery use can select **efficient**, which limits a recording to two preview
+passes without unloading the already warmed model.
+
 ## Build, test and package
 
 ```powershell
 cd C:\PRDJKT\keyboop\rust-app
 cargo test --workspace
 .\scripts\publish.ps1
-.\scripts\build-installer.ps1 -Version 0.5.0 -SkipPublish
+.\scripts\build-installer.ps1 -Version 0.5.1 -SkipPublish
 ```
 
 The measured warm-path design and benchmark gate are documented in

@@ -134,6 +134,7 @@ impl WorkerState {
 }
 
 fn main() -> Result<()> {
+    rust_platform_windows::configure_safe_dll_search()?;
     let mut state = WorkerState::new()?;
     let stdin = io::stdin();
     let mut writer = EventWriter::new();

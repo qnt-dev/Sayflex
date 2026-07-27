@@ -45,12 +45,20 @@ pub fn insert_text(
     } else {
         text.to_owned()
     };
-    let mut inputs = Vec::with_capacity(complete.encode_utf16().count() * 2);
-    for unit in complete.encode_utf16() {
-        inputs.push(unicode_input(unit, false));
-        inputs.push(unicode_input(unit, true));
+    let units = complete.encode_utf16().collect::<Vec<_>>();
+    for chunk in units.chunks(128) {
+        ensure_injection_safe()?;
+        if !is_foreground(target) {
+            return Err(InjectionError::TargetChanged);
+        }
+        let mut inputs = Vec::with_capacity(chunk.len() * 2);
+        for unit in chunk {
+            inputs.push(unicode_input(*unit, false));
+            inputs.push(unicode_input(*unit, true));
+        }
+        send(&inputs)?;
     }
-    send(&inputs)
+    Ok(())
 }
 
 pub fn replace_selection(target: TargetSnapshot, text: &str) -> Result<(), InjectionError> {

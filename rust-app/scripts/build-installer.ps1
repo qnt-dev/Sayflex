@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.5.0',
+    [string]$Version = '0.5.1',
     [switch]$SkipPublish
 )
 
@@ -31,5 +31,11 @@ if (-not $compiler) {
 if ($LASTEXITCODE -ne 0) {
     throw 'Inno Setup compilation failed.'
 }
+
+$installer = Join-Path $rustRoot "dist\RustVoice-$Version-win-x64-setup.exe"
+$checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
+Set-Content -LiteralPath "$installer.sha256" -Encoding ascii -NoNewline -Value (
+    "$checksum  $([System.IO.Path]::GetFileName($installer))"
+)
 
 Write-Host "Rust installer created in $(Join-Path $rustRoot 'dist')"

@@ -3,7 +3,7 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -410,6 +410,7 @@ pub enum SpeechWorkerCommand {
         selected_model_id: String,
         output_mode: SpeechOutputMode,
         history_enabled: bool,
+        fast_release_previews: bool,
     },
     Begin {
         session_id: SessionId,
@@ -429,6 +430,9 @@ pub enum SpeechWorkerCommand {
     },
     SetOutputMode {
         output_mode: SpeechOutputMode,
+    },
+    SetFastReleasePreviews {
+        enabled: bool,
     },
     GetHistory {
         limit: usize,

@@ -41,6 +41,21 @@ try {
     Copy-Item -LiteralPath (
         Join-Path $cpuTarget "$profile\rust-translation-worker.exe"
     ) -Destination $output
+    Copy-Item -LiteralPath (
+        Join-Path $rustRoot '..\LICENSE'
+    ) -Destination (
+        Join-Path $output 'LICENSE.txt'
+    )
+    Copy-Item -LiteralPath (
+        Join-Path $rustRoot 'THIRD_PARTY_NOTICES.md'
+    ) -Destination (
+        Join-Path $output 'THIRD_PARTY_NOTICES.md'
+    )
+    Copy-Item -LiteralPath (
+        Join-Path $rustRoot 'SECURITY.md'
+    ) -Destination (
+        Join-Path $output 'SECURITY.md'
+    )
 
     cargo build --target-dir $cudaTarget --profile $profile -p rust-speech-worker --features cuda
     if ($LASTEXITCODE -ne 0) {

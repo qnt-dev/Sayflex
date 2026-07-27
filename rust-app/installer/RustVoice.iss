@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.5.0"
+  #define AppVersion "0.5.1"
 #endif
 
 #define AppName "Rust Voice"
@@ -30,7 +30,7 @@ SetupLogging=yes
 SetupIconFile=..\..\resources\icons\keyboop.ico
 
 [Tasks]
-Name: "autostart"; Description: "Start Rust Voice with Windows"; Flags: checkedonce
+Name: "autostart"; Description: "Start Rust Voice with Windows"; Flags: unchecked
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
