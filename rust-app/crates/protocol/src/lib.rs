@@ -3,7 +3,7 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -255,6 +255,11 @@ pub enum InputHostEvent {
         target: TargetSnapshot,
     },
     InsertLastRequested {
+        target: TargetSnapshot,
+    },
+    SelectionCaptureStarted {
+        request_id: RequestId,
+        intent: TextActionIntent,
         target: TargetSnapshot,
     },
     SelectionCaptured {
@@ -589,6 +594,17 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<InputHostEvent>(&json).unwrap(),
             selection
+        );
+
+        let capture_started = InputHostEvent::SelectionCaptureStarted {
+            request_id,
+            intent: TextActionIntent::Translate,
+            target: TargetSnapshot::default(),
+        };
+        let json = serde_json::to_string(&capture_started).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InputHostEvent>(&json).unwrap(),
+            capture_started
         );
     }
 }

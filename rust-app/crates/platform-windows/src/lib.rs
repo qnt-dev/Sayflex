@@ -9,7 +9,7 @@ mod single_instance;
 pub use job::WorkerJob;
 #[cfg(windows)]
 pub use overlay::{
-    configure_action_window, configure_overlay_window,
+    configure_action_window, configure_overlay_window, configure_standard_window,
     restore_target_if_our_action_window_activated,
 };
 #[cfg(windows)]
@@ -41,6 +41,11 @@ pub fn configure_overlay_window(
 
 #[cfg(not(windows))]
 pub fn configure_action_window(_window_handle: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn configure_standard_window(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
 

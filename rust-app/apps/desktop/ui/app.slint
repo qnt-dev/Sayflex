@@ -92,6 +92,63 @@ component ActionButton inherits Rectangle {
     }
 }
 
+component VisualizerChoice inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 50px;
+    horizontal-stretch: 1;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.selected ? Theme.orange : Theme.line-soft;
+    background: touch.pressed
+        ? #242026
+        : touch.has-hover
+            ? Theme.panel-raised
+            : root.selected
+                ? Theme.orange-soft
+                : Theme.ink;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+
+        Rectangle {
+            width: 4px;
+            height: 24px;
+            border-radius: 2px;
+            background: root.selected ? Theme.orange : Theme.line;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            Text {
+                text: root.label;
+                color: root.selected ? Theme.orange : Theme.text;
+                font-size: 12px;
+                font-weight: 650;
+            }
+            Text {
+                text: root.detail;
+                color: Theme.text-faint;
+                font-size: 9px;
+                overflow: elide;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 component SectionTitle inherits Text {
     color: Theme.text;
     font-size: 16px;
@@ -231,7 +288,7 @@ export component SettingsWindow inherits Window {
     in-out property <string> indicator-status: "Idle";
     in-out property <string> output-mode-label: "Output: original language";
     in-out property <string> release-optimization-label: "Release optimization: fastest";
-    in-out property <string> visualizer-label: "Visualizer: Voice Orb";
+    in-out property <int> selected-visualizer: 0;
     in property <[ModelRow]> model-rows;
     in property <[ModelRow]> translation-model-rows;
     in property <[HistoryRow]> history-rows;
@@ -249,7 +306,7 @@ export component SettingsWindow inherits Window {
     callback copy-history(int);
     callback toggle-output-mode();
     callback toggle-release-optimization();
-    callback cycle-visualizer();
+    callback select-visualizer(int);
     callback toggle-translation-enabled();
     callback toggle-layout-enabled();
     callback cycle-text-action-mode();
@@ -593,15 +650,6 @@ export component SettingsWindow inherits Window {
                     }
                 }
 
-                SettingRow {
-                    height: 64px;
-                    vertical-stretch: 0;
-                    title: "Recording visualizer";
-                    detail: "Choose Voice Orb, Symmetric Spectrum or Fluid Ribbon.";
-                    action: root.visualizer-label;
-                    active: true;
-                    clicked => { root.cycle-visualizer(); }
-                }
             }
         }
 
@@ -614,6 +662,58 @@ export component SettingsWindow inherits Window {
             if root.active-page == 1 : VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 10px;
+
+                Rectangle {
+                    height: 96px;
+                    vertical-stretch: 0;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    background: Theme.panel;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            height: 18px;
+                            vertical-stretch: 0;
+                            Eyebrow { text: "RECORDING VISUALIZER"; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text {
+                                text: "Applied on the next recording";
+                                color: Theme.text-faint;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            height: 50px;
+                            vertical-stretch: 0;
+                            spacing: 8px;
+
+                            VisualizerChoice {
+                                label: "Voice Orb";
+                                detail: "Reactive bars + pulse";
+                                selected: root.selected-visualizer == 0;
+                                clicked => { root.select-visualizer(0); }
+                            }
+                            VisualizerChoice {
+                                label: "Spectrum";
+                                detail: "Balanced mirrored wave";
+                                selected: root.selected-visualizer == 1;
+                                clicked => { root.select-visualizer(1); }
+                            }
+                            VisualizerChoice {
+                                label: "Fluid Ribbon";
+                                detail: "Continuous flowing signal";
+                                selected: root.selected-visualizer == 2;
+                                clicked => { root.select-visualizer(2); }
+                            }
+                        }
+                    }
+                }
 
                 HorizontalLayout {
                     height: 30px;
@@ -1014,7 +1114,7 @@ export component SettingsWindow inherits Window {
 
                 Eyebrow {
                     height: 16px;
-                    text: "RUST VOICE  ·  0.5.2";
+                    text: "RUST VOICE  ·  0.5.3";
                 }
                 Text {
                     height: 34px;

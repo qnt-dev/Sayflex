@@ -210,7 +210,7 @@ enum TranslationDelivery {
     Copy,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum VisualizerStyle {
     #[default]
@@ -220,11 +220,12 @@ enum VisualizerStyle {
 }
 
 impl VisualizerStyle {
-    const fn next(self) -> Self {
-        match self {
-            Self::VoiceOrb => Self::SymmetricSpectrum,
-            Self::SymmetricSpectrum => Self::FluidRibbon,
-            Self::FluidRibbon => Self::VoiceOrb,
+    const fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::VoiceOrb),
+            1 => Some(Self::SymmetricSpectrum),
+            2 => Some(Self::FluidRibbon),
+            _ => None,
         }
     }
 
@@ -235,14 +236,6 @@ impl VisualizerStyle {
             Self::FluidRibbon => 2,
         }
     }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::VoiceOrb => "Visualizer: Voice Orb",
-            Self::SymmetricSpectrum => "Visualizer: Symmetric Spectrum",
-            Self::FluidRibbon => "Visualizer: Fluid Ribbon",
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -250,6 +243,12 @@ struct PendingTextAction {
     request_id: RequestId,
     target: TargetSnapshot,
     text: String,
+}
+
+#[derive(Clone, Copy)]
+struct PendingSelectionCapture {
+    intent: TextActionIntent,
+    target: TargetSnapshot,
 }
 
 #[derive(Clone, Copy)]
@@ -460,6 +459,7 @@ struct AppState {
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
     pending_text_action: Option<PendingTextAction>,
+    pending_selection_captures: HashMap<RequestId, PendingSelectionCapture>,
     pending_translations: HashMap<RequestId, PendingTranslation>,
     queued_selection_translation: Option<SelectionTranslationRequest>,
     preview_translation: Option<PreviewTranslation>,
@@ -499,6 +499,7 @@ impl AppState {
             text_action_mode: saved_settings.text_action_mode,
             translation_delivery: saved_settings.translation_delivery,
             pending_text_action: None,
+            pending_selection_captures: HashMap::new(),
             pending_translations: HashMap::new(),
             queued_selection_translation: None,
             preview_translation: None,
@@ -682,6 +683,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if !env::args().any(|argument| argument == "--background") {
         settings.show()?;
+        configure_standard_app_window(settings.window(), "Settings");
     }
     tray.show()?;
     slint::run_event_loop()?;
@@ -1383,12 +1385,38 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 }
             }
         }
+        InputHostEvent::SelectionCaptureStarted {
+            request_id,
+            intent,
+            target,
+        } => {
+            state
+                .borrow_mut()
+                .pending_selection_captures
+                .insert(request_id, PendingSelectionCapture { intent, target });
+            if intent == TextActionIntent::Translate {
+                show_selection_translation_preview(
+                    request_id,
+                    target,
+                    "Selected text",
+                    "Reading the selection…",
+                    "Preparing locally",
+                    true,
+                    translation_preview,
+                );
+            }
+            set_indicator_status(settings, "Reading selected text…");
+        }
         InputHostEvent::SelectionCaptured {
             request_id,
             intent,
             target,
             text,
         } => {
+            state
+                .borrow_mut()
+                .pending_selection_captures
+                .remove(&request_id);
             handle_text_action(
                 request_id,
                 intent,
@@ -1402,7 +1430,31 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 workers,
             );
         }
-        InputHostEvent::SelectionCaptureFailed { message, .. } => {
+        InputHostEvent::SelectionCaptureFailed {
+            request_id,
+            message,
+        } => {
+            let pending = state
+                .borrow_mut()
+                .pending_selection_captures
+                .remove(&request_id);
+            if let Some(PendingSelectionCapture {
+                intent: TextActionIntent::Translate,
+                target,
+            }) = pending
+            {
+                show_selection_translation_preview(
+                    request_id,
+                    target,
+                    "Selected text",
+                    &format!(
+                        "Could not read the selection. Keep the source app focused and try again.\n\n{message}"
+                    ),
+                    "Selection unavailable",
+                    false,
+                    translation_preview,
+                );
+            }
             set_indicator_status(settings, &format!("Selection: {message}"));
         }
         InputHostEvent::InsertionDispatched {
@@ -2339,6 +2391,7 @@ fn wire_settings(
         settings.on_open_translator(move || {
             if let Some(translator) = translator.upgrade() {
                 let _ = translator.show();
+                configure_standard_app_window(translator.window(), "Translator");
                 translator.window().request_redraw();
             }
         });
@@ -2411,12 +2464,11 @@ fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let indicator_animation = Rc::clone(indicator_animation);
-        settings.on_cycle_visualizer(move || {
-            let style = {
-                let mut state = state.borrow_mut();
-                state.visualizer_style = state.visualizer_style.next();
-                state.visualizer_style
+        settings.on_select_visualizer(move |index| {
+            let Some(style) = VisualizerStyle::from_index(index) else {
+                return;
             };
+            state.borrow_mut().visualizer_style = style;
             indicator_animation.borrow_mut().set_style(style);
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
@@ -2660,6 +2712,7 @@ fn wire_tray(
         tray.on_open_settings(move || {
             if let Some(settings) = settings.upgrade() {
                 let _ = settings.show();
+                configure_standard_app_window(settings.window(), "Settings");
                 settings.window().request_redraw();
             }
         });
@@ -2669,6 +2722,7 @@ fn wire_tray(
         tray.on_open_translator(move || {
             if let Some(translator) = translator.upgrade() {
                 let _ = translator.show();
+                configure_standard_app_window(translator.window(), "Translator");
                 translator.window().request_redraw();
             }
         });
@@ -3074,7 +3128,7 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
         }
         .into(),
     );
-    settings.set_visualizer_label(state.visualizer_style.label().into());
+    settings.set_selected_visualizer(state.visualizer_style.index());
     settings.set_translation_ready(state.translation_ready);
     settings.set_history_enabled_label(
         if state.history_enabled {
@@ -3245,6 +3299,15 @@ fn prepare_shown_action_window(
         }
     }) {
         eprintln!("could not finalize `{window_title}` after showing it: {error}");
+    }
+}
+
+fn configure_standard_app_window(window: &slint::Window, name: &str) {
+    if let Err(error) = slint_window_handle(window)
+        .ok_or_else(|| "native window handle is unavailable".to_owned())
+        .and_then(rust_platform_windows::configure_standard_window)
+    {
+        eprintln!("could not configure `{name}` as a standard application window: {error}");
     }
 }
 
@@ -3556,7 +3619,7 @@ mod indicator_animation_tests {
 
     use slint::VecModel;
 
-    use super::IndicatorAnimation;
+    use super::{IndicatorAnimation, VisualizerStyle};
 
     fn animation() -> IndicatorAnimation {
         IndicatorAnimation::new(Rc::new(VecModel::from(vec![0.0; 10])))
@@ -3589,6 +3652,23 @@ mod indicator_animation_tests {
 
         assert_ne!(first.heights, second.heights);
         assert_ne!(first.disc_opacity, second.disc_opacity);
+    }
+
+    #[test]
+    fn every_visible_visualizer_choice_maps_to_a_style() {
+        assert_eq!(
+            VisualizerStyle::from_index(0),
+            Some(VisualizerStyle::VoiceOrb)
+        );
+        assert_eq!(
+            VisualizerStyle::from_index(1),
+            Some(VisualizerStyle::SymmetricSpectrum)
+        );
+        assert_eq!(
+            VisualizerStyle::from_index(2),
+            Some(VisualizerStyle::FluidRibbon)
+        );
+        assert_eq!(VisualizerStyle::from_index(3), None);
     }
 }
 

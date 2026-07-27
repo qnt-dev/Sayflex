@@ -10,9 +10,9 @@ use windows_sys::Win32::{
     System::Threading::GetCurrentProcessId,
     UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-        GetWindowThreadProcessId, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+        GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     },
 };
 
@@ -111,6 +111,35 @@ pub fn configure_action_window(window_handle: u64) -> Result<(), String> {
         ) == 0
         {
             return Err("SetWindowPos failed for action window".to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub fn configure_standard_window(window_handle: u64) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("standard window handle is not available".to_owned());
+    }
+    // Settings and the full translator belong to the normal application
+    // z-order. Explicitly undo every overlay-only style before presenting them.
+    unsafe {
+        let current_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let desired_style =
+            (current_style & !(WS_EX_NOACTIVATE as isize) & !(WS_EX_TOOLWINDOW as isize))
+                | WS_EX_APPWINDOW as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_style);
+        if SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            return Err("SetWindowPos failed for standard window".to_owned());
         }
     }
     Ok(())

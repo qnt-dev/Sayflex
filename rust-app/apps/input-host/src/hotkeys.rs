@@ -327,10 +327,7 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
                 };
                 if let Err(error) = begin_selection_capture(intent, target, events.clone()) {
                     SELECTION_BUSY.store(false, Ordering::Release);
-                    let _ = events.send(InputHostEvent::SelectionCaptureFailed {
-                        request_id: RequestId::new(),
-                        message: error.to_string(),
-                    });
+                    eprintln!("could not start selection capture: {error}");
                 }
             }
         }
@@ -343,6 +340,14 @@ fn begin_selection_capture(
     events: Sender<InputHostEvent>,
 ) -> io::Result<()> {
     let request_id = RequestId::new();
+    events
+        .send(InputHostEvent::SelectionCaptureStarted {
+            request_id,
+            intent,
+            target,
+        })
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "desktop event stream closed"))?;
+    let failure_events = events.clone();
     thread::Builder::new()
         .name("selection-capture".to_owned())
         .spawn(move || {
@@ -386,6 +391,12 @@ fn begin_selection_capture(
             }
         })
         .map(|_| ())
+        .inspect_err(|error| {
+            let _ = failure_events.send(InputHostEvent::SelectionCaptureFailed {
+                request_id,
+                message: format!("could not start selection capture: {error}"),
+            });
+        })
 }
 
 struct SelectionBusyGuard;
