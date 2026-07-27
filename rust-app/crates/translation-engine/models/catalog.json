@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "packs": [
+    {
+      "id": "opus-ru-en-tiny",
+      "display_name": "Russian ↔ English · Fast",
+      "description": "Distilled 25.4M-parameter OPUS-MT models for instant local translation.",
+      "tier": "tiny",
+      "license": "Apache-2.0",
+      "recommended_locales": ["ru"],
+      "directions": [
+        {
+          "source_language": "russian",
+          "target_language": "english",
+          "directory": "ru-en",
+          "weight_file": "model.safetensors",
+          "artifacts": [
+            {
+              "relative_path": "model.safetensors",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/model.safetensors",
+              "bytes": 50743442,
+              "sha256": "bb936d77d38c92c465ac9b6269065163e2ab3aeac1fba7660730929ab5185f57"
+            },
+            {
+              "relative_path": "config.json",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/config.json",
+              "bytes": 957,
+              "sha256": "480c811721f0a0dca0aa632ceb566570f06c46d15ad9bbdfcbec58af4734aef0"
+            },
+            {
+              "relative_path": "source.spm",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/source.spm",
+              "bytes": 956176,
+              "sha256": "e684e7edf0c2a134665ac393e09e342175c7f909549e7aa0cbf0ad27390729f1"
+            },
+            {
+              "relative_path": "target.spm",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/target.spm",
+              "bytes": 956176,
+              "sha256": "e684e7edf0c2a134665ac393e09e342175c7f909549e7aa0cbf0ad27390729f1"
+            },
+            {
+              "relative_path": "vocab.json",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/vocab.json",
+              "bytes": 1455694,
+              "sha256": "3dfeb79f213886598ff9dd61b1ac87f068f1f729f5a4536829c8468994f57eb4"
+            }
+          ]
+        },
+        {
+          "source_language": "english",
+          "target_language": "russian",
+          "directory": "en-ru",
+          "weight_file": "model.safetensors",
+          "artifacts": [
+            {
+              "relative_path": "model.safetensors",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/model.safetensors",
+              "bytes": 50743442,
+              "sha256": "bf8078902d56cb354327315c49238bf32f129c9af7e13925f2072faf103c831a"
+            },
+            {
+              "relative_path": "config.json",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/config.json",
+              "bytes": 957,
+              "sha256": "480c811721f0a0dca0aa632ceb566570f06c46d15ad9bbdfcbec58af4734aef0"
+            },
+            {
+              "relative_path": "source.spm",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/source.spm",
+              "bytes": 956510,
+              "sha256": "8282335e85cc36ac5ec1cba7ce18399ce948bf72f3c755b1aced54a13b373c02"
+            },
+            {
+              "relative_path": "target.spm",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/target.spm",
+              "bytes": 956510,
+              "sha256": "8282335e85cc36ac5ec1cba7ce18399ce948bf72f3c755b1aced54a13b373c02"
+            },
+            {
+              "relative_path": "vocab.json",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/vocab.json",
+              "bytes": 1457584,
+              "sha256": "84bf1b5212f13a1f28df67ad0341e80547689a108d97767087b8711bb311ba36"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "opus-ru-en-teacher",
+      "display_name": "Russian ↔ English · Quality",
+      "description": "Original OPUS-MT teacher models with beam search for higher translation quality.",
+      "tier": "teacher",
+      "license": "Apache-2.0 / CC-BY-4.0",
+      "recommended_locales": ["ru"],
+      "directions": [
+        {
+          "source_language": "russian",
+          "target_language": "english",
+          "directory": "ru-en",
+          "weight_file": "pytorch_model.bin",
+          "artifacts": [
+            {
+              "relative_path": "pytorch_model.bin",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/pytorch_model.bin",
+              "bytes": 306991893,
+              "sha256": "535450eb5613f3cc912f9ca3e54cfef6c14d201b319c24a88faf776a65538b5d"
+            },
+            {
+              "relative_path": "config.json",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/config.json",
+              "bytes": 1381,
+              "sha256": "5ea76c78596bce8fe005ef89e00de0924bf83e5f532ce08784ff1fcefb699f5f"
+            },
+            {
+              "relative_path": "source.spm",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/source.spm",
+              "bytes": 1080169,
+              "sha256": "745998e51ba5b058e38b7ac7765c25c43ed5c1c39cc92b27163b9b2e323c9d7c"
+            },
+            {
+              "relative_path": "target.spm",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/target.spm",
+              "bytes": 802781,
+              "sha256": "16bebef1389a0b8ab452772c4e35b9e605e5713f8ac7baa71ca701394eaa086d"
+            },
+            {
+              "relative_path": "vocab.json",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/vocab.json",
+              "bytes": 2601758,
+              "sha256": "33e95da3be3fa3b50169c4c46693ba2f29fbf4cb29d99044bd07d72d181fa1e9"
+            }
+          ]
+        },
+        {
+          "source_language": "english",
+          "target_language": "russian",
+          "directory": "en-ru",
+          "weight_file": "pytorch_model.bin",
+          "artifacts": [
+            {
+              "relative_path": "pytorch_model.bin",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/pytorch_model.bin",
+              "bytes": 306991893,
+              "sha256": "d15fa58c6bc3efd3629c1b6b86d9aa6d15d2751a4620aa4cdd7eed7b5cbe583b"
+            },
+            {
+              "relative_path": "config.json",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/config.json",
+              "bytes": 1381,
+              "sha256": "d3c2614fd099bc228fc257f047e46f1c6f94cfa12dee2b1fa6c0d780e6b7de06"
+            },
+            {
+              "relative_path": "source.spm",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/source.spm",
+              "bytes": 802781,
+              "sha256": "16bebef1389a0b8ab452772c4e35b9e605e5713f8ac7baa71ca701394eaa086d"
+            },
+            {
+              "relative_path": "target.spm",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/target.spm",
+              "bytes": 1080169,
+              "sha256": "745998e51ba5b058e38b7ac7765c25c43ed5c1c39cc92b27163b9b2e323c9d7c"
+            },
+            {
+              "relative_path": "vocab.json",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/vocab.json",
+              "bytes": 2601758,
+              "sha256": "33e95da3be3fa3b50169c4c46693ba2f29fbf4cb29d99044bd07d72d181fa1e9"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

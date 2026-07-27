@@ -1,0 +1,24 @@
+[package]
+name = "rust-translation-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+cuda = ["rust-translation-engine/cuda"]
+
+[dependencies]
+anyhow = "1.0.100"
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
+rust-model-manager = { path = "../../crates/model-manager" }
+rust-protocol = { path = "../../crates/protocol" }
+rust-translation-engine = { path = "../../crates/translation-engine" }
+serde.workspace = true
+serde_json.workspace = true
+sys-locale = "0.3.2"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

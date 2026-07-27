@@ -1,0 +1,250 @@
+<Window x:Class="Keyboop.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Keyboop"
+        Width="760"
+        Height="760"
+        MinWidth="680"
+        MinHeight="680"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource WindowBackground}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Margin="32">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="0,0,0,26">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="Keyboop"
+                               FontFamily="Segoe UI Variable Display"
+                               FontSize="30"
+                               FontWeight="SemiBold" />
+                    <TextBlock Text="Локальная раскладка и голосовой ввод для Windows"
+                               Margin="0,5,0,0"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               FontSize="14" />
+                </StackPanel>
+                <Border Grid.Column="1"
+                        Padding="12,7"
+                        CornerRadius="12"
+                        Background="#173A2D"
+                        VerticalAlignment="Center">
+                    <TextBlock x:Name="OverallStatusText"
+                               Text="Запуск…"
+                               Foreground="#71E3AA"
+                               FontWeight="SemiBold" />
+                </Border>
+            </Grid>
+
+            <Border Grid.Row="1"
+                    Background="{StaticResource PanelBackground}"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="14"
+                    Padding="22"
+                    Margin="0,0,0,16">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Исправление выделенного текста"
+                                   FontSize="18"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="Выделите текст, нажмите Ctrl + Alt + K и явно выберите нужную раскладку. Обычный ввод Keyboop не читает и не меняет."
+                                   Margin="0,5,20,14"
+                                   TextWrapping="Wrap"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock Text="1  Выделите неправильный фрагмент"
+                                   Margin="0,5,0,4" />
+                        <TextBlock Text="2  Нажмите Ctrl + Alt + K"
+                                   Margin="0,4" />
+                        <TextBlock Text="3  Проверьте вариант и подтвердите Enter"
+                                   Margin="0,4" />
+                        <TextBlock Text="Esc всегда отменяет изменение"
+                                   Margin="0,8,0,0"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="Горячие клавиши"
+                                   FontSize="18"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="Исправить выделение" Margin="0,14,0,2"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock Text="Ctrl + Alt + K" />
+                        <TextBlock Text="Голос — удерживать" Margin="0,12,0,2"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock Text="Ctrl + Win" />
+                        <TextBlock Text="Повторить последнюю диктовку" Margin="0,12,0,2"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock Text="Shift + Alt + X" />
+                        <TextBlock Text="Пауза Keyboop" Margin="0,12,0,2"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock Text="Ctrl + Alt + P" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="2"
+                    Background="{StaticResource PanelBackground}"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="14"
+                    Padding="22"
+                    Margin="0,0,0,16">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Голосовой ввод"
+                                   FontSize="18"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="Whisper large-v3-turbo · CUDA · полностью локально"
+                                   Margin="0,5,0,10"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <CheckBox x:Name="DictationCheckBox"
+                                  Content="Включить голосовой ввод"
+                                  Click="SettingChanged" />
+                        <CheckBox x:Name="KeepHistoryCheckBox"
+                                  Content="Сохранять историю расшифровок локально"
+                                  Click="SettingChanged" />
+                        <TextBlock Text="Сохраняется только текст; аудиозаписи удаляются после обработки."
+                                   Margin="24,0,0,0"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="12"
+                                   TextWrapping="Wrap" />
+                        <TextBlock x:Name="SpeechStatusText"
+                                   Text="Проверка worker…"
+                                   Margin="0,6,0,0"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center">
+                        <Button x:Name="DownloadModelButton"
+                                Content="Подготовить модель"
+                                Click="DownloadModelButton_Click"
+                                MinWidth="166" />
+                        <Button x:Name="DictationTestButton"
+                                Content="Начать тест микрофона"
+                                Click="DictationTestButton_Click"
+                                Background="#26324A"
+                                Margin="0,10,0,0"
+                                MinWidth="166" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="3"
+                    Background="{StaticResource PanelBackground}"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="14"
+                    Padding="22">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="История диктовок"
+                                       FontSize="18"
+                                       FontWeight="SemiBold" />
+                            <TextBlock Text="Shift + Alt + X копирует последнюю запись в буфер обмена. В WezTerm вставьте её через Shift + Insert, в других приложениях — через Ctrl + V."
+                                       Margin="0,5,16,0"
+                                       TextWrapping="Wrap"
+                                       Foreground="{StaticResource MutedTextBrush}" />
+                        </StackPanel>
+                        <Button x:Name="ClearHistoryButton"
+                                Grid.Column="1"
+                                Content="Очистить всё"
+                                Click="ClearHistoryButton_Click"
+                                Background="#4A2630"
+                                VerticalAlignment="Top"
+                                IsEnabled="False" />
+                    </Grid>
+                    <ListBox x:Name="HistoryListBox"
+                             Margin="0,12,0,0"
+                             Height="132"
+                             Padding="5"
+                             Background="#0D131E"
+                             Foreground="{StaticResource MainTextBrush}"
+                             BorderBrush="{StaticResource BorderBrush}"
+                             HorizontalContentAlignment="Stretch"
+                             SelectionChanged="HistoryListBox_SelectionChanged">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="7,5">
+                                    <TextBlock Text="{Binding Preview}"
+                                               TextTrimming="CharacterEllipsis"
+                                               TextWrapping="NoWrap" />
+                                    <TextBlock Text="{Binding Metadata}"
+                                               Margin="0,3,0,0"
+                                               FontSize="11"
+                                               Foreground="{StaticResource MutedTextBrush}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBox x:Name="HistoryTextBox"
+                             Margin="0,10,0,0"
+                             MinHeight="72"
+                             MaxHeight="130"
+                             Padding="12"
+                             AcceptsReturn="True"
+                             VerticalScrollBarVisibility="Auto"
+                             TextWrapping="Wrap"
+                             IsReadOnly="True"
+                             Background="#0D131E"
+                             Foreground="{StaticResource MainTextBrush}"
+                             BorderBrush="{StaticResource BorderBrush}" />
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="CopyHistoryButton"
+                                Content="Скопировать"
+                                Click="CopyHistoryButton_Click"
+                                IsEnabled="False" />
+                        <Button x:Name="DeleteHistoryButton"
+                                Grid.Column="1"
+                                Content="Удалить"
+                                Click="DeleteHistoryButton_Click"
+                                Background="#4A2630"
+                                Margin="10,0,0,0"
+                                IsEnabled="False" />
+                        <TextBlock x:Name="HistoryStatusText"
+                                   Grid.Column="2"
+                                   Margin="14,0,0,0"
+                                   VerticalAlignment="Center"
+                                   Text="История пока пуста."
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <TextBlock Grid.Row="4"
+                       Margin="0,18,0,0"
+                       Text="Закрытие окна сворачивает Keyboop в системный трей."
+                       Foreground="{StaticResource MutedTextBrush}"
+                       HorizontalAlignment="Center" />
+        </Grid>
+    </ScrollViewer>
+</Window>

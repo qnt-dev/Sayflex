@@ -1,0 +1,25 @@
+[package]
+name = "rust-translation-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+[dependencies]
+anyhow = "1.0.100"
+candle = { package = "candle-core", version = "0.11.0" }
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+rust-model-manager = { path = "../model-manager" }
+rust-protocol = { path = "../protocol" }
+sentencepiece-rs = "0.2.2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

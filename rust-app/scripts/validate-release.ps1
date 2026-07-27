@@ -1,0 +1,37 @@
+[CmdletBinding()]
+param(
+    [string]$AppDirectory = (
+        Join-Path $PSScriptRoot '..\dist\app'
+    )
+)
+
+$ErrorActionPreference = 'Stop'
+$appRoot = [System.IO.Path]::GetFullPath($AppDirectory)
+$required = @(
+    'rust-desktop.exe',
+    'rust-input-host.exe',
+    'rust-speech-worker-cpu.exe',
+    'rust-speech-worker-cuda.exe',
+    'rust-translation-worker.exe'
+)
+
+$missing = $required | Where-Object {
+    -not (Test-Path -LiteralPath (Join-Path $appRoot $_))
+}
+if ($missing.Count -gt 0) {
+    throw "Release is incomplete. Missing: $($missing -join ', ')"
+}
+
+$files = foreach ($name in $required) {
+    $path = Join-Path $appRoot $name
+    $item = Get-Item -LiteralPath $path
+    $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256
+    [pscustomobject]@{
+        File = $name
+        Bytes = $item.Length
+        SHA256 = $hash.Hash.ToLowerInvariant()
+    }
+}
+
+$files | Format-Table -AutoSize
+Write-Host 'Release file set and SHA-256 validation passed.'

@@ -1,0 +1,51 @@
+[workspace]
+members = [
+    "apps/desktop",
+    "apps/input-host",
+    "apps/speech-worker",
+    "apps/translation-worker",
+    "crates/app-core",
+    "crates/model-manager",
+    "crates/platform-api",
+    "crates/platform-windows",
+    "crates/protocol",
+    "crates/speech-api",
+    "crates/translation-engine",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/iffuno/keyboop"
+
+[workspace.dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+slint = { version = "1.17.1", features = ["unstable-winit-030"] }
+slint-build = "1.17.1"
+tempfile = "3.23.0"
+thiserror = "2.0.17"
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

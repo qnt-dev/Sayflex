@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "default_model": "whisper-large-v3-turbo",
+  "models": [
+    {
+      "id": "whisper-small",
+      "display_name": "Whisper Small",
+      "description": "Lower download size and resource use for less powerful computers.",
+      "engine": "whisper_cpp",
+      "tier": "lightweight",
+      "artifact": {
+        "file_name": "ggml-small.bin",
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        "bytes": 487601967,
+        "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
+      },
+      "compute_backends": ["auto", "cpu", "cuda", "vulkan", "metal"],
+      "supports_speech_translation": true
+    },
+    {
+      "id": "whisper-medium",
+      "display_name": "Whisper Medium",
+      "description": "Balanced local model for systems below the recommended profile.",
+      "engine": "whisper_cpp",
+      "tier": "balanced",
+      "artifact": {
+        "file_name": "ggml-medium.bin",
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        "bytes": 1533763059,
+        "sha256": "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208"
+      },
+      "compute_backends": ["auto", "cpu", "cuda", "vulkan", "metal"],
+      "supports_speech_translation": true
+    },
+    {
+      "id": "whisper-large-v3-turbo",
+      "display_name": "Whisper Large v3 Turbo",
+      "description": "Recommended default and the model used by the current Windows application.",
+      "engine": "whisper_cpp",
+      "tier": "recommended",
+      "artifact": {
+        "file_name": "ggml-large-v3-turbo.bin",
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        "bytes": 1624555275,
+        "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
+      },
+      "compute_backends": ["auto", "cpu", "cuda", "vulkan", "metal"],
+      "supports_speech_translation": false
+    },
+    {
+      "id": "whisper-large-v3",
+      "display_name": "Whisper Large v3",
+      "description": "Maximum-quality profile for users who accept a larger download and slower inference.",
+      "engine": "whisper_cpp",
+      "tier": "maximum_quality",
+      "artifact": {
+        "file_name": "ggml-large-v3.bin",
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+        "bytes": 3095033483,
+        "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2"
+      },
+      "compute_backends": ["auto", "cpu", "cuda", "vulkan", "metal"],
+      "supports_speech_translation": true
+    }
+  ]
+}

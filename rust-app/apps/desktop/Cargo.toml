@@ -1,0 +1,18 @@
+[package]
+name = "rust-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+rust-app-core = { path = "../../crates/app-core" }
+rust-platform-windows = { path = "../../crates/platform-windows" }
+rust-protocol = { path = "../../crates/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+slint.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "rust-input-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-protocol = { path = "../../crates/protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+windows-sys.workspace = true

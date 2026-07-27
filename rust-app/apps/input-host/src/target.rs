@@ -1,0 +1,142 @@
+use std::{mem, path::Path};
+
+use rust_protocol::TargetSnapshot;
+use windows_sys::Win32::{
+    Foundation::CloseHandle,
+    System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    },
+    UI::{
+        Input::KeyboardAndMouse::GetKeyboardLayout,
+        WindowsAndMessaging::{
+            GA_ROOT, GUITHREADINFO, GetAncestor, GetForegroundWindow, GetGUIThreadInfo,
+            GetWindowThreadProcessId,
+        },
+    },
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionCopyShortcut {
+    ControlC,
+    ControlShiftC,
+}
+
+pub fn capture_target() -> TargetSnapshot {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return TargetSnapshot::default();
+    }
+    let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+    let top_level = if root.is_null() { foreground } else { root };
+    let mut process_id = 0_u32;
+    let thread_id = unsafe { GetWindowThreadProcessId(top_level, &mut process_id) };
+    let layout = unsafe { GetKeyboardLayout(thread_id) };
+    TargetSnapshot {
+        window_handle: top_level as usize as u64,
+        process_id,
+        thread_id,
+        keyboard_layout: layout as usize as u64,
+    }
+}
+
+pub fn prefer_direct_unicode(target: TargetSnapshot) -> bool {
+    process_name(target.process_id)
+        .as_deref()
+        .is_some_and(is_wezterm)
+}
+
+pub fn selection_copy_shortcut(target: TargetSnapshot) -> SelectionCopyShortcut {
+    process_name(target.process_id)
+        .as_deref()
+        .map(selection_copy_shortcut_for_process)
+        .unwrap_or(SelectionCopyShortcut::ControlC)
+}
+
+fn selection_copy_shortcut_for_process(process_name: &str) -> SelectionCopyShortcut {
+    if is_wezterm(process_name) {
+        SelectionCopyShortcut::ControlShiftC
+    } else {
+        SelectionCopyShortcut::ControlC
+    }
+}
+
+fn is_wezterm(process_name: &str) -> bool {
+    process_name.eq_ignore_ascii_case("wezterm-gui")
+}
+
+fn process_name(process_id: u32) -> Option<String> {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return None;
+    }
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = buffer.len() as u32;
+    let success =
+        unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length) } != 0;
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    if !success {
+        return None;
+    }
+    let full_path = String::from_utf16(&buffer[..length as usize]).ok()?;
+    Path::new(&full_path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
+#[allow(dead_code)]
+pub fn capture_focused_target() -> TargetSnapshot {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return TargetSnapshot::default();
+    }
+    let mut process_id = 0_u32;
+    let mut thread_id = unsafe { GetWindowThreadProcessId(foreground, &mut process_id) };
+    let mut information = GUITHREADINFO {
+        cbSize: mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    let focused = if unsafe { GetGUIThreadInfo(thread_id, &mut information) } != 0
+        && !information.hwndFocus.is_null()
+    {
+        information.hwndFocus
+    } else {
+        foreground
+    };
+    thread_id = unsafe { GetWindowThreadProcessId(focused, &mut process_id) };
+    let layout = unsafe { GetKeyboardLayout(thread_id) };
+    TargetSnapshot {
+        window_handle: focused as usize as u64,
+        process_id,
+        thread_id,
+        keyboard_layout: layout as usize as u64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SelectionCopyShortcut, is_wezterm, selection_copy_shortcut_for_process};
+
+    #[test]
+    fn wezterm_never_uses_interrupt_as_its_copy_shortcut() {
+        assert_eq!(
+            selection_copy_shortcut_for_process("wezterm-gui"),
+            SelectionCopyShortcut::ControlShiftC
+        );
+        assert_eq!(
+            selection_copy_shortcut_for_process("WEZTERM-GUI"),
+            SelectionCopyShortcut::ControlShiftC
+        );
+    }
+
+    #[test]
+    fn normal_editors_keep_standard_copy_behavior() {
+        assert_eq!(
+            selection_copy_shortcut_for_process("notepad"),
+            SelectionCopyShortcut::ControlC
+        );
+        assert!(!is_wezterm("notepad"));
+    }
+}
