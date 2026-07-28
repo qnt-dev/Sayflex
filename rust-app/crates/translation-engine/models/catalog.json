@@ -99,13 +99,13 @@
           "source_language": "russian",
           "target_language": "english",
           "directory": "ru-en",
-          "weight_file": "pytorch_model.bin",
+          "weight_file": "model.safetensors",
           "artifacts": [
             {
-              "relative_path": "pytorch_model.bin",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/pytorch_model.bin",
-              "bytes": 306991893,
-              "sha256": "535450eb5613f3cc912f9ca3e54cfef6c14d201b319c24a88faf776a65538b5d"
+              "relative_path": "model.safetensors",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/a64ede1bb36da5cd0c7bd9c25d0ee07ce5612124/model.safetensors",
+              "bytes": 306967352,
+              "sha256": "f73dc54675dc0da9ca6704098cadae3562f149b1f93c585f9d21c8502a760421"
             },
             {
               "relative_path": "config.json",
@@ -137,13 +137,13 @@
           "source_language": "english",
           "target_language": "russian",
           "directory": "en-ru",
-          "weight_file": "pytorch_model.bin",
+          "weight_file": "model.safetensors",
           "artifacts": [
             {
-              "relative_path": "pytorch_model.bin",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/pytorch_model.bin",
-              "bytes": 306991893,
-              "sha256": "d15fa58c6bc3efd3629c1b6b86d9aa6d15d2751a4620aa4cdd7eed7b5cbe583b"
+              "relative_path": "model.safetensors",
+              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/cd80d4414addb42379be7c8a75c72940372fa6c2/model.safetensors",
+              "bytes": 306967464,
+              "sha256": "e0af2b7de8a1c4f7b83faee21c5d4391284998e693d76f3a995bfd5bc8dce7e8"
             },
             {
               "relative_path": "config.json",

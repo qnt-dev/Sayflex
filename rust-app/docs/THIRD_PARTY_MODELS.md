@@ -8,8 +8,8 @@ verifies every artifact before installation.
 | --- | --- | --- | --- |
 | Fast RU→EN | `Helsinki-NLP/opus-mt_tiny_rus-eng` | `795b0b2fb13d17b917287421c15e0d70db9ba940` | Apache-2.0 |
 | Fast EN→RU | `Helsinki-NLP/opus-mt_tiny_eng-rus` | `3172938c8acb3f54ab522db1aaca1f12bf168322` | Apache-2.0 |
-| Quality RU→EN | `Helsinki-NLP/opus-mt-ru-en` | `fbd6dc73284f95536648512cc21d57f19191961a` | CC-BY-4.0 |
-| Quality EN→RU | `Helsinki-NLP/opus-mt-en-ru` | `bb09c99d180016eac6819df3dae68edb1690fdee` | Apache-2.0 |
+| Quality RU→EN | `Helsinki-NLP/opus-mt-ru-en` | `a64ede1bb36da5cd0c7bd9c25d0ee07ce5612124` | CC-BY-4.0 |
+| Quality EN→RU | `Helsinki-NLP/opus-mt-en-ru` | `cd80d4414addb42379be7c8a75c72940372fa6c2` | Apache-2.0 |
 
 The exact URLs, sizes, and SHA-256 values used by the installer live in
 `crates/translation-engine/models/catalog.json`.
