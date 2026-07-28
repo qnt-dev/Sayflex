@@ -40,7 +40,19 @@ keyboard event processing.
 Each translation receives a `RequestId`. The desktop stores the immutable
 origin and target against that ID, and a result can only be routed to the
 matching request. There is no mutable global "latest translation" used for
-replacement.
+replacement. A newer request increments the worker generation. The async HTTP
+path observes that generation on a 10 ms cancellation clock while it is
+waiting for response headers as well as while it reads the stream, so prompt
+processing can be interrupted before the first token. Dropping the request
+connection asks llama.cpp to stop the active task; stale partials and stale
+final results are rejected independently by request identity.
+
+Selected-text capture overlaps independent work instead of serializing it:
+UI Automation starts as soon as the command is accepted while the capture
+worker waits for the physical hotkey release. Clipboard copy is attempted only
+after release and only when UI Automation did not return a usable selection.
+Diagnostics keep release wait, UIA provider time, clipboard time, model
+first-token time, model completion and end-to-end time as separate fields.
 
 ## Model lifecycle
 
@@ -76,11 +88,34 @@ startup latency. Inference is deterministic (`temperature = 0`, fixed seed,
 thinking disabled), entirely local after installation, and never runs on a UI
 or input-hook thread.
 
-Before public release, benchmark gates should record separately:
+The engine sends an ordinary selection as one request even when it contains
+line breaks. It asks the pinned llama.cpp tokenizer for the source token count
+and creates natural-boundary chunks only above the explicit 1,200 source-token
+budget. This avoids the legacy per-line request multiplier while leaving room
+inside the 4,096-token context for the instruction and translated output.
+Chunks preserve their original whitespace boundaries.
+
+llama.cpp responses use server-sent events. The worker coalesces partial text
+to at most one IPC update every 30 ms (while allowing sentence boundaries
+through immediately), and the Slint preview opens on the first visible text.
+The final event remains authoritative for history, copy and replacement.
+Closing or superseding a request cancels generation without restarting the
+resident model.
+
+The speech worker is isolated from this pipeline. Its prepared whisper.cpp
+context owns one reusable inference state instead of reallocating CUDA/KV
+buffers for every speculative or final pass. Native routine diagnostics are
+filtered and application logs are written through a bounded asynchronous
+queue, so diagnostics cannot add synchronous disk I/O to the hot path.
+
+Benchmark gates record separately:
 
 - model load and warm-up;
+- physical hotkey release wait;
+- UI Automation and clipboard capture;
+- model first visible token;
 - prompt processing and generation per direction and text length;
-- UI request-to-result;
+- backend request count and end-to-end completion;
 - copy/replace dispatch;
 - peak private memory for Fast and Quality.
 

@@ -223,6 +223,8 @@ mod tests {
                 target_language: TranslationLanguage::Russian,
                 tier: TranslationTier::Tiny,
                 processing_duration_ms: 1,
+                first_token_duration_ms: 1,
+                backend_request_count: 1,
             },
             created_unix_ms: 2,
         });
@@ -255,6 +257,8 @@ mod tests {
                 target_language: TranslationLanguage::Russian,
                 tier: TranslationTier::Tiny,
                 processing_duration_ms: 1,
+                first_token_duration_ms: 1,
+                backend_request_count: 1,
             },
             created_unix_ms: 2,
         });

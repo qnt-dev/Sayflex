@@ -64,6 +64,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let insertion = insertion::InsertionService::start(events.clone())?;
     hotkeys::initialize(events.clone())?;
     thread::Builder::new()
+        .name("uia-selection-prewarm".to_owned())
+        .spawn(|| {
+            if let Err(error) = uia_selection::prewarm() {
+                diagnostic_line(&format!("uia_selection prewarm=failed error={error}"));
+            }
+        })?;
+    thread::Builder::new()
         .name("input-host-json-output".to_owned())
         .spawn(move || write_events(event_receiver))?;
 

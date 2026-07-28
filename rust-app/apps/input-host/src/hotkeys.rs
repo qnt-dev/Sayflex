@@ -11,7 +11,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use rust_protocol::{InputHostEvent, RequestId, SessionId, TargetSnapshot, TextActionIntent};
+use rust_protocol::{
+    InputHostEvent, RequestId, SelectionCaptureTiming, SessionId, TargetSnapshot, TextActionIntent,
+};
 use windows_sys::Win32::{
     Foundation::{GetLastError, LPARAM, LRESULT, WPARAM},
     UI::{
@@ -436,11 +438,13 @@ fn begin_selection_capture(
     events: Sender<InputHostEvent>,
 ) -> io::Result<()> {
     let request_id = RequestId::new();
+    let started_unix_ms = unix_ms();
     events
         .send(InputHostEvent::SelectionCaptureStarted {
             request_id,
             intent,
             target,
+            started_unix_ms,
         })
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "desktop event stream closed"))?;
     let failure_events = events.clone();
@@ -449,11 +453,21 @@ fn begin_selection_capture(
         .spawn(move || {
             let _busy_guard = SelectionBusyGuard;
             let capture_started = Instant::now();
-            let result = if !wait_for_mask_clear(
+            // UI Automation is read-only and can run while the user releases
+            // the shortcut. Clipboard injection remains strictly after release.
+            let pending_uia = selection_capture::begin_uia_capture(target);
+            let release_started = Instant::now();
+            let released = wait_for_mask_clear(
                 selection_chord_mask(intent),
                 COMMAND_RELEASE_TIMEOUT,
                 INPUT_RELEASE_STABILITY,
-            ) {
+            );
+            let release_wait_ms = release_started
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            let result = if !released {
                 crate::diagnostic_line(&format!(
                     "selection_capture request={} pid={} stage=hotkey_release result=timeout \
 physical_mask={:#x}",
@@ -463,24 +477,38 @@ physical_mask={:#x}",
                 ));
                 Err(selection_capture::CaptureError::HotkeyReleaseTimeout)
             } else {
-                selection_capture::capture(target)
+                selection_capture::capture_after_release(target, pending_uia)
             };
             match result {
                 Ok(captured) if !captured.text.trim().is_empty() => {
+                    let total_ms = capture_started
+                        .elapsed()
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
                     crate::diagnostic_line(&format!(
                         "selection_capture request={} pid={} method={:?} \
-result=success chars={} elapsed_ms={}",
+result=success chars={} release_wait_ms={} uia_ms={:?} clipboard_ms={:?} total_ms={}",
                         request_id,
                         target.process_id,
                         captured.method,
                         captured.text.chars().count(),
-                        capture_started.elapsed().as_millis(),
+                        release_wait_ms,
+                        captured.uia_ms,
+                        captured.clipboard_ms,
+                        total_ms,
                     ));
                     let _ = events.send(InputHostEvent::SelectionCaptured {
                         request_id,
                         intent,
                         target,
                         text: captured.text,
+                        timing: SelectionCaptureTiming {
+                            release_wait_ms,
+                            uia_ms: captured.uia_ms,
+                            clipboard_ms: captured.clipboard_ms,
+                            total_ms,
+                        },
                     });
                 }
                 Ok(_) => {

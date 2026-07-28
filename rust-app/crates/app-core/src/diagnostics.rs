@@ -1,13 +1,18 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        OnceLock,
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 8 * 1024;
+const LOG_QUEUE_CAPACITY: usize = 2_048;
+const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 static LOGGER: OnceLock<FileLogger> = OnceLock::new();
 
@@ -30,7 +35,13 @@ pub fn log_line(message: &str) {
 }
 
 struct FileLogger {
-    state: Mutex<LogState>,
+    sender: SyncSender<LogCommand>,
+}
+
+enum LogCommand {
+    Line(String),
+    #[cfg(test)]
+    Flush(SyncSender<()>),
 }
 
 impl FileLogger {
@@ -41,43 +52,91 @@ impl FileLogger {
             bytes_written: 0,
         };
         state.open_current()?;
-        Ok(Self {
-            state: Mutex::new(state),
-        })
+        let (sender, receiver) = sync_channel(LOG_QUEUE_CAPACITY);
+        std::thread::Builder::new()
+            .name("diagnostic-log-writer".to_owned())
+            .spawn(move || run_writer(state, &receiver))
+            .map_err(|error| io::Error::other(format!("could not start log writer: {error}")))?;
+        Ok(Self { sender })
     }
 
     fn write(&self, message: &str) -> io::Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         let sanitized = sanitize(message);
         let line = format!("{timestamp} {sanitized}\n");
-        if state.bytes_written.saturating_add(line.len() as u64) > MAX_LOG_BYTES {
-            state.rotate()?;
+        match self.sender.try_send(LogCommand::Line(line)) {
+            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Disconnected(_)) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "log writer stopped",
+            )),
         }
-        let file = state
-            .file
-            .as_mut()
-            .ok_or_else(|| io::Error::other("diagnostic log is not open"))?;
-        file.write_all(line.as_bytes())?;
-        file.flush()?;
-        state.bytes_written = state.bytes_written.saturating_add(line.len() as u64);
-        Ok(())
+    }
+
+    #[cfg(test)]
+    fn flush(&self) -> io::Result<()> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(0);
+        self.sender
+            .send(LogCommand::Flush(sender))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "log writer stopped"))?;
+        receiver
+            .recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "log writer stopped"))
+    }
+}
+
+fn run_writer(mut state: LogState, receiver: &Receiver<LogCommand>) {
+    loop {
+        match receiver.recv_timeout(LOG_FLUSH_INTERVAL) {
+            Ok(LogCommand::Line(line)) => {
+                let _ = state.write_line(&line);
+            }
+            #[cfg(test)]
+            Ok(LogCommand::Flush(acknowledge)) => {
+                let _ = state.flush();
+                let _ = acknowledge.send(());
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = state.flush();
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = state.flush();
+                return;
+            }
+        }
     }
 }
 
 struct LogState {
     path: PathBuf,
-    file: Option<File>,
+    file: Option<BufWriter<File>>,
     bytes_written: u64,
 }
 
 impl LogState {
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        if self.bytes_written.saturating_add(line.len() as u64) > MAX_LOG_BYTES {
+            self.rotate()?;
+        }
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("diagnostic log is not open"))?;
+        file.write_all(line.as_bytes())?;
+        self.bytes_written = self.bytes_written.saturating_add(line.len() as u64);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("diagnostic log is not open"))?
+            .flush()
+    }
+
     fn open_current(&mut self) -> io::Result<()> {
         self.bytes_written = fs::metadata(&self.path)
             .map(|metadata| metadata.len())
@@ -86,24 +145,25 @@ impl LogState {
             self.rotate_files()?;
             self.bytes_written = 0;
         }
-        self.file = Some(
+        self.file = Some(BufWriter::new(
             OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.path)?,
-        );
+        ));
         Ok(())
     }
 
     fn rotate(&mut self) -> io::Result<()> {
+        self.flush()?;
         self.file.take();
         self.rotate_files()?;
-        self.file = Some(
+        self.file = Some(BufWriter::new(
             OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.path)?,
-        );
+        ));
         self.bytes_written = 0;
         Ok(())
     }
@@ -163,6 +223,7 @@ mod tests {
 
         let logger = FileLogger::open(path.clone()).unwrap();
         logger.write("ready").unwrap();
+        logger.flush().unwrap();
 
         assert!(path.exists());
         assert!(rotated_path(&path, 1).exists());

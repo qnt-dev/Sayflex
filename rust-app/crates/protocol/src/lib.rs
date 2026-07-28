@@ -3,7 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+// Version 7 adds streaming translation events, explicit cancellation, and
+// stage-level selection/translation latency fields. All packaged processes
+// must agree on this schema before exchanging commands.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -206,6 +209,18 @@ pub struct TranslationResult {
     pub target_language: TranslationLanguage,
     pub tier: TranslationTier,
     pub processing_duration_ms: u64,
+    #[serde(default)]
+    pub first_token_duration_ms: u64,
+    #[serde(default)]
+    pub backend_request_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectionCaptureTiming {
+    pub release_wait_ms: u64,
+    pub uia_ms: Option<u64>,
+    pub clipboard_ms: Option<u64>,
+    pub total_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,12 +276,14 @@ pub enum InputHostEvent {
         request_id: RequestId,
         intent: TextActionIntent,
         target: TargetSnapshot,
+        started_unix_ms: u64,
     },
     SelectionCaptured {
         request_id: RequestId,
         intent: TextActionIntent,
         target: TargetSnapshot,
         text: String,
+        timing: SelectionCaptureTiming,
     },
     SelectionCaptureFailed {
         request_id: RequestId,
@@ -351,6 +368,9 @@ pub enum TranslationWorkerCommand {
         source_language: Option<TranslationLanguage>,
         target_language: Option<TranslationLanguage>,
     },
+    Cancel {
+        request_id: RequestId,
+    },
     GetHistory {
         limit: usize,
     },
@@ -393,9 +413,17 @@ pub enum TranslationWorkerEvent {
     ModelSelected {
         tier: TranslationTier,
     },
+    Partial {
+        request_id: RequestId,
+        translated_text: String,
+        first_token_duration_ms: u64,
+    },
     Completed {
         result: TranslationResult,
         created_unix_ms: u64,
+    },
+    Cancelled {
+        request_id: RequestId,
     },
     History {
         entries: Vec<TranslationHistoryEntry>,
@@ -507,9 +535,9 @@ pub enum SpeechWorkerEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        DictationCommand, InputHostEvent, RequestId, SessionId, SpeechWorkerEvent, TargetSnapshot,
-        TextActionIntent, Transcript, TranslationLanguage, TranslationResult, TranslationTier,
-        TranslationWorkerEvent,
+        DictationCommand, InputHostEvent, RequestId, SelectionCaptureTiming, SessionId,
+        SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranslationLanguage,
+        TranslationResult, TranslationTier, TranslationWorkerEvent,
     };
 
     #[test]
@@ -575,6 +603,8 @@ mod tests {
                 target_language: TranslationLanguage::Russian,
                 tier: TranslationTier::Tiny,
                 processing_duration_ms: 12,
+                first_token_duration_ms: 4,
+                backend_request_count: 1,
             },
             created_unix_ms: 123,
         };
@@ -589,6 +619,12 @@ mod tests {
             intent: TextActionIntent::Adaptive,
             target: TargetSnapshot::default(),
             text: "hello".to_owned(),
+            timing: SelectionCaptureTiming {
+                release_wait_ms: 10,
+                uia_ms: Some(3),
+                clipboard_ms: None,
+                total_ms: 10,
+            },
         };
         let json = serde_json::to_string(&selection).unwrap();
         assert_eq!(
@@ -600,6 +636,7 @@ mod tests {
             request_id,
             intent: TextActionIntent::Translate,
             target: TargetSnapshot::default(),
+            started_unix_ms: 42,
         };
         let json = serde_json::to_string(&capture_started).unwrap();
         assert_eq!(

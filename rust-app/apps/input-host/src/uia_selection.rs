@@ -4,7 +4,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rust_protocol::TargetSnapshot;
@@ -55,12 +55,61 @@ pub enum SelectionError {
     Automation { operation: &'static str, code: i32 },
 }
 
-pub fn selected_text(target: TargetSnapshot) -> Result<SelectionOutcome, SelectionError> {
+pub fn prewarm() -> Result<(), SelectionError> {
     let actor = ACTOR.get_or_init(UiAutomationActor::start);
     match actor {
-        Ok(actor) => actor.selected_text(target),
+        Ok(_) => Ok(()),
         Err(error) => Err(SelectionError::ActorUnavailable(error.clone())),
     }
+}
+
+pub fn begin_selected_text(target: TargetSnapshot) -> Result<PendingSelection, SelectionError> {
+    let actor = ACTOR.get_or_init(UiAutomationActor::start);
+    match actor {
+        Ok(actor) => actor.begin_selected_text(target),
+        Err(error) => Err(SelectionError::ActorUnavailable(error.clone())),
+    }
+}
+
+pub struct PendingSelection {
+    response: Receiver<TimedSelectionResponse>,
+    started: Instant,
+    deadline: Instant,
+}
+
+impl PendingSelection {
+    pub fn wait(self) -> TimedSelectionAttempt {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        let result = self
+            .response
+            .recv_timeout(remaining)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => SelectionError::Timeout,
+                mpsc::RecvTimeoutError::Disconnected => {
+                    SelectionError::ActorUnavailable("UI Automation actor stopped".to_owned())
+                }
+            });
+        match result {
+            Ok(response) => TimedSelectionAttempt {
+                elapsed_ms: response.elapsed_ms,
+                result: response.result,
+            },
+            Err(error) => TimedSelectionAttempt {
+                elapsed_ms: self
+                    .started
+                    .elapsed()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                result: Err(error),
+            },
+        }
+    }
+}
+
+pub struct TimedSelectionAttempt {
+    pub elapsed_ms: u64,
+    pub result: Result<SelectionOutcome, SelectionError>,
 }
 
 struct UiAutomationActor {
@@ -69,7 +118,12 @@ struct UiAutomationActor {
 
 struct SelectionRequest {
     target: TargetSnapshot,
-    response: Sender<Result<SelectionOutcome, SelectionError>>,
+    response: Sender<TimedSelectionResponse>,
+}
+
+struct TimedSelectionResponse {
+    result: Result<SelectionOutcome, SelectionError>,
+    elapsed_ms: u64,
 }
 
 impl UiAutomationActor {
@@ -86,19 +140,19 @@ impl UiAutomationActor {
         Ok(Self { requests })
     }
 
-    fn selected_text(&self, target: TargetSnapshot) -> Result<SelectionOutcome, SelectionError> {
+    fn begin_selected_text(
+        &self,
+        target: TargetSnapshot,
+    ) -> Result<PendingSelection, SelectionError> {
         let (response, receiver) = mpsc::channel();
         self.requests
             .send(SelectionRequest { target, response })
             .map_err(|error| SelectionError::ActorUnavailable(error.to_string()))?;
-        receiver
-            .recv_timeout(ACTOR_RESPONSE_TIMEOUT)
-            .map_err(|error| match error {
-                mpsc::RecvTimeoutError::Timeout => SelectionError::Timeout,
-                mpsc::RecvTimeoutError::Disconnected => {
-                    SelectionError::ActorUnavailable("UI Automation actor stopped".to_owned())
-                }
-            })?
+        Ok(PendingSelection {
+            response: receiver,
+            started: Instant::now(),
+            deadline: Instant::now() + ACTOR_RESPONSE_TIMEOUT,
+        })
     }
 }
 
@@ -122,6 +176,7 @@ fn run_actor(receiver: Receiver<SelectionRequest>, ready: mpsc::SyncSender<Resul
     };
 
     for request in receiver {
+        let started = Instant::now();
         let current = match client.as_ref() {
             Some(client) => client.selected_text(request.target),
             None => match UiAutomationClient::new() {
@@ -136,7 +191,15 @@ fn run_actor(receiver: Receiver<SelectionRequest>, ready: mpsc::SyncSender<Resul
         if current.is_err() {
             client = None;
         }
-        let _ = request.response.send(current);
+        let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        crate::diagnostic_line(&format!(
+            "uia_selection target_pid={} stage=provider elapsed_ms={elapsed_ms}",
+            request.target.process_id
+        ));
+        let _ = request.response.send(TimedSelectionResponse {
+            result: current,
+            elapsed_ms,
+        });
     }
     drop(apartment);
 }

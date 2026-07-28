@@ -5,4 +5,4 @@ pub use catalog::{
     TranslationBackendDescriptor, TranslationCatalog, TranslationCatalogError,
     TranslationDirectionDescriptor, TranslationPackDescriptor,
 };
-pub use engine::{TranslationEngine, detect_language};
+pub use engine::{TranslationCancelled, TranslationEngine, TranslationOutput, detect_language};

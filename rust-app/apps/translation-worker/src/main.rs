@@ -8,7 +8,13 @@ use std::{
     env,
     io::{self, BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Sender},
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -21,24 +27,137 @@ use rust_protocol::{
     TranslationModelSummary, TranslationResult, TranslationTier, TranslationWorkerCommand,
     TranslationWorkerEvent,
 };
-use rust_translation_engine::{TranslationCatalog, TranslationEngine, TranslationPackDescriptor};
+use rust_translation_engine::{
+    TranslationCancelled, TranslationCatalog, TranslationEngine, TranslationPackDescriptor,
+};
 
+#[derive(Clone)]
 struct EventWriter {
-    writer: BufWriter<io::Stdout>,
+    events: Sender<TranslationWorkerEvent>,
 }
 
 impl EventWriter {
+    fn start() -> Result<(Self, JoinHandle<()>)> {
+        let (events, receiver) = mpsc::channel::<TranslationWorkerEvent>();
+        let thread = thread::Builder::new()
+            .name("translation-worker-json-output".to_owned())
+            .spawn(move || {
+                let mut writer = BufWriter::new(io::stdout());
+                for event in receiver {
+                    if serde_json::to_writer(&mut writer, &event).is_err()
+                        || writer.write_all(b"\n").is_err()
+                        || writer.flush().is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
+        Ok((Self { events }, thread))
+    }
+
+    fn send(&self, event: &TranslationWorkerEvent) -> Result<()> {
+        self.events
+            .send(event.clone())
+            .map_err(|error| anyhow!("translation event stream closed: {error}"))
+    }
+}
+
+struct TranslationCoordinator {
+    generation: Arc<AtomicU64>,
+    current_request: Arc<Mutex<Option<RequestId>>>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl TranslationCoordinator {
     fn new() -> Self {
         Self {
-            writer: BufWriter::new(io::stdout()),
+            generation: Arc::new(AtomicU64::new(0)),
+            current_request: Arc::new(Mutex::new(None)),
+            threads: Vec::new(),
         }
     }
 
-    fn send(&mut self, event: &TranslationWorkerEvent) -> Result<()> {
-        serde_json::to_writer(&mut self.writer, event)?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
+    fn submit(
+        &mut self,
+        state: Arc<Mutex<WorkerState>>,
+        writer: EventWriter,
+        request_id: RequestId,
+        text: String,
+        source_language: Option<TranslationLanguage>,
+        target_language: Option<TranslationLanguage>,
+    ) -> Result<()> {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        *recover_lock(&self.current_request) = Some(request_id);
+        let current_generation = Arc::clone(&self.generation);
+        let current_request = Arc::clone(&self.current_request);
+        let thread = thread::Builder::new()
+            .name(format!("translation-{}", short_id(request_id)))
+            .spawn(move || {
+                let mut state = recover_lock(&state);
+                let result = translate_request(
+                    &mut state,
+                    &writer,
+                    request_id,
+                    text,
+                    source_language,
+                    target_language,
+                    || current_generation.load(Ordering::Acquire) == generation,
+                );
+                let cancelled = current_generation.load(Ordering::Acquire) != generation
+                    || result.as_ref().err().is_some_and(|error| {
+                        error.downcast_ref::<TranslationCancelled>().is_some()
+                    });
+                if cancelled {
+                    let _ = writer.send(&TranslationWorkerEvent::Cancelled { request_id });
+                } else if let Err(error) = result {
+                    let _ = writer.send(&TranslationWorkerEvent::Failed {
+                        request_id: Some(request_id),
+                        code: if state.selected_tier.is_some() {
+                            "translation_failed"
+                        } else {
+                            "model_required"
+                        }
+                        .to_owned(),
+                        message: format!("{error:#}"),
+                        retryable: state.selected_tier.is_some(),
+                    });
+                }
+                let mut active = recover_lock(&current_request);
+                if *active == Some(request_id) {
+                    *active = None;
+                }
+            })?;
+        self.threads.push(thread);
         Ok(())
+    }
+
+    fn cancel(&self, request_id: RequestId) {
+        if *recover_lock(&self.current_request) == Some(request_id) {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn cancel_all(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn reap(&mut self) {
+        let mut index = 0;
+        while index < self.threads.len() {
+            if self.threads[index].is_finished() {
+                let thread = self.threads.swap_remove(index);
+                let _ = thread.join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn shutdown(mut self) {
+        self.cancel_all();
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -123,7 +242,7 @@ impl WorkerState {
         ))
     }
 
-    fn ensure_engine(&mut self, writer: &mut EventWriter) -> Result<TranslationTier> {
+    fn ensure_engine(&mut self, writer: &EventWriter) -> Result<TranslationTier> {
         let tier = self
             .selected_tier
             .ok_or_else(|| anyhow!("no translation model is selected"))?;
@@ -145,9 +264,10 @@ impl WorkerState {
 
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
-    let mut state = WorkerState::new()?;
+    let state = Arc::new(Mutex::new(WorkerState::new()?));
     let stdin = io::stdin();
-    let mut writer = EventWriter::new();
+    let (writer, output_thread) = EventWriter::start()?;
+    let mut coordinator = TranslationCoordinator::new();
     for line in BufReader::new(stdin.lock()).lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -168,7 +288,8 @@ fn main() -> Result<()> {
         if matches!(command, TranslationWorkerCommand::Shutdown) {
             break;
         }
-        if let Err(error) = handle_command(command, &mut state, &mut writer) {
+        coordinator.reap();
+        if let Err(error) = handle_command(command, Arc::clone(&state), &writer, &mut coordinator) {
             writer.send(&TranslationWorkerEvent::Failed {
                 request_id: None,
                 code: "translation_worker".to_owned(),
@@ -177,13 +298,17 @@ fn main() -> Result<()> {
             })?;
         }
     }
+    coordinator.shutdown();
+    drop(writer);
+    let _ = output_thread.join();
     Ok(())
 }
 
 fn handle_command(
     command: TranslationWorkerCommand,
-    state: &mut WorkerState,
-    writer: &mut EventWriter,
+    state: Arc<Mutex<WorkerState>>,
+    writer: &EventWriter,
+    coordinator: &mut TranslationCoordinator,
 ) -> Result<()> {
     match command {
         TranslationWorkerCommand::Initialize {
@@ -191,6 +316,8 @@ fn handle_command(
             keep_warm,
             history_enabled,
         } => {
+            coordinator.cancel_all();
+            let mut state = recover_lock(&state);
             state.keep_warm = keep_warm;
             state.history_enabled = history_enabled;
             state.selected_tier = selected_tier.filter(|tier| state.installed(*tier));
@@ -209,6 +336,8 @@ fn handle_command(
             }
         }
         TranslationWorkerCommand::EnsureModel { tier } => {
+            coordinator.cancel_all();
+            let mut state = recover_lock(&state);
             let pack = state.pack(tier)?.clone();
             let bundle = pack.as_bundle();
             let runtime_download = if state.runtime.is_installed() {
@@ -240,7 +369,8 @@ fn handle_command(
                 path: path.to_string_lossy().into_owned(),
             })?;
             state.selected_tier = Some(tier);
-            let (catalog_id, load_duration_ms) = state.load_engine(tier, state.keep_warm)?;
+            let keep_warm = state.keep_warm;
+            let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
             writer.send(&TranslationWorkerEvent::ModelSelected { tier })?;
             writer.send(&TranslationWorkerEvent::ModelReady {
                 catalog_id,
@@ -249,6 +379,8 @@ fn handle_command(
             })?;
         }
         TranslationWorkerCommand::SelectTier { tier, keep_warm } => {
+            coordinator.cancel_all();
+            let mut state = recover_lock(&state);
             if !state.installed(tier) {
                 return Err(anyhow!("translation model is not installed"));
             }
@@ -268,36 +400,30 @@ fn handle_command(
             source_language,
             target_language,
         } => {
-            if let Err(error) = translate_request(
+            coordinator.submit(
                 state,
-                writer,
+                writer.clone(),
                 request_id,
                 text,
                 source_language,
                 target_language,
-            ) {
-                writer.send(&TranslationWorkerEvent::Failed {
-                    request_id: Some(request_id),
-                    code: if state.selected_tier.is_some() {
-                        "translation_failed"
-                    } else {
-                        "model_required"
-                    }
-                    .to_owned(),
-                    message: format!("{error:#}"),
-                    retryable: state.selected_tier.is_some(),
-                })?;
-            }
+            )?;
+        }
+        TranslationWorkerCommand::Cancel { request_id } => {
+            coordinator.cancel(request_id);
         }
         TranslationWorkerCommand::GetHistory { limit } => {
+            let state = recover_lock(&state);
             writer.send(&TranslationWorkerEvent::History {
                 entries: state.history.recent(limit),
             })?;
         }
         TranslationWorkerCommand::SetHistoryEnabled { enabled } => {
+            let mut state = recover_lock(&state);
             state.history_enabled = enabled;
         }
         TranslationWorkerCommand::ClearHistory => {
+            let mut state = recover_lock(&state);
             state.history.clear();
             writer.send(&TranslationWorkerEvent::History {
                 entries: Vec::new(),
@@ -310,27 +436,66 @@ fn handle_command(
 
 fn translate_request(
     state: &mut WorkerState,
-    writer: &mut EventWriter,
+    writer: &EventWriter,
     request_id: RequestId,
     text: String,
     source_language: Option<TranslationLanguage>,
     target_language: Option<TranslationLanguage>,
+    is_current: impl Fn() -> bool,
 ) -> Result<()> {
     let tier = state.ensure_engine(writer)?;
     let started = Instant::now();
-    let (translated_text, source_language, target_language) = state
+    let mut last_partial_at = None;
+    let mut last_partial_text = String::new();
+    let output = state
         .engine
         .as_mut()
         .context("translation engine failed to initialize")?
-        .translate(&text, source_language, target_language)?;
+        .translate_streaming(
+            &text,
+            source_language,
+            target_language,
+            &is_current,
+            |partial, first_token_duration_ms| {
+                if !is_current() {
+                    return false;
+                }
+                let now = Instant::now();
+                let should_emit = last_partial_at.is_none()
+                    || last_partial_at.is_some_and(|last: Instant| {
+                        now.duration_since(last) >= Duration::from_millis(30)
+                    })
+                    || partial.ends_with(['\n', '.', '!', '?']);
+                if should_emit && partial != last_partial_text {
+                    if writer
+                        .send(&TranslationWorkerEvent::Partial {
+                            request_id,
+                            translated_text: partial.to_owned(),
+                            first_token_duration_ms,
+                        })
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    last_partial_at = Some(now);
+                    partial.clone_into(&mut last_partial_text);
+                }
+                true
+            },
+        )?;
+    if !is_current() {
+        return Err(TranslationCancelled.into());
+    }
     let result = TranslationResult {
         request_id,
         source_text: text,
-        translated_text,
-        source_language,
-        target_language,
+        translated_text: output.text,
+        source_language: output.source_language,
+        target_language: output.target_language,
         tier,
         processing_duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        first_token_duration_ms: output.first_token_duration_ms,
+        backend_request_count: output.backend_request_count,
     };
     let created_unix_ms = unix_ms();
     if state.history_enabled {
@@ -376,4 +541,12 @@ fn unix_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn short_id(request_id: RequestId) -> String {
+    request_id.to_string().chars().take(8).collect()
 }

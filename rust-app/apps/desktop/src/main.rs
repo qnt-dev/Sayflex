@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env,
     error::Error,
     fs,
@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     rc::Rc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rust_app_core::{
@@ -248,6 +248,7 @@ struct PendingTextAction {
     request_id: RequestId,
     target: TargetSnapshot,
     text: String,
+    request_started_unix_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -261,6 +262,9 @@ enum TranslationOrigin {
 
 struct PendingTranslation {
     origin: TranslationOrigin,
+    started: Instant,
+    request_started_unix_ms: u64,
+    first_partial_shown: bool,
 }
 
 struct SelectionTranslationRequest {
@@ -268,6 +272,7 @@ struct SelectionTranslationRequest {
     target: TargetSnapshot,
     text: String,
     delivery: TranslationDelivery,
+    request_started_unix_ms: u64,
 }
 
 struct PendingInsertLast {
@@ -481,7 +486,7 @@ struct AppState {
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
     pending_text_action: Option<PendingTextAction>,
-    pending_selection_captures: HashSet<RequestId>,
+    pending_selection_captures: HashMap<RequestId, u64>,
     pending_translations: HashMap<RequestId, PendingTranslation>,
     queued_selection_translation: Option<SelectionTranslationRequest>,
     translation_history: Vec<TranslationHistoryEntry>,
@@ -520,7 +525,7 @@ impl AppState {
             text_action_mode: saved_settings.text_action_mode,
             translation_delivery: saved_settings.translation_delivery,
             pending_text_action: None,
-            pending_selection_captures: HashSet::new(),
+            pending_selection_captures: HashMap::new(),
             pending_translations: HashMap::new(),
             queued_selection_translation: None,
             translation_history: Vec::new(),
@@ -1056,6 +1061,9 @@ where
         .name(format!("{executable}-diagnostics"))
         .spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if routine_native_worker_log(&diagnostics_name, &line) {
+                    continue;
+                }
                 rust_app_core::diagnostics::log_line(&format!("worker={diagnostics_name} {line}"));
                 eprintln!("{diagnostics_name}: {line}");
             }
@@ -1067,6 +1075,13 @@ where
             stdin: RefCell::new(BufWriter::new(stdin)),
         },
     ))
+}
+
+fn routine_native_worker_log(executable: &str, line: &str) -> bool {
+    executable.contains("speech-worker")
+        && (line.starts_with("whisper_init_state:")
+            || line.starts_with("whisper_backend_init_gpu:")
+            || line.starts_with("whisper_full_with_state: auto-detected language:"))
 }
 
 fn dispatch_runtime_event(event: RuntimeEvent) {
@@ -1451,11 +1466,12 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             request_id,
             intent,
             target: _,
+            started_unix_ms,
         } => {
             state
                 .borrow_mut()
                 .pending_selection_captures
-                .insert(request_id);
+                .insert(request_id, started_unix_ms);
             if intent == TextActionIntent::Translate
                 && let Some(preview) = translation_preview.upgrade()
             {
@@ -1470,16 +1486,28 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             intent,
             target,
             text,
+            timing,
         } => {
-            state
+            let request_started_unix_ms = state
                 .borrow_mut()
                 .pending_selection_captures
-                .remove(&request_id);
+                .remove(&request_id)
+                .unwrap_or_else(unix_ms);
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_pipeline request={} stage=selection_captured release_wait_ms={} \
+uia_ms={:?} clipboard_ms={:?} total_ms={}",
+                request_id,
+                timing.release_wait_ms,
+                timing.uia_ms,
+                timing.clipboard_ms,
+                timing.total_ms,
+            ));
             handle_text_action(
                 request_id,
                 intent,
                 target,
                 text,
+                request_started_unix_ms,
                 settings,
                 chooser,
                 action_palette,
@@ -1599,6 +1627,7 @@ fn handle_text_action(
     intent: TextActionIntent,
     target: TargetSnapshot,
     text: String,
+    request_started_unix_ms: u64,
     settings: &slint::Weak<SettingsWindow>,
     chooser: &slint::Weak<SelectionChooser>,
     action_palette: &slint::Weak<ActionPalette>,
@@ -1621,6 +1650,7 @@ fn handle_text_action(
                     target,
                     text,
                     delivery: TranslationDelivery::Preview,
+                    request_started_unix_ms,
                 },
                 settings,
                 translation_preview,
@@ -1651,6 +1681,7 @@ fn handle_text_action(
                             target,
                             text,
                             delivery,
+                            request_started_unix_ms,
                         },
                         settings,
                         translation_preview,
@@ -1667,6 +1698,7 @@ fn handle_text_action(
                 request_id,
                 target,
                 text: text.clone(),
+                request_started_unix_ms,
             });
             if let Some(palette) = action_palette.upgrade() {
                 palette.set_source_panel_height(adaptive_text_panel_height(
@@ -1745,6 +1777,7 @@ fn begin_selection_translation(
         target,
         text,
         delivery,
+        request_started_unix_ms,
     } = request;
     let (enabled, selected_tier, ready) = {
         let state = state.borrow();
@@ -1771,6 +1804,7 @@ fn begin_selection_translation(
             target,
             text,
             delivery,
+            request_started_unix_ms,
         });
         set_indicator_status(settings, "The translation model is still loading.");
         return;
@@ -1780,6 +1814,9 @@ fn begin_selection_translation(
         request_id,
         PendingTranslation {
             origin: TranslationOrigin::Selection { target, delivery },
+            started: Instant::now(),
+            request_started_unix_ms,
+            first_partial_shown: false,
         },
     );
     if let Err(error) = workers
@@ -1807,16 +1844,22 @@ fn show_selection_translation_preview(
     let Some(preview) = translation_preview.upgrade() else {
         return;
     };
-    preview.set_request_id(request_id.to_string().into());
-    preview.set_pinned(false);
+    let request_id_text = request_id.to_string();
+    let first_show = preview.get_request_id().as_str() != request_id_text;
+    if first_show {
+        preview.set_request_id(request_id_text.into());
+        preview.set_pinned(false);
+    }
     apply_translation_preview_layout(&preview, translated_text);
     preview.set_translated_text(translated_text.into());
-    let _ = preview.show();
-    prepare_shown_translation_window(
-        slint_window_handle(preview.window()),
-        TRANSLATION_PREVIEW_WINDOW_TITLE,
-        target.window_handle,
-    );
+    if first_show {
+        let _ = preview.show();
+        prepare_shown_translation_window(
+            slint_window_handle(preview.window()),
+            TRANSLATION_PREVIEW_WINDOW_TITLE,
+            target.window_handle,
+        );
+    }
 }
 
 fn handle_speech_event(
@@ -2210,6 +2253,66 @@ fn handle_translation_event(
             sync_translation_models(settings, state);
             sync_action_settings(settings, state);
         }
+        TranslationWorkerEvent::Partial {
+            request_id,
+            translated_text,
+            first_token_duration_ms,
+        } => {
+            let pending = {
+                let mut state = state.borrow_mut();
+                state
+                    .pending_translations
+                    .get_mut(&request_id)
+                    .map(|pending| {
+                        let first_partial = !pending.first_partial_shown;
+                        pending.first_partial_shown = true;
+                        (
+                            pending.origin,
+                            pending.started.elapsed().as_millis() as u64,
+                            pending.request_started_unix_ms,
+                            first_partial,
+                        )
+                    })
+            };
+            let Some((origin, translation_elapsed_ms, request_started_unix_ms, first_partial)) =
+                pending
+            else {
+                return;
+            };
+
+            match origin {
+                TranslationOrigin::Translator => {
+                    if let Some(translator) = translator.upgrade() {
+                        translator.set_result_text(translated_text.into());
+                        translator.set_status_text("Translating locally…".into());
+                        translator.set_processing(true);
+                    }
+                }
+                TranslationOrigin::Selection {
+                    target,
+                    delivery: TranslationDelivery::Preview,
+                } => {
+                    show_selection_translation_preview(
+                        request_id,
+                        target,
+                        &translated_text,
+                        translation_preview,
+                    );
+                }
+                TranslationOrigin::Selection { .. } => {}
+            }
+
+            if first_partial {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_pipeline request={} stage=first_partial \
+                     model_first_token_ms={} translation_elapsed_ms={} end_to_end_ms={}",
+                    request_id,
+                    first_token_duration_ms,
+                    translation_elapsed_ms,
+                    unix_ms().saturating_sub(request_started_unix_ms),
+                ));
+            }
+        }
         TranslationWorkerEvent::Completed {
             result,
             created_unix_ms,
@@ -2235,6 +2338,28 @@ fn handle_translation_event(
                 state,
                 workers,
             );
+        }
+        TranslationWorkerEvent::Cancelled { request_id } => {
+            let pending = state.borrow_mut().pending_translations.remove(&request_id);
+            if matches!(
+                pending.as_ref().map(|pending| pending.origin),
+                Some(TranslationOrigin::Translator)
+            ) && let Some(translator) = translator.upgrade()
+            {
+                translator.set_processing(false);
+                translator.set_status_text("Translation cancelled.".into());
+            }
+            if let Some(preview) = translation_preview.upgrade()
+                && preview.get_request_id().as_str() == request_id.to_string()
+                && !preview.get_pinned()
+            {
+                let _ = preview.hide();
+                rust_platform_windows::deactivate_popup_dismiss();
+            }
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_pipeline request={} stage=cancelled",
+                request_id
+            ));
         }
         TranslationWorkerEvent::History { entries } => {
             state.borrow_mut().translation_history = entries;
@@ -2280,6 +2405,16 @@ fn route_translation_result(
     let Some(pending) = pending else {
         return;
     };
+    rust_app_core::diagnostics::log_line(&format!(
+        "translation_pipeline request={} stage=completed model_ms={} \
+         model_first_token_ms={} backend_requests={} translation_elapsed_ms={} end_to_end_ms={}",
+        result.request_id,
+        result.processing_duration_ms,
+        result.first_token_duration_ms,
+        result.backend_request_count,
+        pending.started.elapsed().as_millis(),
+        unix_ms().saturating_sub(pending.request_started_unix_ms),
+    ));
     match pending.origin {
         TranslationOrigin::Translator => {
             if let Some(translator) = translator.upgrade() {
@@ -2764,6 +2899,7 @@ fn wire_action_palette(
                     target: pending.target,
                     text: pending.text,
                     delivery,
+                    request_started_unix_ms: pending.request_started_unix_ms,
                 },
                 &settings,
                 &preview,
@@ -2863,6 +2999,9 @@ fn wire_translator(
                 request_id,
                 PendingTranslation {
                     origin: TranslationOrigin::Translator,
+                    started: Instant::now(),
+                    request_started_unix_ms: unix_ms(),
+                    first_partial_shown: false,
                 },
             );
             translator.set_processing(true);
@@ -3374,6 +3513,15 @@ fn native_window_handle(window: &slint::winit_030::winit::window::Window) -> Opt
 
 fn short_id(session_id: SessionId) -> String {
     session_id.to_string().chars().take(8).collect()
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn data_root() -> PathBuf {

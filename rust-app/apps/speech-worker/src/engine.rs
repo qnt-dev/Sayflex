@@ -11,7 +11,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rust_protocol::SpeechOutputMode;
 use whisper_rs::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, get_lang_str,
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+    get_lang_str,
 };
 
 use crate::audio::{RecordedAudio, resample_bandlimited};
@@ -74,6 +75,7 @@ impl AbortGeneration {
 pub struct WhisperEngine {
     loaded_path: Option<PathBuf>,
     context: Option<WhisperContext>,
+    state: Option<WhisperState>,
     direct_translation_supported: bool,
 }
 
@@ -82,6 +84,7 @@ impl WhisperEngine {
         Self {
             loaded_path: None,
             context: None,
+            state: None,
             direct_translation_supported: false,
         }
     }
@@ -89,7 +92,10 @@ impl WhisperEngine {
     /// Loads the model and performs one silent pass. Once this returns, a user gesture never
     /// pays model I/O, CUDA context creation, or first-kernel initialization.
     pub fn prepare(&mut self, model_path: &Path) -> Result<PreparedModel> {
-        if self.loaded_path.as_deref() == Some(model_path) && self.context.is_some() {
+        if self.loaded_path.as_deref() == Some(model_path)
+            && self.context.is_some()
+            && self.state.is_some()
+        {
             return Ok(PreparedModel {
                 load_duration_ms: 0,
                 warmup_duration_ms: 0,
@@ -116,9 +122,13 @@ impl WhisperEngine {
             context.model_n_text_layer(),
             context.model_n_text_state(),
         );
+        let state = context
+            .create_state()
+            .context("could not create reusable Whisper inference state")?;
         let load_duration_ms = elapsed_ms(load_started);
 
         self.context = Some(context);
+        self.state = Some(state);
         self.loaded_path = Some(model_path.to_owned());
         self.direct_translation_supported = direct_translation_supported;
 
@@ -169,7 +179,7 @@ impl WhisperEngine {
         {
             bail!("recording segment does not match its absolute source range");
         }
-        if self.context.is_none() {
+        if self.state.is_none() {
             bail!("Whisper model is not prepared");
         }
         if output_mode == SpeechOutputMode::TranslateToEnglish && !self.direct_translation_supported
@@ -215,20 +225,17 @@ impl WhisperEngine {
     }
 
     fn run_whisper(
-        &self,
+        &mut self,
         audio: &[f32],
         output_mode: SpeechOutputMode,
         single_segment: bool,
         initial_prompt: Option<&str>,
         abort_generation: Option<AbortGeneration>,
     ) -> Result<DecodedTranscript> {
-        let context = self
-            .context
-            .as_ref()
-            .context("Whisper model is not loaded")?;
-        let mut state = context
-            .create_state()
-            .context("could not create Whisper inference state")?;
+        let state = self
+            .state
+            .as_mut()
+            .context("Whisper inference state is not prepared")?;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(inference_threads());
         params.set_language(None);
