@@ -23,33 +23,41 @@ pub struct CapturedSelection {
     pub clipboard_ms: Option<u64>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum UiaCapture {
+    Captured(CapturedSelection),
+    ClipboardFallback { uia_ms: Option<u64> },
+}
+
 #[derive(Debug, Error)]
 pub enum CaptureError {
     #[error("selected text is protected")]
     Protected,
-    #[error("the translation hotkey was not fully released before capture")]
-    HotkeyReleaseTimeout,
     #[error(transparent)]
     Clipboard(#[from] clipboard::ClipboardError),
 }
 
 pub fn capture(target: TargetSnapshot) -> Result<CapturedSelection, CaptureError> {
     let pending_uia = uia_selection::begin_selected_text(target);
-    capture_after_release(target, pending_uia)
+    match await_uia_capture(target, pending_uia)? {
+        UiaCapture::Captured(captured) => Ok(captured),
+        UiaCapture::ClipboardFallback { uia_ms } => capture_clipboard_after_release(target, uia_ms),
+    }
 }
 
 pub fn begin_uia_capture(target: TargetSnapshot) -> Result<PendingSelection, SelectionError> {
     uia_selection::begin_selected_text(target)
 }
 
-pub fn capture_after_release(
+pub fn await_uia_capture(
     target: TargetSnapshot,
     pending_uia: Result<PendingSelection, SelectionError>,
-) -> Result<CapturedSelection, CaptureError> {
+) -> Result<UiaCapture, CaptureError> {
     if !inject::is_foreground(target) {
         return Err(clipboard::ClipboardError::TargetChanged.into());
     }
 
+    let had_pending_uia = pending_uia.is_ok();
     let uia_attempt = match pending_uia {
         Ok(pending) => pending.wait(),
         Err(error) => uia_selection::TimedSelectionAttempt {
@@ -57,21 +65,24 @@ pub fn capture_after_release(
             result: Err(error),
         },
     };
-    let uia_ms = Some(uia_attempt.elapsed_ms);
+    let uia_ms = had_pending_uia.then_some(uia_attempt.elapsed_ms);
     match uia_attempt.result {
         Ok(SelectionOutcome::Text(text)) if !text.is_empty() => {
+            if !inject::is_foreground(target) {
+                return Err(clipboard::ClipboardError::TargetChanged.into());
+            }
             crate::diagnostic_line(&format!(
                 "uia_selection target_pid={} result=success chars={} elapsed_ms={}",
                 target.process_id,
                 text.chars().count(),
                 uia_attempt.elapsed_ms,
             ));
-            return Ok(CapturedSelection {
+            return Ok(UiaCapture::Captured(CapturedSelection {
                 text,
                 method: CaptureMethod::UiAutomation,
                 uia_ms,
                 clipboard_ms: None,
-            });
+            }));
         }
         Ok(SelectionOutcome::Protected) => {
             crate::diagnostic_line(&format!(
@@ -94,6 +105,16 @@ pub fn capture_after_release(
         }
     }
 
+    Ok(UiaCapture::ClipboardFallback { uia_ms })
+}
+
+pub fn capture_clipboard_after_release(
+    target: TargetSnapshot,
+    uia_ms: Option<u64>,
+) -> Result<CapturedSelection, CaptureError> {
+    if !inject::is_foreground(target) {
+        return Err(clipboard::ClipboardError::TargetChanged.into());
+    }
     let shortcut = target::selection_copy_shortcut(target);
     let clipboard_started = Instant::now();
     let captured = clipboard::capture_selection(

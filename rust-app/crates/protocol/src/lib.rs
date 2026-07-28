@@ -3,10 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 7 adds streaming translation events, explicit cancellation, and
-// stage-level selection/translation latency fields. All packaged processes
-// must agree on this schema before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 7;
+// Version 8 adds an explicit selection-input release gate and chunk-level
+// translation progress. All packaged processes must agree on this schema
+// before exchanging commands.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -213,11 +213,15 @@ pub struct TranslationResult {
     pub first_token_duration_ms: u64,
     #[serde(default)]
     pub backend_request_count: u32,
+    #[serde(default)]
+    pub tokenize_duration_ms: u64,
+    #[serde(default)]
+    pub chunk_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionCaptureTiming {
-    pub release_wait_ms: u64,
+    pub release_wait_ms: Option<u64>,
     pub uia_ms: Option<u64>,
     pub clipboard_ms: Option<u64>,
     pub total_ms: u64,
@@ -284,6 +288,14 @@ pub enum InputHostEvent {
         target: TargetSnapshot,
         text: String,
         timing: SelectionCaptureTiming,
+    },
+    SelectionInputReleased {
+        request_id: RequestId,
+        release_wait_ms: u64,
+    },
+    SelectionInputReleaseFailed {
+        request_id: RequestId,
+        message: String,
     },
     SelectionCaptureFailed {
         request_id: RequestId,
@@ -417,6 +429,9 @@ pub enum TranslationWorkerEvent {
         request_id: RequestId,
         translated_text: String,
         first_token_duration_ms: u64,
+        tokenize_duration_ms: u64,
+        chunk_index: u32,
+        chunk_count: u32,
     },
     Completed {
         result: TranslationResult,
@@ -605,6 +620,8 @@ mod tests {
                 processing_duration_ms: 12,
                 first_token_duration_ms: 4,
                 backend_request_count: 1,
+                tokenize_duration_ms: 0,
+                chunk_count: 1,
             },
             created_unix_ms: 123,
         };
@@ -620,7 +637,7 @@ mod tests {
             target: TargetSnapshot::default(),
             text: "hello".to_owned(),
             timing: SelectionCaptureTiming {
-                release_wait_ms: 10,
+                release_wait_ms: Some(10),
                 uia_ms: Some(3),
                 clipboard_ms: None,
                 total_ms: 10,
@@ -642,6 +659,16 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<InputHostEvent>(&json).unwrap(),
             capture_started
+        );
+
+        let input_released = InputHostEvent::SelectionInputReleased {
+            request_id,
+            release_wait_ms: 21,
+        };
+        let json = serde_json::to_string(&input_released).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InputHostEvent>(&json).unwrap(),
+            input_released
         );
     }
 }

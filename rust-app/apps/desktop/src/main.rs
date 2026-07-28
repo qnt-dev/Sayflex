@@ -267,6 +267,17 @@ struct PendingTranslation {
     first_partial_shown: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SelectionReleaseGate {
+    Pending,
+    Released,
+    Failed(String),
+    AwaitingReplacement {
+        target: TargetSnapshot,
+        text: String,
+    },
+}
+
 struct SelectionTranslationRequest {
     request_id: RequestId,
     target: TargetSnapshot,
@@ -487,6 +498,7 @@ struct AppState {
     history_enabled: bool,
     pending_text_action: Option<PendingTextAction>,
     pending_selection_captures: HashMap<RequestId, u64>,
+    selection_release_gates: HashMap<RequestId, SelectionReleaseGate>,
     pending_translations: HashMap<RequestId, PendingTranslation>,
     queued_selection_translation: Option<SelectionTranslationRequest>,
     translation_history: Vec<TranslationHistoryEntry>,
@@ -526,6 +538,7 @@ impl AppState {
             translation_delivery: saved_settings.translation_delivery,
             pending_text_action: None,
             pending_selection_captures: HashMap::new(),
+            selection_release_gates: HashMap::new(),
             pending_translations: HashMap::new(),
             queued_selection_translation: None,
             translation_history: Vec::new(),
@@ -1468,10 +1481,12 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             target: _,
             started_unix_ms,
         } => {
-            state
-                .borrow_mut()
-                .pending_selection_captures
+            let mut app = state.borrow_mut();
+            app.pending_selection_captures
                 .insert(request_id, started_unix_ms);
+            app.selection_release_gates
+                .insert(request_id, SelectionReleaseGate::Pending);
+            drop(app);
             if intent == TextActionIntent::Translate
                 && let Some(preview) = translation_preview.upgrade()
             {
@@ -1488,13 +1503,18 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             text,
             timing,
         } => {
-            let request_started_unix_ms = state
-                .borrow_mut()
-                .pending_selection_captures
-                .remove(&request_id)
-                .unwrap_or_else(unix_ms);
+            let request_started_unix_ms = {
+                let mut app = state.borrow_mut();
+                if timing.release_wait_ms.is_some() {
+                    app.selection_release_gates
+                        .insert(request_id, SelectionReleaseGate::Released);
+                }
+                app.pending_selection_captures
+                    .remove(&request_id)
+                    .unwrap_or_else(unix_ms)
+            };
             rust_app_core::diagnostics::log_line(&format!(
-                "translation_pipeline request={} stage=selection_captured release_wait_ms={} \
+                "translation_pipeline request={} stage=selection_captured release_wait_ms={:?} \
 uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 request_id,
                 timing.release_wait_ms,
@@ -1516,14 +1536,63 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 workers,
             );
         }
+        InputHostEvent::SelectionInputReleased {
+            request_id,
+            release_wait_ms,
+        } => {
+            let deferred = {
+                let mut app = state.borrow_mut();
+                let (next, deferred) = release_gate_after_input_release(
+                    app.selection_release_gates.remove(&request_id),
+                );
+                if let Some(next) = next {
+                    app.selection_release_gates.insert(request_id, next);
+                }
+                deferred
+            };
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_pipeline request={} stage=input_released release_wait_ms={}",
+                request_id, release_wait_ms,
+            ));
+            if let Some((target, text)) = deferred {
+                let _ = workers.input.send(&InputHostCommand::ReplaceSelection {
+                    request_id,
+                    target,
+                    text,
+                });
+            }
+        }
+        InputHostEvent::SelectionInputReleaseFailed {
+            request_id,
+            message,
+        } => {
+            let had_deferred_replacement = {
+                let mut app = state.borrow_mut();
+                let (next, deferred) = release_gate_after_input_release_failure(
+                    app.selection_release_gates.remove(&request_id),
+                    message.clone(),
+                );
+                if let Some(next) = next {
+                    app.selection_release_gates.insert(request_id, next);
+                }
+                deferred
+            };
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_pipeline request={} stage=input_release_failed",
+                request_id,
+            ));
+            if had_deferred_replacement {
+                set_indicator_status(settings, &format!("Translation ready, but {message}"));
+            }
+        }
         InputHostEvent::SelectionCaptureFailed {
             request_id,
             message,
         } => {
-            let _pending = state
-                .borrow_mut()
-                .pending_selection_captures
-                .remove(&request_id);
+            let mut app = state.borrow_mut();
+            app.pending_selection_captures.remove(&request_id);
+            app.selection_release_gates.remove(&request_id);
+            drop(app);
             set_indicator_status(settings, &format!("Selection: {message}"));
         }
         InputHostEvent::InsertionDispatched {
@@ -1640,6 +1709,10 @@ fn handle_text_action(
             if state.borrow().layout_enabled {
                 show_layout_chooser(request_id, target, text, settings, chooser, state);
             } else {
+                state
+                    .borrow_mut()
+                    .selection_release_gates
+                    .remove(&request_id);
                 set_indicator_status(settings, "Keyboard-layout correction is disabled.");
             }
         }
@@ -1670,6 +1743,10 @@ fn handle_text_action(
             };
             let enabled_count = usize::from(layout_enabled) + usize::from(translation_enabled);
             if enabled_count == 0 {
+                state
+                    .borrow_mut()
+                    .selection_release_gates
+                    .remove(&request_id);
                 set_indicator_status(settings, "All selected-text actions are disabled.");
                 return;
             }
@@ -1728,6 +1805,10 @@ fn show_layout_chooser(
 ) {
     let candidates = build_layout_candidates(&text);
     if candidates.is_empty() {
+        state
+            .borrow_mut()
+            .selection_release_gates
+            .remove(&request_id);
         set_indicator_status(settings, "No RU/EN layout conversion is available.");
         return;
     }
@@ -1788,10 +1869,18 @@ fn begin_selection_translation(
         )
     };
     if !enabled {
+        state
+            .borrow_mut()
+            .selection_release_gates
+            .remove(&request_id);
         set_indicator_status(settings, "Translation is disabled in Actions.");
         return;
     }
     if selected_tier.is_none() {
+        state
+            .borrow_mut()
+            .selection_release_gates
+            .remove(&request_id);
         set_indicator_status(
             settings,
             "Choose and download a translation model in Settings first.",
@@ -1828,7 +1917,9 @@ fn begin_selection_translation(
             target_language: None,
         })
     {
-        state.borrow_mut().pending_translations.remove(&request_id);
+        let mut app = state.borrow_mut();
+        app.pending_translations.remove(&request_id);
+        app.selection_release_gates.remove(&request_id);
         set_indicator_status(settings, &format!("Could not start translation: {error}"));
     } else {
         set_indicator_status(settings, "Translating locally…");
@@ -2257,6 +2348,9 @@ fn handle_translation_event(
             request_id,
             translated_text,
             first_token_duration_ms,
+            tokenize_duration_ms,
+            chunk_index,
+            chunk_count,
         } => {
             let pending = {
                 let mut state = state.borrow_mut();
@@ -2284,7 +2378,12 @@ fn handle_translation_event(
                 TranslationOrigin::Translator => {
                     if let Some(translator) = translator.upgrade() {
                         translator.set_result_text(translated_text.into());
-                        translator.set_status_text("Translating locally…".into());
+                        let status = if chunk_count > 1 {
+                            format!("Translating locally… {chunk_index}/{chunk_count}")
+                        } else {
+                            "Translating locally…".to_owned()
+                        };
+                        translator.set_status_text(status.into());
                         translator.set_processing(true);
                     }
                 }
@@ -2305,9 +2404,13 @@ fn handle_translation_event(
             if first_partial {
                 rust_app_core::diagnostics::log_line(&format!(
                     "translation_pipeline request={} stage=first_partial \
-                     model_first_token_ms={} translation_elapsed_ms={} end_to_end_ms={}",
+                     model_first_token_ms={} tokenize_ms={} chunk={}/{} \
+                     translation_elapsed_ms={} end_to_end_ms={}",
                     request_id,
                     first_token_duration_ms,
+                    tokenize_duration_ms,
+                    chunk_index,
+                    chunk_count,
                     translation_elapsed_ms,
                     unix_ms().saturating_sub(request_started_unix_ms),
                 ));
@@ -2340,7 +2443,11 @@ fn handle_translation_event(
             );
         }
         TranslationWorkerEvent::Cancelled { request_id } => {
-            let pending = state.borrow_mut().pending_translations.remove(&request_id);
+            let pending = {
+                let mut app = state.borrow_mut();
+                app.selection_release_gates.remove(&request_id);
+                app.pending_translations.remove(&request_id)
+            };
             if matches!(
                 pending.as_ref().map(|pending| pending.origin),
                 Some(TranslationOrigin::Translator)
@@ -2370,8 +2477,11 @@ fn handle_translation_event(
             message,
             ..
         } => {
-            let pending =
-                request_id.and_then(|id| state.borrow_mut().pending_translations.remove(&id));
+            let pending = request_id.and_then(|id| {
+                let mut app = state.borrow_mut();
+                app.selection_release_gates.remove(&id);
+                app.pending_translations.remove(&id)
+            });
             let queued_request_id = if request_id.is_none() {
                 state
                     .borrow_mut()
@@ -2381,13 +2491,19 @@ fn handle_translation_event(
             } else {
                 None
             };
+            if let Some(queued_request_id) = queued_request_id {
+                state
+                    .borrow_mut()
+                    .selection_release_gates
+                    .remove(&queued_request_id);
+            }
             if matches!(
                 pending.as_ref().map(|pending| pending.origin),
                 Some(TranslationOrigin::Translator)
             ) {
                 set_translation_status(translator, &format!("{code}: {message}"));
             }
-            let _ = (translation_preview, queued_request_id);
+            let _ = translation_preview;
             set_indicator_status(settings, &format!("{code}: {message}"));
         }
     }
@@ -2407,15 +2523,18 @@ fn route_translation_result(
     };
     rust_app_core::diagnostics::log_line(&format!(
         "translation_pipeline request={} stage=completed model_ms={} \
-         model_first_token_ms={} backend_requests={} translation_elapsed_ms={} end_to_end_ms={}",
+         model_first_token_ms={} tokenize_ms={} chunks={} backend_requests={} \
+         translation_elapsed_ms={} end_to_end_ms={}",
         result.request_id,
         result.processing_duration_ms,
         result.first_token_duration_ms,
+        result.tokenize_duration_ms,
+        result.chunk_count,
         result.backend_request_count,
         pending.started.elapsed().as_millis(),
         unix_ms().saturating_sub(pending.request_started_unix_ms),
     ));
-    match pending.origin {
+    let completion_status = match pending.origin {
         TranslationOrigin::Translator => {
             if let Some(translator) = translator.upgrade() {
                 translator.set_result_text(result.translated_text.into());
@@ -2430,33 +2549,147 @@ fn route_translation_result(
                 );
                 translator.set_processing(false);
             }
+            "Translation completed locally.".to_owned()
         }
         TranslationOrigin::Selection { target, delivery } => match delivery {
             TranslationDelivery::Preview => {
+                state
+                    .borrow_mut()
+                    .selection_release_gates
+                    .remove(&result.request_id);
                 show_selection_translation_preview(
                     result.request_id,
                     target,
                     &result.translated_text,
                     translation_preview,
                 );
+                "Translation completed locally.".to_owned()
             }
             TranslationDelivery::Replace => {
-                let _ = workers.input.send(&InputHostCommand::ReplaceSelection {
-                    request_id: result.request_id,
+                match dispatch_or_defer_selection_replacement(
+                    state,
+                    workers,
+                    result.request_id,
                     target,
-                    text: result.translated_text,
-                });
+                    result.translated_text,
+                ) {
+                    ReplacementDispatch::Dispatched => "Translation completed locally.".to_owned(),
+                    ReplacementDispatch::Deferred => {
+                        "Translation ready; waiting for the shortcut to be released.".to_owned()
+                    }
+                    ReplacementDispatch::Blocked(message) => {
+                        format!("Translation ready, but {message}")
+                    }
+                }
             }
             TranslationDelivery::Copy => {
+                state
+                    .borrow_mut()
+                    .selection_release_gates
+                    .remove(&result.request_id);
                 let _ = workers.input.send(&InputHostCommand::CopyText {
                     request_id: result.request_id,
                     text: result.translated_text,
                 });
+                "Translation completed locally.".to_owned()
             }
         },
+    };
+    set_indicator_status(settings, &completion_status);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReplacementDispatch {
+    Dispatched,
+    Deferred,
+    Blocked(String),
+}
+
+fn release_gate_after_input_release(
+    gate: Option<SelectionReleaseGate>,
+) -> (
+    Option<SelectionReleaseGate>,
+    Option<(TargetSnapshot, String)>,
+) {
+    match gate {
+        Some(SelectionReleaseGate::AwaitingReplacement { target, text }) => {
+            (None, Some((target, text)))
+        }
+        Some(SelectionReleaseGate::Pending | SelectionReleaseGate::Released) => {
+            (Some(SelectionReleaseGate::Released), None)
+        }
+        Some(SelectionReleaseGate::Failed(message)) => {
+            (Some(SelectionReleaseGate::Failed(message)), None)
+        }
+        None => (None, None),
     }
-    let _ = state;
-    set_indicator_status(settings, "Translation completed locally.");
+}
+
+fn release_gate_after_input_release_failure(
+    gate: Option<SelectionReleaseGate>,
+    message: String,
+) -> (Option<SelectionReleaseGate>, bool) {
+    match gate {
+        Some(SelectionReleaseGate::AwaitingReplacement { .. }) => {
+            (Some(SelectionReleaseGate::Failed(message)), true)
+        }
+        Some(
+            SelectionReleaseGate::Pending
+            | SelectionReleaseGate::Released
+            | SelectionReleaseGate::Failed(_),
+        ) => (Some(SelectionReleaseGate::Failed(message)), false),
+        None => (None, false),
+    }
+}
+
+fn release_gate_for_replacement(
+    gate: Option<SelectionReleaseGate>,
+    target: TargetSnapshot,
+    text: &str,
+) -> (Option<SelectionReleaseGate>, ReplacementDispatch) {
+    match gate {
+        Some(SelectionReleaseGate::Pending | SelectionReleaseGate::AwaitingReplacement { .. }) => (
+            Some(SelectionReleaseGate::AwaitingReplacement {
+                target,
+                text: text.to_owned(),
+            }),
+            ReplacementDispatch::Deferred,
+        ),
+        Some(SelectionReleaseGate::Failed(message)) => {
+            (None, ReplacementDispatch::Blocked(message))
+        }
+        Some(SelectionReleaseGate::Released) | None => (None, ReplacementDispatch::Dispatched),
+    }
+}
+
+fn dispatch_or_defer_selection_replacement(
+    state: &Rc<RefCell<AppState>>,
+    workers: &Rc<Workers>,
+    request_id: RequestId,
+    target: TargetSnapshot,
+    text: String,
+) -> ReplacementDispatch {
+    let mut app = state.borrow_mut();
+    let (next, dispatch) = release_gate_for_replacement(
+        app.selection_release_gates.remove(&request_id),
+        target,
+        &text,
+    );
+    if let Some(next) = next {
+        app.selection_release_gates.insert(request_id, next);
+    }
+    match dispatch {
+        ReplacementDispatch::Dispatched => {
+            drop(app);
+            let _ = workers.input.send(&InputHostCommand::ReplaceSelection {
+                request_id,
+                target,
+                text,
+            });
+            ReplacementDispatch::Dispatched
+        }
+        other => other,
+    }
 }
 
 fn wire_settings(
@@ -2846,11 +3079,13 @@ fn wire_chooser(chooser: &SelectionChooser, state: &Rc<RefCell<AppState>>, worke
             if let Some(chooser) = chooser_weak.upgrade() {
                 let _ = chooser.hide();
             }
-            let _ = workers.input.send(&InputHostCommand::ReplaceSelection {
-                request_id: pending.request_id,
-                target: pending.target,
-                text: candidate.text.clone(),
-            });
+            let _ = dispatch_or_defer_selection_replacement(
+                &state,
+                &workers,
+                pending.request_id,
+                pending.target,
+                candidate.text.clone(),
+            );
         });
     }
     {
@@ -2858,7 +3093,12 @@ fn wire_chooser(chooser: &SelectionChooser, state: &Rc<RefCell<AppState>>, worke
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         chooser.on_cancel(move || {
-            if let Some(pending) = state.borrow_mut().pending_selection.take() {
+            let pending = state.borrow_mut().pending_selection.take();
+            if let Some(pending) = pending {
+                state
+                    .borrow_mut()
+                    .selection_release_gates
+                    .remove(&pending.request_id);
                 let _ = workers.input.send(&InputHostCommand::CancelSelection {
                     request_id: pending.request_id,
                 });
@@ -2936,7 +3176,12 @@ fn wire_action_palette(
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         palette.on_cancel(move || {
-            if let Some(pending) = state.borrow_mut().pending_text_action.take() {
+            let pending = state.borrow_mut().pending_text_action.take();
+            if let Some(pending) = pending {
+                state
+                    .borrow_mut()
+                    .selection_release_gates
+                    .remove(&pending.request_id);
                 let _ = workers.input.send(&InputHostCommand::CancelSelection {
                     request_id: pending.request_id,
                 });
@@ -3767,6 +4012,66 @@ mod indicator_animation_tests {
                 || (first.mic_inner_height - second.mic_inner_height).abs() > 0.01
                 || (first.mic_near_height - second.mic_near_height).abs() > 0.01
         );
+    }
+}
+
+#[cfg(test)]
+mod selection_release_gate_tests {
+    use rust_protocol::TargetSnapshot;
+
+    use super::{
+        ReplacementDispatch, SelectionReleaseGate, release_gate_after_input_release,
+        release_gate_after_input_release_failure, release_gate_for_replacement,
+    };
+
+    #[test]
+    fn replacement_is_deferred_until_the_physical_chord_is_released() {
+        let target = TargetSnapshot {
+            window_handle: 42,
+            process_id: 7,
+            thread_id: 8,
+            keyboard_layout: 9,
+        };
+        let (gate, dispatch) =
+            release_gate_for_replacement(Some(SelectionReleaseGate::Pending), target, "translated");
+        assert_eq!(dispatch, ReplacementDispatch::Deferred);
+
+        let (next, deferred) = release_gate_after_input_release(gate);
+        assert!(next.is_none());
+        assert_eq!(deferred, Some((target, "translated".to_owned())));
+    }
+
+    #[test]
+    fn released_chord_dispatches_without_an_extra_wait() {
+        let (gate, dispatch) = release_gate_for_replacement(
+            Some(SelectionReleaseGate::Released),
+            TargetSnapshot::default(),
+            "translated",
+        );
+        assert!(gate.is_none());
+        assert_eq!(dispatch, ReplacementDispatch::Dispatched);
+    }
+
+    #[test]
+    fn failed_release_never_dispatches_delayed_input() {
+        let (gate, dispatch) = release_gate_for_replacement(
+            Some(SelectionReleaseGate::Failed("still held".to_owned())),
+            TargetSnapshot::default(),
+            "translated",
+        );
+        assert!(gate.is_none());
+        assert_eq!(
+            dispatch,
+            ReplacementDispatch::Blocked("still held".to_owned())
+        );
+    }
+
+    #[test]
+    fn late_release_failure_does_not_resurrect_a_completed_preview_gate() {
+        let (gate, had_deferred_replacement) =
+            release_gate_after_input_release_failure(None, "still held".to_owned());
+        assert!(gate.is_none());
+        assert!(!had_deferred_replacement);
     }
 }
 

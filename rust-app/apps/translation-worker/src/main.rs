@@ -456,7 +456,7 @@ fn translate_request(
             source_language,
             target_language,
             &is_current,
-            |partial, first_token_duration_ms| {
+            |partial, progress| {
                 if !is_current() {
                     return false;
                 }
@@ -471,7 +471,10 @@ fn translate_request(
                         .send(&TranslationWorkerEvent::Partial {
                             request_id,
                             translated_text: partial.to_owned(),
-                            first_token_duration_ms,
+                            first_token_duration_ms: progress.first_token_duration_ms,
+                            tokenize_duration_ms: progress.tokenize_duration_ms,
+                            chunk_index: progress.chunk_index,
+                            chunk_count: progress.chunk_count,
                         })
                         .is_err()
                     {
@@ -496,6 +499,8 @@ fn translate_request(
         processing_duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         first_token_duration_ms: output.first_token_duration_ms,
         backend_request_count: output.backend_request_count,
+        tokenize_duration_ms: output.tokenize_duration_ms,
+        chunk_count: output.chunk_count,
     };
     let created_unix_ms = unix_ms();
     if state.history_enabled {

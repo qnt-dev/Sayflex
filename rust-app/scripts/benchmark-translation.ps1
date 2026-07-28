@@ -3,6 +3,8 @@ param(
     [string]$Worker = (
         Join-Path $PSScriptRoot '..\dist\app\rust-translation-worker.exe'
     ),
+    [ValidateSet('tiny', 'teacher')]
+    [string]$Tier = 'teacher',
     [ValidateRange(1, 50)]
     [int]$Iterations = 5
 )
@@ -54,14 +56,14 @@ try {
     Send-Command @{
         type = 'initialize'
         payload = @{
-            selected_tier = 'tiny'
+            selected_tier = $Tier
             keep_warm = $true
             history_enabled = $false
         }
     }
     $ready = Read-Event
-    if ($ready.type -ne 'ready' -or $ready.payload.selected_tier -ne 'tiny') {
-        throw 'The Tiny translation pack must be installed before benchmarking.'
+    if ($ready.type -ne 'ready' -or $ready.payload.selected_tier -ne $Tier) {
+        throw "The selected '$Tier' translation pack must be installed before benchmarking."
     }
     while ($true) {
         $event = Read-Event
@@ -97,11 +99,18 @@ try {
                 $event.payload.result.request_id -eq $requestId) {
                 $timer.Stop()
                 $samples.Add($timer.ElapsedMilliseconds)
-                Write-Host (
-                    "iteration={0} wall_ms={1} inference_ms={2} direction={3}->{4}" -f
+                $line = (
+                    "iteration={0} wall_ms={1} inference_ms={2} first_token_ms={3} " +
+                    "tokenize_ms={4} chunks={5} requests={6} direction={7}->{8}"
+                )
+                Write-Host ($line -f
                     ($index + 1),
                     $timer.ElapsedMilliseconds,
                     $event.payload.result.processing_duration_ms,
+                    $event.payload.result.first_token_duration_ms,
+                    $event.payload.result.tokenize_duration_ms,
+                    $event.payload.result.chunk_count,
+                    $event.payload.result.backend_request_count,
                     $event.payload.result.source_language,
                     $event.payload.result.target_language
                 )
@@ -114,8 +123,8 @@ try {
     }
 
     $ordered = $samples | Sort-Object
-    $p50 = $ordered[[Math]::Floor(($ordered.Count - 1) * 0.50)]
-    $p95 = $ordered[[Math]::Floor(($ordered.Count - 1) * 0.95)]
+    $p50 = $ordered[[Math]::Max(0, [Math]::Ceiling($ordered.Count * 0.50) - 1)]
+    $p95 = $ordered[[Math]::Max(0, [Math]::Ceiling($ordered.Count * 0.95) - 1)]
     Write-Host "translation benchmark: iterations=$Iterations p50_ms=$p50 p95_ms=$p95"
 }
 finally {

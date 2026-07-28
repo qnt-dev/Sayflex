@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rust-speech-api = { version = "0.5.7", path = "../speech-api" }
+rust-speech-api = { version = "0.5.8", path = "../speech-api" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

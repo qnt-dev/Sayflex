@@ -7,9 +7,9 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
-rust-app-core = { version = "0.5.7", path = "../../crates/app-core" }
-rust-platform-windows = { version = "0.5.7", path = "../../crates/platform-windows" }
-rust-protocol = { version = "0.5.7", path = "../../crates/protocol" }
+rust-app-core = { version = "0.5.8", path = "../../crates/app-core" }
+rust-platform-windows = { version = "0.5.8", path = "../../crates/platform-windows" }
+rust-protocol = { version = "0.5.8", path = "../../crates/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 slint.workspace = true

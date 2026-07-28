@@ -225,6 +225,8 @@ mod tests {
                 processing_duration_ms: 1,
                 first_token_duration_ms: 1,
                 backend_request_count: 1,
+                tokenize_duration_ms: 0,
+                chunk_count: 1,
             },
             created_unix_ms: 2,
         });
@@ -259,6 +261,8 @@ mod tests {
                 processing_duration_ms: 1,
                 first_token_duration_ms: 1,
                 backend_request_count: 1,
+                tokenize_duration_ms: 0,
+                chunk_count: 1,
             },
             created_unix_ms: 2,
         });

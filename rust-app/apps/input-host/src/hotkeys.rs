@@ -453,21 +453,54 @@ fn begin_selection_capture(
         .spawn(move || {
             let _busy_guard = SelectionBusyGuard;
             let capture_started = Instant::now();
-            // UI Automation is read-only and can run while the user releases
-            // the shortcut. Clipboard injection remains strictly after release.
+            // UI Automation is read-only, so a successful result can start the
+            // translation before the command chord is released. Clipboard copy
+            // and every later insertion remain behind the explicit release gate.
             let pending_uia = selection_capture::begin_uia_capture(target);
             let release_started = Instant::now();
-            let released = wait_for_mask_clear(
-                selection_chord_mask(intent),
+            let chord_mask = selection_chord_mask(intent);
+            let uia_capture = selection_capture::await_uia_capture(target, pending_uia);
+
+            let uia_ms = match uia_capture {
+                Ok(selection_capture::UiaCapture::Captured(captured)) => {
+                    dispatch_early_uia_selection(
+                        &events,
+                        request_id,
+                        intent,
+                        target,
+                        captured,
+                        &capture_started,
+                        &release_started,
+                    );
+                    return;
+                }
+                Ok(selection_capture::UiaCapture::ClipboardFallback { uia_ms }) => uia_ms,
+                Err(error) => {
+                    crate::diagnostic_line(&format!(
+                        "selection_capture request={} pid={} result=failed error={error} \
+elapsed_ms={}",
+                        request_id,
+                        target.process_id,
+                        capture_started.elapsed().as_millis(),
+                    ));
+                    let _ = events.send(InputHostEvent::SelectionCaptureFailed {
+                        request_id,
+                        message: match error {
+                            selection_capture::CaptureError::Protected => {
+                                "Selected text is protected.".to_owned()
+                            }
+                            selection_capture::CaptureError::Clipboard(error) => error.to_string(),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            if !wait_for_mask_clear(
+                chord_mask,
                 COMMAND_RELEASE_TIMEOUT,
                 INPUT_RELEASE_STABILITY,
-            );
-            let release_wait_ms = release_started
-                .elapsed()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX);
-            let result = if !released {
+            ) {
                 crate::diagnostic_line(&format!(
                     "selection_capture request={} pid={} stage=hotkey_release result=timeout \
 physical_mask={:#x}",
@@ -475,11 +508,18 @@ physical_mask={:#x}",
                     target.process_id,
                     PHYSICAL_INPUT.load(Ordering::Acquire),
                 ));
-                Err(selection_capture::CaptureError::HotkeyReleaseTimeout)
-            } else {
-                selection_capture::capture_after_release(target, pending_uia)
-            };
-            match result {
+                let _ = events.send(InputHostEvent::SelectionCaptureFailed {
+                    request_id,
+                    message: "Release the translation shortcut before trying again.".to_owned(),
+                });
+                return;
+            }
+            let release_wait_ms = release_started
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            match selection_capture::capture_clipboard_after_release(target, uia_ms) {
                 Ok(captured) if !captured.text.trim().is_empty() => {
                     let total_ms = capture_started
                         .elapsed()
@@ -488,7 +528,7 @@ physical_mask={:#x}",
                         .unwrap_or(u64::MAX);
                     crate::diagnostic_line(&format!(
                         "selection_capture request={} pid={} method={:?} \
-result=success chars={} release_wait_ms={} uia_ms={:?} clipboard_ms={:?} total_ms={}",
+result=success chars={} release_wait_ms=Some({}) uia_ms={:?} clipboard_ms={:?} total_ms={}",
                         request_id,
                         target.process_id,
                         captured.method,
@@ -504,7 +544,7 @@ result=success chars={} release_wait_ms={} uia_ms={:?} clipboard_ms={:?} total_m
                         target,
                         text: captured.text,
                         timing: SelectionCaptureTiming {
-                            release_wait_ms,
+                            release_wait_ms: Some(release_wait_ms),
                             uia_ms: captured.uia_ms,
                             clipboard_ms: captured.clipboard_ms,
                             total_ms,
@@ -512,12 +552,6 @@ result=success chars={} release_wait_ms={} uia_ms={:?} clipboard_ms={:?} total_m
                     });
                 }
                 Ok(_) => {
-                    crate::diagnostic_line(&format!(
-                        "selection_capture request={} pid={} result=empty elapsed_ms={}",
-                        request_id,
-                        target.process_id,
-                        capture_started.elapsed().as_millis(),
-                    ));
                     let _ = events.send(InputHostEvent::SelectionCaptureFailed {
                         request_id,
                         message: "The selection is empty.".to_owned(),
@@ -525,23 +559,14 @@ result=success chars={} release_wait_ms={} uia_ms={:?} clipboard_ms={:?} total_m
                 }
                 Err(error) => {
                     crate::diagnostic_line(&format!(
-                        "selection_capture request={} pid={} result=failed error={error} \
-elapsed_ms={}",
+                        "selection_capture request={} pid={} result=failed error={error} elapsed_ms={}",
                         request_id,
                         target.process_id,
                         capture_started.elapsed().as_millis(),
                     ));
                     let _ = events.send(InputHostEvent::SelectionCaptureFailed {
                         request_id,
-                        message: match error {
-                            selection_capture::CaptureError::Protected => {
-                                "Selected text is protected.".to_owned()
-                            }
-                            selection_capture::CaptureError::HotkeyReleaseTimeout => {
-                                "Release the translation shortcut before trying again.".to_owned()
-                            }
-                            selection_capture::CaptureError::Clipboard(error) => error.to_string(),
-                        },
+                        message: error.to_string(),
                     });
                 }
             }
@@ -553,6 +578,109 @@ elapsed_ms={}",
                 message: format!("could not start selection capture: {error}"),
             });
         })
+}
+
+fn dispatch_early_uia_selection(
+    events: &Sender<InputHostEvent>,
+    request_id: RequestId,
+    intent: TextActionIntent,
+    target: TargetSnapshot,
+    captured: selection_capture::CapturedSelection,
+    capture_started: &Instant,
+    release_started: &Instant,
+) {
+    if captured.text.trim().is_empty() {
+        crate::diagnostic_line(&format!(
+            "selection_capture request={} pid={} result=empty elapsed_ms={}",
+            request_id,
+            target.process_id,
+            capture_started.elapsed().as_millis(),
+        ));
+        let _ = events.send(InputHostEvent::SelectionCaptureFailed {
+            request_id,
+            message: "The selection is empty.".to_owned(),
+        });
+        return;
+    }
+
+    let chord_mask = selection_chord_mask(intent);
+    let released_at_capture =
+        wait_for_mask_clear(chord_mask, Duration::ZERO, INPUT_RELEASE_STABILITY);
+    let capture_ready_ms = capture_started
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let release_wait_ms = released_at_capture.then(|| {
+        release_started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    });
+    crate::diagnostic_line(&format!(
+        "selection_capture request={} pid={} method={:?} result=success chars={} \
+release_wait_ms={:?} uia_ms={:?} clipboard_ms=None total_ms={}",
+        request_id,
+        target.process_id,
+        captured.method,
+        captured.text.chars().count(),
+        release_wait_ms,
+        captured.uia_ms,
+        capture_ready_ms,
+    ));
+    if events
+        .send(InputHostEvent::SelectionCaptured {
+            request_id,
+            intent,
+            target,
+            text: captured.text,
+            timing: SelectionCaptureTiming {
+                release_wait_ms,
+                uia_ms: captured.uia_ms,
+                clipboard_ms: None,
+                total_ms: capture_ready_ms,
+            },
+        })
+        .is_err()
+    {
+        return;
+    }
+
+    if released_at_capture {
+        return;
+    }
+
+    if wait_for_mask_clear(chord_mask, COMMAND_RELEASE_TIMEOUT, INPUT_RELEASE_STABILITY) {
+        let release_wait_ms = release_started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        crate::diagnostic_line(&format!(
+            "selection_capture request={} pid={} stage=input_release \
+result=success release_wait_ms={}",
+            request_id, target.process_id, release_wait_ms,
+        ));
+        let _ = events.send(InputHostEvent::SelectionInputReleased {
+            request_id,
+            release_wait_ms,
+        });
+    } else {
+        let message =
+            "The translation shortcut was not released before the safety timeout.".to_owned();
+        crate::diagnostic_line(&format!(
+            "selection_capture request={} pid={} stage=input_release \
+result=timeout physical_mask={:#x}",
+            request_id,
+            target.process_id,
+            PHYSICAL_INPUT.load(Ordering::Acquire),
+        ));
+        let _ = events.send(InputHostEvent::SelectionInputReleaseFailed {
+            request_id,
+            message,
+        });
+    }
 }
 
 struct SelectionBusyGuard;

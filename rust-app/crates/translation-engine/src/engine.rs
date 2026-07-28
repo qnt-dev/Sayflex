@@ -23,6 +23,12 @@ use crate::{TranslationBackendDescriptor, TranslationPackDescriptor};
 
 const MAX_INPUT_CHARACTERS: usize = 32_000;
 const MAX_SOURCE_TOKENS_PER_REQUEST: usize = 1_200;
+// Qwen uses byte-fallback tokenization with special tokens disabled for this
+// endpoint. Staying below this conservative UTF-8 byte bound therefore cannot
+// exceed the 1,200-token source budget and avoids a local HTTP round-trip for
+// ordinary short selections.
+const MAX_UTF8_BYTES_WITHOUT_TOKENIZE: usize = 1_000;
+const _: () = assert!(MAX_UTF8_BYTES_WITHOUT_TOKENIZE < MAX_SOURCE_TOKENS_PER_REQUEST);
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(90);
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SERVER_LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
@@ -40,6 +46,16 @@ pub struct TranslationOutput {
     pub target_language: TranslationLanguage,
     pub first_token_duration_ms: u64,
     pub backend_request_count: u32,
+    pub tokenize_duration_ms: u64,
+    pub chunk_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranslationProgress {
+    pub first_token_duration_ms: u64,
+    pub tokenize_duration_ms: u64,
+    pub chunk_index: u32,
+    pub chunk_count: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,7 +126,7 @@ impl TranslationEngine {
         source_language: Option<TranslationLanguage>,
         target_language: Option<TranslationLanguage>,
         should_continue: impl Fn() -> bool,
-        mut on_partial: impl FnMut(&str, u64) -> bool,
+        mut on_partial: impl FnMut(&str, TranslationProgress) -> bool,
     ) -> Result<TranslationOutput> {
         if text.trim().is_empty() {
             bail!("text is empty");
@@ -173,6 +189,8 @@ impl TranslationEngine {
             target_language: target,
             first_token_duration_ms: translated.first_token_duration_ms,
             backend_request_count: translated.backend_request_count,
+            tokenize_duration_ms: translated.tokenize_duration_ms,
+            chunk_count: translated.chunk_count,
         })
     }
 
@@ -352,11 +370,11 @@ impl LlamaRuntime {
             messages: [
                 ChatMessage {
                     role: "system",
-                    content: translation_instruction(source, target),
+                    content: translation_instruction(),
                 },
                 ChatMessage {
                     role: "user",
-                    content: text.to_owned(),
+                    content: translation_user_message(text, source, target),
                 },
             ],
             temperature: 0.0,
@@ -437,11 +455,11 @@ impl LlamaRuntime {
             messages: [
                 ChatMessage {
                     role: "system",
-                    content: translation_instruction(source, target),
+                    content: translation_instruction(),
                 },
                 ChatMessage {
                     role: "user",
-                    content: text.to_owned(),
+                    content: translation_user_message(text, source, target),
                 },
             ],
             temperature: 0.0,
@@ -707,13 +725,23 @@ fn language_name(language: TranslationLanguage) -> &'static str {
     }
 }
 
-fn translation_instruction(source: TranslationLanguage, target: TranslationLanguage) -> String {
+fn translation_instruction() -> String {
+    "Act as a precise translation engine. The user message declares the source and target \
+     languages, followed by a Text block. Translate only that Text block naturally and faithfully. \
+     Preserve its exact meaning, tone, terminology, paragraph breaks, and line breaks; do not omit \
+     or add information. Return only the translation, without labels, notes, or delimiters."
+        .to_owned()
+}
+
+fn translation_user_message(
+    text: &str,
+    source: TranslationLanguage,
+    target: TranslationLanguage,
+) -> String {
     format!(
-        "Translate the user text naturally and faithfully from {} into {}. Preserve the exact \
-         meaning, tone, terminology, paragraph breaks, and line breaks; do not omit or add \
-         information. Return only the translation.",
+        "Source language: {}\nTarget language: {}\nText:\n{text}",
         language_name(source),
-        language_name(target)
+        language_name(target),
     )
 }
 
@@ -728,6 +756,8 @@ struct PlannedTranslation {
     text: String,
     first_token_duration_ms: u64,
     backend_request_count: u32,
+    tokenize_duration_ms: u64,
+    chunk_count: u32,
 }
 
 fn translate_planned(
@@ -736,17 +766,20 @@ fn translate_planned(
     source: TranslationLanguage,
     target: TranslationLanguage,
     should_continue: &impl Fn() -> bool,
-    on_partial: &mut impl FnMut(&str, u64) -> bool,
+    on_partial: &mut impl FnMut(&str, TranslationProgress) -> bool,
 ) -> Result<PlannedTranslation> {
     let started = Instant::now();
-    let chunks = plan_translation_chunks(runtime, text, should_continue)?;
+    let plan = plan_translation_chunks(runtime, text, should_continue)?;
+    let chunk_count = u32::try_from(plan.chunks.len()).unwrap_or(u32::MAX);
+    let tokenize_duration_ms = plan.tokenize_duration_ms;
     let mut output = String::with_capacity(text.len());
     let mut first_token_duration_ms = None;
     let mut backend_request_count = 0_u32;
-    for chunk in chunks {
+    for (chunk_offset, chunk) in plan.chunks.into_iter().enumerate() {
         if !should_continue() {
             return Err(TranslationCancelled.into());
         }
+        let chunk_index = u32::try_from(chunk_offset.saturating_add(1)).unwrap_or(u32::MAX);
         let leading_bytes = chunk.len() - chunk.trim_start().len();
         let trailing_bytes = chunk.len() - chunk.trim_end().len();
         let body_end = chunk.len().saturating_sub(trailing_bytes);
@@ -772,7 +805,15 @@ fn translate_planned(
                 let mut visible = String::with_capacity(completed_prefix.len() + partial.len());
                 visible.push_str(&completed_prefix);
                 visible.push_str(partial);
-                on_partial(&visible, elapsed_ms)
+                on_partial(
+                    &visible,
+                    TranslationProgress {
+                        first_token_duration_ms: elapsed_ms,
+                        tokenize_duration_ms,
+                        chunk_index,
+                        chunk_count,
+                    },
+                )
             },
         )?;
         first_token_duration_ms
@@ -787,23 +828,44 @@ fn translate_planned(
         text: output,
         first_token_duration_ms: first_token_duration_ms.unwrap_or(0),
         backend_request_count,
+        tokenize_duration_ms,
+        chunk_count,
     })
+}
+
+struct TranslationPlan {
+    chunks: Vec<String>,
+    tokenize_duration_ms: u64,
 }
 
 fn plan_translation_chunks(
     runtime: &LlamaRuntime,
     text: &str,
     should_continue: &impl Fn() -> bool,
-) -> Result<Vec<String>> {
+) -> Result<TranslationPlan> {
     if !should_continue() {
         return Err(TranslationCancelled.into());
     }
+    if text.len() <= MAX_UTF8_BYTES_WITHOUT_TOKENIZE {
+        return Ok(TranslationPlan {
+            chunks: vec![text.to_owned()],
+            tokenize_duration_ms: 0,
+        });
+    }
+    let tokenize_started = Instant::now();
     let total_tokens = runtime.token_count(text)?;
     if !should_continue() {
         return Err(TranslationCancelled.into());
     }
     if total_tokens <= MAX_SOURCE_TOKENS_PER_REQUEST {
-        return Ok(vec![text.to_owned()]);
+        return Ok(TranslationPlan {
+            chunks: vec![text.to_owned()],
+            tokenize_duration_ms: tokenize_started
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        });
     }
 
     let total_characters = text.chars().count().max(1);
@@ -841,7 +903,14 @@ fn plan_translation_chunks(
         }
         chunks.splice(index..=index, replacement);
     }
-    Ok(chunks)
+    Ok(TranslationPlan {
+        chunks,
+        tokenize_duration_ms: tokenize_started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    })
 }
 
 fn split_at_natural_boundaries(text: &str, max_characters: usize) -> Vec<String> {
@@ -935,7 +1004,8 @@ mod tests {
 
     use super::{
         detect_language, normalize_line_endings, normalize_single_word_repetition,
-        split_at_natural_boundaries, strip_reasoning,
+        split_at_natural_boundaries, strip_reasoning, translation_instruction,
+        translation_user_message,
     };
 
     #[test]
@@ -976,6 +1046,26 @@ mod tests {
             normalize_line_endings("first\rsecond\r\nthird"),
             "first\nsecond\nthird"
         );
+    }
+
+    #[test]
+    fn translation_system_prefix_is_direction_independent() {
+        let instruction = translation_instruction();
+        assert!(!instruction.contains("Russian"));
+        assert!(!instruction.contains("English"));
+
+        let forward = translation_user_message(
+            "hello",
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+        );
+        let reverse = translation_user_message(
+            "привет",
+            TranslationLanguage::Russian,
+            TranslationLanguage::English,
+        );
+        assert!(forward.starts_with("Source language: English\nTarget language: Russian\n"));
+        assert!(reverse.starts_with("Source language: Russian\nTarget language: English\n"));
     }
 
     #[test]

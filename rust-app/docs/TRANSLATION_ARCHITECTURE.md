@@ -47,12 +47,16 @@ processing can be interrupted before the first token. Dropping the request
 connection asks llama.cpp to stop the active task; stale partials and stale
 final results are rejected independently by request identity.
 
-Selected-text capture overlaps independent work instead of serializing it:
-UI Automation starts as soon as the command is accepted while the capture
-worker waits for the physical hotkey release. Clipboard copy is attempted only
-after release and only when UI Automation did not return a usable selection.
-Diagnostics keep release wait, UIA provider time, clipboard time, model
-first-token time, model completion and end-to-end time as separate fields.
+Selected-text capture overlaps independent work instead of serializing it.
+UI Automation starts as soon as the command is accepted. A usable read-only
+UIA result is sent to the translation worker immediately, without waiting for
+the physical hotkey release. Clipboard copy is attempted only after release
+and only when UI Automation did not return a usable selection. Replacement
+and copy delivery remain behind a request-scoped release gate, so early
+translation can never inject input while the command chord is held.
+Diagnostics keep release wait, UIA provider time, clipboard time, tokenizer
+time, model first-token time, chunk progress, model completion and end-to-end
+time as separate fields.
 
 ## Model lifecycle
 
@@ -89,11 +93,18 @@ thinking disabled), entirely local after installation, and never runs on a UI
 or input-hook thread.
 
 The engine sends an ordinary selection as one request even when it contains
-line breaks. It asks the pinned llama.cpp tokenizer for the source token count
-and creates natural-boundary chunks only above the explicit 1,200 source-token
-budget. This avoids the legacy per-line request multiplier while leaving room
-inside the 4,096-token context for the instruction and translated output.
-Chunks preserve their original whitespace boundaries.
+line breaks. Selections up to a conservative 1,000 UTF-8 bytes skip the
+tokenizer HTTP round-trip entirely. Longer input is measured with the pinned
+llama.cpp tokenizer and split at natural boundaries only above the explicit
+1,200 source-token budget. This avoids the legacy per-line request multiplier
+while leaving room inside the 4,096-token context for the instruction and
+translated output. Chunks preserve their original whitespace boundaries and
+publish their index/count as progress.
+
+The system instruction is direction-independent and always occupies the first
+message. Source language, target language and text live in the user message.
+This keeps the longest reusable prompt prefix stable across English/Russian
+direction changes without weakening the explicit translation contract.
 
 llama.cpp responses use server-sent events. The worker coalesces partial text
 to at most one IPC update every 30 ms (while allowing sentence boundaries
