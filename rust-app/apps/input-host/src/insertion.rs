@@ -221,7 +221,7 @@ fn settle_clipboard_restore(
         return;
     };
     if let Err(error) = scheduled.pending.restore() {
-        eprintln!("clipboard restoration failed: {error}");
+        crate::diagnostic_line(&format!("clipboard_restore result=failed error={error}"));
     } else if let Some(session_id) = scheduled.session_id {
         let _ = events.send(InputHostEvent::ClipboardRestored { session_id });
     }

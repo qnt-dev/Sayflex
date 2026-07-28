@@ -35,13 +35,35 @@ pub fn capture(target: TargetSnapshot) -> Result<CapturedSelection, CaptureError
 
     match uia_selection::selected_text(target) {
         Ok(SelectionOutcome::Text(text)) if !text.is_empty() => {
+            crate::diagnostic_line(&format!(
+                "uia_selection target_pid={} result=success chars={}",
+                target.process_id,
+                text.chars().count()
+            ));
             return Ok(CapturedSelection {
                 text,
                 method: CaptureMethod::UiAutomation,
             });
         }
-        Ok(SelectionOutcome::Protected) => return Err(CaptureError::Protected),
-        Ok(SelectionOutcome::Text(_)) | Ok(SelectionOutcome::Unavailable) | Err(_) => {}
+        Ok(SelectionOutcome::Protected) => {
+            crate::diagnostic_line(&format!(
+                "uia_selection target_pid={} result=protected",
+                target.process_id
+            ));
+            return Err(CaptureError::Protected);
+        }
+        Ok(SelectionOutcome::Text(_)) | Ok(SelectionOutcome::Unavailable) => {
+            crate::diagnostic_line(&format!(
+                "uia_selection target_pid={} result=unavailable fallback=clipboard",
+                target.process_id
+            ));
+        }
+        Err(error) => {
+            crate::diagnostic_line(&format!(
+                "uia_selection target_pid={} result=failed error={error} fallback=clipboard",
+                target.process_id
+            ));
+        }
     }
 
     let shortcut = target::selection_copy_shortcut(target);

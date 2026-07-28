@@ -1,3 +1,4 @@
+pub mod diagnostics;
 mod layout;
 mod session_registry;
 

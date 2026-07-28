@@ -327,7 +327,9 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
                 };
                 if let Err(error) = begin_selection_capture(intent, target, events.clone()) {
                     SELECTION_BUSY.store(false, Ordering::Release);
-                    eprintln!("could not start selection capture: {error}");
+                    crate::diagnostic_line(&format!(
+                        "selection_capture result=thread_start_failed error={error}"
+                    ));
                 }
             }
         }
@@ -366,7 +368,7 @@ fn begin_selection_capture(
             };
             match result {
                 Ok(captured) if !captured.text.trim().is_empty() => {
-                    eprintln!(
+                    crate::diagnostic_line(&format!(
                         "selection_capture request={} pid={} method={:?} \
 result=success chars={} elapsed_ms={}",
                         request_id,
@@ -374,7 +376,7 @@ result=success chars={} elapsed_ms={}",
                         captured.method,
                         captured.text.chars().count(),
                         capture_started.elapsed().as_millis(),
-                    );
+                    ));
                     let _ = events.send(InputHostEvent::SelectionCaptured {
                         request_id,
                         intent,
@@ -383,25 +385,25 @@ result=success chars={} elapsed_ms={}",
                     });
                 }
                 Ok(_) => {
-                    eprintln!(
+                    crate::diagnostic_line(&format!(
                         "selection_capture request={} pid={} result=empty elapsed_ms={}",
                         request_id,
                         target.process_id,
                         capture_started.elapsed().as_millis(),
-                    );
+                    ));
                     let _ = events.send(InputHostEvent::SelectionCaptureFailed {
                         request_id,
                         message: "The selection is empty.".to_owned(),
                     });
                 }
                 Err(error) => {
-                    eprintln!(
+                    crate::diagnostic_line(&format!(
                         "selection_capture request={} pid={} result=failed error={error} \
 elapsed_ms={}",
                         request_id,
                         target.process_id,
                         capture_started.elapsed().as_millis(),
-                    );
+                    ));
                     let _ = events.send(InputHostEvent::SelectionCaptureFailed {
                         request_id,
                         message: match error {

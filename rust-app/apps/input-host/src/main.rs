@@ -8,17 +8,18 @@ mod selection_capture;
 mod target;
 mod uia_selection;
 
-#[cfg(debug_assertions)]
-use std::time::Instant;
 use std::{
+    env,
     ffi::c_void,
     io::{self, BufRead, BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
     ptr,
     sync::mpsc,
     thread,
+    time::{Duration, Instant},
 };
 
-use rust_protocol::{InputHostCommand, InputHostEvent, PROTOCOL_VERSION};
+use rust_protocol::{InputHostCommand, InputHostEvent, PROTOCOL_VERSION, SessionId, Transcript};
 use windows_sys::Win32::{
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
     UI::WindowsAndMessaging::{
@@ -29,9 +30,15 @@ use windows_sys::Win32::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     rust_platform_windows::configure_safe_dll_search()?;
-    #[cfg(debug_assertions)]
+    let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "input-host");
+    diagnostic_line("input_host lifecycle=starting");
     if std::env::args().any(|argument| argument == "--selection-capture-smoke") {
+        require_smoke_opt_in("QNTFLEX_RUN_SELECTION_SMOKE")?;
         return run_selection_capture_smoke();
+    }
+    if std::env::args().any(|argument| argument == "--insertion-smoke") {
+        require_smoke_opt_in("QNTFLEX_RUN_INSERTION_SMOKE")?;
+        return run_insertion_smoke();
     }
 
     let (events, event_receiver) = mpsc::channel::<InputHostEvent>();
@@ -78,10 +85,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DispatchMessageW(&message);
         }
     }
+    diagnostic_line("input_host lifecycle=stopped");
     Ok(())
 }
 
-#[cfg(debug_assertions)]
+pub(crate) fn diagnostic_line(message: &str) {
+    rust_app_core::diagnostics::log_line(message);
+    #[cfg(debug_assertions)]
+    eprintln!("{message}");
+}
+
+fn data_root() -> PathBuf {
+    env::var_os("LOCALAPPDATA").map_or_else(
+        || {
+            env::current_dir()
+                .unwrap_or_default()
+                .join(".rust-voice-data")
+        },
+        |root| Path::new(&root).join("KeyboopRust"),
+    )
+}
+
 fn run_selection_capture_smoke() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(delay) = std::env::var("QNTFLEX_SELECTION_SMOKE_DELAY_MS") {
         thread::sleep(std::time::Duration::from_millis(delay.parse()?));
@@ -99,13 +123,16 @@ fn run_selection_capture_smoke() -> Result<(), Box<dyn std::error::Error>> {
             std::time::Duration::from_secs(20),
         )?;
     }
-    eprintln!(
-        "selection-smoke target pid={} hwnd={} hkl={:#x} shortcut={:?}",
+    diagnostic_line(&format!(
+        "selection_smoke target_pid={} target_hwnd={} foreground_pid={} foreground_hwnd={} \
+hkl={:#x} shortcut={:?}",
         target.process_id,
         target.window_handle,
+        target::capture_target().process_id,
+        target::capture_target().window_handle,
         target.keyboard_layout,
         target::selection_copy_shortcut(target),
-    );
+    ));
     let started = Instant::now();
     let captured = selection_capture::capture(target)?;
     serde_json::to_writer(
@@ -120,11 +147,84 @@ fn run_selection_capture_smoke() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(debug_assertions)]
+fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    let handle = std::env::var("QNTFLEX_INSERTION_SMOKE_HWND")?.parse()?;
+    let text = std::env::var("QNTFLEX_INSERTION_SMOKE_TEXT")?;
+    let target = target::capture_window_handle(handle);
+    let (events, receiver) = mpsc::channel();
+    let insertion = insertion::InsertionService::start(events)?;
+    let session_id = SessionId::new();
+    insertion.insert(
+        Transcript {
+            session_id,
+            text: text.clone(),
+            language: "en".to_owned(),
+            audio_duration_ms: 0,
+            processing_duration_ms: 0,
+            latency: Default::default(),
+        },
+        target,
+        false,
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut method = None;
+    let mut clipboard_restored = false;
+    while Instant::now() < deadline {
+        match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(InputHostEvent::InsertionDispatched {
+                session_id: completed,
+                method: insertion_method,
+                ..
+            }) if completed == session_id => {
+                method = Some(insertion_method);
+                if insertion_method != rust_protocol::InsertionMethod::ClipboardPaste {
+                    break;
+                }
+            }
+            Ok(InputHostEvent::ClipboardRestored {
+                session_id: restored,
+            }) if restored == session_id => {
+                clipboard_restored = true;
+                break;
+            }
+            Ok(InputHostEvent::Failed {
+                session_id: Some(failed),
+                message,
+                ..
+            }) if failed == session_id => return Err(message.into()),
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("insertion service stopped before completion".into());
+            }
+        }
+    }
+    insertion.shutdown();
+    let method = method.ok_or("insertion smoke timed out")?;
+    serde_json::to_writer(
+        io::stdout().lock(),
+        &serde_json::json!({
+            "session_id": session_id,
+            "method": format!("{method:?}"),
+            "clipboard_restored": clipboard_restored,
+            "chars": text.chars().count(),
+        }),
+    )?;
+    Ok(())
+}
+
+fn require_smoke_opt_in(variable: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var(variable).as_deref() == Ok("1") {
+        Ok(())
+    } else {
+        Err(format!("{variable}=1 is required for this isolated smoke mode").into())
+    }
+}
+
 fn wait_for_stable_foreground(
     target: rust_protocol::TargetSnapshot,
-    stable_for: std::time::Duration,
-    timeout: std::time::Duration,
+    stable_for: Duration,
+    timeout: Duration,
 ) -> io::Result<()> {
     let deadline = Instant::now() + timeout;
     let mut stable_since = None;
@@ -137,7 +237,7 @@ fn wait_for_stable_foreground(
         } else {
             stable_since = None;
         }
-        thread::sleep(std::time::Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(10));
     }
     Err(io::Error::new(
         io::ErrorKind::TimedOut,

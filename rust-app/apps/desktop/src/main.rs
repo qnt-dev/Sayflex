@@ -497,20 +497,26 @@ impl AppState {
 
     fn latest_transcript(&self) -> Option<&Transcript> {
         self.registry
-            .latest_session()
-            .or(self.latest_history_session)
-            .and_then(|session_id| self.transcripts.get(&session_id))
+            .latest_transcript()
+            .or_else(|| self.history.first().map(|entry| &entry.transcript))
+            .or_else(|| {
+                self.latest_history_session
+                    .and_then(|session_id| self.transcripts.get(&session_id))
+            })
     }
 
     fn request_insert_last(&mut self, target: TargetSnapshot) -> InsertLastResolution {
         if let Some(session_id) = self.registry.latest_session() {
             return match self.registry.phase(session_id) {
-                Some(SessionPhase::Completed) => self.transcripts.get(&session_id).cloned().map_or(
-                    InsertLastResolution::Unavailable(
-                        "The latest dictation has no completed transcript.",
+                Some(SessionPhase::Completed) => self
+                    .registry
+                    .transcript(session_id)
+                    .or_else(|| self.transcripts.get(&session_id))
+                    .cloned()
+                    .map_or_else(
+                        || self.resolve_latest_completed(target),
+                        InsertLastResolution::Insert,
                     ),
-                    InsertLastResolution::Insert,
-                ),
                 Some(SessionPhase::Listening | SessionPhase::Processing) => {
                     self.pending_insert_last = Some(PendingInsertLast {
                         session_id: Some(session_id),
@@ -519,13 +525,15 @@ impl AppState {
                     InsertLastResolution::Await(session_id)
                 }
                 Some(SessionPhase::Cancelled | SessionPhase::Failed) | None => {
-                    InsertLastResolution::Unavailable(
-                        "The latest dictation did not produce recoverable text.",
-                    )
+                    self.resolve_latest_completed(target)
                 }
             };
         }
 
+        self.resolve_latest_completed(target)
+    }
+
+    fn resolve_latest_completed(&mut self, target: TargetSnapshot) -> InsertLastResolution {
         if let Some(transcript) = self.latest_transcript().cloned() {
             return InsertLastResolution::Insert(transcript);
         }
@@ -543,6 +551,8 @@ impl AppState {
 
 fn main() -> Result<(), Box<dyn Error>> {
     rust_platform_windows::configure_safe_dll_search()?;
+    let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "desktop");
+    rust_app_core::diagnostics::log_line("desktop lifecycle=starting");
     configure_ui_backend()?;
     if let Some(style) = indicator_preview_style() {
         return run_indicator_preview(style);
@@ -1010,6 +1020,7 @@ where
         .name(format!("{executable}-diagnostics"))
         .spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                rust_app_core::diagnostics::log_line(&format!("worker={diagnostics_name} {line}"));
                 eprintln!("{diagnostics_name}: {line}");
             }
         })?;
@@ -3664,6 +3675,63 @@ mod insert_last_tests {
             resolution,
             InsertLastResolution::Insert(transcript)
                 if transcript.session_id == session_id && transcript.text == "последний текст"
+        ));
+    }
+
+    #[test]
+    fn failed_latest_session_falls_back_to_last_completed_transcript() {
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            &super::SavedSettings::default(),
+        );
+        let completed = SessionId::new();
+        state.registry.begin(completed, 1).unwrap();
+        state.registry.end(completed).unwrap();
+        state
+            .registry
+            .complete(completed, transcript(completed, "последний успешный"))
+            .unwrap();
+
+        let failed = SessionId::new();
+        state.registry.begin(failed, 2).unwrap();
+        state.registry.end(failed).unwrap();
+        state.registry.fail(failed).unwrap();
+
+        let resolution = state.request_insert_last(target(42));
+        assert!(matches!(
+            resolution,
+            InsertLastResolution::Insert(transcript)
+                if transcript.session_id == completed
+                    && transcript.text == "последний успешный"
+        ));
+    }
+
+    #[test]
+    fn cancelled_latest_session_falls_back_to_last_completed_transcript() {
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            &super::SavedSettings::default(),
+        );
+        let completed = SessionId::new();
+        state.registry.begin(completed, 1).unwrap();
+        state.registry.end(completed).unwrap();
+        state
+            .registry
+            .complete(completed, transcript(completed, "последний успешный"))
+            .unwrap();
+
+        let cancelled = SessionId::new();
+        state.registry.begin(cancelled, 2).unwrap();
+        state.registry.cancel(cancelled).unwrap();
+
+        let resolution = state.request_insert_last(target(42));
+        assert!(matches!(
+            resolution,
+            InsertLastResolution::Insert(transcript)
+                if transcript.session_id == completed
+                    && transcript.text == "последний успешный"
         ));
     }
 }

@@ -22,7 +22,7 @@ use windows_sys::{
     core::IUnknown_Vtbl,
 };
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ClipboardError {
     #[error("clipboard is busy")]
     Busy,
@@ -223,19 +223,54 @@ pub fn capture_selection(
 
     let original_sequence = unsafe { GetClipboardSequenceNumber() };
     let _ = send_direct_copy();
-    let mut method = ClipboardCaptureMethod::WindowMessage;
-    // WM_COPY is a synchronous window message. If it returned without changing
-    // the clipboard, waiting cannot make it succeed; fall through immediately
-    // to the application's keyboard command.
-    if unsafe { GetClipboardSequenceNumber() } == original_sequence {
-        if !target_still_focused() {
-            return Err(ClipboardError::TargetChanged);
+
+    // WM_COPY is synchronous, so an unchanged sequence can fall through
+    // immediately. A changed-but-unreadable clipboard is also not a terminal
+    // failure: restore the user's clipboard and still try the application's
+    // normal keyboard command.
+    if unsafe { GetClipboardSequenceNumber() } != original_sequence {
+        match finish_copy_attempt(
+            &mut snapshot,
+            &target_still_focused,
+            original_sequence,
+            ClipboardCaptureMethod::WindowMessage,
+            Duration::ZERO,
+            Duration::from_millis(250),
+        ) {
+            Ok(captured) => return Ok(captured),
+            Err(error) if is_retryable_capture_error(&error) => {
+                crate::diagnostic_line(&format!(
+                    "clipboard_capture method=window_message result=retry error={error}"
+                ));
+            }
+            Err(error) => return Err(error),
         }
-        send_shortcut_copy()?;
-        method = ClipboardCaptureMethod::Shortcut;
     }
 
-    let deadline = Instant::now() + Duration::from_millis(1_500);
+    if !target_still_focused() {
+        return Err(ClipboardError::TargetChanged);
+    }
+    let shortcut_sequence = unsafe { GetClipboardSequenceNumber() };
+    send_shortcut_copy()?;
+    finish_copy_attempt(
+        &mut snapshot,
+        &target_still_focused,
+        shortcut_sequence,
+        ClipboardCaptureMethod::Shortcut,
+        Duration::from_millis(1_500),
+        Duration::from_millis(800),
+    )
+}
+
+fn finish_copy_attempt(
+    snapshot: &mut ClipboardSnapshot,
+    target_still_focused: &impl Fn() -> bool,
+    original_sequence: u32,
+    method: ClipboardCaptureMethod,
+    change_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<ClipboardCapture, ClipboardError> {
+    let deadline = Instant::now() + change_timeout;
     while unsafe { GetClipboardSequenceNumber() } == original_sequence {
         if !target_still_focused() {
             return Err(ClipboardError::TargetChanged);
@@ -245,7 +280,7 @@ pub fn capture_selection(
         }
         thread::sleep(Duration::from_millis(5));
     }
-
+    let copied_sequence = unsafe { GetClipboardSequenceNumber() };
     let stable_for = if method == ClipboardCaptureMethod::Shortcut {
         Duration::from_millis(40)
     } else {
@@ -253,22 +288,24 @@ pub fn capture_selection(
     };
     let mut private_sequence = None;
     let text = claim_copied_text(
-        &target_still_focused,
+        target_still_focused,
         stable_for,
-        Duration::from_millis(300),
+        read_timeout,
         &mut private_sequence,
     );
     match text {
         Ok(text) => {
             if let Some(sequence) = private_sequence {
-                restore_if_current(&mut snapshot, sequence)?;
+                restore_if_current(snapshot, sequence)?;
             }
             Ok(ClipboardCapture { text, method })
         }
         Err(error) => {
             if let Some(sequence) = private_sequence {
-                restore_if_current(&mut snapshot, sequence)?;
-            } else if target_still_focused() {
+                restore_if_current(snapshot, sequence)?;
+            } else if target_still_focused()
+                && unsafe { GetClipboardSequenceNumber() } == copied_sequence
+            {
                 snapshot.restore()?;
             }
             Err(error)
@@ -288,11 +325,31 @@ fn claim_copied_text(
             return Err(ClipboardError::TargetChanged);
         }
 
+        // A source commonly increments the sequence at EmptyClipboard, before
+        // delayed rendering has made CF_UNICODETEXT readable. Keep polling the
+        // actual text instead of treating that transient gap as a failed Copy.
+        let text = match get_text() {
+            Ok(text) => text,
+            Err(error) if is_transient_read_error(&error) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+
         // A foreign Copy command cannot attach the Windows privacy formats.
-        // Read its text immediately, re-own the same payload with those formats,
-        // and only then wait for any delayed duplicate Copy message.
-        let text = get_text()?;
-        set_private_text(&text)?;
+        // Re-own the same payload when possible, but never discard an already
+        // captured selection merely because a privacy format registration or
+        // clipboard transaction failed. The original snapshot is restored on
+        // both paths.
+        if let Err(error) = set_private_text(&text) {
+            let current = unsafe { GetClipboardSequenceNumber() };
+            *private_sequence = Some(current);
+            crate::diagnostic_line(&format!(
+                "clipboard_capture privacy_marking=failed error={error}"
+            ));
+            return Ok(text);
+        }
         let owned = unsafe { GetClipboardSequenceNumber() };
         *private_sequence = Some(owned);
         if stable_for.is_zero() {
@@ -314,6 +371,23 @@ fn claim_copied_text(
             }
         }
     }
+}
+
+fn is_transient_read_error(error: &ClipboardError) -> bool {
+    matches!(
+        error,
+        ClipboardError::Busy | ClipboardError::NoText | ClipboardError::InvalidData
+    )
+}
+
+fn is_retryable_capture_error(error: &ClipboardError) -> bool {
+    matches!(
+        error,
+        ClipboardError::Busy
+            | ClipboardError::NoText
+            | ClipboardError::CopyTimeout
+            | ClipboardError::InvalidData
+    )
 }
 
 fn restore_if_current(
@@ -460,4 +534,27 @@ fn with_open_clipboard<T>(
         thread::sleep(Duration::from_millis(15));
     }
     Err(ClipboardError::Busy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClipboardError, is_retryable_capture_error, is_transient_read_error};
+
+    #[test]
+    fn delayed_rendering_errors_are_retryable() {
+        assert!(is_transient_read_error(&ClipboardError::Busy));
+        assert!(is_transient_read_error(&ClipboardError::NoText));
+        assert!(is_transient_read_error(&ClipboardError::InvalidData));
+        assert!(!is_transient_read_error(&ClipboardError::TargetChanged));
+        assert!(!is_transient_read_error(&ClipboardError::CopyTimeout));
+    }
+
+    #[test]
+    fn failed_direct_copy_can_escalate_to_the_application_shortcut() {
+        assert!(is_retryable_capture_error(&ClipboardError::Busy));
+        assert!(is_retryable_capture_error(&ClipboardError::NoText));
+        assert!(is_retryable_capture_error(&ClipboardError::CopyTimeout));
+        assert!(is_retryable_capture_error(&ClipboardError::InvalidData));
+        assert!(!is_retryable_capture_error(&ClipboardError::TargetChanged));
+    }
 }

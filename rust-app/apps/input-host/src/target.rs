@@ -32,12 +32,13 @@ pub fn capture_target() -> TargetSnapshot {
     capture_window(top_level)
 }
 
-#[cfg(debug_assertions)]
 pub fn capture_window_handle(window_handle: u64) -> TargetSnapshot {
     capture_window(window_handle as usize as *mut c_void)
 }
 
 fn capture_window(top_level: *mut c_void) -> TargetSnapshot {
+    let root = unsafe { GetAncestor(top_level, GA_ROOT) };
+    let top_level = if root.is_null() { top_level } else { root };
     let mut process_id = 0_u32;
     let thread_id = unsafe { GetWindowThreadProcessId(top_level, &mut process_id) };
     let layout = unsafe { GetKeyboardLayout(thread_id) };

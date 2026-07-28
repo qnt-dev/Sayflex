@@ -31,7 +31,8 @@ same-user threat model, are documented in [`SECURITY.md`](SECURITY.md).
   modifier to transcribe and insert.
 - `Ctrl + Alt + V` inserts the newest dictation into the currently focused
   target. If that dictation is still processing, the request waits for that
-  exact session instead of inserting an older transcript.
+  exact session instead of inserting an older transcript. A later cancelled
+  or failed recording does not hide the newest successfully completed text.
 - `Ctrl + Alt + K` captures selected text and offers explicit RU/EN keyboard
   layout candidates. Ordinary text is never changed automatically.
 - `Ctrl + Alt + T` captures selected text once, translates it locally, and
@@ -42,10 +43,16 @@ Selected text is resolved through a bounded capability cascade: UI Automation
 non-destructive Copy shortcut for the target application family. Modern
 terminals generally use `Ctrl+Shift+C`; WezTerm and classic terminal clients
 use the layout-independent `Ctrl+Insert`; ordinary editors use `Ctrl+C`.
-Clipboard fallback accepts a result only after the clipboard sequence changes
-and restores the original data object after the copy transaction becomes
-stable. Password fields, secure desktop and higher-integrity targets fail
-closed.
+Clipboard fallback accepts a result only after Unicode text is actually
+readable, tolerates delayed-rendering gaps after `EmptyClipboard`, and restores
+the original data object after the copy transaction becomes stable. A failed
+`WM_COPY` attempt escalates to the target application's normal Copy command.
+Password fields, secure desktop and higher-integrity targets fail closed.
+
+UI Automation runs in a persistent MTA actor with a cached client and bounded
+provider timeouts. Release diagnostics are written without captured text to
+`%LOCALAPPDATA%\KeyboopRust\logs\desktop.log` and `input-host.log`, with bounded
+rotation.
 
 The indicator is pre-created and shown from the input-host event pump, before
 model work begins. It is topmost, click-through and non-activating, so it does
@@ -92,7 +99,7 @@ prepared segments without unloading the already warmed model.
 cd C:\PRDJKT\qntflex\rust-app
 cargo test --workspace
 .\scripts\publish.ps1
-.\scripts\build-installer.ps1 -Version 0.5.6 -SkipPublish
+.\scripts\build-installer.ps1 -Version 0.5.7 -SkipPublish
 ```
 
 The measured warm-path design and benchmark gate are documented in
@@ -126,6 +133,19 @@ Get-Content .\target\uia-smoke.out
 Get-Content .\target\window-message-smoke.out
 Get-Content .\target\shortcut-smoke.out
 ```
+
+The same fixtures can be run as one validation gate against either a debug or
+published release input host:
+
+```powershell
+.\scripts\validate-windows-integration.ps1
+.\scripts\validate-windows-integration.ps1 `
+  -InputHost .\dist\app\rust-input-host.exe
+```
+
+The isolated smoke modes are available in release builds only when their
+explicit `QNTFLEX_RUN_*_SMOKE=1` opt-in is present. They do not install the
+global hook and are not reachable from the normal application lifecycle.
 
 The installer is emitted under `rust-app\dist`; it does not overwrite the
 existing C# installer or its application directory.

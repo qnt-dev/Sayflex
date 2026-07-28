@@ -1,5 +1,28 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class FixtureForeground
+{
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, IntPtr processId);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint source, uint target, bool attach);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
+
+    public static void Focus(IntPtr hwnd)
+    {
+        uint current = GetCurrentThreadId();
+        uint foreground = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+        bool attached = foreground != 0 && foreground != current &&
+                        AttachThreadInput(current, foreground, true);
+        try { SetForegroundWindow(hwnd); }
+        finally { if (attached) AttachThreadInput(current, foreground, false); }
+    }
+}
+'@
 
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System;
@@ -71,25 +94,43 @@ $form.Add_Shown({
         )
     }
     $form.TopMost = $true
-    $focusUntil = [DateTime]::UtcNow.AddMilliseconds(800)
+    $script:focusUntil = [DateTime]::UtcNow.AddSeconds(5)
     $script:selectionFocusTimer = [System.Windows.Forms.Timer]::new()
     $script:selectionFocusTimer.Interval = 25
     $script:selectionFocusTimer.Add_Tick({
-        if ([DateTime]::UtcNow -ge $focusUntil) {
+        if (
+            $script:smokeOutputPath -and
+            (Get-Item -LiteralPath $script:smokeOutputPath).Length -gt 0
+        ) {
             $script:selectionFocusTimer.Stop()
-            $form.TopMost = $false
+            $form.Close()
             return
         }
+        if ([DateTime]::UtcNow -ge $script:focusUntil) {
+            $script:selectionFocusTimer.Stop()
+            $form.TopMost = $false
+            $form.Close()
+            return
+        }
+        [FixtureForeground]::Focus($form.Handle)
         $form.Activate()
     })
     $script:selectionFocusTimer.Start()
 
     $rustRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-    $hostPath = Join-Path $rustRoot 'target\debug\rust-input-host.exe'
+    $hostPath = if ($env:QNTFLEX_SELECTION_SMOKE_HOST_PATH) {
+        $env:QNTFLEX_SELECTION_SMOKE_HOST_PATH
+    } else {
+        Join-Path $rustRoot 'target\debug\rust-input-host.exe'
+    }
     $outputPath = Join-Path $rustRoot 'target\shortcut-smoke.out'
     $errorPath = Join-Path $rustRoot 'target\shortcut-smoke.err'
+    $script:smokeOutputPath = $outputPath
+    [System.IO.File]::WriteAllText($outputPath, '')
+    [System.IO.File]::WriteAllText($errorPath, '')
     $handle = $form.Handle.ToInt64()
-    $command = "set QNTFLEX_SELECTION_SMOKE_HWND=$handle&& `"$hostPath`" --selection-capture-smoke > `"$outputPath`" 2> `"$errorPath`""
+    $command = "set QNTFLEX_SELECTION_SMOKE_DELAY_MS=300&& set QNTFLEX_SELECTION_SMOKE_HWND=$handle&& `"$hostPath`" --selection-capture-smoke > `"$outputPath`" 2> `"$errorPath`""
+    [FixtureForeground]::Focus($form.Handle)
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/d', '/c', $command -WindowStyle Hidden
 })
 
