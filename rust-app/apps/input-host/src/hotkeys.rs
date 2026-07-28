@@ -13,11 +13,12 @@ use std::{
 
 use rust_protocol::{InputHostEvent, RequestId, SessionId, TargetSnapshot, TextActionIntent};
 use windows_sys::Win32::{
-    Foundation::{LPARAM, LRESULT, WPARAM},
+    Foundation::{GetLastError, LPARAM, LRESULT, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, VK_CONTROL, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
-            VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_T, VK_V,
+            GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
+            VK_CONTROL, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
+            VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_T, VK_V,
         },
         WindowsAndMessaging::{
             CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
@@ -52,6 +53,11 @@ static MONOTONIC_ORIGIN: OnceLock<Instant> = OnceLock::new();
 static LAST_PHYSICAL_CHANGE_US: AtomicU64 = AtomicU64::new(0);
 static LAST_HOOK_EVENT_US: AtomicU64 = AtomicU64::new(0);
 static SELECTION_BUSY: AtomicBool = AtomicBool::new(false);
+static REGISTERED_COMMANDS: AtomicU32 = AtomicU32::new(0);
+
+pub const HOTKEY_ID_CORRECT_LAYOUT: i32 = 0x5141;
+pub const HOTKEY_ID_INSERT_LAST: i32 = 0x5142;
+pub const HOTKEY_ID_TRANSLATE: i32 = 0x5143;
 
 #[cfg(debug_assertions)]
 static TRACE_EVENTS: OnceLock<std::sync::mpsc::SyncSender<HookTrace>> = OnceLock::new();
@@ -189,7 +195,7 @@ pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LP
     }
 
     let origin = classify_event(input.flags, input.dwExtraInfo);
-    if origin != EventOrigin::Physical {
+    if origin == EventOrigin::OwnInjected {
         trace_injected_event(input, key_down, key_up, origin);
         return unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) };
     }
@@ -203,7 +209,12 @@ pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LP
         let recovery_action = needs_reconciliation
             .then(|| PhysicalKeys::from_async_except(input.vkCode as u16, &state.keys))
             .and_then(|keys| state.reconcile(keys));
-        let decision = state.process_event(input.vkCode as u16, key_down, key_up);
+        let decision = state.process_event(
+            input.vkCode as u16,
+            key_down,
+            key_up,
+            REGISTERED_COMMANDS.load(Ordering::Acquire),
+        );
         (recovery_action, decision, state.keys.input_mask())
     });
     PHYSICAL_INPUT.store(physical_mask, Ordering::Release);
@@ -222,7 +233,7 @@ pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LP
         decision.state_after = GestureStateName::Idle;
     }
 
-    trace_physical_event(input, key_down, key_up, decision);
+    trace_actionable_event(input, key_down, key_up, origin, decision);
     if decision.suppress {
         1
     } else {
@@ -231,24 +242,13 @@ pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LP
 }
 
 fn classify_event(flags: u32, extra_info: usize) -> EventOrigin {
-    classify_event_with_e2e(flags, extra_info, e2e_injected_hotkeys_enabled())
-}
-
-fn classify_event_with_e2e(flags: u32, extra_info: usize, e2e_enabled: bool) -> EventOrigin {
     if extra_info == inject::SYNTHETIC_MARKER {
         EventOrigin::OwnInjected
-    } else if e2e_enabled && extra_info == inject::E2E_HOTKEY_MARKER {
-        EventOrigin::Physical
     } else if flags & LLKHF_INJECTED != 0 {
         EventOrigin::ForeignInjected
     } else {
         EventOrigin::Physical
     }
-}
-
-fn e2e_injected_hotkeys_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("QNTFLEX_E2E_ACCEPT_INJECTED").as_deref() == Ok("1"))
 }
 
 fn dispatch_hook_action(action: HookAction) -> bool {
@@ -267,6 +267,79 @@ fn dispatch_hook_action(action: HookAction) -> bool {
         SELECTION_BUSY.store(false, Ordering::Release);
     }
     sent
+}
+
+pub struct RegisteredHotkeys {
+    registrations: Vec<(i32, u32)>,
+}
+
+impl RegisteredHotkeys {
+    pub fn register_for_current_thread() -> Self {
+        let mut registrations = Vec::with_capacity(3);
+        for (id, trigger, mask, name) in [
+            (
+                HOTKEY_ID_CORRECT_LAYOUT,
+                u32::from(VK_K),
+                INPUT_K,
+                "correct_layout",
+            ),
+            (
+                HOTKEY_ID_INSERT_LAST,
+                u32::from(VK_V),
+                INPUT_V,
+                "insert_last",
+            ),
+            (HOTKEY_ID_TRANSLATE, u32::from(VK_T), INPUT_T, "translate"),
+        ] {
+            let registered = unsafe {
+                RegisterHotKey(
+                    std::ptr::null_mut(),
+                    id,
+                    MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                    trigger,
+                )
+            } != 0;
+            if registered {
+                REGISTERED_COMMANDS.fetch_or(mask, Ordering::AcqRel);
+                registrations.push((id, mask));
+                crate::diagnostic_line(&format!("hotkey registration={name} result=success"));
+            } else {
+                crate::diagnostic_line(&format!(
+                    "hotkey registration={name} result=fallback_hook win32={}",
+                    unsafe { GetLastError() }
+                ));
+            }
+        }
+        Self { registrations }
+    }
+}
+
+impl Drop for RegisteredHotkeys {
+    fn drop(&mut self) {
+        for (id, mask) in self.registrations.drain(..) {
+            unsafe {
+                let _ = UnregisterHotKey(std::ptr::null_mut(), id);
+            }
+            REGISTERED_COMMANDS.fetch_and(!mask, Ordering::AcqRel);
+        }
+    }
+}
+
+pub fn dispatch_registered_hotkey(id: i32) -> bool {
+    registered_hotkey_action(id).is_some_and(dispatch_hook_action)
+}
+
+const fn registered_hotkey_action(id: i32) -> Option<HookAction> {
+    match id {
+        HOTKEY_ID_CORRECT_LAYOUT => Some(HookAction::SelectionRequested {
+            intent: TextActionIntent::CorrectLayout,
+        }),
+        HOTKEY_ID_INSERT_LAST => Some(HookAction::InsertLastRequested),
+        HOTKEY_ID_TRANSLATE => Some(HookAction::SelectionRequested {
+            intent: TextActionIntent::Translate,
+        }),
+        _ => None,
+    }
 }
 
 fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHostEvent>) {
@@ -319,6 +392,10 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
                     });
                     continue;
                 };
+                crate::diagnostic_line(&format!(
+                    "hotkey action=insert_last target_pid={} target_hwnd={}",
+                    target.process_id, target.window_handle
+                ));
                 if events
                     .send(InputHostEvent::InsertLastRequested { target })
                     .is_err()
@@ -336,6 +413,10 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
                     });
                     continue;
                 };
+                crate::diagnostic_line(&format!(
+                    "hotkey action=selection intent={intent:?} target_pid={} target_hwnd={}",
+                    target.process_id, target.window_handle
+                ));
                 if let Err(error) = begin_selection_capture(intent, target, events.clone()) {
                     SELECTION_BUSY.store(false, Ordering::Release);
                     crate::diagnostic_line(&format!(
@@ -533,7 +614,13 @@ impl HotkeyState {
         }
     }
 
-    fn process_event(&mut self, virtual_key: u16, key_down: bool, key_up: bool) -> HookDecision {
+    fn process_event(
+        &mut self,
+        virtual_key: u16,
+        key_down: bool,
+        key_up: bool,
+        registered_commands: u32,
+    ) -> HookDecision {
         let state_before = self.gesture.name();
         let was_down = self.keys.is_down(virtual_key);
         self.keys.set(virtual_key, key_down, key_up);
@@ -599,7 +686,7 @@ impl HotkeyState {
             };
         }
 
-        if virtual_key == VK_K {
+        if registered_commands & INPUT_K == 0 && virtual_key == VK_K {
             if self.selection_k_down {
                 suppress = true;
                 if key_up {
@@ -618,7 +705,7 @@ impl HotkeyState {
                 });
             }
         }
-        if virtual_key == VK_V {
+        if registered_commands & INPUT_V == 0 && virtual_key == VK_V {
             if self.insert_v_down {
                 suppress = true;
                 if key_up {
@@ -635,7 +722,7 @@ impl HotkeyState {
                 action = Some(HookAction::InsertLastRequested);
             }
         }
-        if virtual_key == VK_T {
+        if registered_commands & INPUT_T == 0 && virtual_key == VK_T {
             if self.adaptive_t_down {
                 suppress = true;
                 if key_up {
@@ -810,10 +897,11 @@ fn unix_ms() -> u64 {
 }
 
 #[cfg(debug_assertions)]
-fn trace_physical_event(
+fn trace_actionable_event(
     input: &KBDLLHOOKSTRUCT,
     key_down: bool,
     key_up: bool,
+    origin: EventOrigin,
     decision: HookDecision,
 ) {
     if !should_trace(input.vkCode as u16, decision) {
@@ -825,7 +913,7 @@ fn trace_physical_event(
         vk: input.vkCode as u16,
         key_down,
         key_up,
-        origin: EventOrigin::Physical,
+        origin,
         state_before: decision.state_before,
         state_after: decision.state_after,
         repeated: decision.repeated,
@@ -836,10 +924,11 @@ fn trace_physical_event(
 }
 
 #[cfg(not(debug_assertions))]
-fn trace_physical_event(
+fn trace_actionable_event(
     _input: &KBDLLHOOKSTRUCT,
     _key_down: bool,
     _key_up: bool,
+    _origin: EventOrigin,
     decision: HookDecision,
 ) {
     let _ = (decision.state_before, decision.repeated);
@@ -953,20 +1042,30 @@ mod tests {
     use rust_protocol::TextActionIntent;
 
     use super::{
-        EndReason, EventOrigin, GestureState, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL,
-        INPUT_K, INPUT_T, PhysicalKeys, classify_event, classify_event_with_e2e,
-        selection_chord_mask,
+        EndReason, EventOrigin, GestureState, HOTKEY_ID_CORRECT_LAYOUT, HOTKEY_ID_INSERT_LAST,
+        HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_K, INPUT_T,
+        INPUT_V, PhysicalKeys, classify_event, registered_hotkey_action, selection_chord_mask,
     };
-    use crate::inject::{E2E_HOTKEY_MARKER, SYNTHETIC_MARKER};
+    use crate::inject::SYNTHETIC_MARKER;
     use windows_sys::Win32::UI::{
         Input::KeyboardAndMouse::{
-            VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_SPACE,
+            VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_SPACE, VK_T,
+            VK_V,
         },
         WindowsAndMessaging::LLKHF_INJECTED,
     };
 
     fn event(state: &mut HotkeyState, key: u16, down: bool) -> super::HookDecision {
-        state.process_event(key, down, !down)
+        state.process_event(key, down, !down, 0)
+    }
+
+    fn registered_event(
+        state: &mut HotkeyState,
+        key: u16,
+        down: bool,
+        registered_commands: u32,
+    ) -> super::HookDecision {
+        state.process_event(key, down, !down, registered_commands)
     }
 
     fn gesture_id(action: Option<HookAction>) -> Option<u64> {
@@ -1115,6 +1214,40 @@ mod tests {
     }
 
     #[test]
+    fn registered_commands_are_owned_by_wm_hotkey_instead_of_the_hook() {
+        let mut state = HotkeyState::default();
+        event(&mut state, VK_LCONTROL, true);
+        event(&mut state, VK_LMENU, true);
+        for (key, mask) in [(VK_K, INPUT_K), (VK_V, INPUT_V), (VK_T, INPUT_T)] {
+            let decision = registered_event(&mut state, key, true, mask);
+            assert!(!decision.suppress);
+            assert!(decision.action.is_none());
+            let _ = registered_event(&mut state, key, false, mask);
+        }
+    }
+
+    #[test]
+    fn registered_hotkey_ids_map_to_the_expected_commands() {
+        assert_eq!(
+            registered_hotkey_action(HOTKEY_ID_CORRECT_LAYOUT),
+            Some(HookAction::SelectionRequested {
+                intent: TextActionIntent::CorrectLayout,
+            })
+        );
+        assert_eq!(
+            registered_hotkey_action(HOTKEY_ID_INSERT_LAST),
+            Some(HookAction::InsertLastRequested)
+        );
+        assert_eq!(
+            registered_hotkey_action(HOTKEY_ID_TRANSLATE),
+            Some(HookAction::SelectionRequested {
+                intent: TextActionIntent::Translate,
+            })
+        );
+        assert_eq!(registered_hotkey_action(i32::MAX), None);
+    }
+
+    #[test]
     fn extra_shift_or_windows_prevents_activation() {
         for extra in [VK_LSHIFT, VK_LWIN] {
             let mut state = HotkeyState::default();
@@ -1182,14 +1315,10 @@ mod tests {
     }
 
     #[test]
-    fn e2e_marker_is_physical_only_with_explicit_opt_in() {
+    fn foreign_injection_remains_distinguishable_from_owned_injection() {
         assert_eq!(
-            classify_event_with_e2e(LLKHF_INJECTED, E2E_HOTKEY_MARKER, false),
+            classify_event(LLKHF_INJECTED, 0x1234),
             EventOrigin::ForeignInjected
-        );
-        assert_eq!(
-            classify_event_with_e2e(LLKHF_INJECTED, E2E_HOTKEY_MARKER, true),
-            EventOrigin::Physical
         );
     }
 

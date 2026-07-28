@@ -98,6 +98,10 @@ impl InsertionService {
                             ) {
                                 Ok(restore) => pending_restore = restore,
                                 Err(error) => {
+                                    crate::diagnostic_line(&format!(
+                                        "insertion action=insert result=failed session={} target_pid={} error={error}",
+                                        transcript.session_id, target.process_id
+                                    ));
                                     let _ = events.send(InputHostEvent::Failed {
                                         session_id: Some(transcript.session_id),
                                         code: "insert_transcript".to_owned(),
@@ -317,6 +321,10 @@ fn send_dispatched(
     method: InsertionMethod,
     started: Instant,
 ) {
+    crate::diagnostic_line(&format!(
+        "insertion action=insert result=dispatched session={session_id} method={method:?} elapsed_ms={}",
+        started.elapsed().as_millis()
+    ));
     let _ = events.send(InputHostEvent::InsertionDispatched {
         session_id,
         method,

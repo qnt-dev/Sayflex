@@ -26,7 +26,8 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{VK_T, VK_V},
         WindowsAndMessaging::{
             DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
-            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_QUIT,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_HOTKEY,
+            WM_QUIT,
         },
     },
 };
@@ -74,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = PeekMessageW(&mut queue_probe, ptr::null_mut(), 0, 0, PM_NOREMOVE);
     }
     let hook_thread_id = unsafe { GetCurrentThreadId() };
+    let _registered_hotkeys = hotkeys::RegisteredHotkeys::register_for_current_thread();
     let module = unsafe { GetModuleHandleW(ptr::null()) };
     let hook =
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hotkeys::keyboard_hook), module, 0) };
@@ -97,6 +99,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if result == -1 {
             return Err(io::Error::last_os_error().into());
+        }
+        if message.message == WM_HOTKEY
+            && hotkeys::dispatch_registered_hotkey(message.wParam as i32)
+        {
+            continue;
         }
         unsafe {
             let _ = TranslateMessage(&message);
