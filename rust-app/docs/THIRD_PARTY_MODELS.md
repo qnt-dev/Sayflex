@@ -4,12 +4,14 @@ Translation models are not distributed inside the installer. The application
 downloads a user-selected pack directly from the pinned upstream revision and
 verifies every artifact before installation.
 
-| Catalog entry | Upstream model | Pinned revision | License shown by catalog |
+| Catalog entry | Upstream model | Pinned revision | License |
 | --- | --- | --- | --- |
-| Fast RU→EN | `Helsinki-NLP/opus-mt_tiny_rus-eng` | `795b0b2fb13d17b917287421c15e0d70db9ba940` | Apache-2.0 |
-| Fast EN→RU | `Helsinki-NLP/opus-mt_tiny_eng-rus` | `3172938c8acb3f54ab522db1aaca1f12bf168322` | Apache-2.0 |
-| Quality RU→EN | `Helsinki-NLP/opus-mt-ru-en` | `a64ede1bb36da5cd0c7bd9c25d0ee07ce5612124` | CC-BY-4.0 |
-| Quality EN→RU | `Helsinki-NLP/opus-mt-en-ru` | `cd80d4414addb42379be7c8a75c72940372fa6c2` | Apache-2.0 |
+| Fast multilingual | `Qwen/Qwen3.5-4B`, GGUF by `bartowski` | `4168f45a16a1290d65a4ec0fa312ae917a4c15d6` | Apache-2.0 |
+| Quality multilingual | `Qwen/Qwen3.5-9B`, GGUF by `bartowski` | `182be2fd6c7bc44887d88a91cb03ff009cc9f549` | Apache-2.0 |
+
+Inference uses the official llama.cpp Windows Vulkan archive from release
+`b10164`, downloaded from `ggml-org/llama.cpp` and verified before atomic
+extraction. llama.cpp is MIT-licensed.
 
 The exact URLs, sizes, and SHA-256 values used by the installer live in
 `crates/translation-engine/models/catalog.json`.

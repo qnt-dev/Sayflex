@@ -2130,7 +2130,7 @@ fn handle_translation_event(
             if selected_tier.is_none() {
                 set_translation_status(
                     translator,
-                    "No model installed. Choose Tiny or Teacher in Settings.",
+                    "No model installed. Choose Fast or Quality in Settings.",
                 );
             }
             let _ = workers
@@ -2850,7 +2850,7 @@ fn wire_translator(
             };
             if selected_tier.is_none() {
                 translator.set_status_text(
-                    "No model installed. Choose Tiny or Teacher in Settings.".into(),
+                    "No model installed. Choose Fast or Quality in Settings.".into(),
                 );
                 return;
             }

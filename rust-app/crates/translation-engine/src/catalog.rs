@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use rust_model_manager::{BundleArtifact, BundleDescriptor};
 use rust_protocol::{TranslationLanguage, TranslationModelSummary, TranslationTier};
 use serde::{Deserialize, Serialize};
@@ -11,9 +9,41 @@ const BUILT_IN_CATALOG: &str = include_str!("../models/catalog.json");
 pub struct TranslationDirectionDescriptor {
     pub source_language: TranslationLanguage,
     pub target_language: TranslationLanguage,
-    pub directory: String,
-    pub weight_file: String,
-    pub artifacts: Vec<BundleArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TranslationBackendDescriptor {
+    LlamaCpp {
+        model_file: String,
+        context_size: u32,
+        max_output_tokens: u32,
+    },
+}
+
+impl TranslationBackendDescriptor {
+    #[must_use]
+    pub fn model_file(&self) -> &str {
+        match self {
+            Self::LlamaCpp { model_file, .. } => model_file,
+        }
+    }
+
+    #[must_use]
+    pub const fn context_size(&self) -> u32 {
+        match self {
+            Self::LlamaCpp { context_size, .. } => *context_size,
+        }
+    }
+
+    #[must_use]
+    pub const fn max_output_tokens(&self) -> u32 {
+        match self {
+            Self::LlamaCpp {
+                max_output_tokens, ..
+            } => *max_output_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,17 +54,15 @@ pub struct TranslationPackDescriptor {
     pub tier: TranslationTier,
     pub license: String,
     pub recommended_locales: Vec<String>,
+    pub backend: TranslationBackendDescriptor,
+    pub artifacts: Vec<BundleArtifact>,
     pub directions: Vec<TranslationDirectionDescriptor>,
 }
 
 impl TranslationPackDescriptor {
     #[must_use]
-    pub fn direction(
-        &self,
-        source: TranslationLanguage,
-        target: TranslationLanguage,
-    ) -> Option<&TranslationDirectionDescriptor> {
-        self.directions.iter().find(|direction| {
+    pub fn supports(&self, source: TranslationLanguage, target: TranslationLanguage) -> bool {
+        self.directions.iter().any(|direction| {
             direction.source_language == source && direction.target_language == target
         })
     }
@@ -43,21 +71,7 @@ impl TranslationPackDescriptor {
     pub fn as_bundle(&self) -> BundleDescriptor {
         BundleDescriptor {
             id: self.id.clone(),
-            artifacts: self
-                .directions
-                .iter()
-                .flat_map(|direction| {
-                    direction.artifacts.iter().map(|artifact| BundleArtifact {
-                        relative_path: Path::new(&direction.directory)
-                            .join(&artifact.relative_path)
-                            .to_string_lossy()
-                            .replace('\\', "/"),
-                        url: artifact.url.clone(),
-                        bytes: artifact.bytes,
-                        sha256: artifact.sha256.clone(),
-                    })
-                })
-                .collect(),
+            artifacts: self.artifacts.clone(),
         }
     }
 
@@ -112,7 +126,7 @@ impl TranslationCatalog {
     }
 
     pub fn validate(&self) -> Result<(), TranslationCatalogError> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err(TranslationCatalogError::UnsupportedSchema(
                 self.schema_version,
             ));
@@ -123,7 +137,10 @@ impl TranslationCatalog {
         for pack in &self.packs {
             if pack.id.trim().is_empty()
                 || pack.display_name.trim().is_empty()
-                || pack.directions.len() != 2
+                || pack.directions.is_empty()
+                || pack.backend.model_file().trim().is_empty()
+                || pack.backend.context_size() < 1_024
+                || pack.backend.max_output_tokens() == 0
                 || self
                     .packs
                     .iter()
@@ -142,15 +159,15 @@ impl TranslationCatalog {
             pack.as_bundle()
                 .validate()
                 .map_err(|_| TranslationCatalogError::InvalidPack(pack.id.clone()))?;
+            if !pack
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.relative_path == pack.backend.model_file())
+            {
+                return Err(TranslationCatalogError::InvalidPack(pack.id.clone()));
+            }
             for direction in &pack.directions {
-                if direction.source_language == direction.target_language
-                    || direction.directory.trim().is_empty()
-                    || direction.weight_file.trim().is_empty()
-                    || !direction
-                        .artifacts
-                        .iter()
-                        .any(|artifact| artifact.relative_path == direction.weight_file)
-                {
+                if direction.source_language == direction.target_language {
                     return Err(TranslationCatalogError::InvalidPack(pack.id.clone()));
                 }
             }
@@ -188,15 +205,9 @@ mod tests {
         assert_eq!(catalog.packs.len(), 2);
         for tier in [TranslationTier::Tiny, TranslationTier::Teacher] {
             let pack = catalog.by_tier(tier).unwrap();
-            assert!(
-                pack.direction(TranslationLanguage::Russian, TranslationLanguage::English)
-                    .is_some()
-            );
-            assert!(
-                pack.direction(TranslationLanguage::English, TranslationLanguage::Russian)
-                    .is_some()
-            );
-            assert!(pack.as_bundle().total_bytes() > 100_000_000);
+            assert!(pack.supports(TranslationLanguage::Russian, TranslationLanguage::English));
+            assert!(pack.supports(TranslationLanguage::English, TranslationLanguage::Russian));
+            assert!(pack.as_bundle().total_bytes() > 2_000_000_000);
         }
     }
 

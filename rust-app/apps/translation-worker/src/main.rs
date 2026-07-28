@@ -2,6 +2,7 @@
 
 mod download;
 mod history;
+mod runtime;
 
 use std::{
     env,
@@ -13,6 +14,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use download::HttpFetcher;
 use history::TranslationHistory;
+use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::BundleInstaller;
 use rust_protocol::{
     PROTOCOL_VERSION, RequestId, TranslationHistoryEntry, TranslationLanguage,
@@ -43,6 +45,7 @@ impl EventWriter {
 struct WorkerState {
     catalog: TranslationCatalog,
     installer: BundleInstaller,
+    runtime: LlamaRuntimeManager,
     fetcher: HttpFetcher,
     selected_tier: Option<TranslationTier>,
     keep_warm: bool,
@@ -58,6 +61,7 @@ impl WorkerState {
         Ok(Self {
             catalog: TranslationCatalog::load()?,
             installer: BundleInstaller::new(root.join("translation-models")),
+            runtime: LlamaRuntimeManager::new(root.join("runtimes")),
             fetcher: HttpFetcher::new()?,
             selected_tier: None,
             keep_warm: true,
@@ -75,11 +79,12 @@ impl WorkerState {
     }
 
     fn installed(&self, tier: TranslationTier) -> bool {
-        self.pack(tier).ok().is_some_and(|pack| {
-            self.installer
-                .is_installed(&pack.as_bundle())
-                .unwrap_or(false)
-        })
+        self.runtime.is_installed()
+            && self.pack(tier).ok().is_some_and(|pack| {
+                self.installer
+                    .is_installed(&pack.as_bundle())
+                    .unwrap_or(false)
+            })
     }
 
     fn summaries(&self) -> Vec<TranslationModelSummary> {
@@ -88,9 +93,11 @@ impl WorkerState {
             .iter()
             .map(|pack| {
                 pack.summary(
-                    self.installer
-                        .is_installed(&pack.as_bundle())
-                        .unwrap_or(false),
+                    self.runtime.is_installed()
+                        && self
+                            .installer
+                            .is_installed(&pack.as_bundle())
+                            .unwrap_or(false),
                     self.selected_tier == Some(pack.tier),
                     &self.locale,
                 )
@@ -102,7 +109,10 @@ impl WorkerState {
         let started = Instant::now();
         let pack = self.pack(tier)?.clone();
         let root = self.installer.bundle_path(&pack.as_bundle());
-        let mut engine = TranslationEngine::new(pack.clone(), root);
+        if !self.runtime.is_installed() {
+            return Err(anyhow!("llama.cpp translation runtime is not installed"));
+        }
+        let mut engine = TranslationEngine::new(pack.clone(), root, self.runtime.runtime_path());
         if warm {
             engine.warm()?;
         }
@@ -201,13 +211,27 @@ fn handle_command(
         TranslationWorkerCommand::EnsureModel { tier } => {
             let pack = state.pack(tier)?.clone();
             let bundle = pack.as_bundle();
+            let runtime_download = if state.runtime.is_installed() {
+                0
+            } else {
+                RUNTIME_DOWNLOAD_BYTES
+            };
+            let model_download = bundle.total_bytes();
+            let combined_total = runtime_download.saturating_add(model_download);
+            state.runtime.ensure_installed(&state.fetcher, |progress| {
+                let _ = writer.send(&TranslationWorkerEvent::ModelDownloadProgress {
+                    catalog_id: pack.id.clone(),
+                    downloaded_bytes: progress.bytes_received.min(runtime_download),
+                    total_bytes: combined_total,
+                });
+            })?;
             let path = state
                 .installer
                 .ensure_installed(&bundle, &state.fetcher, |progress| {
                     let _ = writer.send(&TranslationWorkerEvent::ModelDownloadProgress {
                         catalog_id: pack.id.clone(),
-                        downloaded_bytes: progress.bytes_received,
-                        total_bytes: progress.total_bytes,
+                        downloaded_bytes: runtime_download.saturating_add(progress.bytes_received),
+                        total_bytes: combined_total,
                     });
                 })?;
             writer.send(&TranslationWorkerEvent::ModelInstalled {

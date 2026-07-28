@@ -14,8 +14,13 @@ The release contains four failure-isolated process roles and five executables:
   capture, Unicode insertion, clipboard recovery and selected-text capture.
 - `rust-speech-worker-*.exe` — CPAL microphone capture, verified model
   installation, CUDA/CPU `whisper.cpp` inference and durable history.
-- `rust-translation-worker.exe` — pure-Rust Candle/Marian inference,
-  verified multi-file translation model installation and translation history.
+- `rust-translation-worker.exe` — verified Qwen3.5 model/runtime installation,
+  lifecycle-isolated local llama.cpp inference and translation history.
+
+When translation is enabled, its worker owns one authenticated
+`llama-server.exe` sidecar from the verified optional Vulkan runtime. The
+sidecar is contained by the same Windows Job Object and cannot outlive the
+desktop process.
 
 Every recording has a UUID that is carried through hotkey, audio, inference,
 history, insertion and recovery. No operation reads a mutable global “last
@@ -71,11 +76,11 @@ Speech output remains in the detected language for the recommended
 model: upstream does not train it for that task. Direct speech-to-English mode
 is available only for compatible non-Turbo Whisper models.
 
-Selected-text translation and the full translator use a separate local Marian
-engine. No translation pack is preinstalled or downloaded automatically.
-Users can choose a compact Fast pack or the original higher-quality Teacher
-pack; the system locale is used only to mark a recommendation. Translation
-can preview, copy or replace the selection.
+Selected-text translation and the full translator use a separate local
+Qwen3.5 engine through a pinned llama.cpp Vulkan runtime. No translation pack
+is preinstalled or downloaded automatically. Users can choose a 4B Fast model
+or a higher-quality 9B model; the system locale is used only to mark a
+recommendation. Translation can preview, copy or replace the selection.
 
 Translation and layout correction can be disabled independently.
 `Ctrl+Alt+T` translates the selected text immediately into a compact Acrylic

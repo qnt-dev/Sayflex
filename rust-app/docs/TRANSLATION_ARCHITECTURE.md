@@ -25,7 +25,7 @@ Slint desktop coordinator
              |
              v
 Translation worker
-  model manager -> Candle/Marian -> history
+  model manager -> authenticated llama.cpp -> Qwen3.5 -> history
              |
              v
 Input host
@@ -44,33 +44,42 @@ replacement.
 
 ## Model lifecycle
 
-The catalog contains bidirectional packs. Every file has a pinned upstream
-revision, expected byte length, and SHA-256. A pack is downloaded into an
-isolated `.download` directory, verified with streaming hashes, and moved into
-place atomically. A failed or interrupted download cannot replace a verified
-pack.
+The catalog contains multilingual GGUF packs exposed initially for the
+bidirectional English/Russian product contract. Every file has a pinned
+upstream revision, expected byte length, and SHA-256. A pack is downloaded into
+an isolated `.download` path with range-resume support, verified with a
+streaming hash, and moved into place atomically. A failed or interrupted
+download cannot replace a verified pack.
 
 The current release exposes:
 
-- Fast: two distilled OPUS-MT models, about 108 MB total.
-- Quality: the two original OPUS-MT teacher models, about 623 MB total.
+- Fast: Qwen3.5 4B Q4_K_M, about 2.8 GiB.
+- Quality: Qwen3.5 9B Q4_K_M, about 5.7 GiB.
 
-The catalog, protocol, and bundle installer are separated from the Marian
-runtime so more language-pair engines or a multilingual backend can be added
-without changing input capture or UI delivery semantics.
+The pinned llama.cpp Vulkan runtime is a separate 32 MiB verified download and
+is extracted atomically. It is shared by all translation models. The worker
+launches it on a random loopback port with a random per-process API key,
+disables the web UI and network model lookup, and inherits the desktop worker
+Job Object. A worker or desktop failure therefore cannot leave an orphaned
+translation server.
+
+The catalog, protocol, model installer, runtime installer, and inference client
+are separate components. Additional languages, model sizes, or native
+backends can be added without changing input capture or UI delivery semantics.
 
 ## Latency policy
 
 Keeping the engine warm is the default after the user has selected a model.
+Warm-up primes both translation directions and the GPU execution graphs.
 Turning it off unloads the model after every result and trades memory for
-startup latency. Translation uses deterministic beam search; no network call,
-generative LLM, or UI-thread work is part of the request path.
+startup latency. Inference is deterministic (`temperature = 0`, fixed seed,
+thinking disabled), entirely local after installation, and never runs on a UI
+or input-hook thread.
 
 Before public release, benchmark gates should record separately:
 
 - model load and warm-up;
-- tokenization;
-- inference per direction and text length;
+- prompt processing and generation per direction and text length;
 - UI request-to-result;
 - copy/replace dispatch;
 - peak private memory for Fast and Quality.

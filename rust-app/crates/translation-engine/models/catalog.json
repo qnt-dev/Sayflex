@@ -1,175 +1,67 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "packs": [
     {
-      "id": "opus-ru-en-tiny",
-      "display_name": "Russian ↔ English · Fast",
-      "description": "Distilled 25.4M-parameter OPUS-MT models for instant local translation.",
+      "id": "qwen35-4b-q4",
+      "display_name": "Qwen3.5 4B · Fast",
+      "description": "Modern multilingual 4B model accelerated locally through Vulkan.",
       "tier": "tiny",
       "license": "Apache-2.0",
       "recommended_locales": ["ru"],
+      "backend": {
+        "kind": "llama_cpp",
+        "model_file": "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+        "context_size": 4096,
+        "max_output_tokens": 2048
+      },
+      "artifacts": [
+        {
+          "relative_path": "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/4168f45a16a1290d65a4ec0fa312ae917a4c15d6/Qwen_Qwen3.5-4B-Q4_K_M.gguf?download=true",
+          "bytes": 3013027808,
+          "sha256": "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
+        }
+      ],
       "directions": [
         {
           "source_language": "russian",
-          "target_language": "english",
-          "directory": "ru-en",
-          "weight_file": "model.safetensors",
-          "artifacts": [
-            {
-              "relative_path": "model.safetensors",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/model.safetensors",
-              "bytes": 50743442,
-              "sha256": "bb936d77d38c92c465ac9b6269065163e2ab3aeac1fba7660730929ab5185f57"
-            },
-            {
-              "relative_path": "config.json",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/config.json",
-              "bytes": 957,
-              "sha256": "480c811721f0a0dca0aa632ceb566570f06c46d15ad9bbdfcbec58af4734aef0"
-            },
-            {
-              "relative_path": "source.spm",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/source.spm",
-              "bytes": 956176,
-              "sha256": "e684e7edf0c2a134665ac393e09e342175c7f909549e7aa0cbf0ad27390729f1"
-            },
-            {
-              "relative_path": "target.spm",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/target.spm",
-              "bytes": 956176,
-              "sha256": "e684e7edf0c2a134665ac393e09e342175c7f909549e7aa0cbf0ad27390729f1"
-            },
-            {
-              "relative_path": "vocab.json",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_rus-eng/resolve/795b0b2fb13d17b917287421c15e0d70db9ba940/vocab.json",
-              "bytes": 1455694,
-              "sha256": "3dfeb79f213886598ff9dd61b1ac87f068f1f729f5a4536829c8468994f57eb4"
-            }
-          ]
+          "target_language": "english"
         },
         {
           "source_language": "english",
-          "target_language": "russian",
-          "directory": "en-ru",
-          "weight_file": "model.safetensors",
-          "artifacts": [
-            {
-              "relative_path": "model.safetensors",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/model.safetensors",
-              "bytes": 50743442,
-              "sha256": "bf8078902d56cb354327315c49238bf32f129c9af7e13925f2072faf103c831a"
-            },
-            {
-              "relative_path": "config.json",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/config.json",
-              "bytes": 957,
-              "sha256": "480c811721f0a0dca0aa632ceb566570f06c46d15ad9bbdfcbec58af4734aef0"
-            },
-            {
-              "relative_path": "source.spm",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/source.spm",
-              "bytes": 956510,
-              "sha256": "8282335e85cc36ac5ec1cba7ce18399ce948bf72f3c755b1aced54a13b373c02"
-            },
-            {
-              "relative_path": "target.spm",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/target.spm",
-              "bytes": 956510,
-              "sha256": "8282335e85cc36ac5ec1cba7ce18399ce948bf72f3c755b1aced54a13b373c02"
-            },
-            {
-              "relative_path": "vocab.json",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt_tiny_eng-rus/resolve/3172938c8acb3f54ab522db1aaca1f12bf168322/vocab.json",
-              "bytes": 1457584,
-              "sha256": "84bf1b5212f13a1f28df67ad0341e80547689a108d97767087b8711bb311ba36"
-            }
-          ]
+          "target_language": "russian"
         }
       ]
     },
     {
-      "id": "opus-ru-en-teacher",
-      "display_name": "Russian ↔ English · Quality",
-      "description": "Original OPUS-MT teacher models with beam search for higher translation quality.",
+      "id": "qwen35-9b-q4",
+      "display_name": "Qwen3.5 9B · Quality",
+      "description": "Higher-quality multilingual 9B model for modern discrete GPUs.",
       "tier": "teacher",
-      "license": "Apache-2.0 / CC-BY-4.0",
+      "license": "Apache-2.0",
       "recommended_locales": ["ru"],
+      "backend": {
+        "kind": "llama_cpp",
+        "model_file": "Qwen_Qwen3.5-9B-Q4_K_M.gguf",
+        "context_size": 4096,
+        "max_output_tokens": 2048
+      },
+      "artifacts": [
+        {
+          "relative_path": "Qwen_Qwen3.5-9B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/Qwen_Qwen3.5-9B-GGUF/resolve/182be2fd6c7bc44887d88a91cb03ff009cc9f549/Qwen_Qwen3.5-9B-Q4_K_M.gguf?download=true",
+          "bytes": 6169341984,
+          "sha256": "d784ce9eda1a5a7b51e8f705a9e6310844bf4f173654d115823c775fdea56d43"
+        }
+      ],
       "directions": [
         {
           "source_language": "russian",
-          "target_language": "english",
-          "directory": "ru-en",
-          "weight_file": "model.safetensors",
-          "artifacts": [
-            {
-              "relative_path": "model.safetensors",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/a64ede1bb36da5cd0c7bd9c25d0ee07ce5612124/model.safetensors",
-              "bytes": 306967352,
-              "sha256": "f73dc54675dc0da9ca6704098cadae3562f149b1f93c585f9d21c8502a760421"
-            },
-            {
-              "relative_path": "config.json",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/config.json",
-              "bytes": 1381,
-              "sha256": "5ea76c78596bce8fe005ef89e00de0924bf83e5f532ce08784ff1fcefb699f5f"
-            },
-            {
-              "relative_path": "source.spm",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/source.spm",
-              "bytes": 1080169,
-              "sha256": "745998e51ba5b058e38b7ac7765c25c43ed5c1c39cc92b27163b9b2e323c9d7c"
-            },
-            {
-              "relative_path": "target.spm",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/target.spm",
-              "bytes": 802781,
-              "sha256": "16bebef1389a0b8ab452772c4e35b9e605e5713f8ac7baa71ca701394eaa086d"
-            },
-            {
-              "relative_path": "vocab.json",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-ru-en/resolve/fbd6dc73284f95536648512cc21d57f19191961a/vocab.json",
-              "bytes": 2601758,
-              "sha256": "33e95da3be3fa3b50169c4c46693ba2f29fbf4cb29d99044bd07d72d181fa1e9"
-            }
-          ]
+          "target_language": "english"
         },
         {
           "source_language": "english",
-          "target_language": "russian",
-          "directory": "en-ru",
-          "weight_file": "model.safetensors",
-          "artifacts": [
-            {
-              "relative_path": "model.safetensors",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/cd80d4414addb42379be7c8a75c72940372fa6c2/model.safetensors",
-              "bytes": 306967464,
-              "sha256": "e0af2b7de8a1c4f7b83faee21c5d4391284998e693d76f3a995bfd5bc8dce7e8"
-            },
-            {
-              "relative_path": "config.json",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/config.json",
-              "bytes": 1381,
-              "sha256": "d3c2614fd099bc228fc257f047e46f1c6f94cfa12dee2b1fa6c0d780e6b7de06"
-            },
-            {
-              "relative_path": "source.spm",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/source.spm",
-              "bytes": 802781,
-              "sha256": "16bebef1389a0b8ab452772c4e35b9e605e5713f8ac7baa71ca701394eaa086d"
-            },
-            {
-              "relative_path": "target.spm",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/target.spm",
-              "bytes": 1080169,
-              "sha256": "745998e51ba5b058e38b7ac7765c25c43ed5c1c39cc92b27163b9b2e323c9d7c"
-            },
-            {
-              "relative_path": "vocab.json",
-              "url": "https://huggingface.co/Helsinki-NLP/opus-mt-en-ru/resolve/bb09c99d180016eac6819df3dae68edb1690fdee/vocab.json",
-              "bytes": 2601758,
-              "sha256": "33e95da3be3fa3b50169c4c46693ba2f29fbf4cb29d99044bd07d72d181fa1e9"
-            }
-          ]
+          "target_language": "russian"
         }
       ]
     }

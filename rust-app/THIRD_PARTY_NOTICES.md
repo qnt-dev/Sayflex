@@ -28,6 +28,12 @@ Optional translation packs are downloaded only after an explicit user choice.
 Their exact artifact, checksum, origin, and license metadata are documented in
 `docs/THIRD_PARTY_MODELS.md` and the built-in translation catalog.
 
+The current packs are quantized derivatives of Alibaba Cloud's Qwen3.5 4B and
+9B models under Apache-2.0. Local inference uses the MIT-licensed llama.cpp
+runtime from `ggml-org/llama.cpp`. Neither model weights nor the runtime are
+bundled in the base installer; both are fetched only when translation is
+enabled.
+
 ## Other Rust dependencies
 
 The application includes permissively licensed Rust crates listed in

@@ -1,34 +1,49 @@
 use std::{
-    cmp::Ordering,
-    collections::HashMap,
-    fs,
+    fs::{self, File, OpenOptions},
+    io,
+    net::TcpListener,
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use candle::{DType, Device, Tensor};
-use candle_nn::{VarBuilder, ops::log_softmax};
-use candle_transformers::models::marian;
+use reqwest::{
+    StatusCode,
+    blocking::Client,
+    header::{AUTHORIZATION, CONTENT_TYPE},
+};
 use rust_protocol::{TranslationLanguage, TranslationTier};
-use sentencepiece_rs::SentencePieceProcessor;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-use crate::{TranslationDirectionDescriptor, TranslationPackDescriptor};
+use crate::{TranslationBackendDescriptor, TranslationPackDescriptor};
 
 const MAX_INPUT_CHARACTERS: usize = 32_000;
-const CHUNK_CHARACTERS: usize = 1_200;
+const CHUNK_CHARACTERS: usize = 2_000;
+const SERVER_START_TIMEOUT: Duration = Duration::from_secs(90);
+const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SERVER_LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 
 pub struct TranslationEngine {
     pack: TranslationPackDescriptor,
-    root: PathBuf,
-    runtimes: HashMap<(TranslationLanguage, TranslationLanguage), MarianRuntime>,
+    model_root: PathBuf,
+    runtime_root: PathBuf,
+    runtime: Option<LlamaRuntime>,
 }
 
 impl TranslationEngine {
-    pub fn new(pack: TranslationPackDescriptor, root: PathBuf) -> Self {
+    pub fn new(
+        pack: TranslationPackDescriptor,
+        model_root: PathBuf,
+        runtime_root: PathBuf,
+    ) -> Self {
         Self {
             pack,
-            root,
-            runtimes: HashMap::new(),
+            model_root,
+            runtime_root,
+            runtime: None,
         }
     }
 
@@ -38,11 +53,25 @@ impl TranslationEngine {
     }
 
     pub fn warm(&mut self) -> Result<()> {
-        for (source, target) in [
-            (TranslationLanguage::Russian, TranslationLanguage::English),
-            (TranslationLanguage::English, TranslationLanguage::Russian),
+        self.ensure_runtime()?;
+        // Prime both prompt directions and GPU execution graphs. This happens only
+        // when the user opts into the warm/fast mode, never in the input hook.
+        for (text, source, target) in [
+            (
+                "Hello",
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+            ),
+            (
+                "Привет",
+                TranslationLanguage::Russian,
+                TranslationLanguage::English,
+            ),
         ] {
-            self.ensure_runtime(source, target)?;
+            self.runtime
+                .as_mut()
+                .context("translation runtime failed to initialize")?
+                .translate_unit(text, source, target)?;
         }
         Ok(())
     }
@@ -64,36 +93,67 @@ impl TranslationEngine {
         if source == target {
             bail!("source and target languages are the same");
         }
-        let runtime = self.ensure_runtime(source, target)?;
-        let translated = translate_preserving_lines(runtime, text)?;
+        if !self.pack.supports(source, target) {
+            bail!("installed pack does not support this translation direction");
+        }
+
+        self.ensure_runtime()?;
+        let first_attempt = translate_preserving_lines(
+            self.runtime
+                .as_mut()
+                .context("translation runtime failed to initialize")?,
+            text,
+            source,
+            target,
+        );
+        let translated = match first_attempt {
+            Ok(translated) => translated,
+            Err(first_error) => {
+                // A crashed backend is restarted once in-process. The caller still
+                // receives a normal error if the deterministic retry also fails.
+                self.runtime = None;
+                self.ensure_runtime()
+                    .context("translation backend restart failed")?;
+                translate_preserving_lines(
+                    self.runtime
+                        .as_mut()
+                        .context("translation runtime failed to restart")?,
+                    text,
+                    source,
+                    target,
+                )
+                .with_context(|| format!("translation retry failed after: {first_error:#}"))?
+            }
+        };
         let translated = normalize_single_word_repetition(text, &translated);
         Ok((translated, source, target))
     }
 
-    fn ensure_runtime(
-        &mut self,
-        source: TranslationLanguage,
-        target: TranslationLanguage,
-    ) -> Result<&mut MarianRuntime> {
-        let key = (source, target);
-        if !self.runtimes.contains_key(&key) {
-            let descriptor = self
-                .pack
-                .direction(source, target)
-                .cloned()
-                .ok_or_else(|| anyhow!("installed pack does not support this direction"))?;
-            let runtime = MarianRuntime::load(&self.root.join(&descriptor.directory), &descriptor)
-                .with_context(|| {
-                    format!(
-                        "could not load {} → {} translation model",
-                        source.code(),
-                        target.code()
-                    )
-                })?;
-            self.runtimes.insert(key, runtime);
+    fn ensure_runtime(&mut self) -> Result<&mut LlamaRuntime> {
+        if self.runtime.as_mut().is_some_and(LlamaRuntime::is_running) {
+            return self
+                .runtime
+                .as_mut()
+                .ok_or_else(|| anyhow!("translation runtime disappeared"));
         }
-        self.runtimes
-            .get_mut(&key)
+        self.runtime = None;
+        let TranslationBackendDescriptor::LlamaCpp {
+            model_file,
+            context_size,
+            max_output_tokens,
+        } = &self.pack.backend;
+        let model_path = self.model_root.join(model_file);
+        if !model_path.is_file() {
+            bail!("translation model is missing: {}", model_path.display());
+        }
+        self.runtime = Some(LlamaRuntime::start(
+            &self.runtime_root,
+            &model_path,
+            *context_size,
+            *max_output_tokens,
+        )?);
+        self.runtime
+            .as_mut()
             .ok_or_else(|| anyhow!("translation runtime disappeared"))
     }
 }
@@ -116,213 +176,300 @@ pub fn detect_language(text: &str) -> TranslationLanguage {
     }
 }
 
-struct MarianRuntime {
-    model: marian::MTModel,
-    config: marian::Config,
-    source_processor: SentencePieceProcessor,
-    target_processor: SentencePieceProcessor,
-    vocabulary: HashMap<String, u32>,
-    inverse_vocabulary: Vec<String>,
-    device: Device,
-    beam_size: usize,
+struct LlamaRuntime {
+    child: Child,
+    client: Client,
+    endpoint: String,
+    authorization: String,
+    max_output_tokens: u32,
 }
 
-impl MarianRuntime {
-    fn load(root: &Path, descriptor: &TranslationDirectionDescriptor) -> Result<Self> {
-        let config: marian::Config = serde_json::from_slice(&fs::read(root.join("config.json"))?)
-            .context("invalid Marian config")?;
-        let source_processor = SentencePieceProcessor::open(root.join("source.spm"))
-            .context("invalid source SentencePiece model")?;
-        let target_processor = SentencePieceProcessor::open(root.join("target.spm"))
-            .context("invalid target SentencePiece model")?;
-        let vocabulary: HashMap<String, u32> =
-            serde_json::from_slice(&fs::read(root.join("vocab.json"))?)
-                .context("invalid Marian vocabulary")?;
-        let max_id = vocabulary
-            .values()
-            .copied()
-            .max()
-            .ok_or_else(|| anyhow!("Marian vocabulary is empty"))? as usize;
-        let mut inverse_vocabulary = vec![String::new(); max_id + 1];
-        for (piece, id) in &vocabulary {
-            if let Some(slot) = inverse_vocabulary.get_mut(*id as usize) {
-                slot.clone_from(piece);
-            }
+impl LlamaRuntime {
+    fn start(
+        runtime_root: &Path,
+        model_path: &Path,
+        context_size: u32,
+        max_output_tokens: u32,
+    ) -> Result<Self> {
+        let executable = runtime_root.join("llama-server.exe");
+        if !executable.is_file() {
+            bail!(
+                "llama.cpp translation runtime is missing: {}",
+                executable.display()
+            );
         }
+        let device = preferred_vulkan_device(&executable, runtime_root);
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .context("could not reserve a local translation port")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
 
-        let device = Device::Cpu;
-        let weights = root.join(&descriptor.weight_file);
-        let builder = if descriptor.weight_file.ends_with(".safetensors") {
-            unsafe { VarBuilder::from_mmaped_safetensors(&[weights], DType::F32, &device)? }
-        } else {
-            VarBuilder::from_pth(weights, DType::F32, &device)?
+        let api_key = Uuid::new_v4().simple().to_string();
+        let authorization = format!("Bearer {api_key}");
+        let log = open_server_log(runtime_root)?;
+        let error_log = log.try_clone()?;
+        let mut command = Command::new(&executable);
+        command
+            .arg("-m")
+            .arg(model_path)
+            .args(["-c", &context_size.to_string()])
+            .args(["-np", "1"])
+            .args(["-ngl", "all"])
+            .args(["--host", "127.0.0.1"])
+            .args(["--port", &port.to_string()])
+            .args(["--api-key", &api_key])
+            .args(["--no-ui", "--offline"])
+            .current_dir(runtime_root)
+            .env("PATH", runtime_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(error_log));
+        if let Some(device) = device {
+            command.args(["-dev", &device]);
+        }
+        configure_hidden_process(&mut command);
+        let child = command
+            .spawn()
+            .context("could not launch the local llama.cpp translation runtime")?;
+
+        let client = Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .context("could not create the local translation client")?;
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let mut runtime = Self {
+            child,
+            client,
+            endpoint,
+            authorization,
+            max_output_tokens,
         };
-        let model = marian::MTModel::new(&config, builder)?;
-        let beam_size = if config.encoder_layers <= 3 { 3 } else { 4 };
-        Ok(Self {
-            model,
-            config,
-            source_processor,
-            target_processor,
-            vocabulary,
-            inverse_vocabulary,
-            device,
-            beam_size,
-        })
+        runtime.wait_until_ready()?;
+        Ok(runtime)
     }
 
-    fn translate_unit(&mut self, text: &str) -> Result<String> {
-        let pieces = self.source_processor.encode(text)?;
-        let unknown = self
-            .vocabulary
-            .get("<unk>")
-            .copied()
-            .unwrap_or(self.source_processor.unk_id() as u32);
-        let mut source_ids = pieces
-            .iter()
-            .map(|piece| self.vocabulary.get(piece).copied().unwrap_or(unknown))
-            .collect::<Vec<_>>();
-        source_ids.push(self.config.eos_token_id);
-        if source_ids.len() >= self.config.max_position_embeddings {
-            bail!("translation unit is too long for this model");
+    fn wait_until_ready(&mut self) -> Result<()> {
+        let deadline = Instant::now() + SERVER_START_TIMEOUT;
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait()? {
+                bail!("llama.cpp translation runtime exited during startup: {status}");
+            }
+            match self
+                .client
+                .get(format!("{}/health", self.endpoint))
+                .header(AUTHORIZATION, &self.authorization)
+                .send()
+            {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response)
+                    if response.status() == StatusCode::SERVICE_UNAVAILABLE
+                        || response.status() == StatusCode::TOO_MANY_REQUESTS => {}
+                Ok(_) | Err(_) => {}
+            }
+            thread::sleep(SERVER_POLL_INTERVAL);
         }
+        bail!("llama.cpp translation runtime did not become ready in time")
+    }
 
-        self.model.reset_kv_cache();
-        let source = Tensor::new(source_ids.as_slice(), &self.device)?.unsqueeze(0)?;
-        let encoder = self.model.encoder().forward(&source, 0)?;
-        let max_output = source_ids
-            .len()
-            .saturating_mul(3)
-            .saturating_add(24)
-            .min(self.config.max_position_embeddings.saturating_sub(1))
-            .max(24);
-        let output_ids = beam_search(
-            &self.model,
-            &encoder,
-            &self.config,
-            self.beam_size,
-            max_output,
-            &self.device,
-        )?;
-        let pieces = output_ids
+    fn is_running(&mut self) -> bool {
+        self.child.try_wait().ok().flatten().is_none()
+    }
+
+    fn translate_unit(
+        &mut self,
+        text: &str,
+        source: TranslationLanguage,
+        target: TranslationLanguage,
+    ) -> Result<String> {
+        if !self.is_running() {
+            bail!("llama.cpp translation runtime is not running");
+        }
+        let request = ChatRequest {
+            model: "local",
+            messages: [
+                ChatMessage {
+                    role: "system",
+                    content: format!(
+                        "Translate the user text naturally and faithfully from {} into {}. \
+                         Preserve the exact meaning, tone, and terminology; do not omit or add \
+                         information. Return only the translation.",
+                        language_name(source),
+                        language_name(target)
+                    ),
+                },
+                ChatMessage {
+                    role: "user",
+                    content: text.to_owned(),
+                },
+            ],
+            temperature: 0.0,
+            max_tokens: self.max_output_tokens,
+            seed: 0,
+            stream: false,
+            chat_template_kwargs: ChatTemplateKwargs {
+                enable_thinking: false,
+            },
+        };
+        let response = self
+            .client
+            .post(format!("{}/v1/chat/completions", self.endpoint))
+            .header(AUTHORIZATION, &self.authorization)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&request)
+            .send()
+            .context("local translation request failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            bail!("local translation runtime returned {status}: {body}");
+        }
+        let response: ChatResponse = response
+            .json()
+            .context("local translation runtime returned invalid JSON")?;
+        let content = response
+            .choices
             .into_iter()
-            .filter(|id| {
-                *id != self.config.decoder_start_token_id
-                    && *id != self.config.eos_token_id
-                    && *id != self.config.forced_eos_token_id
-                    && *id != self.config.pad_token_id
-            })
-            .filter_map(|id| self.inverse_vocabulary.get(id as usize))
-            .filter(|piece| !piece.is_empty())
-            .cloned()
-            .collect::<Vec<_>>();
-        self.target_processor
-            .decode_pieces(&pieces)
-            .map_err(Into::into)
+            .next()
+            .map(|choice| choice.message.content)
+            .ok_or_else(|| anyhow!("local translation runtime returned no result"))?;
+        let content = strip_reasoning(&content);
+        if content.is_empty() {
+            bail!("local translation runtime returned an empty result");
+        }
+        Ok(content.to_owned())
     }
 }
 
-#[derive(Clone)]
-struct Beam {
-    tokens: Vec<u32>,
-    score: f64,
-    model: marian::MTModel,
-    finished: bool,
+impl Drop for LlamaRuntime {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
 }
 
-fn beam_search(
-    model: &marian::MTModel,
-    encoder: &Tensor,
-    config: &marian::Config,
-    beam_size: usize,
-    max_output: usize,
-    device: &Device,
-) -> Result<Vec<u32>> {
-    let mut seed = model.clone();
-    seed.reset_kv_cache();
-    let mut beams = vec![Beam {
-        tokens: vec![config.decoder_start_token_id],
-        score: 0.0,
-        model: seed,
-        finished: false,
-    }];
+#[derive(Serialize)]
+struct ChatRequest {
+    model: &'static str,
+    messages: [ChatMessage; 2],
+    temperature: f32,
+    max_tokens: u32,
+    seed: u32,
+    stream: bool,
+    chat_template_kwargs: ChatTemplateKwargs,
+}
 
-    for _ in 0..max_output {
-        let mut candidates = Vec::with_capacity(beam_size * beam_size);
-        for beam in beams {
-            if beam.finished {
-                candidates.push(beam);
-                continue;
-            }
-            let mut decoded = beam.model;
-            let past = beam.tokens.len().saturating_sub(1);
-            let input = Tensor::new(&beam.tokens[past..], device)?.unsqueeze(0)?;
-            let logits = decoded.decode(&input, encoder, past)?;
-            let logits = logits.squeeze(0)?;
-            let logits = logits.get(logits.dim(0)? - 1)?;
-            let log_probabilities = log_softmax(&logits, 0)?.to_vec1::<f32>()?;
-            for (token, token_score) in top_k(&log_probabilities, beam_size) {
-                if token as u32 == config.pad_token_id
-                    || token as u32 == config.decoder_start_token_id
-                {
-                    continue;
-                }
-                let mut tokens = beam.tokens.clone();
-                tokens.push(token as u32);
-                let finished = token as u32 == config.eos_token_id
-                    || token as u32 == config.forced_eos_token_id;
-                candidates.push(Beam {
-                    tokens,
-                    score: beam.score + f64::from(token_score),
-                    model: decoded.clone(),
-                    finished,
-                });
-            }
-        }
+#[derive(Serialize)]
+struct ChatMessage {
+    role: &'static str,
+    content: String,
+}
 
-        candidates.sort_by(|left, right| {
-            normalized_score(right)
-                .partial_cmp(&normalized_score(left))
-                .unwrap_or(Ordering::Equal)
-        });
-        candidates.truncate(beam_size);
-        if candidates.iter().all(|beam| beam.finished) {
-            beams = candidates;
-            break;
-        }
-        beams = candidates;
-    }
-    beams
-        .into_iter()
-        .max_by(|left, right| {
-            normalized_score(left)
-                .partial_cmp(&normalized_score(right))
-                .unwrap_or(Ordering::Equal)
+#[derive(Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
+}
+
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct ChatResponseMessage {
+    content: String,
+}
+
+fn preferred_vulkan_device(executable: &Path, runtime_root: &Path) -> Option<String> {
+    let mut command = Command::new(executable);
+    command
+        .arg("--list-devices")
+        .current_dir(runtime_root)
+        .env("PATH", runtime_root);
+    configure_hidden_process(&mut command);
+    let output = command.output().ok()?;
+    let listing = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let devices = listing
+        .lines()
+        .filter_map(|line| {
+            let (id, name) = line.trim().split_once(':')?;
+            id.starts_with("Vulkan")
+                .then(|| (id.to_owned(), name.trim().to_owned()))
         })
-        .map(|beam| beam.tokens)
-        .ok_or_else(|| anyhow!("translation produced no hypotheses"))
+        .collect::<Vec<_>>();
+    devices
+        .iter()
+        .find(|(_, name)| {
+            let name = name.to_ascii_lowercase();
+            !name.contains("intel(r) uhd")
+                && !name.contains("intel uhd")
+                && !name.contains("intel(r) iris")
+                && !name.contains("intel iris")
+        })
+        .or_else(|| devices.first())
+        .map(|(id, _)| id.clone())
 }
 
-fn normalized_score(beam: &Beam) -> f64 {
-    let generated = beam.tokens.len().saturating_sub(1).max(1) as f64;
-    beam.score / generated.powf(0.7)
-}
-
-fn top_k(values: &[f32], count: usize) -> Vec<(usize, f32)> {
-    let mut indexed = values.iter().copied().enumerate().collect::<Vec<_>>();
-    let retained = count.min(indexed.len());
-    if retained == 0 {
-        return Vec::new();
+fn open_server_log(runtime_root: &Path) -> io::Result<File> {
+    let log_directory = runtime_root.join("logs");
+    fs::create_dir_all(&log_directory)?;
+    let current = log_directory.join("translation-server.log");
+    if current
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() >= SERVER_LOG_LIMIT_BYTES)
+    {
+        let previous = log_directory.join("translation-server.previous.log");
+        if previous.exists() {
+            fs::remove_file(&previous)?;
+        }
+        fs::rename(&current, previous)?;
     }
-    indexed.select_nth_unstable_by(retained - 1, |left, right| {
-        right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal)
-    });
-    indexed.truncate(retained);
-    indexed.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
-    indexed
+    OpenOptions::new().create(true).append(true).open(current)
 }
 
-fn translate_preserving_lines(runtime: &mut MarianRuntime, text: &str) -> Result<String> {
+#[cfg(windows)]
+fn configure_hidden_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_hidden_process(_command: &mut Command) {}
+
+fn language_name(language: TranslationLanguage) -> &'static str {
+    match language {
+        TranslationLanguage::English => "English",
+        TranslationLanguage::Russian => "Russian",
+    }
+}
+
+fn strip_reasoning(text: &str) -> &str {
+    let trimmed = text.trim();
+    trimmed
+        .rfind("</think>")
+        .map_or(trimmed, |end| trimmed[end + "</think>".len()..].trim())
+}
+
+fn translate_preserving_lines(
+    runtime: &mut LlamaRuntime,
+    text: &str,
+    source: TranslationLanguage,
+    target: TranslationLanguage,
+) -> Result<String> {
     let mut output = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
         let (content, newline) = line.strip_suffix('\n').map_or((line, ""), |content| {
@@ -343,7 +490,7 @@ fn translate_preserving_lines(runtime: &mut MarianRuntime, text: &str) -> Result
             if index > 0 {
                 output.push(' ');
             }
-            output.push_str(runtime.translate_unit(chunk.trim())?.trim());
+            output.push_str(runtime.translate_unit(chunk.trim(), source, target)?.trim());
         }
         if trailing > 0 {
             output.push_str(&content[body_end..]);
@@ -417,7 +564,7 @@ fn lexical_spans(text: &str) -> Vec<(usize, usize)> {
 mod tests {
     use rust_protocol::TranslationLanguage;
 
-    use super::{detect_language, normalize_single_word_repetition, split_chunks};
+    use super::{detect_language, normalize_single_word_repetition, split_chunks, strip_reasoning};
 
     #[test]
     fn language_detection_is_deterministic_for_the_supported_pair() {
@@ -473,5 +620,11 @@ mod tests {
             normalize_single_word_repetition("hello", "Привет, привет, привет."),
             "Привет, привет, привет."
         );
+    }
+
+    #[test]
+    fn reasoning_is_never_exposed_as_translation() {
+        assert_eq!(strip_reasoning("<think>hidden</think>\nПеревод"), "Перевод");
+        assert_eq!(strip_reasoning("Перевод"), "Перевод");
     }
 }
