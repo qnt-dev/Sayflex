@@ -66,6 +66,7 @@ impl TranslationEngine {
         }
         let runtime = self.ensure_runtime(source, target)?;
         let translated = translate_preserving_lines(runtime, text)?;
+        let translated = normalize_single_word_repetition(text, &translated);
         Ok((translated, source, target))
     }
 
@@ -374,11 +375,49 @@ fn split_chunks(text: &str, max_characters: usize) -> Vec<String> {
     chunks
 }
 
+fn normalize_single_word_repetition(source: &str, translated: &str) -> String {
+    let source_words = lexical_spans(source);
+    if source_words.len() != 1 {
+        return translated.to_owned();
+    }
+    let translated_words = lexical_spans(translated);
+    if translated_words.len() != 2 {
+        return translated.to_owned();
+    }
+    let first = &translated[translated_words[0].0..translated_words[0].1];
+    let second = &translated[translated_words[1].0..translated_words[1].1];
+    if first.to_lowercase() != second.to_lowercase() {
+        return translated.to_owned();
+    }
+
+    let mut normalized = String::with_capacity(translated.len());
+    normalized.push_str(&translated[..translated_words[0].0]);
+    normalized.push_str(first);
+    normalized.push_str(&translated[translated_words[1].1..]);
+    normalized
+}
+
+fn lexical_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_alphanumeric() {
+            start.get_or_insert(index);
+        } else if let Some(word_start) = start.take() {
+            spans.push((word_start, index));
+        }
+    }
+    if let Some(word_start) = start {
+        spans.push((word_start, text.len()));
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use rust_protocol::TranslationLanguage;
 
-    use super::{detect_language, split_chunks};
+    use super::{detect_language, normalize_single_word_repetition, split_chunks};
 
     #[test]
     fn language_detection_is_deterministic_for_the_supported_pair() {
@@ -402,5 +441,37 @@ mod tests {
         let chunks = split_chunks(input, 8);
         assert_eq!(chunks.join(" "), input);
         assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 8));
+    }
+
+    #[test]
+    fn repeated_single_word_translation_is_collapsed_without_losing_terminal_punctuation() {
+        assert_eq!(
+            normalize_single_word_repetition("hello", "Привет, привет."),
+            "Привет."
+        );
+        assert_eq!(
+            normalize_single_word_repetition("TEXT", "TEXT TEXT"),
+            "TEXT"
+        );
+        assert_eq!(
+            normalize_single_word_repetition("текст", "text-text"),
+            "text"
+        );
+    }
+
+    #[test]
+    fn repetition_normalization_never_changes_multiword_or_distinct_results() {
+        assert_eq!(
+            normalize_single_word_repetition("hello world", "Привет, привет."),
+            "Привет, привет."
+        );
+        assert_eq!(
+            normalize_single_word_repetition("hello", "Добрый день"),
+            "Добрый день"
+        );
+        assert_eq!(
+            normalize_single_word_repetition("hello", "Привет, привет, привет."),
+            "Привет, привет, привет."
+        );
     }
 }

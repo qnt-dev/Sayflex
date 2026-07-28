@@ -1449,13 +1449,20 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
         }
         InputHostEvent::SelectionCaptureStarted {
             request_id,
-            intent: _,
+            intent,
             target: _,
         } => {
             state
                 .borrow_mut()
                 .pending_selection_captures
                 .insert(request_id);
+            if intent == TextActionIntent::Translate
+                && let Some(preview) = translation_preview.upgrade()
+            {
+                preview.set_pinned(false);
+                let _ = preview.hide();
+                rust_platform_windows::deactivate_popup_dismiss();
+            }
             set_indicator_status(settings, "Reading selected text…");
         }
         InputHostEvent::SelectionCaptured {
@@ -3122,22 +3129,21 @@ struct TranslationPreviewLayout {
 fn translation_preview_layout(result_text: &str) -> TranslationPreviewLayout {
     let content_characters = result_text.chars().count();
     let (card_width, characters_per_line) = match content_characters {
-        0..=28 => (280.0, 30),
+        0..=28 => (280.0, 24),
         29..=140 => (400.0, 47),
         _ => (560.0, 68),
     };
 
     let result_lines = estimated_wrapped_lines(result_text, characters_per_line).max(1);
     let result_text_height = result_lines as f32 * 20.0;
-    let result_panel_height = (result_text_height + 14.0).clamp(40.0, 300.0);
-    let visible_result_height = (result_panel_height - 14.0).max(20.0);
-    let result_content_height = result_text_height.max(visible_result_height);
+    let result_panel_height = result_text_height.clamp(20.0, 280.0);
+    let result_content_height = result_text_height;
 
     TranslationPreviewLayout {
         card_width,
         result_panel_height,
         result_content_height,
-        result_scrollable: result_content_height > visible_result_height + 0.5,
+        result_scrollable: result_content_height > result_panel_height + 0.5,
     }
 }
 
@@ -3650,14 +3656,14 @@ mod adaptive_popup_tests {
         let layout = translation_preview_layout("Привет");
         assert_eq!(layout.card_width, 280.0);
         assert!(!layout.result_scrollable);
-        assert_eq!(layout.result_panel_height, 40.0);
+        assert_eq!(layout.result_panel_height, 20.0);
     }
 
     #[test]
     fn long_translation_is_capped_and_becomes_scrollable() {
         let layout = translation_preview_layout(&"translated text ".repeat(500));
         assert_eq!(layout.card_width, 560.0);
-        assert_eq!(layout.result_panel_height, 300.0);
+        assert_eq!(layout.result_panel_height, 280.0);
         assert!(layout.result_content_height > layout.result_panel_height);
         assert!(layout.result_scrollable);
     }

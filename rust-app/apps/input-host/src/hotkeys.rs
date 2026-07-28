@@ -27,7 +27,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::{clipboard, inject, selection_capture, target};
+use crate::{inject, selection_capture, target};
 
 const INPUT_CONTROL: u32 = 1 << 0;
 const INPUT_ALT: u32 = 1 << 1;
@@ -46,6 +46,8 @@ const INJECTION_UNSAFE: u32 = INPUT_CONTROL
     | INPUT_V
     | INPUT_T;
 const INPUT_RELEASE_STABILITY: Duration = Duration::from_millis(30);
+const ASYNC_RECONCILIATION_DELAY: Duration = Duration::from_millis(75);
+const COMMAND_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 static ACTIONS: OnceLock<Sender<HookAction>> = OnceLock::new();
 static PHYSICAL_INPUT: AtomicU32 = AtomicU32::new(0);
@@ -449,12 +451,17 @@ fn begin_selection_capture(
             let capture_started = Instant::now();
             let result = if !wait_for_mask_clear(
                 selection_chord_mask(intent),
-                Duration::from_millis(1200),
+                COMMAND_RELEASE_TIMEOUT,
                 INPUT_RELEASE_STABILITY,
             ) {
-                Err(selection_capture::CaptureError::Clipboard(
-                    clipboard::ClipboardError::CopyTimeout,
-                ))
+                crate::diagnostic_line(&format!(
+                    "selection_capture request={} pid={} stage=hotkey_release result=timeout \
+physical_mask={:#x}",
+                    request_id,
+                    target.process_id,
+                    PHYSICAL_INPUT.load(Ordering::Acquire),
+                ));
+                Err(selection_capture::CaptureError::HotkeyReleaseTimeout)
             } else {
                 selection_capture::capture(target)
             };
@@ -502,6 +509,9 @@ elapsed_ms={}",
                             selection_capture::CaptureError::Protected => {
                                 "Selected text is protected.".to_owned()
                             }
+                            selection_capture::CaptureError::HotkeyReleaseTimeout => {
+                                "Release the translation shortcut before trying again.".to_owned()
+                            }
                             selection_capture::CaptureError::Clipboard(error) => error.to_string(),
                         },
                     });
@@ -536,33 +546,60 @@ pub fn wait_until_injection_safe(timeout: Duration) -> bool {
 }
 
 fn wait_for_mask_clear(mask: u32, timeout: Duration, stable_for: Duration) -> bool {
+    wait_for_mask_clear_using(
+        mask,
+        timeout,
+        stable_for,
+        || PHYSICAL_INPUT.load(Ordering::Acquire),
+        || LAST_PHYSICAL_CHANGE_US.load(Ordering::Acquire),
+        || PhysicalKeys::from_async_except(u16::MAX, &PhysicalKeys::default()).input_mask(),
+        |sampled| reconcile_physical_mask(mask, sampled),
+    )
+}
+
+fn wait_for_mask_clear_using(
+    mask: u32,
+    timeout: Duration,
+    stable_for: Duration,
+    mut load_input: impl FnMut() -> u32,
+    mut load_last_change_us: impl FnMut() -> u64,
+    mut sample_async_input: impl FnMut() -> u32,
+    mut reconcile: impl FnMut(u32),
+) -> bool {
     let started = Instant::now();
-    let mut reconciled = false;
     loop {
-        if PHYSICAL_INPUT.load(Ordering::Acquire) & mask == 0 {
-            let last_change = LAST_PHYSICAL_CHANGE_US.load(Ordering::Acquire);
+        if load_input() & mask == 0 {
+            let last_change = load_last_change_us();
             let stable_us = stable_for.as_micros().try_into().unwrap_or(u64::MAX);
             if monotonic_us().saturating_sub(last_change) >= stable_us {
                 return true;
             }
         }
-        // LL hooks do not observe key releases on the secure desktop. Reconcile
-        // only after the normal release window has elapsed, and force the
-        // hook-thread state to reconcile on its next physical event as well.
-        if !reconciled && started.elapsed() >= Duration::from_millis(75) {
-            reconciled = true;
-            let sampled =
-                PhysicalKeys::from_async_except(u16::MAX, &PhysicalKeys::default()).input_mask();
-            let previous = PHYSICAL_INPUT.swap(sampled, Ordering::AcqRel);
-            if sampled != previous {
-                LAST_PHYSICAL_CHANGE_US.store(monotonic_us(), Ordering::Release);
-                LAST_HOOK_EVENT_US.store(0, Ordering::Release);
-            }
+        // LL hooks can miss a key-up while focus crosses integrity/session
+        // boundaries. A one-shot sample is insufficient: users commonly keep
+        // the modifiers held beyond the initial 75 ms. Reconcile only the bits
+        // this caller is waiting for, repeatedly and outside the hook callback,
+        // then require the normal stability window before accepting release.
+        if started.elapsed() >= ASYNC_RECONCILIATION_DELAY {
+            reconcile(sample_async_input());
         }
         if started.elapsed() >= timeout {
             return false;
         }
         thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn reconcile_physical_mask(mask: u32, sampled: u32) {
+    let previous = PHYSICAL_INPUT
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some((current & !mask) | (sampled & mask))
+        })
+        .unwrap_or_else(|current| current);
+    let reconciled = (previous & !mask) | (sampled & mask);
+    if reconciled != previous {
+        LAST_PHYSICAL_CHANGE_US.store(monotonic_us(), Ordering::Release);
+        LAST_HOOK_EVENT_US.store(0, Ordering::Release);
     }
 }
 
@@ -1039,12 +1076,15 @@ const fn action_gesture_id(action: HookAction) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, time::Duration};
+
     use rust_protocol::TextActionIntent;
 
     use super::{
         EndReason, EventOrigin, GestureState, HOTKEY_ID_CORRECT_LAYOUT, HOTKEY_ID_INSERT_LAST,
         HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_K, INPUT_T,
-        INPUT_V, PhysicalKeys, classify_event, registered_hotkey_action, selection_chord_mask,
+        INPUT_V, PhysicalKeys, classify_event, monotonic_us, registered_hotkey_action,
+        selection_chord_mask, wait_for_mask_clear_using,
     };
     use crate::inject::SYNTHETIC_MARKER;
     use windows_sys::Win32::UI::{
@@ -1336,5 +1376,38 @@ mod tests {
             selection_chord_mask(TextActionIntent::Translate),
             INPUT_CONTROL | INPUT_ALT | INPUT_T
         );
+    }
+
+    #[test]
+    fn release_wait_reconciles_until_a_late_modifier_release_is_stable() {
+        let chord = INPUT_CONTROL | INPUT_ALT | INPUT_T;
+        let input = Cell::new(chord);
+        let last_change = Cell::new(monotonic_us());
+        let samples = Cell::new(0_u32);
+
+        let released = wait_for_mask_clear_using(
+            chord,
+            Duration::from_millis(300),
+            Duration::from_millis(10),
+            || input.get(),
+            || last_change.get(),
+            || {
+                let next = samples.get() + 1;
+                samples.set(next);
+                if next < 3 { chord } else { 0 }
+            },
+            |sampled| {
+                let previous = input.get();
+                let reconciled = (previous & !chord) | (sampled & chord);
+                if reconciled != previous {
+                    input.set(reconciled);
+                    last_change.set(monotonic_us());
+                }
+            },
+        );
+
+        assert!(released);
+        assert!(samples.get() >= 3);
+        assert_eq!(input.get() & chord, 0);
     }
 }

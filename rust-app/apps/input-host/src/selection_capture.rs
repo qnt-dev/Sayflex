@@ -24,6 +24,8 @@ pub struct CapturedSelection {
 pub enum CaptureError {
     #[error("selected text is protected")]
     Protected,
+    #[error("the translation hotkey was not fully released before capture")]
+    HotkeyReleaseTimeout,
     #[error(transparent)]
     Clipboard(#[from] clipboard::ClipboardError),
 }
