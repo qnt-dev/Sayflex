@@ -1944,6 +1944,7 @@ fn show_selection_translation_preview(
     apply_translation_preview_layout(&preview, translated_text);
     preview.set_translated_text(translated_text.into());
     if first_show {
+        preview.invoke_reset_scroll();
         let _ = preview.show();
         prepare_shown_translation_window(
             slint_window_handle(preview.window()),
@@ -3505,38 +3506,22 @@ fn adaptive_text_panel_height(
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TranslationPreviewLayout {
     card_width: f32,
-    result_panel_height: f32,
-    result_content_height: f32,
-    result_scrollable: bool,
 }
 
 fn translation_preview_layout(result_text: &str) -> TranslationPreviewLayout {
     let content_characters = result_text.chars().count();
-    let (card_width, characters_per_line) = match content_characters {
-        0..=28 => (280.0, 24),
-        29..=140 => (400.0, 47),
-        _ => (560.0, 68),
+    let card_width = match content_characters {
+        0..=28 => 280.0,
+        29..=140 => 400.0,
+        _ => 560.0,
     };
 
-    let result_lines = estimated_wrapped_lines(result_text, characters_per_line).max(1);
-    let result_text_height = result_lines as f32 * 20.0;
-    let result_panel_height = result_text_height.clamp(20.0, 280.0);
-    let result_content_height = result_text_height;
-
-    TranslationPreviewLayout {
-        card_width,
-        result_panel_height,
-        result_content_height,
-        result_scrollable: result_content_height > result_panel_height + 0.5,
-    }
+    TranslationPreviewLayout { card_width }
 }
 
 fn apply_translation_preview_layout(preview: &TranslationPreview, result_text: &str) {
     let layout = translation_preview_layout(result_text);
     preview.set_card_width(layout.card_width);
-    preview.set_result_panel_height(layout.result_panel_height);
-    preview.set_result_content_height(layout.result_content_height);
-    preview.set_result_scrollable(layout.result_scrollable);
 }
 
 fn prepare_shown_translation_window(
@@ -4077,7 +4062,7 @@ mod selection_release_gate_tests {
 
 #[cfg(test)]
 mod adaptive_popup_tests {
-    use super::{adaptive_text_panel_height, translation_preview_layout};
+    use super::{TranslationPreview, adaptive_text_panel_height, translation_preview_layout};
 
     #[test]
     fn short_text_uses_the_compact_minimum() {
@@ -4105,20 +4090,32 @@ mod adaptive_popup_tests {
     }
 
     #[test]
-    fn short_translation_stays_compact_without_a_scrollbar() {
+    fn short_translation_uses_the_compact_width() {
         let layout = translation_preview_layout("Привет");
         assert_eq!(layout.card_width, 280.0);
-        assert!(!layout.result_scrollable);
-        assert_eq!(layout.result_panel_height, 20.0);
     }
 
     #[test]
-    fn long_translation_is_capped_and_becomes_scrollable() {
+    fn long_translation_uses_the_readable_width() {
         let layout = translation_preview_layout(&"translated text ".repeat(500));
         assert_eq!(layout.card_width, 560.0);
-        assert_eq!(layout.result_panel_height, 280.0);
-        assert!(layout.result_content_height > layout.result_panel_height);
-        assert!(layout.result_scrollable);
+    }
+
+    #[test]
+    fn wrapped_preview_uses_intrinsic_text_height_and_exposes_scroll_range() {
+        let preview = TranslationPreview::new().unwrap();
+        preview.set_card_width(560.0);
+        preview.set_translated_text(
+            ("Длинный переведённый текст с пропорциональным шрифтом и переносами. ".repeat(120))
+                .into(),
+        );
+
+        assert_eq!(preview.get_result_panel_height(), 280.0);
+        assert!(
+            preview.get_result_content_height() > preview.get_result_panel_height(),
+            "wrapped text must remain reachable below the capped viewport"
+        );
+        assert!(preview.get_result_scrollable());
     }
 }
 

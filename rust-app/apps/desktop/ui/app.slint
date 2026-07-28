@@ -1120,7 +1120,7 @@ export component SettingsWindow inherits Window {
 
                 Eyebrow {
                     height: 16px;
-                    text: "RUST VOICE  ·  0.5.8";
+                    text: "RUST VOICE  ·  0.5.9";
                 }
                 Text {
                     height: 34px;
@@ -1764,10 +1764,19 @@ export component TranslationPreview inherits Window {
     in-out property <string> translated-text;
     in-out property <bool> pinned: false;
     in-out property <float> card-width: 320;
-    in-out property <float> result-panel-height: 20;
-    in-out property <float> result-content-height: 20;
-    in-out property <bool> result-scrollable: false;
+    // Text owns its real height-for-width measurement. The extra four pixels
+    // are bottom breathing room for descenders and the last rendered line.
+    out property <float> result-content-height:
+        max(20px, result-text.preferred-height + 4px) / 1px;
+    out property <float> result-panel-height:
+        min(280px, root.result-content-height * 1px) / 1px;
+    out property <bool> result-scrollable:
+        root.result-content-height > root.result-panel-height + 0.5;
     callback begin-drag();
+    callback reset-scroll();
+    reset-scroll => {
+        result-scroll.viewport-y = 0px;
+    }
 
     Rectangle {
         border-radius: 9px;
@@ -1792,12 +1801,15 @@ export component TranslationPreview inherits Window {
         result-scroll := Flickable {
             x: 14px;
             y: 12px;
-            width: parent.width - (root.result-scrollable ? 40px : 66px);
+            // Always reserve the pin area. Changing the width when the
+            // scrollbar appears would reflow the text and create a
+            // height/scroll feedback loop while a streamed result grows.
+            width: parent.width - 66px;
             height: root.result-panel-height * 1px;
             viewport-width: self.width;
             viewport-height: root.result-content-height * 1px;
 
-            Text {
+            result-text := Text {
                 width: result-scroll.width;
                 height: root.result-content-height * 1px;
                 text: root.translated-text;

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.5.8"
+  #define AppVersion "0.5.9"
 #endif
 
 #define AppName "Rust Voice"
