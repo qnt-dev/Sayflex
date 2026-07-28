@@ -310,9 +310,11 @@ struct IndicatorFrame {
     ribbon_y2: f32,
     ribbon_y3: f32,
     ribbon_y4: f32,
+    mic_edge_height: f32,
     mic_outer_height: f32,
     mic_middle_height: f32,
     mic_inner_height: f32,
+    mic_near_height: f32,
 }
 
 impl IndicatorAnimation {
@@ -381,9 +383,11 @@ impl IndicatorAnimation {
             indicator.set_ribbon_y2(frame.ribbon_y2);
             indicator.set_ribbon_y3(frame.ribbon_y3);
             indicator.set_ribbon_y4(frame.ribbon_y4);
+            indicator.set_mic_edge_height(frame.mic_edge_height);
             indicator.set_mic_outer_height(frame.mic_outer_height);
             indicator.set_mic_middle_height(frame.mic_middle_height);
             indicator.set_mic_inner_height(frame.mic_inner_height);
+            indicator.set_mic_near_height(frame.mic_near_height);
         }
     }
 
@@ -411,6 +415,9 @@ impl IndicatorAnimation {
                 (3.0 + (profile * 5.0) + (travelling_wave * energy * 12.0)).clamp(3.0, 19.0)
             })
             .collect();
+        let mic_edge_height = (3.0
+            + energy * (4.0 + (((self.phase * 0.67 + 0.45).sin() + 1.0) / 2.0) * 5.0))
+            .clamp(3.0, 12.0);
         let mic_outer_height = (4.0
             + energy * (5.4 + (((self.phase * 0.78).sin() + 1.0) / 2.0) * 7.6))
             .clamp(4.0, 17.0);
@@ -420,6 +427,9 @@ impl IndicatorAnimation {
         let mic_inner_height = (3.0
             + energy * (4.8 + (((self.phase * 1.34 + 2.6).sin() + 1.0) / 2.0) * 5.6))
             .clamp(3.0, 14.0);
+        let mic_near_height = (4.0
+            + energy * (5.0 + (((self.phase * 1.52 + 3.35).sin() + 1.0) / 2.0) * 6.0))
+            .clamp(4.0, 15.0);
         IndicatorFrame {
             heights,
             signal_opacity: (0.5 + energy.min(1.0) * 0.5).clamp(0.5, 1.0),
@@ -434,9 +444,11 @@ impl IndicatorAnimation {
             ribbon_y2: 9.5 + (self.phase * 0.93 + 1.35).sin() * energy * 7.4,
             ribbon_y3: 9.5 + (self.phase * 0.93 + 2.7).sin() * energy * 6.8,
             ribbon_y4: 9.5 + (self.phase * 0.93 + 4.05).sin() * energy * 5.8,
+            mic_edge_height,
             mic_outer_height,
             mic_middle_height,
             mic_inner_height,
+            mic_near_height,
         }
     }
 }
@@ -3589,13 +3601,17 @@ mod indicator_animation_tests {
         let first = animation.advance_frame(1.0);
         let second = animation.advance_frame(1.0);
 
+        assert!((3.0..=12.0).contains(&first.mic_edge_height));
         assert!((4.0..=17.0).contains(&first.mic_outer_height));
         assert!((5.0..=18.0).contains(&first.mic_middle_height));
         assert!((3.0..=14.0).contains(&first.mic_inner_height));
+        assert!((4.0..=15.0).contains(&first.mic_near_height));
         assert!(
-            (first.mic_outer_height - second.mic_outer_height).abs() > 0.01
+            (first.mic_edge_height - second.mic_edge_height).abs() > 0.01
+                || (first.mic_outer_height - second.mic_outer_height).abs() > 0.01
                 || (first.mic_middle_height - second.mic_middle_height).abs() > 0.01
                 || (first.mic_inner_height - second.mic_inner_height).abs() > 0.01
+                || (first.mic_near_height - second.mic_near_height).abs() > 0.01
         );
     }
 }

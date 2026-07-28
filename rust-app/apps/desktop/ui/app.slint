@@ -1217,9 +1217,11 @@ export component RecordingIndicator inherits Window {
     in property <float> ribbon-y2: 9.5;
     in property <float> ribbon-y3: 9.5;
     in property <float> ribbon-y4: 9.5;
+    in property <float> mic-edge-height: 5;
     in property <float> mic-outer-height: 7;
     in property <float> mic-middle-height: 9;
     in property <float> mic-inner-height: 6;
+    in property <float> mic-near-height: 7;
     in-out property <bool> prepared: false;
 
     Rectangle {
@@ -1343,14 +1345,23 @@ export component RecordingIndicator inherits Window {
                 }
 
                 if root.visualizer-style == 3 : Rectangle {
-                    width: 56px;
+                    width: 78px;
                     height: 19px;
                     background: transparent;
 
-                    // Three voice-reactive lines on each side. The heights are
+                    // Five voice-reactive lines on each side. The heights are
                     // mirrored so the tiny surface stays calm and legible.
                     Rectangle {
-                        x: 1px;
+                        x: 0px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-edge-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity * 0.58;
+                    }
+                    Rectangle {
+                        x: 6px;
                         y: (parent.height - self.height) / 2;
                         width: 2px;
                         height: root.mic-outer-height * 1px;
@@ -1359,7 +1370,7 @@ export component RecordingIndicator inherits Window {
                         opacity: root.signal-opacity * 0.72;
                     }
                     Rectangle {
-                        x: 7px;
+                        x: 12px;
                         y: (parent.height - self.height) / 2;
                         width: 2px;
                         height: root.mic-middle-height * 1px;
@@ -1368,17 +1379,35 @@ export component RecordingIndicator inherits Window {
                         opacity: root.signal-opacity * 0.86;
                     }
                     Rectangle {
-                        x: 13px;
+                        x: 18px;
                         y: (parent.height - self.height) / 2;
                         width: 2px;
                         height: root.mic-inner-height * 1px;
                         border-radius: 1px;
                         background: #ffd400;
                         opacity: root.signal-opacity;
+                    }
+                    Rectangle {
+                        x: 24px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-near-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity * 0.94;
                     }
 
                     Rectangle {
-                        x: 41px;
+                        x: 52px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-near-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity * 0.94;
+                    }
+                    Rectangle {
+                        x: 58px;
                         y: (parent.height - self.height) / 2;
                         width: 2px;
                         height: root.mic-inner-height * 1px;
@@ -1387,7 +1416,7 @@ export component RecordingIndicator inherits Window {
                         opacity: root.signal-opacity;
                     }
                     Rectangle {
-                        x: 47px;
+                        x: 64px;
                         y: (parent.height - self.height) / 2;
                         width: 2px;
                         height: root.mic-middle-height * 1px;
@@ -1396,19 +1425,28 @@ export component RecordingIndicator inherits Window {
                         opacity: root.signal-opacity * 0.86;
                     }
                     Rectangle {
-                        x: 53px;
+                        x: 70px;
                         y: (parent.height - self.height) / 2;
                         width: 2px;
                         height: root.mic-outer-height * 1px;
                         border-radius: 1px;
                         background: #ffd400;
                         opacity: root.signal-opacity * 0.72;
+                    }
+                    Rectangle {
+                        x: 76px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-edge-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity * 0.58;
                     }
 
                     // Capsule and short stem only: the reference's stand and
                     // horizontal base deliberately do not belong in the overlay.
                     Rectangle {
-                        x: 22px;
+                        x: 33px;
                         y: 0px;
                         width: 12px;
                         height: 15px;
@@ -1446,7 +1484,7 @@ export component RecordingIndicator inherits Window {
                         }
                     }
                     Rectangle {
-                        x: 27px;
+                        x: 38px;
                         y: 15px;
                         width: 2px;
                         height: 4px;
