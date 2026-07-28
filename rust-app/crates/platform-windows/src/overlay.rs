@@ -24,7 +24,7 @@ use windows_sys::Win32::{
             SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
             SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WM_NCLBUTTONDOWN, WS_CAPTION,
             WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
-            WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+            WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -160,17 +160,17 @@ pub fn configure_translation_window(window_handle: u64) -> Result<(), String> {
         let current_window_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         let native_chrome =
             (WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
-        SetWindowLongPtrW(hwnd, GWL_STYLE, current_window_style & !native_chrome);
-
-        // Translation is already complete before this window is shown, so it
-        // may become interactive after an explicit click. SWP_NOACTIVATE below
-        // still guarantees that merely showing it never steals editor focus.
-        let current_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(
             hwnd,
-            GWL_EXSTYLE,
-            current_style & !(WS_EX_NOACTIVATE as isize),
+            GWL_STYLE,
+            (current_window_style & !native_chrome) | WS_POPUP as isize,
         );
+
+        // Keep WS_EX_NOACTIVATE from configure_action_window for the complete
+        // lifetime of the preview, including its pinned state. Activating a
+        // winit-backed frameless window can make the backend restore native
+        // non-client chrome. Mouse interaction is still delivered, while
+        // scrolling is routed by PopupDismissMonitor without taking focus.
         apply_translation_backdrop(hwnd);
 
         let mut cursor = POINT::default();

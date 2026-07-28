@@ -108,6 +108,7 @@ impl PopupDismissMonitor {
     pub fn start(
         _on_dismiss: impl Fn() + Send + 'static,
         _on_pin_changed: impl Fn(bool) + Send + 'static,
+        _on_scroll: impl Fn(i32) + Send + 'static,
     ) -> Result<Self, String> {
         Ok(Self)
     }

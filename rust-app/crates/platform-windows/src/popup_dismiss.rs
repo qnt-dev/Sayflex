@@ -17,7 +17,7 @@ use windows_sys::Win32::{
             CallNextHookEx, DispatchMessageW, GetMessageW, GetWindowRect, HHOOK, LLMHF_INJECTED,
             MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
             TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN,
+            WM_MBUTTONDOWN, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN,
         },
     },
 };
@@ -30,6 +30,7 @@ static DISMISS_SENDER: OnceLock<mpsc::Sender<DismissSignal>> = OnceLock::new();
 enum DismissSignal {
     Dismiss,
     PinChanged(bool),
+    Scroll(i32),
     Shutdown,
 }
 
@@ -43,6 +44,7 @@ impl PopupDismissMonitor {
     pub fn start(
         on_dismiss: impl Fn() + Send + 'static,
         on_pin_changed: impl Fn(bool) + Send + 'static,
+        on_scroll: impl Fn(i32) + Send + 'static,
     ) -> Result<Self, String> {
         let (dismiss_sender, dismiss_receiver) = mpsc::channel();
         DISMISS_SENDER
@@ -72,6 +74,7 @@ impl PopupDismissMonitor {
                     match signal {
                         DismissSignal::Dismiss => on_dismiss(),
                         DismissSignal::PinChanged(pinned) => on_pin_changed(pinned),
+                        DismissSignal::Scroll(delta) => on_scroll(delta),
                         DismissSignal::Shutdown => break,
                     }
                 }
@@ -182,6 +185,18 @@ unsafe extern "system" fn mouse_hook(code: i32, w_param: WPARAM, l_param: LPARAM
                 return 1;
             }
             if message == WM_LBUTTONUP && PIN_CLICK_CAPTURED.swap(false, Ordering::AcqRel) {
+                return 1;
+            }
+            if event.flags & LLMHF_INJECTED == 0
+                && message == WM_MOUSEWHEEL
+                && !point_is_outside(active, event.pt)
+            {
+                let delta = (event.mouseData >> 16) as u16 as i16 as i32;
+                let _ = DISMISS_SENDER
+                    .get()
+                    .map(|sender| sender.send(DismissSignal::Scroll(delta)));
+                // The preview owns this gesture. Do not scroll the editor
+                // beneath the non-activating popup at the same time.
                 return 1;
             }
             if event.flags & LLMHF_INJECTED == 0

@@ -1120,7 +1120,7 @@ export component SettingsWindow inherits Window {
 
                 Eyebrow {
                     height: 16px;
-                    text: "RUST VOICE  ·  0.5.9";
+                    text: "RUST VOICE  ·  0.5.10";
                 }
                 Text {
                     height: 34px;
@@ -1772,10 +1772,20 @@ export component TranslationPreview inherits Window {
         min(280px, root.result-content-height * 1px) / 1px;
     out property <bool> result-scrollable:
         root.result-content-height > root.result-panel-height + 0.5;
+    out property <float> result-scroll-offset: -result-scroll.viewport-y / 1px;
     callback begin-drag();
     callback reset-scroll();
+    callback scroll-by(float);
     reset-scroll => {
         result-scroll.viewport-y = 0px;
+    }
+    scroll-by(delta) => {
+        if (root.result-scrollable) {
+            result-scroll.viewport-y = max(
+                result-scroll.height - result-scroll.viewport-height,
+                min(0px, result-scroll.viewport-y + (delta / 120) * 48px)
+            );
+        }
     }
 
     Rectangle {

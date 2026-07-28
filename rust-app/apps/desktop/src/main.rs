@@ -46,6 +46,7 @@ enum RuntimeEvent {
     Translation(TranslationWorkerEvent),
     DismissTranslationPreview,
     TranslationPreviewPinChanged(bool),
+    ScrollTranslationPreview(i32),
     WorkerError(String),
     WorkerExited { kind: WorkerKind, message: String },
 }
@@ -734,6 +735,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         |pinned| {
             dispatch_runtime_event(RuntimeEvent::TranslationPreviewPinChanged(pinned));
         },
+        |delta| {
+            dispatch_runtime_event(RuntimeEvent::ScrollTranslationPreview(delta));
+        },
     ) {
         Ok(monitor) => Some(monitor),
         Err(error) => {
@@ -949,6 +953,17 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
                     preview.set_pinned(pinned);
                 }
             });
+        },
+        {
+            let preview = preview.as_weak();
+            move |delta| {
+                let preview = preview.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(preview) = preview.upgrade() {
+                        preview.invoke_scroll_by(delta as f32);
+                    }
+                });
+            }
         },
     )?;
     slint::run_event_loop()?;
@@ -1232,6 +1247,11 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
         RuntimeEvent::TranslationPreviewPinChanged(pinned) => {
             if let Some(preview) = runtime.translation_preview.upgrade() {
                 preview.set_pinned(pinned);
+            }
+        }
+        RuntimeEvent::ScrollTranslationPreview(delta) => {
+            if let Some(preview) = runtime.translation_preview.upgrade() {
+                preview.invoke_scroll_by(delta as f32);
             }
         }
         RuntimeEvent::WorkerError(message) => {
@@ -4116,6 +4136,23 @@ mod adaptive_popup_tests {
             "wrapped text must remain reachable below the capped viewport"
         );
         assert!(preview.get_result_scrollable());
+
+        preview.invoke_reset_scroll();
+        assert_eq!(preview.get_result_scroll_offset(), 0.0);
+
+        preview.invoke_scroll_by(-120.0);
+        assert_eq!(preview.get_result_scroll_offset(), 48.0);
+
+        for _ in 0..1_000 {
+            preview.invoke_scroll_by(-120.0);
+        }
+        let maximum = preview.get_result_content_height() - preview.get_result_panel_height();
+        assert!((preview.get_result_scroll_offset() - maximum).abs() < 0.01);
+
+        for _ in 0..1_000 {
+            preview.invoke_scroll_by(120.0);
+        }
+        assert_eq!(preview.get_result_scroll_offset(), 0.0);
     }
 }
 
