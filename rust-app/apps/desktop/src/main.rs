@@ -219,6 +219,7 @@ enum VisualizerStyle {
     VoiceOrb,
     SymmetricSpectrum,
     FluidRibbon,
+    BroadcastMic,
 }
 
 impl VisualizerStyle {
@@ -227,6 +228,7 @@ impl VisualizerStyle {
             0 => Some(Self::VoiceOrb),
             1 => Some(Self::SymmetricSpectrum),
             2 => Some(Self::FluidRibbon),
+            3 => Some(Self::BroadcastMic),
             _ => None,
         }
     }
@@ -236,6 +238,7 @@ impl VisualizerStyle {
             Self::VoiceOrb => 0,
             Self::SymmetricSpectrum => 1,
             Self::FluidRibbon => 2,
+            Self::BroadcastMic => 3,
         }
     }
 }
@@ -307,6 +310,9 @@ struct IndicatorFrame {
     ribbon_y2: f32,
     ribbon_y3: f32,
     ribbon_y4: f32,
+    mic_outer_height: f32,
+    mic_middle_height: f32,
+    mic_inner_height: f32,
 }
 
 impl IndicatorAnimation {
@@ -375,6 +381,9 @@ impl IndicatorAnimation {
             indicator.set_ribbon_y2(frame.ribbon_y2);
             indicator.set_ribbon_y3(frame.ribbon_y3);
             indicator.set_ribbon_y4(frame.ribbon_y4);
+            indicator.set_mic_outer_height(frame.mic_outer_height);
+            indicator.set_mic_middle_height(frame.mic_middle_height);
+            indicator.set_mic_inner_height(frame.mic_inner_height);
         }
     }
 
@@ -402,6 +411,15 @@ impl IndicatorAnimation {
                 (3.0 + (profile * 5.0) + (travelling_wave * energy * 12.0)).clamp(3.0, 19.0)
             })
             .collect();
+        let mic_outer_height = (4.0
+            + energy * (5.4 + (((self.phase * 0.78).sin() + 1.0) / 2.0) * 7.6))
+            .clamp(4.0, 17.0);
+        let mic_middle_height = (5.0
+            + energy * (6.2 + (((self.phase * 1.06 + 1.4).sin() + 1.0) / 2.0) * 6.8))
+            .clamp(5.0, 18.0);
+        let mic_inner_height = (3.0
+            + energy * (4.8 + (((self.phase * 1.34 + 2.6).sin() + 1.0) / 2.0) * 5.6))
+            .clamp(3.0, 14.0);
         IndicatorFrame {
             heights,
             signal_opacity: (0.5 + energy.min(1.0) * 0.5).clamp(0.5, 1.0),
@@ -416,6 +434,9 @@ impl IndicatorAnimation {
             ribbon_y2: 9.5 + (self.phase * 0.93 + 1.35).sin() * energy * 7.4,
             ribbon_y3: 9.5 + (self.phase * 0.93 + 2.7).sin() * energy * 6.8,
             ribbon_y4: 9.5 + (self.phase * 0.93 + 4.05).sin() * energy * 5.8,
+            mic_outer_height,
+            mic_middle_height,
+            mic_inner_height,
         }
     }
 }
@@ -728,6 +749,9 @@ fn indicator_preview_style() -> Option<VisualizerStyle> {
         "--indicator-preview" | "--indicator-preview=orb" => Some(VisualizerStyle::VoiceOrb),
         "--indicator-preview=spectrum" => Some(VisualizerStyle::SymmetricSpectrum),
         "--indicator-preview=ribbon" => Some(VisualizerStyle::FluidRibbon),
+        "--indicator-preview=mic" | "--indicator-preview=microphone" => {
+            Some(VisualizerStyle::BroadcastMic)
+        }
         _ => None,
     })
 }
@@ -3549,7 +3573,30 @@ mod indicator_animation_tests {
             VisualizerStyle::from_index(2),
             Some(VisualizerStyle::FluidRibbon)
         );
-        assert_eq!(VisualizerStyle::from_index(3), None);
+        assert_eq!(
+            VisualizerStyle::from_index(3),
+            Some(VisualizerStyle::BroadcastMic)
+        );
+        assert_eq!(VisualizerStyle::from_index(4), None);
+    }
+
+    #[test]
+    fn broadcast_microphone_lines_react_independently() {
+        let mut animation = animation();
+        animation.set_style(VisualizerStyle::BroadcastMic);
+        animation.begin_listening();
+        animation.set_microphone_level(0.64);
+        let first = animation.advance_frame(1.0);
+        let second = animation.advance_frame(1.0);
+
+        assert!((4.0..=17.0).contains(&first.mic_outer_height));
+        assert!((5.0..=18.0).contains(&first.mic_middle_height));
+        assert!((3.0..=14.0).contains(&first.mic_inner_height));
+        assert!(
+            (first.mic_outer_height - second.mic_outer_height).abs() > 0.01
+                || (first.mic_middle_height - second.mic_middle_height).abs() > 0.01
+                || (first.mic_inner_height - second.mic_inner_height).abs() > 0.01
+        );
     }
 }
 

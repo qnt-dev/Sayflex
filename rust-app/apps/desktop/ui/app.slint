@@ -691,11 +691,11 @@ export component SettingsWindow inherits Window {
                         HorizontalLayout {
                             height: 50px;
                             vertical-stretch: 0;
-                            spacing: 8px;
+                            spacing: 6px;
 
                             VisualizerChoice {
                                 label: "Voice Orb";
-                                detail: "Reactive bars + pulse";
+                                detail: "Reactive pulse";
                                 selected: root.selected-visualizer == 0;
                                 clicked => { root.select-visualizer(0); }
                             }
@@ -710,6 +710,12 @@ export component SettingsWindow inherits Window {
                                 detail: "Continuous flowing signal";
                                 selected: root.selected-visualizer == 2;
                                 clicked => { root.select-visualizer(2); }
+                            }
+                            VisualizerChoice {
+                                label: "Broadcast Mic";
+                                detail: "Mic + voice lines";
+                                selected: root.selected-visualizer == 3;
+                                clicked => { root.select-visualizer(3); }
                             }
                         }
                     }
@@ -1211,6 +1217,9 @@ export component RecordingIndicator inherits Window {
     in property <float> ribbon-y2: 9.5;
     in property <float> ribbon-y3: 9.5;
     in property <float> ribbon-y4: 9.5;
+    in property <float> mic-outer-height: 7;
+    in property <float> mic-middle-height: 9;
+    in property <float> mic-inner-height: 6;
     in-out property <bool> prepared: false;
 
     Rectangle {
@@ -1333,13 +1342,127 @@ export component RecordingIndicator inherits Window {
                     }
                 }
 
-                Rectangle {
+                if root.visualizer-style == 3 : Rectangle {
+                    width: 56px;
+                    height: 19px;
+                    background: transparent;
+
+                    // Three voice-reactive lines on each side. The heights are
+                    // mirrored so the tiny surface stays calm and legible.
+                    Rectangle {
+                        x: 1px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-outer-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity * 0.72;
+                    }
+                    Rectangle {
+                        x: 7px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-middle-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity * 0.86;
+                    }
+                    Rectangle {
+                        x: 13px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-inner-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity;
+                    }
+
+                    Rectangle {
+                        x: 41px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-inner-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity;
+                    }
+                    Rectangle {
+                        x: 47px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-middle-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity * 0.86;
+                    }
+                    Rectangle {
+                        x: 53px;
+                        y: (parent.height - self.height) / 2;
+                        width: 2px;
+                        height: root.mic-outer-height * 1px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: root.signal-opacity * 0.72;
+                    }
+
+                    // Capsule and short stem only: the reference's stand and
+                    // horizontal base deliberately do not belong in the overlay.
+                    Rectangle {
+                        x: 22px;
+                        y: 0px;
+                        width: 12px;
+                        height: 15px;
+                        border-radius: 5px;
+                        border-width: 1px;
+                        border-color: #ffd400;
+                        background: #171819;
+
+                        Rectangle {
+                            x: 3px;
+                            y: 4px;
+                            width: 6px;
+                            height: 1px;
+                            border-radius: 0.5px;
+                            background: #ffd400;
+                            opacity: 0.78;
+                        }
+                        Rectangle {
+                            x: 3px;
+                            y: 7px;
+                            width: 6px;
+                            height: 1px;
+                            border-radius: 0.5px;
+                            background: #ffd400;
+                            opacity: 0.78;
+                        }
+                        Rectangle {
+                            x: 3px;
+                            y: 10px;
+                            width: 6px;
+                            height: 1px;
+                            border-radius: 0.5px;
+                            background: #ffd400;
+                            opacity: 0.78;
+                        }
+                    }
+                    Rectangle {
+                        x: 27px;
+                        y: 15px;
+                        width: 2px;
+                        height: 4px;
+                        border-radius: 1px;
+                        background: #ffd400;
+                        opacity: 0.92;
+                    }
+                }
+
+                if root.visualizer-style != 3 : Rectangle {
                     width: 4px;
                     height: 19px;
                     background: transparent;
                 }
 
-                Rectangle {
+                if root.visualizer-style != 3 : Rectangle {
                     width: 18px;
                     height: 19px;
                     background: transparent;
