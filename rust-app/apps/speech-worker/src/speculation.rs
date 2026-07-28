@@ -115,7 +115,7 @@ impl SpeculationScheduler {
                     {
                         continue;
                     }
-                    inference.invalidate_exact_preview_for_new_audio();
+                    inference.cancel_stale_preview_for_new_audio();
                     if inference.request_preview(recording, session.output_mode) {
                         session.last_preview_at = Some(Instant::now());
                         session.preview_count = session.preview_count.saturating_add(1);

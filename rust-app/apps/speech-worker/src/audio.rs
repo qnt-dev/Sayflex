@@ -21,6 +21,10 @@ const AUDIO_RING_SECONDS: usize = 8;
 const CAPTURE_RESERVE_SECONDS: usize = 15;
 const MAX_CAPTURE_SECONDS: usize = 5 * 60;
 const LEVEL_INTERVAL: Duration = Duration::from_millis(32);
+const POST_RELEASE_AUDIO_MS: u64 = 60;
+const SAFE_PRE_RELEASE_SILENCE_MS: u64 = 100;
+const POST_RELEASE_TIMEOUT: Duration = Duration::from_millis(140);
+const AUDIBLE_SAMPLE_FLOOR: f32 = 0.0005;
 
 #[derive(Debug, Clone)]
 pub struct RecordedAudio {
@@ -96,6 +100,12 @@ struct ActiveCapture {
     limit_reported: bool,
 }
 
+struct CaptureCounters {
+    dropped_samples: AtomicU64,
+    callback_samples: AtomicU64,
+    last_audible_sample: AtomicU64,
+}
+
 enum CaptureCommand {
     Begin {
         session_id: SessionId,
@@ -120,6 +130,8 @@ enum CaptureCommand {
 pub struct AudioRecorder {
     stream: Stream,
     commands: Sender<CaptureCommand>,
+    counters: Arc<CaptureCounters>,
+    sample_rate_hz: u32,
 }
 
 impl AudioRecorder {
@@ -138,10 +150,14 @@ impl AudioRecorder {
 
         let ring_capacity = sample_rate_hz as usize * AUDIO_RING_SECONDS;
         let (producer, consumer) = RingBuffer::<f32>::new(ring_capacity);
-        let dropped_samples = Arc::new(AtomicU64::new(0));
+        let counters = Arc::new(CaptureCounters {
+            dropped_samples: AtomicU64::new(0),
+            callback_samples: AtomicU64::new(0),
+            last_audible_sample: AtomicU64::new(0),
+        });
         let (commands, command_receiver) = mpsc::channel();
         let consumer_events = events.clone();
-        let consumer_drops = Arc::clone(&dropped_samples);
+        let consumer_counters = Arc::clone(&counters);
         thread::Builder::new()
             .name("speech-audio-consumer".to_owned())
             .spawn(move || {
@@ -149,7 +165,7 @@ impl AudioRecorder {
                     consumer,
                     command_receiver,
                     consumer_events,
-                    consumer_drops,
+                    consumer_counters,
                     sample_rate_hz,
                 );
             })?;
@@ -160,7 +176,7 @@ impl AudioRecorder {
                 &config,
                 channels,
                 producer,
-                dropped_samples,
+                Arc::clone(&counters),
                 events,
             )?,
             SampleFormat::I16 => build_stream::<i16>(
@@ -168,7 +184,7 @@ impl AudioRecorder {
                 &config,
                 channels,
                 producer,
-                dropped_samples,
+                Arc::clone(&counters),
                 events,
             )?,
             SampleFormat::I32 => build_stream::<i32>(
@@ -176,7 +192,7 @@ impl AudioRecorder {
                 &config,
                 channels,
                 producer,
-                dropped_samples,
+                Arc::clone(&counters),
                 events,
             )?,
             SampleFormat::U16 => build_stream::<u16>(
@@ -184,12 +200,17 @@ impl AudioRecorder {
                 &config,
                 channels,
                 producer,
-                dropped_samples,
+                Arc::clone(&counters),
                 events,
             )?,
             other => bail!("unsupported microphone sample format: {other}"),
         };
-        Ok(Self { stream, commands })
+        Ok(Self {
+            stream,
+            commands,
+            counters,
+            sample_rate_hz,
+        })
     }
 
     pub fn snapshot_source(&self) -> AudioSnapshotSource {
@@ -215,6 +236,7 @@ impl AudioRecorder {
     }
 
     pub fn end(&self, session_id: SessionId) -> Result<RecordedAudio> {
+        self.wait_for_post_release_audio();
         self.stream
             .pause()
             .context("could not stop microphone capture")?;
@@ -226,6 +248,18 @@ impl AudioRecorder {
             .recv()
             .context("audio capture worker did not finalize audio")?
             .map_err(anyhow::Error::msg)
+    }
+
+    fn wait_for_post_release_audio(&self) {
+        let released_at = self.counters.callback_samples.load(Ordering::Acquire);
+        let last_audible = self.counters.last_audible_sample.load(Ordering::Acquire);
+        let target = post_release_target_sample(released_at, last_audible, self.sample_rate_hz);
+        let deadline = Instant::now() + POST_RELEASE_TIMEOUT;
+        while self.counters.callback_samples.load(Ordering::Acquire) < target
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     pub fn cancel(&self, session_id: SessionId) -> bool {
@@ -254,7 +288,7 @@ fn build_stream<T>(
     config: &StreamConfig,
     channels: usize,
     mut producer: Producer<f32>,
-    dropped_samples: Arc<AtomicU64>,
+    counters: Arc<CaptureCounters>,
     events: Sender<SpeechWorkerEvent>,
 ) -> Result<Stream>
 where
@@ -269,13 +303,29 @@ where
                 // This callback is real-time sensitive: no locks, allocation, filesystem, or IPC.
                 // Stereo downmixing is bounded arithmetic and the preallocated SPSC queue is
                 // wait-free. The consumer owns all growing buffers and UI event publication.
+                let callback_start = counters.callback_samples.load(Ordering::Relaxed);
+                let mut frame_count = 0_u64;
+                let mut peak = 0.0_f32;
                 for frame in input.chunks(channels) {
                     let mono = frame.iter().copied().map(f32::from_sample).sum::<f32>()
                         / frame.len().max(1) as f32;
+                    peak = peak.max(mono.abs());
                     if producer.push(mono.clamp(-1.0, 1.0)).is_err() {
-                        dropped_samples.fetch_add(1, Ordering::Relaxed);
+                        counters.dropped_samples.fetch_add(1, Ordering::Relaxed);
                     }
+                    frame_count += 1;
                 }
+                let callback_end = callback_start.saturating_add(frame_count);
+                if peak >= AUDIBLE_SAMPLE_FLOOR {
+                    counters
+                        .last_audible_sample
+                        .store(callback_end, Ordering::Relaxed);
+                }
+                // Release-publish the corresponding audio and activity counters as
+                // one completed callback batch.
+                counters
+                    .callback_samples
+                    .store(callback_end, Ordering::Release);
             },
             move |error| {
                 let _ = error_events.send(SpeechWorkerEvent::Failed {
@@ -290,11 +340,21 @@ where
         .context("could not create microphone stream")
 }
 
+fn post_release_target_sample(released_at: u64, last_audible: u64, sample_rate_hz: u32) -> u64 {
+    let safe_silence_samples =
+        u64::from(sample_rate_hz).saturating_mul(SAFE_PRE_RELEASE_SILENCE_MS) / 1_000;
+    if released_at.saturating_sub(last_audible) >= safe_silence_samples {
+        return released_at;
+    }
+    released_at
+        .saturating_add(u64::from(sample_rate_hz).saturating_mul(POST_RELEASE_AUDIO_MS) / 1_000)
+}
+
 fn capture_loop(
     mut consumer: Consumer<f32>,
     commands: Receiver<CaptureCommand>,
     events: Sender<SpeechWorkerEvent>,
-    dropped_samples: Arc<AtomicU64>,
+    counters: Arc<CaptureCounters>,
     sample_rate_hz: u32,
 ) {
     let mut active: Option<ActiveCapture> = None;
@@ -310,7 +370,7 @@ fn capture_loop(
         match command {
             Ok(CaptureCommand::Begin { session_id, reply }) => {
                 drain_discard(&mut consumer);
-                dropped_samples.store(0, Ordering::Release);
+                counters.dropped_samples.store(0, Ordering::Release);
                 if active.is_some() {
                     let _ = reply.send(Err("another recording is already active".to_owned()));
                     continue;
@@ -327,7 +387,7 @@ fn capture_loop(
             Ok(CaptureCommand::End { session_id, reply }) => {
                 drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
                 let result = finish_capture(&mut active, session_id, sample_rate_hz);
-                let dropped = dropped_samples.swap(0, Ordering::AcqRel);
+                let dropped = counters.dropped_samples.swap(0, Ordering::AcqRel);
                 if dropped > 0 {
                     eprintln!(
                         "audio ring overflowed; dropped {dropped} samples for session {session_id}"
@@ -532,7 +592,7 @@ fn sinc(value: f64) -> f64 {
 mod tests {
     use rust_protocol::SessionId;
 
-    use super::{RecordedAudio, resample_bandlimited};
+    use super::{RecordedAudio, post_release_target_sample, resample_bandlimited};
 
     #[test]
     fn resampler_preserves_duration() {
@@ -582,5 +642,19 @@ mod tests {
         assert_eq!(tail.samples.first(), Some(&8_000.0));
         assert!(recording.segment_from_absolute(31_999).is_none());
         assert!(recording.segment_from_absolute(48_001).is_none());
+    }
+
+    #[test]
+    fn release_fence_waits_for_real_audio_when_speech_reaches_key_up() {
+        assert_eq!(post_release_target_sample(10_000, 9_999, 48_000), 12_880);
+        assert_eq!(
+            post_release_target_sample(u64::MAX - 5, u64::MAX - 6, 48_000),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn release_fence_is_free_after_a_natural_pause() {
+        assert_eq!(post_release_target_sample(10_000, 5_000, 48_000), 10_000);
     }
 }

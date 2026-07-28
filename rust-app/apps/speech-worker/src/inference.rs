@@ -19,7 +19,7 @@ use crate::{
     history_actor::HistoryCommand,
 };
 
-const MAX_REUSABLE_SILENCE_MS: u64 = 1_200;
+const MAX_PREVIEW_COMPLETION_TAIL_MS: u64 = 1_200;
 const MIN_SPECULATIVE_AUDIO_MS: u64 = 650;
 const MIN_FINAL_TAIL_AUDIO_MS: u64 = 180;
 
@@ -34,7 +34,6 @@ struct PreviewCandidate {
 struct PreviewResult {
     session_id: SessionId,
     output_mode: SpeechOutputMode,
-    generation: u64,
     transcript: EngineTranscript,
 }
 
@@ -54,7 +53,6 @@ enum InferenceCommand {
         output_mode: SpeechOutputMode,
         audio_finalize_ms: u64,
         release_started: Instant,
-        allow_speculative: bool,
     },
     Shutdown,
 }
@@ -138,10 +136,10 @@ impl InferenceHandle {
         self.stable_source_sample_count.load(Ordering::Acquire)
     }
 
-    /// Marks the exact preview candidate stale while retaining its completed
-    /// transcript as a stable prefix for the next speech segment.
-    pub fn invalidate_exact_preview_for_new_audio(&self) {
-        self.invalidate_exact_preview();
+    /// Cancels a preview that no longer reaches the live audio edge. Already
+    /// committed segments remain available as an authoritative stable prefix.
+    pub fn cancel_stale_preview_for_new_audio(&self) {
+        self.cancel_preview_generation();
     }
 
     pub fn request_preview(&self, recording: RecordedAudio, output_mode: SpeechOutputMode) -> bool {
@@ -189,21 +187,20 @@ impl InferenceHandle {
     ) {
         *recover_lock(&self.active_session) = None;
         let candidate = *recover_lock(&self.candidate);
-        let allow_speculative = candidate.is_some_and(|candidate| {
+        let allow_preview_completion = candidate.is_some_and(|candidate| {
             candidate.session_id == recording.session_id
                 && candidate.generation == self.generation.load(Ordering::Acquire)
                 && candidate.sample_rate_hz == recording.sample_rate_hz
-                && reusable_tail(&recording, candidate.source_sample_count)
+                && quiet_tail_after(&recording, candidate.source_sample_count)
         });
-        if !allow_speculative {
-            self.invalidate_exact_preview();
+        if !allow_preview_completion {
+            self.cancel_preview_generation();
         }
         if let Err(error) = self.commands.send(InferenceCommand::Finalize {
             recording,
             output_mode,
             audio_finalize_ms,
             release_started,
-            allow_speculative,
         }) {
             eprintln!("could not queue final transcription: {error}");
         }
@@ -214,13 +211,13 @@ impl InferenceHandle {
         let _ = self.commands.send(InferenceCommand::Shutdown);
     }
 
-    fn invalidate_exact_preview(&self) {
+    fn cancel_preview_generation(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         *recover_lock(&self.candidate) = None;
     }
 
     fn reset_segmented_session(&self) {
-        self.invalidate_exact_preview();
+        self.cancel_preview_generation();
         self.stable_source_sample_count.store(0, Ordering::Release);
     }
 }
@@ -234,7 +231,7 @@ fn inference_loop(
     history: mpsc::Sender<HistoryCommand>,
 ) {
     let mut engine = WhisperEngine::new();
-    let mut latest_preview: Option<PreviewResult> = None;
+    let mut stable_prefix: Option<PreviewResult> = None;
     for command in commands {
         match command {
             InferenceCommand::Load {
@@ -242,7 +239,7 @@ fn inference_loop(
                 path,
                 selected,
             } => {
-                latest_preview = None;
+                stable_prefix = None;
                 match engine.prepare(&path) {
                     Ok(prepared) => {
                         let _ = events.send(SpeechWorkerEvent::ModelReady {
@@ -275,7 +272,7 @@ fn inference_loop(
                 if generation.load(Ordering::Acquire) != preview_generation {
                     continue;
                 }
-                let stable_prefix = latest_preview
+                let existing_prefix = stable_prefix
                     .as_ref()
                     .filter(|preview| {
                         preview.session_id == recording.session_id
@@ -284,7 +281,7 @@ fn inference_loop(
                                 == recording.source_start_sample
                     })
                     .map(|preview| preview.transcript.clone());
-                let prompt = stable_prefix
+                let prompt = existing_prefix
                     .as_ref()
                     .map(|prefix| context_prompt(&prefix.text));
                 let result = engine.transcribe_with_prompt(
@@ -300,18 +297,18 @@ fn inference_loop(
                     continue;
                 }
                 match result {
-                    Ok(segment) => {
-                        let transcript = stable_prefix.as_ref().map_or(segment.clone(), |prefix| {
-                            merge_engine_transcripts(prefix, segment)
-                        });
-                        stable_source_sample_count
-                            .store(transcript.source_sample_count, Ordering::Release);
-                        latest_preview = Some(PreviewResult {
-                            session_id: recording.session_id,
-                            output_mode,
-                            generation: preview_generation,
-                            transcript,
-                        });
+                    Ok(preview) => {
+                        if let Some(transcript) =
+                            advance_stable_prefix(existing_prefix.as_ref(), &preview)
+                        {
+                            stable_source_sample_count
+                                .store(transcript.source_sample_count, Ordering::Release);
+                            stable_prefix = Some(PreviewResult {
+                                session_id: recording.session_id,
+                                output_mode,
+                                transcript,
+                            });
+                        }
                     }
                     Err(error) => {
                         eprintln!(
@@ -326,22 +323,14 @@ fn inference_loop(
                 output_mode,
                 audio_finalize_ms,
                 release_started,
-                allow_speculative,
             } => {
-                let stable_prefix = latest_preview.take().filter(|preview| {
+                let stable_prefix = stable_prefix.take().filter(|preview| {
                     preview.session_id == recording.session_id
                         && preview.output_mode == output_mode
                         && preview.transcript.source_sample_count <= recording.source_total_samples
                 });
-                let exact_reuse = stable_prefix.as_ref().is_some_and(|preview| {
-                    allow_speculative
-                        && preview.generation == generation.load(Ordering::Acquire)
-                        && reusable_tail(&recording, preview.transcript.source_sample_count)
-                });
-                let (engine_result, speculative_reuse) = match (exact_reuse, stable_prefix.as_ref())
-                {
-                    (true, Some(prefix)) => (Ok(prefix.transcript.clone()), true),
-                    (false, Some(prefix)) => (
+                let (engine_result, speculative_reuse) = match stable_prefix.as_ref() {
+                    Some(prefix) => (
                         finalize_from_stable_prefix(
                             &mut engine,
                             &recording,
@@ -350,7 +339,7 @@ fn inference_loop(
                         ),
                         true,
                     ),
-                    _ => (engine.transcribe(&recording, output_mode, None), false),
+                    None => (engine.transcribe(&recording, output_mode, None), false),
                 };
                 stable_source_sample_count.store(0, Ordering::Release);
                 match engine_result {
@@ -395,16 +384,57 @@ fn inference_loop(
     }
 }
 
+fn advance_stable_prefix(
+    existing: Option<&EngineTranscript>,
+    preview: &EngineTranscript,
+) -> Option<EngineTranscript> {
+    // A streaming Whisper hypothesis is allowed to revise its final segment.
+    // Commit only segments that precede it, then decode that final segment again
+    // after key release with the complete acoustic context.
+    let provisional = preview.segments.last()?;
+    let boundary = provisional.source_start_sample;
+    let completed = preview
+        .segments
+        .iter()
+        .take(preview.segments.len().saturating_sub(1))
+        .filter(|segment| {
+            segment.source_start_sample < boundary && segment.source_end_sample <= boundary
+        })
+        .collect::<Vec<_>>();
+    if completed.is_empty() {
+        return existing.cloned();
+    }
+
+    let completed_text = completed.iter().fold(String::new(), |text, segment| {
+        join_transcript_text(&text, &segment.text)
+    });
+    let text = existing.map_or_else(
+        || completed_text.clone(),
+        |prefix| join_transcript_text(&prefix.text, &completed_text),
+    );
+    Some(EngineTranscript {
+        text,
+        language: if preview.language == "und" {
+            existing.map_or_else(|| "und".to_owned(), |prefix| prefix.language.clone())
+        } else {
+            preview.language.clone()
+        },
+        audio_duration_ms: preview.audio_duration_ms,
+        source_sample_count: boundary,
+        preprocessing_ms: preview.preprocessing_ms,
+        inference_ms: preview.inference_ms,
+        segments: Vec::new(),
+    })
+}
+
 fn finalize_from_stable_prefix(
     engine: &mut WhisperEngine,
     recording: &RecordedAudio,
     output_mode: SpeechOutputMode,
     prefix: &EngineTranscript,
 ) -> anyhow::Result<EngineTranscript> {
-    if prefix.source_sample_count == recording.source_total_samples
-        || reusable_tail(recording, prefix.source_sample_count)
-    {
-        return Ok(prefix.clone());
+    if prefix.source_sample_count >= recording.source_total_samples {
+        return engine.transcribe(recording, output_mode, None);
     }
 
     let Some(tail) = recording.segment_from_absolute(prefix.source_sample_count) else {
@@ -503,7 +533,7 @@ fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn reusable_tail(recording: &RecordedAudio, source_sample_count: usize) -> bool {
+fn quiet_tail_after(recording: &RecordedAudio, source_sample_count: usize) -> bool {
     if source_sample_count < recording.source_start_sample
         || source_sample_count > recording.source_total_samples
     {
@@ -511,7 +541,8 @@ fn reusable_tail(recording: &RecordedAudio, source_sample_count: usize) -> bool 
     }
     let tail_samples = recording.source_total_samples - source_sample_count;
     let tail_ms = tail_samples as u64 * 1000 / u64::from(recording.sample_rate_hz.max(1));
-    tail_ms <= MAX_REUSABLE_SILENCE_MS && !tail_contains_speech(recording, source_sample_count)
+    tail_ms <= MAX_PREVIEW_COMPLETION_TAIL_MS
+        && !tail_contains_speech(recording, source_sample_count)
 }
 
 fn tail_contains_speech(recording: &RecordedAudio, source_sample_count: usize) -> bool {
@@ -555,8 +586,14 @@ fn elapsed_ms(started: Instant) -> u64 {
 mod tests {
     use rust_protocol::SessionId;
 
-    use super::{context_prompt, has_trailing_silence, join_transcript_text, reusable_tail};
-    use crate::audio::RecordedAudio;
+    use super::{
+        advance_stable_prefix, context_prompt, has_trailing_silence, join_transcript_text,
+        quiet_tail_after,
+    };
+    use crate::{
+        audio::RecordedAudio,
+        engine::{EngineSegment, EngineTranscript},
+    };
 
     fn recording(samples: Vec<f32>, rate: u32) -> RecordedAudio {
         RecordedAudio {
@@ -570,20 +607,65 @@ mod tests {
     }
 
     #[test]
-    fn speculative_result_is_reused_only_for_a_silent_short_tail() {
+    fn a_short_silent_tail_can_finish_an_in_flight_preview() {
         let mut samples = vec![0.08_f32; 16_000];
         samples.extend(vec![0.0; 4_000]);
         let audio = recording(samples, 16_000);
         assert!(has_trailing_silence(&audio, 200));
-        assert!(reusable_tail(&audio, 16_000));
+        assert!(quiet_tail_after(&audio, 16_000));
     }
 
     #[test]
-    fn speech_in_tail_forces_full_finalization() {
+    fn speech_in_tail_cancels_an_outdated_preview() {
         let mut samples = vec![0.08_f32; 16_000];
         samples.extend(vec![0.07; 2_000]);
         let audio = recording(samples, 16_000);
-        assert!(!reusable_tail(&audio, 16_000));
+        assert!(!quiet_tail_after(&audio, 16_000));
+    }
+
+    #[test]
+    fn preview_never_commits_its_final_segment() {
+        let preview = transcript(
+            "Первое предложение. Второе окончание.",
+            32_000,
+            vec![
+                segment("Первое предложение.", 0, 16_000),
+                segment("Второе окончание.", 16_000, 32_000),
+            ],
+        );
+
+        let stable = advance_stable_prefix(None, &preview).expect("first segment is stable");
+        assert_eq!(stable.text, "Первое предложение.");
+        assert_eq!(stable.source_sample_count, 16_000);
+    }
+
+    #[test]
+    fn a_single_segment_preview_remains_fully_provisional() {
+        let preview = transcript(
+            "Окончание ещё может измениться.",
+            16_000,
+            vec![segment("Окончание ещё может измениться.", 0, 16_000)],
+        );
+
+        assert!(advance_stable_prefix(None, &preview).is_none());
+    }
+
+    #[test]
+    fn completed_segments_advance_an_existing_stable_prefix() {
+        let existing = transcript("Уже проверено.", 16_000, Vec::new());
+        let preview = transcript(
+            "Новая стабильная часть. Последний фрагмент.",
+            48_000,
+            vec![
+                segment("Новая стабильная часть.", 16_000, 32_000),
+                segment("Последний фрагмент.", 32_000, 48_000),
+            ],
+        );
+
+        let stable =
+            advance_stable_prefix(Some(&existing), &preview).expect("prefix should advance");
+        assert_eq!(stable.text, "Уже проверено. Новая стабильная часть.");
+        assert_eq!(stable.source_sample_count, 32_000);
     }
 
     #[test]
@@ -605,5 +687,29 @@ mod tests {
         let prompt = context_prompt(&source);
         assert_eq!(prompt.chars().count(), 240);
         assert!(prompt.chars().all(|character| character == 'x'));
+    }
+
+    fn transcript(
+        text: &str,
+        source_sample_count: usize,
+        segments: Vec<EngineSegment>,
+    ) -> EngineTranscript {
+        EngineTranscript {
+            text: text.to_owned(),
+            language: "ru".to_owned(),
+            audio_duration_ms: source_sample_count as u64 / 16,
+            source_sample_count,
+            preprocessing_ms: 1,
+            inference_ms: 1,
+            segments,
+        }
+    }
+
+    fn segment(text: &str, start: usize, end: usize) -> EngineSegment {
+        EngineSegment {
+            text: text.to_owned(),
+            source_start_sample: start,
+            source_end_sample: end,
+        }
     }
 }

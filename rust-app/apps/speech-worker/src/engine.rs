@@ -34,6 +34,26 @@ pub struct EngineTranscript {
     pub source_sample_count: usize,
     pub preprocessing_ms: u64,
     pub inference_ms: u64,
+    pub segments: Vec<EngineSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineSegment {
+    pub text: String,
+    pub source_start_sample: usize,
+    pub source_end_sample: usize,
+}
+
+struct DecodedTranscript {
+    text: String,
+    language: String,
+    segments: Vec<DecodedSegment>,
+}
+
+struct DecodedSegment {
+    text: String,
+    start_timestamp_cs: i64,
+    end_timestamp_cs: i64,
 }
 
 pub struct AbortGeneration {
@@ -168,16 +188,29 @@ impl WhisperEngine {
         );
         let preprocessing_ms = elapsed_ms(preprocessing_started);
         let inference_started = Instant::now();
-        let (text, language) =
+        let decoded =
             self.run_whisper(&audio, output_mode, false, initial_prompt, abort_generation)?;
+        let segments = decoded
+            .segments
+            .into_iter()
+            .map(|segment| EngineSegment {
+                text: segment.text,
+                source_start_sample: source_sample_at_timestamp(
+                    recording,
+                    segment.start_timestamp_cs,
+                ),
+                source_end_sample: source_sample_at_timestamp(recording, segment.end_timestamp_cs),
+            })
+            .collect();
 
         Ok(EngineTranscript {
-            text,
-            language,
+            text: decoded.text,
+            language: decoded.language,
             audio_duration_ms: recording.duration_ms,
             source_sample_count: recording.source_total_samples,
             preprocessing_ms,
             inference_ms: elapsed_ms(inference_started),
+            segments,
         })
     }
 
@@ -188,7 +221,7 @@ impl WhisperEngine {
         single_segment: bool,
         initial_prompt: Option<&str>,
         abort_generation: Option<AbortGeneration>,
-    ) -> Result<(String, String)> {
+    ) -> Result<DecodedTranscript> {
         let context = self
             .context
             .as_ref()
@@ -228,15 +261,23 @@ impl WhisperEngine {
             .full(params, audio)
             .context("Whisper inference failed")?;
 
-        let mut text = String::new();
+        let mut raw_text = String::new();
+        let mut segments = Vec::new();
         for segment in state.as_iter() {
-            text.push_str(
-                segment
-                    .to_str()
-                    .context("Whisper returned invalid transcript text")?,
-            );
+            let raw_segment = segment
+                .to_str()
+                .context("Whisper returned invalid transcript text")?;
+            raw_text.push_str(raw_segment);
+            let text = normalize_transcript(raw_segment);
+            if !text.is_empty() {
+                segments.push(DecodedSegment {
+                    text,
+                    start_timestamp_cs: segment.start_timestamp(),
+                    end_timestamp_cs: segment.end_timestamp(),
+                });
+            }
         }
-        let text = normalize_transcript(&text);
+        let text = normalize_transcript(&raw_text);
         if text.is_empty() {
             bail!("no speech was recognized");
         }
@@ -247,8 +288,24 @@ impl WhisperEngine {
                 .unwrap_or("und")
                 .to_owned()
         };
-        Ok((text, language))
+        Ok(DecodedTranscript {
+            text,
+            language,
+            segments,
+        })
     }
+}
+
+fn source_sample_at_timestamp(recording: &RecordedAudio, timestamp_cs: i64) -> usize {
+    let timestamp_cs = u64::try_from(timestamp_cs.max(0)).unwrap_or(0);
+    let local_sample = timestamp_cs
+        .saturating_mul(u64::from(recording.sample_rate_hz))
+        .checked_div(100)
+        .unwrap_or(0);
+    let local_sample = usize::try_from(local_sample)
+        .unwrap_or(usize::MAX)
+        .min(recording.samples.len());
+    recording.source_start_sample.saturating_add(local_sample)
 }
 
 unsafe extern "C" fn abort_callback(user_data: *mut c_void) -> bool {
@@ -293,7 +350,13 @@ fn normalize_transcript(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{inference_threads, normalize_transcript, supports_direct_translation};
+    use rust_protocol::SessionId;
+
+    use super::{
+        inference_threads, normalize_transcript, source_sample_at_timestamp,
+        supports_direct_translation,
+    };
+    use crate::audio::RecordedAudio;
 
     #[test]
     fn transcript_whitespace_is_stable_for_insertion_and_history() {
@@ -312,5 +375,22 @@ mod tests {
         assert!(supports_direct_translation("large v3", 32, 1280));
         assert!(supports_direct_translation("medium", 24, 1024));
         assert!(supports_direct_translation("tiny", 4, 384));
+    }
+
+    #[test]
+    fn segment_timestamps_map_to_absolute_source_samples() {
+        let recording = RecordedAudio {
+            session_id: SessionId::new(),
+            samples: vec![0.0; 48_000],
+            sample_rate_hz: 48_000,
+            source_start_sample: 96_000,
+            source_total_samples: 144_000,
+            duration_ms: 3_000,
+        };
+
+        assert_eq!(source_sample_at_timestamp(&recording, 25), 108_000);
+        assert_eq!(source_sample_at_timestamp(&recording, 100), 144_000);
+        assert_eq!(source_sample_at_timestamp(&recording, 500), 144_000);
+        assert_eq!(source_sample_at_timestamp(&recording, -10), 96_000);
     }
 }

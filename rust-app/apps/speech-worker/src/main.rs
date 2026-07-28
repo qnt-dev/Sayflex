@@ -219,6 +219,10 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
             SpeechWorkerCommand::End { session_id } => {
                 speculation.stop(session_id);
                 let release_started = Instant::now();
+                // The recorder keeps a short sample-counted post-roll so the OS audio
+                // buffer cannot clip the final phoneme. The UI should still leave
+                // Listening immediately when the physical gesture ends.
+                let _ = events.send(SpeechWorkerEvent::Processing { session_id });
                 let audio_finalize_started = Instant::now();
                 let recording = match recorder.end(session_id) {
                     Ok(recording) => recording,
@@ -234,7 +238,6 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
                     }
                 };
                 let audio_finalize_ms = elapsed_ms(audio_finalize_started);
-                let _ = events.send(SpeechWorkerEvent::Processing { session_id });
                 inference.finalize(recording, output_mode, audio_finalize_ms, release_started);
             }
             SpeechWorkerCommand::Cancel { session_id } => {
