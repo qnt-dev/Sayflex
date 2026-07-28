@@ -8,7 +8,7 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
             KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput,
-            VK_C, VK_CONTROL, VK_INSERT, VK_SHIFT, VK_V,
+            VK_C, VK_CONTROL, VK_INSERT, VK_LCONTROL, VK_LMENU, VK_SHIFT, VK_V,
         },
         WindowsAndMessaging::{
             GA_ROOT, GUITHREADINFO, GetAncestor, GetForegroundWindow, GetGUIThreadInfo,
@@ -20,6 +20,7 @@ use windows_sys::Win32::{
 use crate::target::SelectionCopyShortcut;
 
 pub const SYNTHETIC_MARKER: usize = 0x5255_5354_564f_4943;
+pub const E2E_HOTKEY_MARKER: usize = 0x514e_5446_4c45_5845;
 
 #[derive(Debug, Error)]
 pub enum InjectionError {
@@ -153,6 +154,10 @@ fn unicode_input(unit: u16, key_up: bool) -> INPUT {
 }
 
 fn scan_code_key(virtual_key: u16, key_up: bool) -> INPUT {
+    marked_scan_code_key(virtual_key, key_up, SYNTHETIC_MARKER)
+}
+
+fn marked_scan_code_key(virtual_key: u16, key_up: bool, marker: usize) -> INPUT {
     // SAFETY: MapVirtualKeyW has no pointer parameters. VK-to-scan translation
     // produces the physical metadata required by Raw Input applications.
     let mapped = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC_EX) };
@@ -167,10 +172,22 @@ fn scan_code_key(virtual_key: u16, key_up: bool) -> INPUT {
                     | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 }
                     | if key_up { KEYEVENTF_KEYUP } else { 0 },
                 time: 0,
-                dwExtraInfo: SYNTHETIC_MARKER,
+                dwExtraInfo: marker,
             },
         },
     }
+}
+
+pub fn send_e2e_hotkey(trigger: u16) -> Result<(), InjectionError> {
+    let inputs = [
+        marked_scan_code_key(VK_LCONTROL, false, E2E_HOTKEY_MARKER),
+        marked_scan_code_key(VK_LMENU, false, E2E_HOTKEY_MARKER),
+        marked_scan_code_key(trigger, false, E2E_HOTKEY_MARKER),
+        marked_scan_code_key(trigger, true, E2E_HOTKEY_MARKER),
+        marked_scan_code_key(VK_LMENU, true, E2E_HOTKEY_MARKER),
+        marked_scan_code_key(VK_LCONTROL, true, E2E_HOTKEY_MARKER),
+    ];
+    send(&inputs)
 }
 
 fn send_control_shortcut(key: u16, with_shift: bool) -> Result<(), InjectionError> {

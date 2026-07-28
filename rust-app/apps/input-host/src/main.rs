@@ -22,9 +22,12 @@ use std::{
 use rust_protocol::{InputHostCommand, InputHostEvent, PROTOCOL_VERSION, SessionId, Transcript};
 use windows_sys::Win32::{
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
-    UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
-        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_QUIT,
+    UI::{
+        Input::KeyboardAndMouse::{VK_T, VK_V},
+        WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_QUIT,
+        },
     },
 };
 
@@ -39,6 +42,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|argument| argument == "--insertion-smoke") {
         require_smoke_opt_in("QNTFLEX_RUN_INSERTION_SMOKE")?;
         return run_insertion_smoke();
+    }
+    if let Some(action) = std::env::args().find_map(|argument| {
+        argument
+            .strip_prefix("--hotkey-e2e-send=")
+            .map(str::to_owned)
+    }) {
+        require_smoke_opt_in("QNTFLEX_RUN_HOTKEY_E2E")?;
+        let trigger = match action.as_str() {
+            "translation" => VK_T,
+            "insert-last" => VK_V,
+            _ => return Err(format!("unknown hotkey E2E action: {action}").into()),
+        };
+        inject::send_e2e_hotkey(trigger)?;
+        diagnostic_line(&format!("hotkey_e2e action={action} result=sent"));
+        return Ok(());
     }
 
     let (events, event_receiver) = mpsc::channel::<InputHostEvent>();

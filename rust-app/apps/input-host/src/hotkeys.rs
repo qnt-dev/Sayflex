@@ -231,13 +231,24 @@ pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LP
 }
 
 fn classify_event(flags: u32, extra_info: usize) -> EventOrigin {
+    classify_event_with_e2e(flags, extra_info, e2e_injected_hotkeys_enabled())
+}
+
+fn classify_event_with_e2e(flags: u32, extra_info: usize, e2e_enabled: bool) -> EventOrigin {
     if extra_info == inject::SYNTHETIC_MARKER {
         EventOrigin::OwnInjected
+    } else if e2e_enabled && extra_info == inject::E2E_HOTKEY_MARKER {
+        EventOrigin::Physical
     } else if flags & LLKHF_INJECTED != 0 {
         EventOrigin::ForeignInjected
     } else {
         EventOrigin::Physical
     }
+}
+
+fn e2e_injected_hotkeys_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("QNTFLEX_E2E_ACCEPT_INJECTED").as_deref() == Ok("1"))
 }
 
 fn dispatch_hook_action(action: HookAction) -> bool {
@@ -943,9 +954,10 @@ mod tests {
 
     use super::{
         EndReason, EventOrigin, GestureState, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL,
-        INPUT_K, INPUT_T, PhysicalKeys, classify_event, selection_chord_mask,
+        INPUT_K, INPUT_T, PhysicalKeys, classify_event, classify_event_with_e2e,
+        selection_chord_mask,
     };
-    use crate::inject::SYNTHETIC_MARKER;
+    use crate::inject::{E2E_HOTKEY_MARKER, SYNTHETIC_MARKER};
     use windows_sys::Win32::UI::{
         Input::KeyboardAndMouse::{
             VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_SPACE,
@@ -1167,6 +1179,18 @@ mod tests {
             EventOrigin::ForeignInjected
         );
         assert_eq!(classify_event(0, 0), EventOrigin::Physical);
+    }
+
+    #[test]
+    fn e2e_marker_is_physical_only_with_explicit_opt_in() {
+        assert_eq!(
+            classify_event_with_e2e(LLKHF_INJECTED, E2E_HOTKEY_MARKER, false),
+            EventOrigin::ForeignInjected
+        );
+        assert_eq!(
+            classify_event_with_e2e(LLKHF_INJECTED, E2E_HOTKEY_MARKER, true),
+            EventOrigin::Physical
+        );
     }
 
     #[test]
