@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -39,6 +40,9 @@ const TRANSLATION_PREVIEW_WINDOW_TITLE: &str = "Translation preview";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INDICATOR_BAR_PROFILE: [f32; 10] = [0.25, 0.4, 0.62, 0.82, 1.0, 1.0, 0.82, 0.62, 0.4, 0.25];
+const WORKER_RESTART_WINDOW: Duration = Duration::from_secs(60);
+const WORKER_STARTUP_STABILITY: Duration = Duration::from_secs(2);
+static NEXT_WORKER_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 enum RuntimeEvent {
     Input(InputHostEvent),
@@ -47,8 +51,13 @@ enum RuntimeEvent {
     DismissTranslationPreview,
     TranslationPreviewPinChanged(bool),
     ScrollTranslationPreview(i32),
+    SessionEnd(rust_platform_windows::SessionEndEvent),
     WorkerError(String),
-    WorkerExited { kind: WorkerKind, message: String },
+    WorkerExited {
+        kind: WorkerKind,
+        instance_id: u64,
+        exit: rust_platform_windows::ProcessExit,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -94,36 +103,153 @@ impl JsonWriter {
     }
 }
 
+struct WorkerProcess {
+    child: Child,
+    instance_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerLifecycle {
+    Running,
+    SessionEnding,
+    Stopping,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RestartAttempt {
+    at: Instant,
+    startup_failure: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeferredWorkerExit {
+    kind: WorkerKind,
+    instance_id: u64,
+    exit: rust_platform_windows::ProcessExit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerRecovery {
+    Restarted,
+    Deferred,
+    Stopping,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartPolicyDecision {
+    Restart,
+    Defer,
+    Stop,
+    Stale,
+    RejectRepeatedStartupFailure,
+    RejectRateLimit,
+}
+
 struct Workers {
     _job: rust_platform_windows::WorkerJob,
     input: JsonWriter,
     speech: JsonWriter,
     translation: JsonWriter,
-    input_child: RefCell<Child>,
-    speech_child: RefCell<Child>,
-    translation_child: RefCell<Child>,
-    restart_attempts: RefCell<HashMap<WorkerKind, Vec<Instant>>>,
+    input_child: RefCell<WorkerProcess>,
+    speech_child: RefCell<WorkerProcess>,
+    translation_child: RefCell<WorkerProcess>,
+    lifecycle: Cell<WorkerLifecycle>,
+    restart_attempts: RefCell<HashMap<WorkerKind, Vec<RestartAttempt>>>,
+    deferred_exits: RefCell<HashMap<WorkerKind, DeferredWorkerExit>>,
 }
 
 impl Workers {
     fn shutdown(&self) {
+        if self.lifecycle.replace(WorkerLifecycle::Stopping) == WorkerLifecycle::Stopping {
+            return;
+        }
+        rust_app_core::diagnostics::log_line("desktop lifecycle=stopping workers");
         let _ = self.input.send(&InputHostCommand::Shutdown);
         let _ = self.speech.send(&SpeechWorkerCommand::Shutdown);
         let _ = self.translation.send(&TranslationWorkerCommand::Shutdown);
     }
 
-    fn restart(&self, kind: WorkerKind) -> Result<(), String> {
-        let now = Instant::now();
+    fn begin_session_end(&self) {
+        if self.lifecycle.get() == WorkerLifecycle::Running {
+            self.lifecycle.set(WorkerLifecycle::SessionEnding);
+            rust_app_core::diagnostics::log_line("desktop lifecycle=session_end_query");
+        }
+    }
+
+    fn confirm_session_end(&self) {
+        rust_app_core::diagnostics::log_line("desktop lifecycle=session_end_confirmed");
+        self.shutdown();
+    }
+
+    fn cancel_session_end(&self) -> Vec<DeferredWorkerExit> {
+        if self.lifecycle.get() != WorkerLifecycle::SessionEnding {
+            return Vec::new();
+        }
+        self.lifecycle.set(WorkerLifecycle::Running);
+        rust_app_core::diagnostics::log_line("desktop lifecycle=session_end_cancelled");
+        self.deferred_exits
+            .borrow_mut()
+            .drain()
+            .map(|(_, exit)| exit)
+            .collect()
+    }
+
+    fn is_current_instance(&self, kind: WorkerKind, instance_id: u64) -> bool {
+        self.process(kind).borrow().instance_id == instance_id
+    }
+
+    fn recover(
+        &self,
+        kind: WorkerKind,
+        instance_id: u64,
+        exit: rust_platform_windows::ProcessExit,
+    ) -> Result<WorkerRecovery, String> {
+        let lifecycle = if rust_platform_windows::session_is_ending()
+            && self.lifecycle.get() == WorkerLifecycle::Running
         {
+            self.lifecycle.set(WorkerLifecycle::SessionEnding);
+            WorkerLifecycle::SessionEnding
+        } else {
+            self.lifecycle.get()
+        };
+        let now = Instant::now();
+        let decision = {
             let mut attempts = self.restart_attempts.borrow_mut();
             let attempts = attempts.entry(kind).or_default();
-            attempts.retain(|attempt| now.duration_since(*attempt) < Duration::from_secs(60));
-            if attempts.len() >= 3 {
+            decide_worker_restart(
+                lifecycle,
+                self.is_current_instance(kind, instance_id),
+                exit,
+                attempts,
+                now,
+            )
+        };
+        match decision {
+            RestartPolicyDecision::Stale => return Ok(WorkerRecovery::Stale),
+            RestartPolicyDecision::Stop => return Ok(WorkerRecovery::Stopping),
+            RestartPolicyDecision::Defer => {
+                self.deferred_exits.borrow_mut().insert(
+                    kind,
+                    DeferredWorkerExit {
+                        kind,
+                        instance_id,
+                        exit,
+                    },
+                );
+                return Ok(WorkerRecovery::Deferred);
+            }
+            RestartPolicyDecision::RejectRepeatedStartupFailure => {
+                return Err(format!(
+                    "{kind:?} worker failed during startup twice within one minute"
+                ));
+            }
+            RestartPolicyDecision::RejectRateLimit => {
                 return Err(format!(
                     "{kind:?} worker stopped at least three times in one minute"
                 ));
             }
-            attempts.push(now);
+            RestartPolicyDecision::Restart => {}
         }
 
         match kind {
@@ -136,7 +262,7 @@ impl Workers {
                 )
                 .map_err(|error| error.to_string())?;
                 self.input.replace_with(writer);
-                replace_child(&self.input_child, child);
+                replace_process(&self.input_child, child);
             }
             WorkerKind::Speech => {
                 let (child, writer) = spawn_worker(
@@ -147,7 +273,7 @@ impl Workers {
                 )
                 .map_err(|error| error.to_string())?;
                 self.speech.replace_with(writer);
-                replace_child(&self.speech_child, child);
+                replace_process(&self.speech_child, child);
             }
             WorkerKind::Translation => {
                 let (child, writer) = spawn_worker(
@@ -158,19 +284,58 @@ impl Workers {
                 )
                 .map_err(|error| error.to_string())?;
                 self.translation.replace_with(writer);
-                replace_child(&self.translation_child, child);
+                replace_process(&self.translation_child, child);
             }
         }
-        Ok(())
+        Ok(WorkerRecovery::Restarted)
+    }
+
+    fn process(&self, kind: WorkerKind) -> &RefCell<WorkerProcess> {
+        match kind {
+            WorkerKind::Input => &self.input_child,
+            WorkerKind::Speech => &self.speech_child,
+            WorkerKind::Translation => &self.translation_child,
+        }
     }
 }
 
-fn replace_child(slot: &RefCell<Child>, replacement: Child) {
-    let mut previous = slot.replace(replacement);
-    if previous.try_wait().ok().flatten().is_none() {
-        let _ = previous.kill();
+fn decide_worker_restart(
+    lifecycle: WorkerLifecycle,
+    current_instance: bool,
+    exit: rust_platform_windows::ProcessExit,
+    attempts: &mut Vec<RestartAttempt>,
+    now: Instant,
+) -> RestartPolicyDecision {
+    if !current_instance {
+        return RestartPolicyDecision::Stale;
     }
-    let _ = previous.wait();
+    match lifecycle {
+        WorkerLifecycle::SessionEnding => return RestartPolicyDecision::Defer,
+        WorkerLifecycle::Stopping => return RestartPolicyDecision::Stop,
+        WorkerLifecycle::Running => {}
+    }
+
+    attempts.retain(|attempt| now.duration_since(attempt.at) < WORKER_RESTART_WINDOW);
+    let startup_failure = exit.uptime < WORKER_STARTUP_STABILITY;
+    if startup_failure && attempts.iter().any(|attempt| attempt.startup_failure) {
+        return RestartPolicyDecision::RejectRepeatedStartupFailure;
+    }
+    if attempts.len() >= 3 {
+        return RestartPolicyDecision::RejectRateLimit;
+    }
+    attempts.push(RestartAttempt {
+        at: now,
+        startup_failure,
+    });
+    RestartPolicyDecision::Restart
+}
+
+fn replace_process(slot: &RefCell<WorkerProcess>, replacement: WorkerProcess) {
+    let mut previous = slot.replace(replacement);
+    if previous.child.try_wait().ok().flatten().is_none() {
+        let _ = previous.child.kill();
+    }
+    let _ = previous.child.wait();
 }
 
 impl Drop for Workers {
@@ -182,9 +347,9 @@ impl Drop for Workers {
             &self.speech_child,
             &self.translation_child,
         ] {
-            let mut child = child.borrow_mut();
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
+            let mut process = child.borrow_mut();
+            if process.child.try_wait().ok().flatten().is_none() {
+                let _ = process.child.kill();
             }
         }
     }
@@ -602,6 +767,7 @@ impl AppState {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    rust_platform_windows::configure_process_error_mode();
     rust_platform_windows::configure_safe_dll_search()?;
     let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "desktop");
     rust_app_core::diagnostics::log_line("desktop lifecycle=starting");
@@ -658,7 +824,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         input_child: RefCell::new(input_child),
         speech_child: RefCell::new(speech_child),
         translation_child: RefCell::new(translation_child),
+        lifecycle: Cell::new(WorkerLifecycle::Running),
         restart_attempts: RefCell::new(HashMap::new()),
+        deferred_exits: RefCell::new(HashMap::new()),
     });
     let saved_settings = load_settings();
     indicator_animation
@@ -728,6 +896,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         workers: Rc::clone(&workers),
         indicator_animation: Rc::clone(&indicator_animation),
     });
+    let _session_end_monitor = match rust_platform_windows::SessionEndMonitor::start(|event| {
+        dispatch_runtime_event(RuntimeEvent::SessionEnd(event));
+    }) {
+        Ok(monitor) => Some(monitor),
+        Err(error) => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "desktop lifecycle=session_end_monitor_failed error={error}"
+            ));
+            eprintln!("Windows session-end monitoring is unavailable: {error}");
+            None
+        }
+    };
     let _popup_dismiss_monitor = match rust_platform_windows::PopupDismissMonitor::start(
         || {
             dispatch_runtime_event(RuntimeEvent::DismissTranslationPreview);
@@ -1018,11 +1198,13 @@ fn spawn_worker<T>(
     kind: WorkerKind,
     executable: &str,
     wrap: fn(T) -> RuntimeEvent,
-) -> Result<(Child, JsonWriter), Box<dyn Error>>
+) -> Result<(WorkerProcess, JsonWriter), Box<dyn Error>>
 where
     T: DeserializeOwned + Send + 'static,
 {
     let path = worker_path(executable)?;
+    let started_at = Instant::now();
+    let instance_id = NEXT_WORKER_INSTANCE.fetch_add(1, Ordering::Relaxed);
     let mut command = Command::new(&path);
     command
         .stdin(Stdio::piped())
@@ -1050,20 +1232,35 @@ where
         let _ = child.wait();
         return Err(format!("could not contain {executable} in the worker job: {error}").into());
     }
+    if let Err(error) = rust_platform_windows::watch_process_exit(&child, started_at, move |exit| {
+        dispatch_runtime_event(RuntimeEvent::WorkerExited {
+            kind,
+            instance_id,
+            exit,
+        });
+    }) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("could not supervise {executable}: {error}").into());
+    }
     let stdin = child.stdin.take().ok_or("worker stdin is unavailable")?;
     let stdout = child.stdout.take().ok_or("worker stdout is unavailable")?;
     let stderr = child.stderr.take().ok_or("worker stderr is unavailable")?;
 
-    let output_name = executable.to_owned();
+    let output_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(executable)
+        .to_owned();
     std::thread::Builder::new()
         .name(format!("{executable}-events"))
         .spawn(move || {
-            let mut exit_message = format!("{output_name} closed its event stream");
+            let mut stream_result = "closed".to_owned();
             for line in BufReader::new(stdout).lines() {
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
-                        exit_message = format!("{output_name} output failed: {error}");
+                        stream_result = format!("read_error:{error}");
                         break;
                     }
                 };
@@ -1078,10 +1275,9 @@ where
                     }
                 }
             }
-            dispatch_runtime_event(RuntimeEvent::WorkerExited {
-                kind,
-                message: exit_message,
-            });
+            rust_app_core::diagnostics::log_line(&format!(
+                "worker={output_name} instance={instance_id} event_stream={stream_result}"
+            ));
         })?;
 
     let diagnostics_name = executable.to_owned();
@@ -1098,7 +1294,7 @@ where
         })?;
 
     Ok((
-        child,
+        WorkerProcess { child, instance_id },
         JsonWriter {
             stdin: RefCell::new(BufWriter::new(stdin)),
         },
@@ -1254,6 +1450,9 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 preview.invoke_scroll_by(delta as f32);
             }
         }
+        RuntimeEvent::SessionEnd(event) => {
+            handle_session_end(event, runtime);
+        }
         RuntimeEvent::WorkerError(message) => {
             runtime.state.borrow_mut().indicator_session = None;
             runtime.indicator_animation.borrow_mut().stop();
@@ -1265,13 +1464,63 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 settings.set_indicator_status(message.into());
             }
         }
-        RuntimeEvent::WorkerExited { kind, message } => {
-            handle_worker_exit(kind, &message, runtime);
+        RuntimeEvent::WorkerExited {
+            kind,
+            instance_id,
+            exit,
+        } => {
+            handle_worker_exit(kind, instance_id, exit, runtime);
         }
     }
 }
 
-fn handle_worker_exit(kind: WorkerKind, message: &str, runtime: &RuntimeUi) {
+fn handle_session_end(event: rust_platform_windows::SessionEndEvent, runtime: &RuntimeUi) {
+    match event {
+        rust_platform_windows::SessionEndEvent::Query => {
+            runtime.workers.begin_session_end();
+        }
+        rust_platform_windows::SessionEndEvent::Confirmed => {
+            runtime.workers.confirm_session_end();
+            let _ = slint::quit_event_loop();
+        }
+        rust_platform_windows::SessionEndEvent::Cancelled => {
+            let deferred = runtime.workers.cancel_session_end();
+            for worker_exit in deferred {
+                handle_worker_exit(
+                    worker_exit.kind,
+                    worker_exit.instance_id,
+                    worker_exit.exit,
+                    runtime,
+                );
+            }
+        }
+    }
+}
+
+fn handle_worker_exit(
+    kind: WorkerKind,
+    instance_id: u64,
+    exit: rust_platform_windows::ProcessExit,
+    runtime: &RuntimeUi,
+) {
+    if !runtime.workers.is_current_instance(kind, instance_id) {
+        rust_app_core::diagnostics::log_line(&format!(
+            "worker kind={kind:?} instance={instance_id} exit=stale"
+        ));
+        return;
+    }
+    let exit_code = exit
+        .exit_code
+        .map_or_else(|| "unknown".to_owned(), |code| format!("0x{code:08X}"));
+    let message = format!(
+        "{kind:?} worker exited with {exit_code} after {} ms",
+        exit.uptime.as_millis()
+    );
+    rust_app_core::diagnostics::log_line(&format!(
+        "worker kind={kind:?} instance={instance_id} exit_code={exit_code} uptime_ms={}",
+        exit.uptime.as_millis()
+    ));
+
     let active_session = {
         let mut state = runtime.state.borrow_mut();
         match kind {
@@ -1303,8 +1552,8 @@ fn handle_worker_exit(kind: WorkerKind, message: &str, runtime: &RuntimeUi) {
         let _ = indicator.hide();
     }
 
-    match runtime.workers.restart(kind) {
-        Ok(()) => {
+    match runtime.workers.recover(kind, instance_id, exit) {
+        Ok(WorkerRecovery::Restarted) => {
             let initialization = match kind {
                 WorkerKind::Input => Ok(()),
                 WorkerKind::Speech => {
@@ -1340,6 +1589,17 @@ fn handle_worker_exit(kind: WorkerKind, message: &str, runtime: &RuntimeUi) {
                 settings.set_indicator_status(detail.into());
             }
         }
+        Ok(WorkerRecovery::Deferred) => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "worker kind={kind:?} instance={instance_id} recovery=deferred_session_end"
+            ));
+        }
+        Ok(WorkerRecovery::Stopping) => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "worker kind={kind:?} instance={instance_id} recovery=suppressed_stopping"
+            ));
+        }
+        Ok(WorkerRecovery::Stale) => {}
         Err(error) => {
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Worker unavailable".into());
@@ -4077,6 +4337,97 @@ mod selection_release_gate_tests {
             release_gate_after_input_release_failure(None, "still held".to_owned());
         assert!(gate.is_none());
         assert!(!had_deferred_replacement);
+    }
+}
+
+#[cfg(test)]
+mod worker_lifecycle_tests {
+    use std::time::{Duration, Instant};
+
+    use rust_platform_windows::ProcessExit;
+
+    use super::{RestartAttempt, RestartPolicyDecision, WorkerLifecycle, decide_worker_restart};
+
+    fn worker_exit(uptime: Duration) -> ProcessExit {
+        ProcessExit {
+            exit_code: Some(0xC000_0142),
+            uptime,
+        }
+    }
+
+    #[test]
+    fn session_end_never_consumes_a_restart_attempt_or_spawns() {
+        let mut attempts = Vec::new();
+        let decision = decide_worker_restart(
+            WorkerLifecycle::SessionEnding,
+            true,
+            worker_exit(Duration::from_millis(20)),
+            &mut attempts,
+            Instant::now(),
+        );
+
+        assert_eq!(decision, RestartPolicyDecision::Defer);
+        assert!(attempts.is_empty());
+    }
+
+    #[test]
+    fn confirmed_shutdown_never_restarts_a_worker() {
+        let mut attempts = Vec::new();
+        let decision = decide_worker_restart(
+            WorkerLifecycle::Stopping,
+            true,
+            worker_exit(Duration::from_secs(30)),
+            &mut attempts,
+            Instant::now(),
+        );
+
+        assert_eq!(decision, RestartPolicyDecision::Stop);
+        assert!(attempts.is_empty());
+    }
+
+    #[test]
+    fn repeated_loader_failure_is_not_relaunched_forever() {
+        let mut attempts = Vec::new();
+        let now = Instant::now();
+        assert_eq!(
+            decide_worker_restart(
+                WorkerLifecycle::Running,
+                true,
+                worker_exit(Duration::from_millis(25)),
+                &mut attempts,
+                now,
+            ),
+            RestartPolicyDecision::Restart
+        );
+        assert_eq!(
+            decide_worker_restart(
+                WorkerLifecycle::Running,
+                true,
+                worker_exit(Duration::from_millis(30)),
+                &mut attempts,
+                now + Duration::from_secs(1),
+            ),
+            RestartPolicyDecision::RejectRepeatedStartupFailure
+        );
+        assert_eq!(attempts.len(), 1);
+    }
+
+    #[test]
+    fn stale_exit_from_replaced_process_is_ignored() {
+        let mut attempts = vec![RestartAttempt {
+            at: Instant::now(),
+            startup_failure: false,
+        }];
+        let decision = decide_worker_restart(
+            WorkerLifecycle::Running,
+            false,
+            worker_exit(Duration::from_secs(30)),
+            &mut attempts,
+            Instant::now(),
+        );
+
+        assert_eq!(decision, RestartPolicyDecision::Stale);
+        assert_eq!(attempts.len(), 1);
     }
 }
 
