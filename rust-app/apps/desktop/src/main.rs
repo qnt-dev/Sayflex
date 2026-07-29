@@ -901,11 +901,26 @@ impl IndicatorAnimation {
         if self.mode == IndicatorMode::Success {
             self.mode_progress = (self.mode_progress + 0.045 * frame_scale).min(1.0);
         }
-        let smoothing = 1.0 - 0.82_f32.powf(frame_scale);
+        let level_response: f32 = if self.style == VisualizerStyle::FlowSpherePreview {
+            if self.target_level > self.display_level {
+                0.34
+            } else {
+                0.085
+            }
+        } else {
+            0.18
+        };
+        let smoothing = 1.0 - (1.0 - level_response).powf(frame_scale);
         self.display_level += (self.target_level - self.display_level) * smoothing;
         for (display, target) in self.display_spectrum.iter_mut().zip(self.target_spectrum) {
             let response = if target > *display {
-                0.46_f32
+                if self.style == VisualizerStyle::FlowSpherePreview {
+                    0.52_f32
+                } else {
+                    0.46_f32
+                }
+            } else if self.style == VisualizerStyle::FlowSpherePreview {
+                0.095_f32
             } else {
                 0.16_f32
             };
@@ -1334,7 +1349,11 @@ fn new_indicator()
 }
 
 fn indicator_preview_style() -> Option<VisualizerStyle> {
-    env::args().find_map(|argument| match argument.as_str() {
+    env::args().find_map(|argument| indicator_preview_style_for_argument(&argument))
+}
+
+fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyle> {
+    match argument {
         "--indicator-preview" | "--indicator-preview=orb" => Some(VisualizerStyle::VoiceOrb),
         "--indicator-preview=spectrum" => Some(VisualizerStyle::SymmetricSpectrum),
         "--indicator-preview=ribbon" => Some(VisualizerStyle::FluidRibbon),
@@ -1350,8 +1369,11 @@ fn indicator_preview_style() -> Option<VisualizerStyle> {
         "--indicator-preview-live=circle" | "--indicator-preview-live=circular-spectrum" => {
             Some(VisualizerStyle::CircularSpectrum)
         }
+        "--indicator-preview-live=flow-sphere" | "--indicator-preview-live=sphere" => {
+            Some(VisualizerStyle::FlowSpherePreview)
+        }
         _ => None,
-    })
+    }
 }
 
 fn indicator_preview_palette() -> CircularSpectrumPalette {
@@ -4783,7 +4805,10 @@ mod indicator_animation_tests {
     use rust_protocol::AUDIO_SPECTRUM_BANDS;
     use slint::VecModel;
 
-    use super::{CircularSpectrumPalette, IndicatorAnimation, VisualizerStyle};
+    use super::{
+        CircularSpectrumPalette, IndicatorAnimation, VisualizerStyle,
+        indicator_preview_style_for_argument,
+    };
 
     fn animation() -> IndicatorAnimation {
         IndicatorAnimation::new(
@@ -4860,6 +4885,18 @@ mod indicator_animation_tests {
             Some(VisualizerStyle::CircularSpectrum)
         );
         assert_eq!(VisualizerStyle::from_index(5), None);
+    }
+
+    #[test]
+    fn flow_sphere_live_preview_is_explicitly_addressable() {
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview-live=flow-sphere"),
+            Some(VisualizerStyle::FlowSpherePreview)
+        );
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview-live=sphere"),
+            Some(VisualizerStyle::FlowSpherePreview)
+        );
     }
 
     #[test]
