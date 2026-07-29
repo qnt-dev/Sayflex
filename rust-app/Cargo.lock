@@ -4571,7 +4571,7 @@ checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
 
 [[package]]
 name = "rust-app-core"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "rust-protocol",
  "tempfile",
@@ -4580,7 +4580,7 @@ dependencies = [
 
 [[package]]
 name = "rust-model-manager"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "rust-speech-api",
  "serde",
@@ -4592,7 +4592,7 @@ dependencies = [
 
 [[package]]
 name = "rust-platform-api"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "rust-protocol",
  "thiserror 2.0.19",
@@ -4600,14 +4600,14 @@ dependencies = [
 
 [[package]]
 name = "rust-platform-windows"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "rust-protocol"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "serde",
  "serde_json",
@@ -4616,7 +4616,7 @@ dependencies = [
 
 [[package]]
 name = "rust-speech-api"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "rust-protocol",
  "serde",
@@ -4625,7 +4625,7 @@ dependencies = [
 
 [[package]]
 name = "rust-translation-engine"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -5264,7 +5264,7 @@ dependencies = [
 
 [[package]]
 name = "styleflex-desktop"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "rust-app-core",
  "rust-platform-windows",
@@ -5277,7 +5277,7 @@ dependencies = [
 
 [[package]]
 name = "styleflex-input-host"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "rust-app-core",
  "rust-platform-windows",
@@ -5290,7 +5290,7 @@ dependencies = [
 
 [[package]]
 name = "styleflex-speech-worker"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "anyhow",
  "cpal",
@@ -5310,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "styleflex-translation-worker"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "anyhow",
  "reqwest",

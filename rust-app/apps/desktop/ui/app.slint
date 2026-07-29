@@ -12,6 +12,15 @@ export struct HistoryRow {
     detail: string,
 }
 
+export struct SlateLine {
+    x: float,
+    width: float,
+    y: float,
+    opacity: float,
+    glow: float,
+    color-index: int,
+}
+
 global Theme {
     out property <brush> ink: #101114;
     out property <brush> sidebar: #0c0d10;
@@ -741,8 +750,8 @@ export component SettingsWindow inherits Window {
 
                 Rectangle {
                     height: root.selected-visualizer == 4 || root.selected-visualizer == 5
-                        ? 164px
-                        : 96px;
+                        ? 228px
+                        : 160px;
                     vertical-stretch: 0;
                     border-radius: 9px;
                     border-width: 1px;
@@ -795,6 +804,13 @@ export component SettingsWindow inherits Window {
                                 selected: root.selected-visualizer == 3;
                                 clicked => { root.select-visualizer(3); }
                             }
+                        }
+
+                        HorizontalLayout {
+                            height: 50px;
+                            vertical-stretch: 0;
+                            spacing: 6px;
+
                             VisualizerChoice {
                                 label: "Circular";
                                 detail: "Real frequency ring";
@@ -807,6 +823,13 @@ export component SettingsWindow inherits Window {
                                 selected: root.selected-visualizer == 5;
                                 clicked => { root.select-visualizer(5); }
                             }
+                            VisualizerChoice {
+                                label: "Writing Slate";
+                                detail: "Voice-written color lines";
+                                selected: root.selected-visualizer == 6;
+                                clicked => { root.select-visualizer(6); }
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
                         }
 
                         if root.selected-visualizer == 4 : VerticalLayout {
@@ -1359,8 +1382,20 @@ export component SettingsWindow inherits Window {
 export component RecordingIndicator inherits Window {
     title: "StyleFlex Recording Indicator";
     icon: @image-url("../assets/tray-icon.svg");
-    width: root.visualizer-style == 5 ? 116px : root.visualizer-style == 4 ? 92px : 118px;
-    height: root.visualizer-style == 5 ? 116px : root.visualizer-style == 4 ? 92px : 42px;
+    width: root.visualizer-style == 6
+        ? 128px
+        : root.visualizer-style == 5
+            ? 116px
+            : root.visualizer-style == 4
+                ? 92px
+                : 118px;
+    height: root.visualizer-style == 6
+        ? 154px
+        : root.visualizer-style == 5
+            ? 116px
+            : root.visualizer-style == 4
+                ? 92px
+                : 42px;
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -1371,6 +1406,7 @@ export component RecordingIndicator inherits Window {
     in property <int> visualizer-style: 0;
     in property <int> circular-palette: 0;
     in property <image> flow-sphere-frame;
+    in property <[SlateLine]> slate-lines;
     in property <bool> processing: false;
     in property <float> signal-opacity: 0.54;
     in property <float> disc-opacity: 1;
@@ -1411,8 +1447,72 @@ export component RecordingIndicator inherits Window {
                 image-fit: contain;
             }
 
+            if root.visualizer-style == 6 : Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: transparent;
+
+                Rectangle {
+                    x: 2px;
+                    y: 4px;
+                    width: parent.width - 4px;
+                    height: parent.height - 5px;
+                    border-radius: 7px;
+                    background: #000000;
+                    opacity: 0.28;
+                }
+
+                Rectangle {
+                    x: 3px;
+                    y: 3px;
+                    width: parent.width - 6px;
+                    height: parent.height - 6px;
+                    border-radius: 6px;
+                    border-width: 0px;
+                    background: #181b21f5;
+
+                    Rectangle {
+                        x: 3px;
+                        y: 3px;
+                        width: parent.width - 6px;
+                        height: parent.height - 6px;
+                        border-radius: 4px;
+                        background: #0b0e13f5;
+                        clip: true;
+
+                        for line in root.slate-lines : Rectangle {
+                            x: 11px + line.x * 1px;
+                            y: 11px + line.y * 1px;
+                            width: line.width * 1px + 2px;
+                            height: 5.5px;
+                            border-radius: 2px;
+                            background: line.color-index == 0
+                                ? #ef5048
+                                : line.color-index == 1
+                                    ? #ffd24a
+                                    : #ece9e1;
+                            opacity: line.glow * 0.2;
+                        }
+
+                        for line in root.slate-lines : Rectangle {
+                            x: 12px + line.x * 1px;
+                            y: 12px + line.y * 1px;
+                            width: line.width * 1px;
+                            height: 3.5px;
+                            border-radius: 1px;
+                            background: line.color-index == 0
+                                ? #ef5048
+                                : line.color-index == 1
+                                    ? #ffd24a
+                                    : #ece9e1;
+                            opacity: line.opacity;
+                        }
+                    }
+                }
+            }
+
             HorizontalLayout {
-                visible: root.visualizer-style != 5;
+                visible: root.visualizer-style != 5 && root.visualizer-style != 6;
                 y: (parent.height - self.height) / 2;
                 height: root.visualizer-style == 4 ? 88px : 19px;
                 padding-left: root.visualizer-style >= 4 ? 0px : 9px;

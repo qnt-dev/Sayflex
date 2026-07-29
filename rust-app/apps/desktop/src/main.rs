@@ -624,6 +624,8 @@ enum VisualizerStyle {
     CircularSpectrum,
     #[serde(alias = "flow_sphere_preview")]
     FlowSphere,
+    #[serde(alias = "writing_slate_preview")]
+    WritingSlate,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -663,6 +665,7 @@ impl VisualizerStyle {
             3 => Some(Self::BroadcastMic),
             4 => Some(Self::CircularSpectrum),
             5 => Some(Self::FlowSphere),
+            6 => Some(Self::WritingSlate),
             _ => None,
         }
     }
@@ -675,11 +678,15 @@ impl VisualizerStyle {
             Self::BroadcastMic => 3,
             Self::CircularSpectrum => 4,
             Self::FlowSphere => 5,
+            Self::WritingSlate => 6,
         }
     }
 
     const fn uses_transparent_window(self) -> bool {
-        matches!(self, Self::CircularSpectrum | Self::FlowSphere)
+        matches!(
+            self,
+            Self::CircularSpectrum | Self::FlowSphere | Self::WritingSlate
+        )
     }
 }
 
@@ -750,6 +757,7 @@ enum IndicatorMode {
 struct IndicatorAnimation {
     bars: Rc<VecModel<f32>>,
     spectrum: Rc<VecModel<f32>>,
+    slate_lines: Rc<VecModel<SlateLine>>,
     style: VisualizerStyle,
     mode: IndicatorMode,
     target_level: f32,
@@ -762,6 +770,173 @@ struct IndicatorAnimation {
     flow_sphere_palette: flow_sphere::FlowSpherePalette,
     last_frame: Instant,
     flow_sphere_renderer: Option<flow_sphere::FlowSphereRenderer>,
+    writing_slate: WritingSlateAnimation,
+}
+
+#[derive(Clone)]
+struct WritingSlateLine {
+    x: f32,
+    width: f32,
+    target_width: f32,
+    y: f32,
+    target_y: f32,
+    opacity: f32,
+    glow: f32,
+    color_index: i32,
+    active: bool,
+}
+
+#[derive(Default)]
+struct WritingSlateAnimation {
+    lines: Vec<WritingSlateLine>,
+    voice_active: bool,
+    silence_seconds: f32,
+    next_line_delay: f32,
+    sequence_index: usize,
+    cursor_x: f32,
+    cursor_y: f32,
+}
+
+impl WritingSlateAnimation {
+    const CONTENT_WIDTH: f32 = 98.0;
+    const SCROLL_Y: f32 = 88.0;
+    const ROW_STEP: f32 = 8.5;
+    const SEGMENT_GAP: f32 = 4.0;
+    const COLOR_SEQUENCE: [i32; 12] = [0, 1, 2, 1, 0, 2, 0, 2, 1, 2, 0, 1];
+    const WIDTH_SEQUENCE: [f32; 12] = [
+        18.0, 27.0, 12.0, 22.0, 15.0, 30.0, 20.0, 10.0, 25.0, 16.0, 29.0, 13.0,
+    ];
+    const CADENCE_SEQUENCE: [f32; 12] = [
+        0.072, 0.060, 0.086, 0.104, 0.066, 0.080, 0.058, 0.096, 0.070, 0.088, 0.062, 0.100,
+    ];
+
+    fn reset(&mut self) {
+        self.lines.clear();
+        self.voice_active = false;
+        self.silence_seconds = 0.0;
+        self.next_line_delay = 0.0;
+        self.sequence_index = 0;
+        self.cursor_x = 0.0;
+        self.cursor_y = 0.0;
+    }
+
+    fn stop_input(&mut self) {
+        self.voice_active = false;
+        self.silence_seconds = 0.0;
+        self.commit_active();
+    }
+
+    fn advance(&mut self, frame_scale: f32, mode: IndicatorMode, energy: f32) -> Vec<SlateLine> {
+        let elapsed_seconds = 0.016 * frame_scale;
+        self.next_line_delay = (self.next_line_delay - elapsed_seconds).max(0.0);
+
+        for line in &mut self.lines {
+            let y_response = 1.0 - 0.72_f32.powf(frame_scale);
+            line.y += (line.target_y - line.y) * y_response;
+            line.glow *= 0.90_f32.powf(frame_scale);
+            let target_opacity = if line.target_y < 0.0 {
+                0.0
+            } else if line.active {
+                1.0
+            } else {
+                0.78
+            };
+            let opacity_response = 1.0 - 0.68_f32.powf(frame_scale);
+            line.opacity += (target_opacity - line.opacity) * opacity_response;
+        }
+
+        if mode == IndicatorMode::Listening {
+            let threshold = if self.voice_active { 0.22 } else { 0.34 };
+            let speaking = energy >= threshold;
+            if speaking {
+                self.voice_active = true;
+                self.silence_seconds = 0.0;
+                if !self.lines.last().is_some_and(|line| line.active) && self.next_line_delay <= 0.0
+                {
+                    self.start_line();
+                }
+                let reached_target =
+                    if let Some(line) = self.lines.last_mut().filter(|line| line.active) {
+                        let fill_response = 1.0 - (1.0 - (0.22 + energy * 0.10)).powf(frame_scale);
+                        line.width += (line.target_width - line.width) * fill_response;
+                        line.glow = line.glow.max((0.34 + energy * 0.66).clamp(0.0, 1.0));
+                        line.opacity = (line.opacity + 0.20 * frame_scale).min(1.0);
+                        line.width >= line.target_width - 0.45
+                    } else {
+                        false
+                    };
+                if reached_target {
+                    self.commit_active();
+                    let cadence =
+                        self.sequence_index.saturating_sub(1) % Self::CADENCE_SEQUENCE.len();
+                    self.next_line_delay = Self::CADENCE_SEQUENCE[cadence];
+                }
+            } else {
+                self.voice_active = false;
+                self.silence_seconds += elapsed_seconds;
+                if self.silence_seconds >= 0.16 {
+                    self.commit_active();
+                }
+            }
+        } else {
+            self.stop_input();
+        }
+
+        self.lines
+            .retain(|line| line.target_y > -Self::ROW_STEP && line.opacity > 0.02);
+        self.lines
+            .iter()
+            .map(|line| SlateLine {
+                x: line.x,
+                width: line.width,
+                y: line.y,
+                opacity: line.opacity,
+                glow: line.glow,
+                color_index: line.color_index,
+            })
+            .collect()
+    }
+
+    fn start_line(&mut self) {
+        let sequence = self.sequence_index % Self::COLOR_SEQUENCE.len();
+        let target_width = Self::WIDTH_SEQUENCE[sequence];
+        if self.cursor_x > 0.0 && self.cursor_x + target_width > Self::CONTENT_WIDTH {
+            self.cursor_x = 0.0;
+            self.cursor_y += Self::ROW_STEP;
+        }
+        if self.cursor_y >= Self::SCROLL_Y {
+            for line in &mut self.lines {
+                line.target_y -= Self::ROW_STEP;
+            }
+            self.cursor_y -= Self::ROW_STEP;
+        }
+        self.lines.retain(|line| line.target_y > -Self::ROW_STEP);
+
+        let x = self.cursor_x;
+        let target_y = self.cursor_y;
+        self.sequence_index = self.sequence_index.wrapping_add(1);
+        self.lines.push(WritingSlateLine {
+            x,
+            width: 3.0,
+            target_width,
+            y: target_y + 2.5,
+            target_y,
+            opacity: 0.34,
+            glow: 1.0,
+            color_index: Self::COLOR_SEQUENCE[sequence],
+            active: true,
+        });
+        self.cursor_x += target_width + Self::SEGMENT_GAP;
+    }
+
+    fn commit_active(&mut self) {
+        if let Some(line) = self.lines.last_mut().filter(|line| line.active) {
+            line.active = false;
+            line.width = line.width.max(6.0).min(line.target_width);
+            line.opacity = line.opacity.max(0.78);
+            line.glow = line.glow.max(0.18);
+        }
+    }
 }
 
 struct IndicatorFrame {
@@ -785,10 +960,15 @@ struct IndicatorFrame {
 }
 
 impl IndicatorAnimation {
-    fn new(bars: Rc<VecModel<f32>>, spectrum: Rc<VecModel<f32>>) -> Self {
+    fn new(
+        bars: Rc<VecModel<f32>>,
+        spectrum: Rc<VecModel<f32>>,
+        slate_lines: Rc<VecModel<SlateLine>>,
+    ) -> Self {
         Self {
             bars,
             spectrum,
+            slate_lines,
             style: VisualizerStyle::default(),
             mode: IndicatorMode::Hidden,
             target_level: 0.08,
@@ -801,6 +981,7 @@ impl IndicatorAnimation {
             flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
             last_frame: Instant::now(),
             flow_sphere_renderer: None,
+            writing_slate: WritingSlateAnimation::default(),
         }
     }
 
@@ -825,6 +1006,10 @@ impl IndicatorAnimation {
         self.display_spectrum.fill(0.0);
         self.mode_progress = 0.0;
         self.flow_voice_impulse = 0.0;
+        if self.style == VisualizerStyle::WritingSlate {
+            self.writing_slate.reset();
+            self.slate_lines.set_vec(Vec::new());
+        }
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
     }
 
@@ -849,6 +1034,9 @@ impl IndicatorAnimation {
         self.target_spectrum.fill(0.0);
         self.mode_progress = 0.0;
         self.flow_voice_impulse = 0.0;
+        if self.style == VisualizerStyle::WritingSlate {
+            self.writing_slate.stop_input();
+        }
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
     }
 
@@ -883,6 +1071,14 @@ impl IndicatorAnimation {
         let frame = self.advance_frame(frame_scale);
         self.bars.set_vec(frame.heights);
         self.spectrum.set_vec(frame.spectrum_heights);
+        if self.style == VisualizerStyle::WritingSlate {
+            let slate_energy = self.target_level.max(self.display_level);
+            self.slate_lines.set_vec(self.writing_slate.advance(
+                frame_scale,
+                self.mode,
+                slate_energy,
+            ));
+        }
 
         if let Some(indicator) = indicator.upgrade() {
             indicator.set_visualizer_style(self.style.index());
@@ -1377,11 +1573,14 @@ fn new_indicator()
         4.0, 6.0, 9.0, 12.0, 15.0, 15.0, 12.0, 9.0, 6.0, 4.0,
     ]));
     let spectrum_bands = Rc::new(VecModel::from(vec![2.8; AUDIO_SPECTRUM_BANDS]));
+    let slate_lines = Rc::new(VecModel::from(Vec::<SlateLine>::new()));
     indicator.set_bar_heights(ModelRc::from(Rc::clone(&indicator_bars)));
     indicator.set_spectrum_heights(ModelRc::from(Rc::clone(&spectrum_bands)));
+    indicator.set_slate_lines(ModelRc::from(Rc::clone(&slate_lines)));
     let animation = Rc::new(RefCell::new(IndicatorAnimation::new(
         indicator_bars,
         spectrum_bands,
+        slate_lines,
     )));
     Ok((indicator, animation))
 }
@@ -1404,11 +1603,17 @@ fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyl
         "--indicator-preview=flow-sphere" | "--indicator-preview=sphere" => {
             Some(VisualizerStyle::FlowSphere)
         }
+        "--indicator-preview=slate" | "--indicator-preview=writing-slate" => {
+            Some(VisualizerStyle::WritingSlate)
+        }
         "--indicator-preview-live=circle" | "--indicator-preview-live=circular-spectrum" => {
             Some(VisualizerStyle::CircularSpectrum)
         }
         "--indicator-preview-live=flow-sphere" | "--indicator-preview-live=sphere" => {
             Some(VisualizerStyle::FlowSphere)
+        }
+        "--indicator-preview-live=slate" | "--indicator-preview-live=writing-slate" => {
+            Some(VisualizerStyle::WritingSlate)
         }
         _ => None,
     }
@@ -1479,14 +1684,7 @@ fn run_indicator_preview(
                 .as_deref()
                 .and_then(native_window_handle)
                 .is_some_and(|handle| {
-                    configure_indicator_native_window(
-                        handle,
-                        None,
-                        matches!(
-                            style,
-                            VisualizerStyle::CircularSpectrum | VisualizerStyle::FlowSphere
-                        ),
-                    )
+                    configure_indicator_native_window(handle, None, style.uses_transparent_window())
                 });
             if !configured {
                 eprintln!("could not configure recording indicator preview");
@@ -1576,10 +1774,16 @@ fn run_indicator_preview(
     let live_signal_for_timer = Arc::clone(&live_signal);
     timer.start(TimerMode::Repeated, Duration::from_millis(12), move || {
         let elapsed = started.elapsed().as_secs_f32();
-        let cycle_position = elapsed % 10.0;
-        let next_segment = if cycle_position < 7.0 {
+        let (cycle_length, listening_until, processing_until) =
+            if style == VisualizerStyle::WritingSlate {
+                (17.0, 14.0, 16.0)
+            } else {
+                (10.0, 7.0, 9.0)
+            };
+        let cycle_position = elapsed % cycle_length;
+        let next_segment = if cycle_position < listening_until {
             IndicatorMode::Listening
-        } else if cycle_position < 9.0 {
+        } else if cycle_position < processing_until {
             IndicatorMode::Processing
         } else {
             IndicatorMode::Success
@@ -3671,6 +3875,7 @@ fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
+        let indicator = indicator.as_weak();
         let indicator_animation = Rc::clone(indicator_animation);
         settings.on_select_visualizer(move |index| {
             let Some(style) = VisualizerStyle::from_index(index) else {
@@ -3678,6 +3883,9 @@ fn wire_settings(
             };
             state.borrow_mut().visualizer_style = style;
             indicator_animation.borrow_mut().set_style(style);
+            if let Some(indicator) = indicator.upgrade() {
+                indicator.set_visualizer_style(style.index());
+            }
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
             set_indicator_status(
@@ -4890,14 +5098,15 @@ mod indicator_animation_tests {
     use slint::VecModel;
 
     use super::{
-        CircularSpectrumPalette, IndicatorAnimation, VisualizerStyle, flow_sphere,
-        indicator_preview_style_for_argument,
+        CircularSpectrumPalette, IndicatorAnimation, IndicatorMode, SlateLine, VisualizerStyle,
+        WritingSlateAnimation, flow_sphere, indicator_preview_style_for_argument,
     };
 
     fn animation() -> IndicatorAnimation {
         IndicatorAnimation::new(
             Rc::new(VecModel::from(vec![0.0; 10])),
             Rc::new(VecModel::from(vec![0.0; AUDIO_SPECTRUM_BANDS])),
+            Rc::new(VecModel::from(Vec::<SlateLine>::new())),
         )
     }
 
@@ -4972,7 +5181,10 @@ mod indicator_animation_tests {
             VisualizerStyle::from_index(5),
             Some(VisualizerStyle::FlowSphere)
         );
-        assert_eq!(VisualizerStyle::from_index(6), None);
+        assert_eq!(
+            VisualizerStyle::from_index(6),
+            Some(VisualizerStyle::WritingSlate)
+        );
         assert_eq!(
             serde_json::to_string(&VisualizerStyle::FlowSphere).unwrap(),
             "\"flow_sphere\""
@@ -4980,6 +5192,57 @@ mod indicator_animation_tests {
         assert_eq!(
             serde_json::from_str::<VisualizerStyle>("\"flow_sphere_preview\"").unwrap(),
             VisualizerStyle::FlowSphere
+        );
+        assert_eq!(
+            serde_json::to_string(&VisualizerStyle::WritingSlate).unwrap(),
+            "\"writing_slate\""
+        );
+        assert_eq!(
+            serde_json::from_str::<VisualizerStyle>("\"writing_slate_preview\"").unwrap(),
+            VisualizerStyle::WritingSlate
+        );
+    }
+
+    #[test]
+    fn writing_slate_builds_short_segments_and_scrolls_after_two_thirds() {
+        let mut slate = WritingSlateAnimation::default();
+        for _ in 0..80 {
+            slate.start_line();
+            slate.commit_active();
+        }
+        let mut lines = Vec::new();
+        for _ in 0..12 {
+            lines = slate.advance(1.0, IndicatorMode::Listening, 0.0);
+        }
+        let colors = lines
+            .iter()
+            .map(|line| line.color_index)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(colors.len() >= 3);
+        assert!(lines.len() < 80);
+        assert!(lines.iter().all(|line| line.width <= 30.0));
+        assert!(
+            lines
+                .windows(2)
+                .any(|pair| (pair[0].y - pair[1].y).abs() < 0.2)
+        );
+        assert!(lines.iter().all(|line| line.y <= 91.0));
+    }
+
+    #[test]
+    fn writing_slate_is_available_in_settings_and_preview_modes() {
+        assert_eq!(
+            VisualizerStyle::from_index(6),
+            Some(VisualizerStyle::WritingSlate)
+        );
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview=writing-slate"),
+            Some(VisualizerStyle::WritingSlate)
+        );
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview-live=slate"),
+            Some(VisualizerStyle::WritingSlate)
         );
     }
 

@@ -104,7 +104,7 @@ prepared segments without unloading the already warmed model.
 cd .\rust-app
 cargo test --workspace
 .\scripts\publish.ps1
-.\scripts\build-installer.ps1 -Version 0.5.15 -SkipPublish
+.\scripts\build-installer.ps1 -Version 0.5.16 -SkipPublish
 ```
 
 The measured warm-path design and benchmark gate are documented in
