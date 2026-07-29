@@ -797,6 +797,12 @@ export component SettingsWindow inherits Window {
                                 selected: root.selected-visualizer == 4;
                                 clicked => { root.select-visualizer(4); }
                             }
+                            VisualizerChoice {
+                                label: "Flow Sphere";
+                                detail: "Voice-reactive point cloud";
+                                selected: root.selected-visualizer == 5;
+                                clicked => { root.select-visualizer(5); }
+                            }
                         }
 
                         if root.selected-visualizer == 4 : VerticalLayout {

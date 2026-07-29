@@ -622,7 +622,8 @@ enum VisualizerStyle {
     FluidRibbon,
     BroadcastMic,
     CircularSpectrum,
-    FlowSpherePreview,
+    #[serde(alias = "flow_sphere_preview")]
+    FlowSphere,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,6 +662,7 @@ impl VisualizerStyle {
             2 => Some(Self::FluidRibbon),
             3 => Some(Self::BroadcastMic),
             4 => Some(Self::CircularSpectrum),
+            5 => Some(Self::FlowSphere),
             _ => None,
         }
     }
@@ -672,8 +674,12 @@ impl VisualizerStyle {
             Self::FluidRibbon => 2,
             Self::BroadcastMic => 3,
             Self::CircularSpectrum => 4,
-            Self::FlowSpherePreview => 5,
+            Self::FlowSphere => 5,
         }
+    }
+
+    const fn uses_transparent_window(self) -> bool {
+        matches!(self, Self::CircularSpectrum | Self::FlowSphere)
     }
 }
 
@@ -798,8 +804,10 @@ impl IndicatorAnimation {
 
     fn set_style(&mut self, style: VisualizerStyle) {
         self.style = style;
-        if style == VisualizerStyle::FlowSpherePreview && self.flow_sphere_renderer.is_none() {
+        if style == VisualizerStyle::FlowSphere && self.flow_sphere_renderer.is_none() {
             self.flow_sphere_renderer = Some(flow_sphere::FlowSphereRenderer::start());
+        } else if style != VisualizerStyle::FlowSphere {
+            self.flow_sphere_renderer = None;
         }
     }
 
@@ -817,7 +825,7 @@ impl IndicatorAnimation {
     fn set_microphone_signal(&mut self, microphone_level: f32, spectrum: &[f32]) {
         if self.mode == IndicatorMode::Listening {
             let next_level = (microphone_level.clamp(0.0, 1.0).sqrt() * 2.35).clamp(0.0, 1.0);
-            if self.style == VisualizerStyle::FlowSpherePreview {
+            if self.style == VisualizerStyle::FlowSphere {
                 let onset = (next_level - self.target_level).max(0.0);
                 self.flow_voice_impulse =
                     self.flow_voice_impulse.max((onset * 1.65).clamp(0.0, 1.0));
@@ -888,7 +896,7 @@ impl IndicatorAnimation {
             indicator.set_mic_near_height(frame.mic_near_height);
             indicator.set_visual_scale(frame.visual_scale);
             indicator.set_visual_opacity(frame.visual_opacity);
-            if self.style == VisualizerStyle::FlowSpherePreview
+            if self.style == VisualizerStyle::FlowSphere
                 && let Some(renderer) = &self.flow_sphere_renderer
                 && let Some(frame) = renderer.render_latest(
                     self.phase,
@@ -907,7 +915,7 @@ impl IndicatorAnimation {
         if self.mode == IndicatorMode::Success {
             self.mode_progress = (self.mode_progress + 0.045 * frame_scale).min(1.0);
         }
-        let level_response: f32 = if self.style == VisualizerStyle::FlowSpherePreview {
+        let level_response: f32 = if self.style == VisualizerStyle::FlowSphere {
             if self.target_level > self.display_level {
                 0.34
             } else {
@@ -920,12 +928,12 @@ impl IndicatorAnimation {
         self.display_level += (self.target_level - self.display_level) * smoothing;
         for (display, target) in self.display_spectrum.iter_mut().zip(self.target_spectrum) {
             let response = if target > *display {
-                if self.style == VisualizerStyle::FlowSpherePreview {
+                if self.style == VisualizerStyle::FlowSphere {
                     0.52_f32
                 } else {
                     0.46_f32
                 }
-            } else if self.style == VisualizerStyle::FlowSpherePreview {
+            } else if self.style == VisualizerStyle::FlowSphere {
                 0.095_f32
             } else {
                 0.16_f32
@@ -935,7 +943,7 @@ impl IndicatorAnimation {
         }
         let flow_activity = ((self.display_level - 0.14) / 0.48).clamp(0.0, 1.0);
         let phase_step = match self.mode {
-            IndicatorMode::Listening if self.style == VisualizerStyle::FlowSpherePreview => {
+            IndicatorMode::Listening if self.style == VisualizerStyle::FlowSphere => {
                 0.045 + flow_activity * 0.245 + self.flow_voice_impulse * 0.075
             }
             IndicatorMode::Listening => 0.29,
@@ -1382,13 +1390,13 @@ fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyl
             Some(VisualizerStyle::CircularSpectrum)
         }
         "--indicator-preview=flow-sphere" | "--indicator-preview=sphere" => {
-            Some(VisualizerStyle::FlowSpherePreview)
+            Some(VisualizerStyle::FlowSphere)
         }
         "--indicator-preview-live=circle" | "--indicator-preview-live=circular-spectrum" => {
             Some(VisualizerStyle::CircularSpectrum)
         }
         "--indicator-preview-live=flow-sphere" | "--indicator-preview-live=sphere" => {
-            Some(VisualizerStyle::FlowSpherePreview)
+            Some(VisualizerStyle::FlowSphere)
         }
         _ => None,
     }
@@ -1449,7 +1457,7 @@ fn run_indicator_preview(
                         None,
                         matches!(
                             style,
-                            VisualizerStyle::CircularSpectrum | VisualizerStyle::FlowSpherePreview
+                            VisualizerStyle::CircularSpectrum | VisualizerStyle::FlowSphere
                         ),
                     )
                 });
@@ -4573,8 +4581,8 @@ fn precreate_indicator(indicator: &RecordingIndicator) {
                         configure_indicator_native_window(
                             handle,
                             None,
-                            indicator.get_visualizer_style()
-                                == VisualizerStyle::CircularSpectrum.index(),
+                            VisualizerStyle::from_index(indicator.get_visualizer_style())
+                                .is_some_and(VisualizerStyle::uses_transparent_window),
                         )
                     }),
                     Err(_) => false,
@@ -4609,7 +4617,8 @@ fn configure_indicator_window(
         configure_indicator_native_window(
             handle,
             target_window_handle,
-            matches!(indicator.get_visualizer_style(), 4 | 5),
+            VisualizerStyle::from_index(indicator.get_visualizer_style())
+                .is_some_and(VisualizerStyle::uses_transparent_window),
         )
     })
 }
@@ -4902,25 +4911,37 @@ mod indicator_animation_tests {
             VisualizerStyle::from_index(4),
             Some(VisualizerStyle::CircularSpectrum)
         );
-        assert_eq!(VisualizerStyle::from_index(5), None);
+        assert_eq!(
+            VisualizerStyle::from_index(5),
+            Some(VisualizerStyle::FlowSphere)
+        );
+        assert_eq!(VisualizerStyle::from_index(6), None);
+        assert_eq!(
+            serde_json::to_string(&VisualizerStyle::FlowSphere).unwrap(),
+            "\"flow_sphere\""
+        );
+        assert_eq!(
+            serde_json::from_str::<VisualizerStyle>("\"flow_sphere_preview\"").unwrap(),
+            VisualizerStyle::FlowSphere
+        );
     }
 
     #[test]
     fn flow_sphere_live_preview_is_explicitly_addressable() {
         assert_eq!(
             indicator_preview_style_for_argument("--indicator-preview-live=flow-sphere"),
-            Some(VisualizerStyle::FlowSpherePreview)
+            Some(VisualizerStyle::FlowSphere)
         );
         assert_eq!(
             indicator_preview_style_for_argument("--indicator-preview-live=sphere"),
-            Some(VisualizerStyle::FlowSpherePreview)
+            Some(VisualizerStyle::FlowSphere)
         );
     }
 
     #[test]
     fn flow_sphere_is_calm_in_silence_and_accelerates_on_voice_onset() {
         let mut animation = animation();
-        animation.set_style(VisualizerStyle::FlowSpherePreview);
+        animation.set_style(VisualizerStyle::FlowSphere);
         animation.begin_listening();
 
         let quiet_start = animation.phase;
