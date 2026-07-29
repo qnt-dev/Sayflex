@@ -759,6 +759,7 @@ struct IndicatorAnimation {
     phase: f32,
     mode_progress: f32,
     flow_voice_impulse: f32,
+    flow_sphere_palette: flow_sphere::FlowSpherePalette,
     last_frame: Instant,
     flow_sphere_renderer: Option<flow_sphere::FlowSphereRenderer>,
 }
@@ -797,6 +798,7 @@ impl IndicatorAnimation {
             phase: 0.0,
             mode_progress: 0.0,
             flow_voice_impulse: 0.0,
+            flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
             last_frame: Instant::now(),
             flow_sphere_renderer: None,
         }
@@ -809,6 +811,10 @@ impl IndicatorAnimation {
         } else if style != VisualizerStyle::FlowSphere {
             self.flow_sphere_renderer = None;
         }
+    }
+
+    fn set_flow_sphere_palette(&mut self, palette: flow_sphere::FlowSpherePalette) {
+        self.flow_sphere_palette = palette;
     }
 
     fn begin_listening(&mut self) {
@@ -902,6 +908,7 @@ impl IndicatorAnimation {
                     self.phase,
                     self.display_level,
                     self.flow_voice_impulse,
+                    self.flow_sphere_palette,
                     &self.display_spectrum,
                     frame.visual_opacity,
                 )
@@ -1055,6 +1062,7 @@ struct AppState {
     fast_release_previews: bool,
     visualizer_style: VisualizerStyle,
     circular_spectrum_palette: CircularSpectrumPalette,
+    flow_sphere_palette: flow_sphere::FlowSpherePalette,
     input_ready: bool,
     speech_ready: bool,
     indicator_session: Option<SessionId>,
@@ -1097,6 +1105,7 @@ impl AppState {
             fast_release_previews: saved_settings.fast_release_previews,
             visualizer_style: saved_settings.visualizer_style,
             circular_spectrum_palette: saved_settings.circular_spectrum_palette,
+            flow_sphere_palette: saved_settings.flow_sphere_palette,
             input_ready: false,
             speech_ready: false,
             indicator_session: None,
@@ -1217,6 +1226,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     indicator_animation
         .borrow_mut()
         .set_style(saved_settings.visualizer_style);
+    indicator_animation
+        .borrow_mut()
+        .set_flow_sphere_palette(saved_settings.flow_sphere_palette);
     indicator.set_visualizer_style(saved_settings.visualizer_style.index());
     indicator.set_circular_palette(saved_settings.circular_spectrum_palette.index());
     let chooser = SelectionChooser::new()?;
@@ -1417,6 +1429,20 @@ fn indicator_preview_palette() -> CircularSpectrumPalette {
         .unwrap_or_default()
 }
 
+fn indicator_preview_flow_sphere_palette() -> flow_sphere::FlowSpherePalette {
+    env::args()
+        .find_map(|argument| match argument.as_str() {
+            "--flow-sphere-palette=reference" | "--flow-sphere-palette=original" => {
+                Some(flow_sphere::FlowSpherePalette::Reference)
+            }
+            "--flow-sphere-palette=black-yellow" | "--flow-sphere-palette=yellow" => {
+                Some(flow_sphere::FlowSpherePalette::BlackYellow)
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 fn translation_preview_mode() -> Option<bool> {
     env::args().find_map(|argument| match argument.as_str() {
         "--translation-preview" => Some(false),
@@ -1435,6 +1461,7 @@ fn run_indicator_preview(
     {
         let mut animation = animation.borrow_mut();
         animation.set_style(style);
+        animation.set_flow_sphere_palette(indicator_preview_flow_sphere_palette());
         animation.begin_listening();
     }
     indicator.set_visualizer_style(style.index());
@@ -3682,6 +3709,26 @@ fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
+        let indicator_animation = Rc::clone(indicator_animation);
+        settings.on_select_flow_sphere_palette(move |index| {
+            let Some(palette) = flow_sphere::FlowSpherePalette::from_index(index) else {
+                return;
+            };
+            state.borrow_mut().flow_sphere_palette = palette;
+            indicator_animation
+                .borrow_mut()
+                .set_flow_sphere_palette(palette);
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+            set_indicator_status(
+                &settings_weak,
+                "Flow Sphere palette updated for the next dictation.",
+            );
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         settings.on_clear_history(move || {
             let _ = workers.speech.send(&SpeechWorkerCommand::ClearHistory);
@@ -4306,6 +4353,7 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
     );
     settings.set_selected_visualizer(state.visualizer_style.index());
     settings.set_selected_circular_palette(state.circular_spectrum_palette.index());
+    settings.set_selected_flow_sphere_palette(state.flow_sphere_palette.index());
     settings.set_translation_ready(state.translation_ready);
     settings.set_history_enabled_label(
         if state.history_enabled {
@@ -4677,6 +4725,7 @@ struct SavedSettings {
     fast_release_previews: bool,
     visualizer_style: VisualizerStyle,
     circular_spectrum_palette: CircularSpectrumPalette,
+    flow_sphere_palette: flow_sphere::FlowSpherePalette,
     selected_translation_tier: Option<TranslationTier>,
     translation_enabled: bool,
     layout_enabled: bool,
@@ -4694,6 +4743,7 @@ impl Default for SavedSettings {
             fast_release_previews: true,
             visualizer_style: VisualizerStyle::default(),
             circular_spectrum_palette: CircularSpectrumPalette::default(),
+            flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
             selected_translation_tier: None,
             translation_enabled: false,
             layout_enabled: true,
@@ -4732,6 +4782,11 @@ fn load_settings() -> SavedSettings {
     let circular_spectrum_palette = value
         .as_ref()
         .and_then(|value| value.get("circular_spectrum_palette"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let flow_sphere_palette = value
+        .as_ref()
+        .and_then(|value| value.get("flow_sphere_palette"))
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
     let selected_translation_tier = value
@@ -4774,6 +4829,7 @@ fn load_settings() -> SavedSettings {
         fast_release_previews,
         visualizer_style,
         circular_spectrum_palette,
+        flow_sphere_palette,
         selected_translation_tier,
         translation_enabled,
         layout_enabled,
@@ -4795,6 +4851,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
         "fast_release_previews": state.fast_release_previews,
         "visualizer_style": state.visualizer_style,
         "circular_spectrum_palette": state.circular_spectrum_palette,
+        "flow_sphere_palette": state.flow_sphere_palette,
         "selected_translation_tier": state.selected_translation_tier,
         "translation_enabled": state.translation_enabled,
         "layout_enabled": state.layout_enabled,
@@ -4833,7 +4890,7 @@ mod indicator_animation_tests {
     use slint::VecModel;
 
     use super::{
-        CircularSpectrumPalette, IndicatorAnimation, VisualizerStyle,
+        CircularSpectrumPalette, IndicatorAnimation, VisualizerStyle, flow_sphere,
         indicator_preview_style_for_argument,
     };
 
@@ -4983,6 +5040,25 @@ mod indicator_animation_tests {
         assert_eq!(
             serde_json::from_str::<CircularSpectrumPalette>("\"monochrome\"").unwrap(),
             CircularSpectrumPalette::Monochrome
+        );
+    }
+
+    #[test]
+    fn every_flow_sphere_palette_maps_to_a_persisted_value() {
+        assert_eq!(
+            flow_sphere::FlowSpherePalette::from_index(0),
+            Some(flow_sphere::FlowSpherePalette::Reference)
+        );
+        assert_eq!(
+            flow_sphere::FlowSpherePalette::from_index(1),
+            Some(flow_sphere::FlowSpherePalette::BlackYellow)
+        );
+        assert_eq!(flow_sphere::FlowSpherePalette::from_index(2), None);
+        assert_eq!(flow_sphere::FlowSpherePalette::Reference.index(), 0);
+        assert_eq!(flow_sphere::FlowSpherePalette::BlackYellow.index(), 1);
+        assert_eq!(
+            serde_json::to_string(&flow_sphere::FlowSpherePalette::BlackYellow).unwrap(),
+            "\"black_yellow\""
         );
     }
 

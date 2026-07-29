@@ -362,6 +362,7 @@ export component SettingsWindow inherits Window {
     in-out property <string> release-optimization-label: "Release optimization: fastest";
     in-out property <int> selected-visualizer: 0;
     in-out property <int> selected-circular-palette: 0;
+    in-out property <int> selected-flow-sphere-palette: 0;
     in property <[ModelRow]> model-rows;
     in property <[ModelRow]> translation-model-rows;
     in property <[HistoryRow]> history-rows;
@@ -381,6 +382,7 @@ export component SettingsWindow inherits Window {
     callback toggle-release-optimization();
     callback select-visualizer(int);
     callback select-circular-palette(int);
+    callback select-flow-sphere-palette(int);
     callback toggle-translation-enabled();
     callback toggle-layout-enabled();
     callback cycle-text-action-mode();
@@ -738,7 +740,9 @@ export component SettingsWindow inherits Window {
                 spacing: 10px;
 
                 Rectangle {
-                    height: root.selected-visualizer == 4 ? 164px : 96px;
+                    height: root.selected-visualizer == 4 || root.selected-visualizer == 5
+                        ? 164px
+                        : 96px;
                     vertical-stretch: 0;
                     border-radius: 9px;
                     border-width: 1px;
@@ -840,6 +844,37 @@ export component SettingsWindow inherits Window {
                                     color-c: #56616d;
                                     selected: root.selected-circular-palette == 2;
                                     clicked => { root.select-circular-palette(2); }
+                                }
+                            }
+                        }
+
+                        if root.selected-visualizer == 5 : VerticalLayout {
+                            height: 58px;
+                            vertical-stretch: 0;
+                            spacing: 6px;
+
+                            Eyebrow { text: "FLOW SPHERE PALETTE"; }
+
+                            HorizontalLayout {
+                                height: 34px;
+                                vertical-stretch: 0;
+                                spacing: 6px;
+
+                                CircularPaletteChoice {
+                                    label: "Reference";
+                                    color-a: #3cff42;
+                                    color-b: #b8ff20;
+                                    color-c: #fff45a;
+                                    selected: root.selected-flow-sphere-palette == 0;
+                                    clicked => { root.select-flow-sphere-palette(0); }
+                                }
+                                CircularPaletteChoice {
+                                    label: "Black + Yellow";
+                                    color-a: #191914;
+                                    color-b: #9f6300;
+                                    color-c: #ffe844;
+                                    selected: root.selected-flow-sphere-palette == 1;
+                                    clicked => { root.select-flow-sphere-palette(1); }
                                 }
                             }
                         }

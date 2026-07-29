@@ -3,16 +3,43 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use serde::{Deserialize, Serialize};
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
 pub const FLOW_SPHERE_IMAGE_SIZE: u32 = 116;
 const SPECTRUM_BANDS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowSpherePalette {
+    #[default]
+    Reference,
+    BlackYellow,
+}
+
+impl FlowSpherePalette {
+    pub const fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::Reference),
+            1 => Some(Self::BlackYellow),
+            _ => None,
+        }
+    }
+
+    pub const fn index(self) -> i32 {
+        match self {
+            Self::Reference => 0,
+            Self::BlackYellow => 1,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct RenderRequest {
     phase: f32,
     energy: f32,
     impulse: f32,
+    palette: FlowSpherePalette,
     spectrum: [f32; SPECTRUM_BANDS],
     opacity: f32,
 }
@@ -39,6 +66,7 @@ impl FlowSphereRenderer {
                         request.phase,
                         request.energy,
                         request.impulse,
+                        request.palette,
                         &request.spectrum,
                         request.opacity,
                     );
@@ -67,6 +95,7 @@ impl FlowSphereRenderer {
         phase: f32,
         energy: f32,
         impulse: f32,
+        palette: FlowSpherePalette,
         spectrum: &[f32],
         opacity: f32,
     ) -> Option<Image> {
@@ -79,6 +108,7 @@ impl FlowSphereRenderer {
                 phase,
                 energy,
                 impulse,
+                palette,
                 spectrum: bands,
                 opacity,
             }) {
@@ -162,6 +192,7 @@ fn render_flow_sphere_buffer(
     phase: f32,
     energy: f32,
     impulse: f32,
+    palette: FlowSpherePalette,
     spectrum: &[f32],
     opacity: f32,
 ) -> SharedPixelBuffer<Rgba8Pixel> {
@@ -211,10 +242,13 @@ fn render_flow_sphere_buffer(
             let alpha = fade
                 * (surface_alpha + voice_presence * 0.105)
                     .max(silhouette * (0.62 + flow * 0.32 + voice_presence * 0.22));
-            let color = (
-                (60.0 + vertical_mix * 195.0) as u8,
-                255,
-                (66.0 - vertical_mix * 36.0) as u8,
+            let color = flow_sphere_color(
+                palette,
+                vertical_mix,
+                depth,
+                silhouette,
+                flow,
+                voice_presence,
             );
             surface.draw_glowing_point(
                 x,
@@ -228,6 +262,60 @@ fn render_flow_sphere_buffer(
         }
     }
     buffer
+}
+
+fn flow_sphere_color(
+    palette: FlowSpherePalette,
+    vertical_mix: f32,
+    depth: f32,
+    silhouette: f32,
+    flow: f32,
+    voice_presence: f32,
+) -> (u8, u8, u8) {
+    match palette {
+        FlowSpherePalette::Reference => (
+            (60.0 + vertical_mix * 195.0) as u8,
+            255,
+            (66.0 - vertical_mix * 36.0) as u8,
+        ),
+        FlowSpherePalette::BlackYellow => {
+            let position = (flow * 0.42
+                + depth * 0.20
+                + silhouette * 0.24
+                + voice_presence * 0.16
+                + vertical_mix * 0.08)
+                .clamp(0.0, 1.0);
+            if position < 0.38 {
+                mix_rgb((25, 25, 20), (142, 88, 0), smoothstep(0.0, 0.38, position))
+            } else if position < 0.78 {
+                mix_rgb(
+                    (142, 88, 0),
+                    (255, 190, 0),
+                    smoothstep(0.38, 0.78, position),
+                )
+            } else {
+                mix_rgb(
+                    (255, 190, 0),
+                    (255, 232, 68),
+                    smoothstep(0.78, 1.0, position),
+                )
+            }
+        }
+    }
+}
+
+fn mix_rgb(left: (u8, u8, u8), right: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |left: u8, right: u8| {
+        (left as f32 + (right as f32 - left as f32) * amount)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (
+        mix(left.0, right.0),
+        mix(left.1, right.1),
+        mix(left.2, right.2),
+    )
 }
 
 fn deform_sphere(
@@ -411,14 +499,18 @@ fn rotate_z(point: SurfacePoint, angle: f32) -> SurfacePoint {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioShape, FLOW_SPHERE_IMAGE_SIZE, render_flow_sphere_buffer};
+    use super::{
+        AudioShape, FLOW_SPHERE_IMAGE_SIZE, FlowSpherePalette, flow_sphere_color,
+        render_flow_sphere_buffer,
+    };
 
     #[test]
     fn sphere_frame_keeps_corners_transparent_and_draws_one_point_cloud() {
         let spectrum = (0..32)
             .map(|index| (index as f32 * 0.37).sin().abs())
             .collect::<Vec<_>>();
-        let mut frame = render_flow_sphere_buffer(1.4, 0.72, 0.4, &spectrum, 1.0);
+        let mut frame =
+            render_flow_sphere_buffer(1.4, 0.72, 0.4, FlowSpherePalette::Reference, &spectrum, 1.0);
         let bytes = frame.make_mut_bytes();
         let corner_alpha = bytes[3];
         let visible_pixels = bytes.chunks_exact(4).filter(|pixel| pixel[3] > 10).count();
@@ -441,12 +533,26 @@ mod tests {
 
     #[test]
     fn active_voice_materially_changes_the_same_point_cloud() {
-        let silent = render_flow_sphere_buffer(2.1, 0.08, 0.0, &[0.0; 32], 1.0);
+        let silent = render_flow_sphere_buffer(
+            2.1,
+            0.08,
+            0.0,
+            FlowSpherePalette::Reference,
+            &[0.0; 32],
+            1.0,
+        );
         let spectrum = std::array::from_fn::<_, 32, _>(|index| {
             let position = index as f32 / 31.0;
             (0.22 + (position * std::f32::consts::TAU * 2.5).sin().abs() * 0.58).clamp(0.0, 1.0)
         });
-        let active = render_flow_sphere_buffer(2.1, 0.68, 0.82, &spectrum, 1.0);
+        let active = render_flow_sphere_buffer(
+            2.1,
+            0.68,
+            0.82,
+            FlowSpherePalette::Reference,
+            &spectrum,
+            1.0,
+        );
         let difference = silent
             .as_bytes()
             .iter()
@@ -455,5 +561,16 @@ mod tests {
             .sum::<usize>();
 
         assert!(difference > 50_000);
+    }
+
+    #[test]
+    fn black_yellow_palette_flows_from_graphite_to_bright_gold() {
+        let graphite = flow_sphere_color(FlowSpherePalette::BlackYellow, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let amber = flow_sphere_color(FlowSpherePalette::BlackYellow, 0.5, 0.5, 0.2, 0.55, 0.4);
+        let yellow = flow_sphere_color(FlowSpherePalette::BlackYellow, 1.0, 1.0, 1.0, 1.0, 1.0);
+
+        assert!(graphite.0 < 40 && graphite.1 < 40 && graphite.2 < 30);
+        assert!(amber.0 > amber.1 && amber.1 > amber.2);
+        assert!(yellow.0 >= 250 && yellow.1 >= 220 && yellow.2 < 90);
     }
 }
