@@ -637,6 +637,14 @@ enum CircularSpectrumPalette {
     Monochrome,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WritingSlateSurface {
+    #[default]
+    DarkPanel,
+    MatteGlass,
+}
+
 impl CircularSpectrumPalette {
     const fn from_index(index: i32) -> Option<Self> {
         match index {
@@ -652,6 +660,23 @@ impl CircularSpectrumPalette {
             Self::Sunset => 0,
             Self::Arctic => 1,
             Self::Monochrome => 2,
+        }
+    }
+}
+
+impl WritingSlateSurface {
+    const fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::DarkPanel),
+            1 => Some(Self::MatteGlass),
+            _ => None,
+        }
+    }
+
+    const fn index(self) -> i32 {
+        match self {
+            Self::DarkPanel => 0,
+            Self::MatteGlass => 1,
         }
     }
 }
@@ -1259,6 +1284,7 @@ struct AppState {
     visualizer_style: VisualizerStyle,
     circular_spectrum_palette: CircularSpectrumPalette,
     flow_sphere_palette: flow_sphere::FlowSpherePalette,
+    writing_slate_surface: WritingSlateSurface,
     input_ready: bool,
     speech_ready: bool,
     indicator_session: Option<SessionId>,
@@ -1302,6 +1328,7 @@ impl AppState {
             visualizer_style: saved_settings.visualizer_style,
             circular_spectrum_palette: saved_settings.circular_spectrum_palette,
             flow_sphere_palette: saved_settings.flow_sphere_palette,
+            writing_slate_surface: saved_settings.writing_slate_surface,
             input_ready: false,
             speech_ready: false,
             indicator_session: None,
@@ -1396,7 +1423,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             argument == "--indicator-preview-live"
                 || argument.starts_with("--indicator-preview-live=")
         });
-        return run_indicator_preview(style, live_microphone);
+        return run_indicator_preview(style, live_microphone, indicator_preview_slate_surface());
     }
     if env::args().any(|argument| argument == "--action-preview") {
         return run_action_palette_preview();
@@ -1427,6 +1454,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .set_flow_sphere_palette(saved_settings.flow_sphere_palette);
     indicator.set_visualizer_style(saved_settings.visualizer_style.index());
     indicator.set_circular_palette(saved_settings.circular_spectrum_palette.index());
+    indicator.set_writing_slate_surface(saved_settings.writing_slate_surface.index());
     let chooser = SelectionChooser::new()?;
     let action_palette = ActionPalette::new()?;
     let translation_preview = TranslationPreview::new()?;
@@ -1606,6 +1634,11 @@ fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyl
         "--indicator-preview=slate" | "--indicator-preview=writing-slate" => {
             Some(VisualizerStyle::WritingSlate)
         }
+        "--indicator-preview=slate-transparent"
+        | "--indicator-preview=writing-slate-transparent" => Some(VisualizerStyle::WritingSlate),
+        "--indicator-preview=slate-frosted" | "--indicator-preview=writing-slate-frosted" => {
+            Some(VisualizerStyle::WritingSlate)
+        }
         "--indicator-preview-live=circle" | "--indicator-preview-live=circular-spectrum" => {
             Some(VisualizerStyle::CircularSpectrum)
         }
@@ -1615,6 +1648,32 @@ fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyl
         "--indicator-preview-live=slate" | "--indicator-preview-live=writing-slate" => {
             Some(VisualizerStyle::WritingSlate)
         }
+        "--indicator-preview-live=slate-transparent"
+        | "--indicator-preview-live=writing-slate-transparent" => {
+            Some(VisualizerStyle::WritingSlate)
+        }
+        "--indicator-preview-live=slate-frosted"
+        | "--indicator-preview-live=writing-slate-frosted" => Some(VisualizerStyle::WritingSlate),
+        _ => None,
+    }
+}
+
+fn indicator_preview_slate_surface() -> WritingSlateSurface {
+    env::args()
+        .find_map(|argument| indicator_preview_slate_surface_for_argument(&argument))
+        .unwrap_or_default()
+}
+
+fn indicator_preview_slate_surface_for_argument(argument: &str) -> Option<WritingSlateSurface> {
+    match argument {
+        "--indicator-preview=slate-transparent"
+        | "--indicator-preview=writing-slate-transparent"
+        | "--indicator-preview-live=slate-transparent"
+        | "--indicator-preview-live=writing-slate-transparent"
+        | "--indicator-preview=slate-frosted"
+        | "--indicator-preview=writing-slate-frosted"
+        | "--indicator-preview-live=slate-frosted"
+        | "--indicator-preview-live=writing-slate-frosted" => Some(WritingSlateSurface::MatteGlass),
         _ => None,
     }
 }
@@ -1659,6 +1718,7 @@ fn translation_preview_mode() -> Option<bool> {
 fn run_indicator_preview(
     style: VisualizerStyle,
     live_microphone: bool,
+    writing_slate_surface: WritingSlateSurface,
 ) -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.IndicatorPreview")?;
@@ -1670,6 +1730,8 @@ fn run_indicator_preview(
         animation.begin_listening();
     }
     indicator.set_visualizer_style(style.index());
+    indicator.set_indicator_title("SayFlex Recording Indicator".into());
+    indicator.set_writing_slate_surface(writing_slate_surface.index());
     indicator.set_circular_palette(indicator_preview_palette().index());
     indicator.set_prepared(true);
     indicator.show()?;
@@ -3943,6 +4005,26 @@ fn wire_settings(
     }
     {
         let settings_weak = settings.as_weak();
+        let indicator = indicator.as_weak();
+        let state = Rc::clone(state);
+        settings.on_select_writing_slate_surface(move |index| {
+            let Some(surface) = WritingSlateSurface::from_index(index) else {
+                return;
+            };
+            state.borrow_mut().writing_slate_surface = surface;
+            if let Some(indicator) = indicator.upgrade() {
+                indicator.set_writing_slate_surface(surface.index());
+            }
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+            set_indicator_status(
+                &settings_weak,
+                "Writing Slate surface updated for the next dictation.",
+            );
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         settings.on_clear_history(move || {
@@ -4569,6 +4651,7 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
     settings.set_selected_visualizer(state.visualizer_style.index());
     settings.set_selected_circular_palette(state.circular_spectrum_palette.index());
     settings.set_selected_flow_sphere_palette(state.flow_sphere_palette.index());
+    settings.set_selected_writing_slate_surface(state.writing_slate_surface.index());
     settings.set_translation_ready(state.translation_ready);
     settings.set_history_enabled_label(
         if state.history_enabled {
@@ -4941,6 +5024,7 @@ struct SavedSettings {
     visualizer_style: VisualizerStyle,
     circular_spectrum_palette: CircularSpectrumPalette,
     flow_sphere_palette: flow_sphere::FlowSpherePalette,
+    writing_slate_surface: WritingSlateSurface,
     selected_translation_tier: Option<TranslationTier>,
     translation_enabled: bool,
     layout_enabled: bool,
@@ -4959,6 +5043,7 @@ impl Default for SavedSettings {
             visualizer_style: VisualizerStyle::default(),
             circular_spectrum_palette: CircularSpectrumPalette::default(),
             flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
+            writing_slate_surface: WritingSlateSurface::default(),
             selected_translation_tier: None,
             translation_enabled: false,
             layout_enabled: true,
@@ -5004,6 +5089,11 @@ fn load_settings() -> SavedSettings {
         .and_then(|value| value.get("flow_sphere_palette"))
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
+    let writing_slate_surface = value
+        .as_ref()
+        .and_then(|value| value.get("writing_slate_surface"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
     let selected_translation_tier = value
         .as_ref()
         .and_then(|value| value.get("selected_translation_tier"))
@@ -5045,6 +5135,7 @@ fn load_settings() -> SavedSettings {
         visualizer_style,
         circular_spectrum_palette,
         flow_sphere_palette,
+        writing_slate_surface,
         selected_translation_tier,
         translation_enabled,
         layout_enabled,
@@ -5067,6 +5158,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
         "visualizer_style": state.visualizer_style,
         "circular_spectrum_palette": state.circular_spectrum_palette,
         "flow_sphere_palette": state.flow_sphere_palette,
+        "writing_slate_surface": state.writing_slate_surface,
         "selected_translation_tier": state.selected_translation_tier,
         "translation_enabled": state.translation_enabled,
         "layout_enabled": state.layout_enabled,
@@ -5106,7 +5198,8 @@ mod indicator_animation_tests {
 
     use super::{
         CircularSpectrumPalette, IndicatorAnimation, IndicatorMode, SlateLine, VisualizerStyle,
-        WritingSlateAnimation, flow_sphere, indicator_preview_style_for_argument,
+        WritingSlateAnimation, WritingSlateSurface, flow_sphere,
+        indicator_preview_slate_surface_for_argument, indicator_preview_style_for_argument,
     };
 
     fn animation() -> IndicatorAnimation {
@@ -5250,6 +5343,41 @@ mod indicator_animation_tests {
         assert_eq!(
             indicator_preview_style_for_argument("--indicator-preview-live=slate"),
             Some(VisualizerStyle::WritingSlate)
+        );
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview-live=slate-transparent"),
+            Some(VisualizerStyle::WritingSlate)
+        );
+        assert_eq!(
+            indicator_preview_slate_surface_for_argument(
+                "--indicator-preview-live=slate-transparent"
+            ),
+            Some(WritingSlateSurface::MatteGlass)
+        );
+        assert_eq!(
+            indicator_preview_slate_surface_for_argument("--indicator-preview-live=slate"),
+            None
+        );
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview-live=slate-frosted"),
+            Some(VisualizerStyle::WritingSlate)
+        );
+        assert_eq!(
+            indicator_preview_slate_surface_for_argument("--indicator-preview-live=slate-frosted"),
+            Some(WritingSlateSurface::MatteGlass)
+        );
+        assert_eq!(
+            WritingSlateSurface::from_index(0),
+            Some(WritingSlateSurface::DarkPanel)
+        );
+        assert_eq!(
+            WritingSlateSurface::from_index(1),
+            Some(WritingSlateSurface::MatteGlass)
+        );
+        assert_eq!(WritingSlateSurface::from_index(2), None);
+        assert_eq!(
+            serde_json::to_string(&WritingSlateSurface::MatteGlass).unwrap(),
+            "\"matte_glass\""
         );
     }
 

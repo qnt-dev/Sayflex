@@ -372,6 +372,7 @@ export component SettingsWindow inherits Window {
     in-out property <int> selected-visualizer: 0;
     in-out property <int> selected-circular-palette: 0;
     in-out property <int> selected-flow-sphere-palette: 0;
+    in-out property <int> selected-writing-slate-surface: 0;
     in property <[ModelRow]> model-rows;
     in property <[ModelRow]> translation-model-rows;
     in property <[HistoryRow]> history-rows;
@@ -392,6 +393,7 @@ export component SettingsWindow inherits Window {
     callback select-visualizer(int);
     callback select-circular-palette(int);
     callback select-flow-sphere-palette(int);
+    callback select-writing-slate-surface(int);
     callback toggle-translation-enabled();
     callback toggle-layout-enabled();
     callback cycle-text-action-mode();
@@ -749,7 +751,9 @@ export component SettingsWindow inherits Window {
                 spacing: 10px;
 
                 Rectangle {
-                    height: root.selected-visualizer == 4 || root.selected-visualizer == 5
+                    height: root.selected-visualizer == 4
+                            || root.selected-visualizer == 5
+                            || root.selected-visualizer == 6
                         ? 228px
                         : 160px;
                     vertical-stretch: 0;
@@ -898,6 +902,37 @@ export component SettingsWindow inherits Window {
                                     color-c: #ffe844;
                                     selected: root.selected-flow-sphere-palette == 1;
                                     clicked => { root.select-flow-sphere-palette(1); }
+                                }
+                            }
+                        }
+
+                        if root.selected-visualizer == 6 : VerticalLayout {
+                            height: 58px;
+                            vertical-stretch: 0;
+                            spacing: 6px;
+
+                            Eyebrow { text: "WRITING SLATE SURFACE"; }
+
+                            HorizontalLayout {
+                                height: 34px;
+                                vertical-stretch: 0;
+                                spacing: 6px;
+
+                                CircularPaletteChoice {
+                                    label: "Dark Panel";
+                                    color-a: #181b21;
+                                    color-b: #0b0e13;
+                                    color-c: #ef5048;
+                                    selected: root.selected-writing-slate-surface == 0;
+                                    clicked => { root.select-writing-slate-surface(0); }
+                                }
+                                CircularPaletteChoice {
+                                    label: "Matte Glass";
+                                    color-a: #73777e;
+                                    color-b: #ffd24a;
+                                    color-c: #ece9e1;
+                                    selected: root.selected-writing-slate-surface == 1;
+                                    clicked => { root.select-writing-slate-surface(1); }
                                 }
                             }
                         }
@@ -1380,7 +1415,8 @@ export component SettingsWindow inherits Window {
 }
 
 export component RecordingIndicator inherits Window {
-    title: "StyleFlex Recording Indicator";
+    in property <string> indicator-title: "StyleFlex Recording Indicator";
+    title: root.indicator-title;
     icon: @image-url("../assets/tray-icon.svg");
     width: root.visualizer-style == 6
         ? 128px
@@ -1407,6 +1443,7 @@ export component RecordingIndicator inherits Window {
     in property <int> circular-palette: 0;
     in property <image> flow-sphere-frame;
     in property <[SlateLine]> slate-lines;
+    in property <int> writing-slate-surface: 0;
     in property <bool> processing: false;
     in property <float> signal-opacity: 0.54;
     in property <float> disc-opacity: 1;
@@ -1453,32 +1490,39 @@ export component RecordingIndicator inherits Window {
                 background: transparent;
 
                 Rectangle {
-                    x: 2px;
-                    y: 4px;
-                    width: parent.width - 4px;
-                    height: parent.height - 5px;
+                    x: root.writing-slate-surface == 1 ? 0px : 2px;
+                    y: root.writing-slate-surface == 1 ? 0px : 4px;
+                    width: root.writing-slate-surface == 1 ? parent.width : parent.width - 4px;
+                    height: root.writing-slate-surface == 1 ? parent.height : parent.height - 5px;
                     border-radius: 7px;
                     background: #000000;
-                    opacity: 0.28;
+                    opacity: root.writing-slate-surface == 1 ? 0 : 0.28;
                 }
 
                 Rectangle {
-                    x: 3px;
-                    y: 3px;
-                    width: parent.width - 6px;
-                    height: parent.height - 6px;
+                    x: root.writing-slate-surface == 1 ? 0px : 3px;
+                    y: root.writing-slate-surface == 1 ? 0px : 3px;
+                    width: root.writing-slate-surface == 1 ? parent.width : parent.width - 6px;
+                    height: root.writing-slate-surface == 1 ? parent.height : parent.height - 6px;
                     border-radius: 6px;
                     border-width: 0px;
-                    background: #181b21f5;
+                    background: root.writing-slate-surface == 1 ? #73777e4d : #181b21f5;
 
                     Rectangle {
-                        x: 3px;
-                        y: 3px;
-                        width: parent.width - 6px;
-                        height: parent.height - 6px;
-                        border-radius: 4px;
-                        background: #0b0e13f5;
+                        x: root.writing-slate-surface == 1 ? 0px : 3px;
+                        y: root.writing-slate-surface == 1 ? 0px : 3px;
+                        width: root.writing-slate-surface == 1 ? parent.width : parent.width - 6px;
+                        height: root.writing-slate-surface == 1 ? parent.height : parent.height - 6px;
+                        border-radius: root.writing-slate-surface == 1 ? 6px : 4px;
+                        background: root.writing-slate-surface == 1 ? transparent : #0b0e13f5;
                         clip: true;
+
+                        if root.writing-slate-surface == 1 : Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: @image-url("../assets/slate-matte-grain.svg");
+                            image-fit: fill;
+                        }
 
                         for line in root.slate-lines : Rectangle {
                             x: 11px + line.x * 1px;
