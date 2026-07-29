@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Worker = (
-        Join-Path $PSScriptRoot '..\dist\app\rust-translation-worker.exe'
+        Join-Path $PSScriptRoot '..\dist\app\StyleFlex.Translation.exe'
     ),
     [ValidateSet('tiny', 'teacher')]
     [string]$Tier = 'teacher',

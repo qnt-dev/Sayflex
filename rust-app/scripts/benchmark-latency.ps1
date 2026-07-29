@@ -10,7 +10,7 @@ param(
     [int]$Iterations = 5,
 
     [string]$WorkerPath = (
-        Join-Path $PSScriptRoot '..\dist\app\rust-speech-worker-cuda.exe'
+        Join-Path $PSScriptRoot '..\dist\app\StyleFlex.Speech.Cuda.exe'
     ),
 
     [ValidateRange(1, 5000)]
@@ -33,7 +33,7 @@ foreach ($required in @($worker, $wav, $model)) {
 
 $samples = for ($iteration = 1; $iteration -le $Iterations; $iteration++) {
     $stderr = Join-Path $env:TEMP (
-        "rustvoice-benchmark-{0}-{1}.stderr.log" -f $PID, $iteration
+        "styleflex-benchmark-{0}-{1}.stderr.log" -f $PID, $iteration
     )
     $modeArgument = if ($OutputMode -eq 'TranslateToEnglish') {
         '--translate-to-english'

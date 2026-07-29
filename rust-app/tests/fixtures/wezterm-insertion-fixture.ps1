@@ -4,7 +4,7 @@ param(
     [string]$ResultPath
 )
 
-$Host.UI.RawUI.WindowTitle = 'Qntflex WezTerm Insertion E2E'
+$Host.UI.RawUI.WindowTitle = 'StyleFlex WezTerm Insertion E2E'
 Clear-Host
 Write-Host 'Waiting for Ctrl+Alt+V insertion...'
 

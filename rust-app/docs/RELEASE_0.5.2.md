@@ -1,4 +1,4 @@
-# Rust Voice 0.5.2
+# StyleFlex 0.5.2
 
 ## Long-dictation latency
 

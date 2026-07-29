@@ -35,7 +35,7 @@ public sealed class ShortcutSelectionFixture : Form
 
     public ShortcutSelectionFixture()
     {
-        Text = "Qntflex Shortcut Selection Fixture";
+        Text = "StyleFlex Shortcut Selection Fixture";
         StartPosition = FormStartPosition.Manual;
         Location = new System.Drawing.Point(80, 360);
         Size = new System.Drawing.Size(640, 240);
@@ -44,7 +44,7 @@ public sealed class ShortcutSelectionFixture : Form
         editor.Multiline = true;
         editor.Dock = DockStyle.Fill;
         editor.Font = new System.Drawing.Font("Segoe UI", 14);
-        editor.Text = "QNTFLEX_SHORTCUT_SELECTION_TEXT";
+        editor.Text = "STYLEFLEX_SHORTCUT_SELECTION_TEXT";
         Controls.Add(editor);
 
         Shown += (_, __) => SelectFixtureText();
@@ -84,13 +84,13 @@ public sealed class ShortcutSelectionFixture : Form
 
 $form = [ShortcutSelectionFixture]::new()
 $form.Add_Shown({
-    if ($env:QNTFLEX_RUN_SELECTION_SMOKE -ne '1') {
+    if ($env:STYLEFLEX_RUN_SELECTION_SMOKE -ne '1') {
         return
     }
 
-    if ($env:QNTFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER) {
+    if ($env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER) {
         [System.Windows.Forms.Clipboard]::SetText(
-            $env:QNTFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER
+            $env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER
         )
     }
     $form.TopMost = $true
@@ -118,10 +118,10 @@ $form.Add_Shown({
     $script:selectionFocusTimer.Start()
 
     $rustRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-    $hostPath = if ($env:QNTFLEX_SELECTION_SMOKE_HOST_PATH) {
-        $env:QNTFLEX_SELECTION_SMOKE_HOST_PATH
+    $hostPath = if ($env:STYLEFLEX_SELECTION_SMOKE_HOST_PATH) {
+        $env:STYLEFLEX_SELECTION_SMOKE_HOST_PATH
     } else {
-        Join-Path $rustRoot 'target\debug\rust-input-host.exe'
+        Join-Path $rustRoot 'target\debug\styleflex-input-host.exe'
     }
     $outputPath = Join-Path $rustRoot 'target\shortcut-smoke.out'
     $errorPath = Join-Path $rustRoot 'target\shortcut-smoke.err'
@@ -129,7 +129,7 @@ $form.Add_Shown({
     [System.IO.File]::WriteAllText($outputPath, '')
     [System.IO.File]::WriteAllText($errorPath, '')
     $handle = $form.Handle.ToInt64()
-    $command = "set QNTFLEX_SELECTION_SMOKE_DELAY_MS=300&& set QNTFLEX_SELECTION_SMOKE_HWND=$handle&& `"$hostPath`" --selection-capture-smoke > `"$outputPath`" 2> `"$errorPath`""
+    $command = "set STYLEFLEX_SELECTION_SMOKE_DELAY_MS=300&& set STYLEFLEX_SELECTION_SMOKE_HWND=$handle&& `"$hostPath`" --selection-capture-smoke > `"$outputPath`" 2> `"$errorPath`""
     [FixtureForeground]::Focus($form.Handle)
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/d', '/c', $command -WindowStyle Hidden
 })

@@ -1,18 +1,19 @@
 [CmdletBinding()]
 param(
-    [string]$AppDirectory = (
-        Join-Path $PSScriptRoot '..\dist\app'
-    )
+    [string]$AppDirectory
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($AppDirectory)) {
+    $AppDirectory = Join-Path $PSScriptRoot '..\dist\app'
+}
 $appRoot = [System.IO.Path]::GetFullPath($AppDirectory)
 $required = @(
-    'rust-desktop.exe',
-    'rust-input-host.exe',
-    'rust-speech-worker-cpu.exe',
-    'rust-speech-worker-cuda.exe',
-    'rust-translation-worker.exe'
+    'StyleFlex.exe',
+    'StyleFlex.InputHost.exe',
+    'StyleFlex.Speech.Cpu.exe',
+    'StyleFlex.Speech.Cuda.exe',
+    'StyleFlex.Translation.exe'
 )
 
 $missing = $required | Where-Object {

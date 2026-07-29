@@ -348,7 +348,7 @@ component CircularPaletteChoice inherits Rectangle {
 }
 
 export component SettingsWindow inherits Window {
-    title: "Rust Voice";
+    title: "StyleFlex";
     icon: @image-url("../assets/tray-icon.svg");
     width: 1000px;
     height: 720px;
@@ -422,7 +422,7 @@ export component SettingsWindow inherits Window {
                     spacing: 3px;
 
                     Text {
-                        text: "Rust Voice";
+                        text: "StyleFlex";
                         color: Theme.text;
                         font-size: 18px;
                         font-weight: 700;
@@ -511,7 +511,7 @@ export component SettingsWindow inherits Window {
                 ActionButton {
                     height: 34px;
                     vertical-stretch: 0;
-                    label: "Quit Rust Voice";
+                    label: "Quit StyleFlex";
                     danger: true;
                     clicked => { root.quit-requested(); }
                 }
@@ -1239,7 +1239,7 @@ export component SettingsWindow inherits Window {
 
                 Eyebrow {
                     height: 16px;
-                    text: "RUST VOICE  ·  0.5.12";
+                    text: "STYLEFLEX  ·  0.5.15";
                 }
                 Text {
                     height: 34px;
@@ -1316,10 +1316,10 @@ export component SettingsWindow inherits Window {
 }
 
 export component RecordingIndicator inherits Window {
-    title: "Rust Recording Indicator";
+    title: "StyleFlex Recording Indicator";
     icon: @image-url("../assets/tray-icon.svg");
-    width: root.visualizer-style == 4 ? 92px : 118px;
-    height: root.visualizer-style == 4 ? 92px : 42px;
+    width: root.visualizer-style == 5 ? 116px : root.visualizer-style == 4 ? 92px : 118px;
+    height: root.visualizer-style == 5 ? 116px : root.visualizer-style == 4 ? 92px : 42px;
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -1329,6 +1329,7 @@ export component RecordingIndicator inherits Window {
     in property <[float]> spectrum-heights;
     in property <int> visualizer-style: 0;
     in property <int> circular-palette: 0;
+    in property <image> flow-sphere-frame;
     in property <bool> processing: false;
     in property <float> signal-opacity: 0.54;
     in property <float> disc-opacity: 1;
@@ -1348,25 +1349,33 @@ export component RecordingIndicator inherits Window {
     in-out property <bool> prepared: false;
 
     Rectangle {
-        border-radius: root.visualizer-style == 4 ? 18px : 10px;
-        background: root.visualizer-style == 4 ? transparent : #2c2f31;
+        border-radius: root.visualizer-style >= 4 ? 18px : 10px;
+        background: root.visualizer-style >= 4 ? transparent : #2c2f31;
         opacity: root.prepared ? root.visual-opacity : 0;
         transform-origin: { x: self.width / 2, y: self.height / 2 };
         transform-scale: root.visual-scale;
 
         Rectangle {
-            x: root.visualizer-style == 4 ? 2px : 3px;
-            y: root.visualizer-style == 4 ? 2px : 3px;
-            width: parent.width - (root.visualizer-style == 4 ? 4px : 6px);
-            height: parent.height - (root.visualizer-style == 4 ? 4px : 6px);
-            border-radius: root.visualizer-style == 4 ? 16px : 7px;
-            background: root.visualizer-style == 4 ? transparent : #272727;
+            x: root.visualizer-style >= 4 ? 0px : 3px;
+            y: root.visualizer-style >= 4 ? 0px : 3px;
+            width: parent.width - (root.visualizer-style >= 4 ? 0px : 6px);
+            height: parent.height - (root.visualizer-style >= 4 ? 0px : 6px);
+            border-radius: root.visualizer-style >= 4 ? 16px : 7px;
+            background: root.visualizer-style >= 4 ? transparent : #272727;
+
+            if root.visualizer-style == 5 : Image {
+                source: root.flow-sphere-frame;
+                width: parent.width;
+                height: parent.height;
+                image-fit: contain;
+            }
 
             HorizontalLayout {
+                visible: root.visualizer-style != 5;
                 y: (parent.height - self.height) / 2;
                 height: root.visualizer-style == 4 ? 88px : 19px;
-                padding-left: root.visualizer-style == 4 ? 0px : 9px;
-                padding-right: root.visualizer-style == 4 ? 0px : 7px;
+                padding-left: root.visualizer-style >= 4 ? 0px : 9px;
+                padding-right: root.visualizer-style >= 4 ? 0px : 7px;
                 alignment: center;
                 spacing: 3px;
 
@@ -1696,13 +1705,13 @@ export component RecordingIndicator inherits Window {
                     }
                 }
 
-                if root.visualizer-style != 3 && root.visualizer-style != 4 : Rectangle {
+                if root.visualizer-style < 3 : Rectangle {
                     width: 4px;
                     height: 19px;
                     background: transparent;
                 }
 
-                if root.visualizer-style != 3 && root.visualizer-style != 4 : Rectangle {
+                if root.visualizer-style < 3 : Rectangle {
                     width: 18px;
                     height: 19px;
                     background: transparent;
@@ -2196,7 +2205,7 @@ export component TranslatorWindow inherits Window {
 
 export component AppTray inherits SystemTrayIcon {
     icon: @image-url("../assets/tray-icon.svg");
-    tooltip: "Rust Voice";
+    tooltip: "StyleFlex";
 
     callback open-settings();
     callback open-translator();

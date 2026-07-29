@@ -1,5 +1,5 @@
 [package]
-name = "rust-input-host"
+name = "styleflex-input-host"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,4 +1,4 @@
-# Rust Voice 0.3.1
+# StyleFlex 0.3.1
 
 Critical Windows terminal safety hotfix:
 

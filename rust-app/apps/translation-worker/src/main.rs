@@ -5,9 +5,8 @@ mod history;
 mod runtime;
 
 use std::{
-    env,
     io::{self, BufRead, BufReader, BufWriter, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -520,14 +519,7 @@ fn translate_request(
 }
 
 fn data_root() -> PathBuf {
-    env::var_os("LOCALAPPDATA").map_or_else(
-        || {
-            env::current_dir()
-                .unwrap_or_default()
-                .join(".rust-voice-data")
-        },
-        |root| Path::new(&root).join("KeyboopRust"),
-    )
+    rust_app_core::product::data_root()
 }
 
 fn system_language() -> String {

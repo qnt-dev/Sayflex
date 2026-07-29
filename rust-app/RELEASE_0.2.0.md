@@ -1,4 +1,4 @@
-# Rust Voice 0.2.0
+# StyleFlex 0.2.0
 
 This release replaces the synchronous post-recording pipeline with measured,
 isolated actors. The C# reference application is unchanged.

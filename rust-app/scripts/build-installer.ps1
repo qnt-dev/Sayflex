@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.5.14',
+    [string]$Version = '0.5.15',
     [switch]$SkipPublish
 )
 
@@ -26,16 +26,16 @@ if (-not $compiler) {
 }
 
 & $compiler "/DAppVersion=$Version" (
-    Join-Path $rustRoot 'installer\RustVoice.iss'
+    Join-Path $rustRoot 'installer\StyleFlex.iss'
 )
 if ($LASTEXITCODE -ne 0) {
     throw 'Inno Setup compilation failed.'
 }
 
-$installer = Join-Path $rustRoot "dist\RustVoice-$Version-win-x64-setup.exe"
+$installer = Join-Path $rustRoot "dist\StyleFlex-$Version-win-x64-setup.exe"
 $checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
 Set-Content -LiteralPath "$installer.sha256" -Encoding ascii -NoNewline -Value (
     "$checksum  $([System.IO.Path]::GetFileName($installer))"
 )
 
-Write-Host "Rust installer created in $(Join-Path $rustRoot 'dist')"
+Write-Host "StyleFlex installer created in $(Join-Path $rustRoot 'dist')"

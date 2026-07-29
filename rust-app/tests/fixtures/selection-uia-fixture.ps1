@@ -29,7 +29,7 @@ public static class FixtureForeground
 '@
 
 $window = [System.Windows.Window]::new()
-$window.Title = 'Qntflex UIA Selection Fixture'
+$window.Title = 'StyleFlex UIA Selection Fixture'
 $window.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
 $window.Left = 760
 $window.Top = 80
@@ -40,28 +40,28 @@ $editor = [System.Windows.Controls.TextBox]::new()
 $editor.AcceptsReturn = $true
 $editor.FontFamily = [System.Windows.Media.FontFamily]::new('Segoe UI')
 $editor.FontSize = 20
-$editor.Text = 'QNTFLEX_UIA_SELECTION_TEXT'
+$editor.Text = 'STYLEFLEX_UIA_SELECTION_TEXT'
 $window.Content = $editor
 
 $window.Add_Loaded({
     $editor.Focus()
     $editor.SelectAll()
 
-    if ($env:QNTFLEX_RUN_SELECTION_SMOKE -ne '1') {
+    if ($env:STYLEFLEX_RUN_SELECTION_SMOKE -ne '1') {
         return
     }
 
-    if ($env:QNTFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER) {
+    if ($env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER) {
         [System.Windows.Clipboard]::SetText(
-            $env:QNTFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER
+            $env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER
         )
     }
     $window.Topmost = $true
     $rustRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-    $hostPath = if ($env:QNTFLEX_SELECTION_SMOKE_HOST_PATH) {
-        $env:QNTFLEX_SELECTION_SMOKE_HOST_PATH
+    $hostPath = if ($env:STYLEFLEX_SELECTION_SMOKE_HOST_PATH) {
+        $env:STYLEFLEX_SELECTION_SMOKE_HOST_PATH
     } else {
-        Join-Path $rustRoot 'target\debug\rust-input-host.exe'
+        Join-Path $rustRoot 'target\debug\styleflex-input-host.exe'
     }
     $outputPath = Join-Path $rustRoot 'target\uia-smoke.out'
     $errorPath = Join-Path $rustRoot 'target\uia-smoke.err'
@@ -70,7 +70,7 @@ $window.Add_Loaded({
     [System.IO.File]::WriteAllText($errorPath, '')
     $handle = [System.Windows.Interop.WindowInteropHelper]::new($window).Handle.ToInt64()
     $script:fixtureHandle = $handle
-    $script:smokeCommand = "set QNTFLEX_SELECTION_SMOKE_DELAY_MS=300&& set QNTFLEX_SELECTION_SMOKE_HWND=$handle&& `"$hostPath`" --selection-capture-smoke > `"$outputPath`" 2> `"$errorPath`""
+    $script:smokeCommand = "set STYLEFLEX_SELECTION_SMOKE_DELAY_MS=300&& set STYLEFLEX_SELECTION_SMOKE_HWND=$handle&& `"$hostPath`" --selection-capture-smoke > `"$outputPath`" 2> `"$errorPath`""
     $script:smokeStarted = $true
     [FixtureForeground]::Focus([IntPtr]::new($handle))
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/d', '/c', $script:smokeCommand -WindowStyle Hidden
@@ -104,7 +104,7 @@ $window.Add_Activated({
     $editor.Focus()
     $editor.SelectAll()
     if (
-        $env:QNTFLEX_RUN_SELECTION_SMOKE -eq '1' -and
+        $env:STYLEFLEX_RUN_SELECTION_SMOKE -eq '1' -and
         $script:smokeCommand -and
         -not $script:smokeStarted
     ) {

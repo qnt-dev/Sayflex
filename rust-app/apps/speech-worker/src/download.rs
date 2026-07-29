@@ -71,10 +71,13 @@ impl HttpFetcher {
             offset = 0;
         }
 
-        let mut request = self
-            .client
-            .get(url)
-            .header(USER_AGENT, "RustVoice/0.5 model-manager");
+        let mut request = self.client.get(url).header(
+            USER_AGENT,
+            format!(
+                "{} model-manager",
+                rust_app_core::product::USER_AGENT_PRODUCT
+            ),
+        );
         if offset > 0 {
             request = request.header(RANGE, format!("bytes={offset}-"));
         }

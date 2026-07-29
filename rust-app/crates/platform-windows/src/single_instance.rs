@@ -18,7 +18,7 @@ impl SingleInstanceGuard {
             unsafe {
                 let _ = CloseHandle(handle);
             }
-            return Err("Rust Voice is already running".to_owned());
+            return Err("StyleFlex is already running".to_owned());
         }
         Ok(Self(handle))
     }

@@ -1,4 +1,4 @@
-# Rust-first desktop application
+# StyleFlex
 
 This directory is an independent Rust/Slint application. The existing Windows
 C# application in the repository root remains a separate product and is not a
@@ -8,13 +8,13 @@ build dependency of this workspace.
 
 The release contains four failure-isolated process roles and five executables:
 
-- `rust-desktop.exe` — Slint settings, tray, history, model selection and
+- `StyleFlex.exe` — Slint settings, tray, history, model selection and
   recording/selection overlays.
-- `rust-input-host.exe` — Windows low-level keyboard hook, immutable target
+- `StyleFlex.InputHost.exe` — Windows low-level keyboard hook, immutable target
   capture, Unicode insertion, clipboard recovery and selected-text capture.
-- `rust-speech-worker-*.exe` — CPAL microphone capture, verified model
+- `StyleFlex.Speech.*.exe` — CPAL microphone capture, verified model
   installation, CUDA/CPU `whisper.cpp` inference and durable history.
-- `rust-translation-worker.exe` — verified Qwen3.5 model/runtime installation,
+- `StyleFlex.Translation.exe` — verified Qwen3.5 model/runtime installation,
   lifecycle-isolated local llama.cpp inference and translation history.
 
 When translation is enabled, its worker owns one authenticated
@@ -56,7 +56,7 @@ Password fields, secure desktop and higher-integrity targets fail closed.
 
 UI Automation runs in a persistent MTA actor with a cached client and bounded
 provider timeouts. Release diagnostics are written without captured text to
-`%LOCALAPPDATA%\KeyboopRust\logs\desktop.log` and `input-host.log`, with bounded
+`%LOCALAPPDATA%\StyleFlex\logs\desktop.log` and `input-host.log`, with bounded
 rotation.
 
 The indicator is pre-created and shown from the input-host event pump, before
@@ -101,10 +101,10 @@ prepared segments without unloading the already warmed model.
 ## Build, test and package
 
 ```powershell
-cd C:\PRDJKT\qntflex\rust-app
+cd .\rust-app
 cargo test --workspace
 .\scripts\publish.ps1
-.\scripts\build-installer.ps1 -Version 0.5.14 -SkipPublish
+.\scripts\build-installer.ps1 -Version 0.5.15 -SkipPublish
 ```
 
 The measured warm-path design and benchmark gate are documented in
@@ -116,21 +116,21 @@ Transient windows have isolated visual preview modes that do not register the
 global hook or touch another application:
 
 ```powershell
-.\target\debug\rust-desktop.exe --indicator-preview=orb
-.\target\debug\rust-desktop.exe --indicator-preview=spectrum
-.\target\debug\rust-desktop.exe --indicator-preview=ribbon
-.\target\debug\rust-desktop.exe --action-preview
-.\target\debug\rust-desktop.exe --translation-preview
-.\target\debug\rust-desktop.exe --translation-preview=long
-.\target\debug\rust-desktop.exe --layout-preview
+.\target\debug\styleflex-desktop.exe --indicator-preview=orb
+.\target\debug\styleflex-desktop.exe --indicator-preview=spectrum
+.\target\debug\styleflex-desktop.exe --indicator-preview=ribbon
+.\target\debug\styleflex-desktop.exe --action-preview
+.\target\debug\styleflex-desktop.exe --translation-preview
+.\target\debug\styleflex-desktop.exe --translation-preview=long
+.\target\debug\styleflex-desktop.exe --layout-preview
 ```
 
 Three controlled selection fixtures exercise UI Automation, native-message and
 keyboard-shortcut capture without depending on a user's document:
 
 ```powershell
-$env:QNTFLEX_RUN_SELECTION_SMOKE = '1'
-$env:QNTFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER = 'QNTFLEX_CLIPBOARD_SENTINEL'
+$env:STYLEFLEX_RUN_SELECTION_SMOKE = '1'
+$env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER = 'STYLEFLEX_CLIPBOARD_SENTINEL'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-uia-fixture.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-fixture.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-shortcut-fixture.ps1
@@ -145,11 +145,11 @@ published release input host:
 ```powershell
 .\scripts\validate-windows-integration.ps1
 .\scripts\validate-windows-integration.ps1 `
-  -InputHost .\dist\app\rust-input-host.exe
+  -InputHost .\dist\app\StyleFlex.InputHost.exe
 ```
 
 The isolated smoke modes are available in release builds only when their
-explicit `QNTFLEX_RUN_*_SMOKE=1` opt-in is present. They do not install the
+explicit `STYLEFLEX_RUN_*_SMOKE=1` opt-in is present. They do not install the
 global hook and are not reachable from the normal application lifecycle.
 
 The installer is emitted under `rust-app\dist`; it does not overwrite the

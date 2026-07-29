@@ -1,8 +1,8 @@
-# Rust Voice interface system
+# StyleFlex interface system
 
 ## Product character
 
-Rust Voice is a compact system utility, not a web dashboard. Its interface is
+StyleFlex is a compact system utility, not a web dashboard. Its interface is
 calm, task-focused and immediately scannable:
 
 - a persistent sidebar provides predictable navigation;

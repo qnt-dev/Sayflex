@@ -7,7 +7,7 @@ use std::{
     error::Error,
     fs,
     io::{BufRead, BufReader, BufWriter, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     rc::Rc,
     sync::{
@@ -35,9 +35,19 @@ use slint::winit_030::{
 };
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
+mod flow_sphere;
+
 slint::include_modules!();
 
 const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
+const INPUT_WORKER_EXE: &str = "StyleFlex.InputHost.exe";
+const SPEECH_WORKER_EXE: &str = "StyleFlex.Speech.exe";
+const TRANSLATION_WORKER_EXE: &str = "StyleFlex.Translation.exe";
+const SPEECH_CPU_EXE: &str = "StyleFlex.Speech.Cpu.exe";
+const SPEECH_CUDA_EXE: &str = "StyleFlex.Speech.Cuda.exe";
+const DEV_INPUT_WORKER_EXE: &str = "styleflex-input-host.exe";
+const DEV_SPEECH_WORKER_EXE: &str = "styleflex-speech-worker.exe";
+const DEV_TRANSLATION_WORKER_EXE: &str = "styleflex-translation-worker.exe";
 const SELECTION_WINDOW_TITLE: &str = "Correct keyboard layout";
 const ACTION_PALETTE_WINDOW_TITLE: &str = "Text actions";
 const TRANSLATION_PREVIEW_WINDOW_TITLE: &str = "Translation preview";
@@ -379,7 +389,7 @@ impl Workers {
                 let (child, writer) = spawn_worker(
                     &self._job,
                     WorkerKind::Input,
-                    "rust-input-host.exe",
+                    INPUT_WORKER_EXE,
                     RuntimeEvent::Input,
                 )
                 .map_err(|error| error.to_string())?;
@@ -390,7 +400,7 @@ impl Workers {
                 let (child, writer) = spawn_worker(
                     &self._job,
                     WorkerKind::Speech,
-                    "rust-speech-worker.exe",
+                    SPEECH_WORKER_EXE,
                     RuntimeEvent::Speech,
                 )
                 .map_err(|error| error.to_string())?;
@@ -401,7 +411,7 @@ impl Workers {
                 let (child, writer) = spawn_worker(
                     &self._job,
                     WorkerKind::Translation,
-                    "rust-translation-worker.exe",
+                    TRANSLATION_WORKER_EXE,
                     RuntimeEvent::Translation,
                 )
                 .map_err(|error| error.to_string())?;
@@ -489,7 +499,7 @@ fn spawn_initial_workers(
         &job,
         startup_gate,
         WorkerKind::Input,
-        "rust-input-host.exe",
+        INPUT_WORKER_EXE,
         RuntimeEvent::Input,
     )?
     else {
@@ -499,7 +509,7 @@ fn spawn_initial_workers(
         &job,
         startup_gate,
         WorkerKind::Speech,
-        "rust-speech-worker.exe",
+        SPEECH_WORKER_EXE,
         RuntimeEvent::Speech,
     )?
     else {
@@ -509,7 +519,7 @@ fn spawn_initial_workers(
         &job,
         startup_gate,
         WorkerKind::Translation,
-        "rust-translation-worker.exe",
+        TRANSLATION_WORKER_EXE,
         RuntimeEvent::Translation,
     )?
     else {
@@ -612,6 +622,7 @@ enum VisualizerStyle {
     FluidRibbon,
     BroadcastMic,
     CircularSpectrum,
+    FlowSpherePreview,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,6 +672,7 @@ impl VisualizerStyle {
             Self::FluidRibbon => 2,
             Self::BroadcastMic => 3,
             Self::CircularSpectrum => 4,
+            Self::FlowSpherePreview => 5,
         }
     }
 }
@@ -741,6 +753,7 @@ struct IndicatorAnimation {
     phase: f32,
     mode_progress: f32,
     last_frame: Instant,
+    flow_sphere_renderer: Option<flow_sphere::FlowSphereRenderer>,
 }
 
 struct IndicatorFrame {
@@ -777,11 +790,15 @@ impl IndicatorAnimation {
             phase: 0.0,
             mode_progress: 0.0,
             last_frame: Instant::now(),
+            flow_sphere_renderer: None,
         }
     }
 
     fn set_style(&mut self, style: VisualizerStyle) {
         self.style = style;
+        if style == VisualizerStyle::FlowSpherePreview && self.flow_sphere_renderer.is_none() {
+            self.flow_sphere_renderer = Some(flow_sphere::FlowSphereRenderer::start());
+        }
     }
 
     fn begin_listening(&mut self) {
@@ -859,6 +876,17 @@ impl IndicatorAnimation {
             indicator.set_mic_near_height(frame.mic_near_height);
             indicator.set_visual_scale(frame.visual_scale);
             indicator.set_visual_opacity(frame.visual_opacity);
+            if self.style == VisualizerStyle::FlowSpherePreview
+                && let Some(renderer) = &self.flow_sphere_renderer
+                && let Some(frame) = renderer.render_latest(
+                    self.phase,
+                    self.display_level,
+                    &self.display_spectrum,
+                    frame.visual_opacity,
+                )
+            {
+                indicator.set_flow_sphere_frame(frame);
+            }
         }
     }
 
@@ -1116,8 +1144,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         session_router_for_monitor.receive(event);
     })
     .map_err(|error| format!("Windows session-end monitoring is unavailable: {error}"))?;
-    let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "desktop");
-    rust_app_core::diagnostics::log_line("desktop lifecycle=starting");
     configure_ui_backend()?;
     if let Some(style) = indicator_preview_style() {
         let live_microphone = env::args().any(|argument| {
@@ -1136,8 +1162,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         return run_layout_preview();
     }
 
+    if let Err(error) = rust_app_core::product::migrate_legacy_data_root() {
+        eprintln!("StyleFlex data migration is deferred: {error}");
+    }
+    let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "desktop");
+    rust_app_core::diagnostics::log_line("desktop lifecycle=starting");
+
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.Desktop")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.Desktop")?;
     let settings = SettingsWindow::new()?;
     let saved_settings = load_settings();
     let (indicator, indicator_animation) = new_indicator()?;
@@ -1312,6 +1344,9 @@ fn indicator_preview_style() -> Option<VisualizerStyle> {
         "--indicator-preview=circle" | "--indicator-preview=circular-spectrum" => {
             Some(VisualizerStyle::CircularSpectrum)
         }
+        "--indicator-preview=flow-sphere" | "--indicator-preview=sphere" => {
+            Some(VisualizerStyle::FlowSpherePreview)
+        }
         "--indicator-preview-live=circle" | "--indicator-preview-live=circular-spectrum" => {
             Some(VisualizerStyle::CircularSpectrum)
         }
@@ -1347,7 +1382,7 @@ fn run_indicator_preview(
     live_microphone: bool,
 ) -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.IndicatorPreview")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.IndicatorPreview")?;
     let (indicator, animation) = new_indicator()?;
     {
         let mut animation = animation.borrow_mut();
@@ -1372,7 +1407,10 @@ fn run_indicator_preview(
                     configure_indicator_native_window(
                         handle,
                         None,
-                        style == VisualizerStyle::CircularSpectrum,
+                        matches!(
+                            style,
+                            VisualizerStyle::CircularSpectrum | VisualizerStyle::FlowSpherePreview
+                        ),
                     )
                 });
             if !configured {
@@ -1385,17 +1423,7 @@ fn run_indicator_preview(
     let live_audio_worker = if live_microphone {
         let worker_job = rust_platform_windows::WorkerJob::new()
             .map_err(|error| format!("could not create preview worker job: {error}"))?;
-        let path = env::current_exe()?
-            .parent()
-            .ok_or("preview executable has no parent directory")?
-            .join("rust-speech-worker.exe");
-        if !path.exists() {
-            return Err(format!(
-                "preview audio worker is missing: {}. Build rust-speech-worker first.",
-                path.display()
-            )
-            .into());
-        }
+        let path = worker_path(SPEECH_WORKER_EXE)?;
         let mut command = Command::new(&path);
         command
             .stdin(Stdio::piped())
@@ -1534,7 +1562,7 @@ fn run_indicator_preview(
 
 fn run_action_palette_preview() -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.ActionPreview")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.ActionPreview")?;
     let palette = ActionPalette::new()?;
     let source =
         "A compact command surface should fit the selected text and preserve editor focus.";
@@ -1577,7 +1605,7 @@ fn run_action_palette_preview() -> Result<(), Box<dyn Error>> {
 
 fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.TranslationPreview")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.TranslationPreview")?;
     let preview = TranslationPreview::new()?;
     let translated = if long_text {
         "Длинный перевод должен оставаться удобным для чтения. Карточка сохраняет компактную форму, а результат прокручивается внутри неё. Это позволяет быстро проверить смысл, не терять выбранное место в исходном приложении и не открывать отдельное большое рабочее окно. Прокрутка появляется только тогда, когда текст действительно не помещается. ".repeat(12)
@@ -1643,7 +1671,7 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
 
 fn run_layout_preview() -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.LayoutPreview")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.LayoutPreview")?;
     let chooser = SelectionChooser::new()?;
     let source = "ghbdtn vbh";
     chooser.set_source_text(source.into());
@@ -1703,7 +1731,7 @@ where
         .stderr(Stdio::piped());
     if path
         .file_name()
-        .is_some_and(|name| name == "rust-speech-worker-cuda.exe")
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(SPEECH_CUDA_EXE))
     {
         let cuda = trusted_cuda_runtime_directory()
             .ok_or("the CUDA worker was selected without a trusted CUDA runtime")?;
@@ -1793,7 +1821,7 @@ where
 }
 
 fn routine_native_worker_log(executable: &str, line: &str) -> bool {
-    executable.contains("speech-worker")
+    executable == SPEECH_WORKER_EXE
         && (line.starts_with("whisper_init_state:")
             || line.starts_with("whisper_backend_init_gpu:")
             || line.starts_with("whisper_full_with_state: auto-detected language:"))
@@ -1816,19 +1844,32 @@ fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
     let parent = current
         .parent()
         .ok_or("desktop executable has no parent directory")?;
-    if executable == "rust-speech-worker.exe" {
-        let cuda = parent.join("rust-speech-worker-cuda.exe");
+    if executable == SPEECH_WORKER_EXE {
+        let cuda = parent.join(SPEECH_CUDA_EXE);
         if cuda.exists() && trusted_cuda_runtime_directory().is_some() {
             return Ok(cuda);
         }
-        let cpu = parent.join("rust-speech-worker-cpu.exe");
+        let cpu = parent.join(SPEECH_CPU_EXE);
         if cpu.exists() {
             return Ok(cpu);
+        }
+        let development = parent.join(DEV_SPEECH_WORKER_EXE);
+        if development.exists() {
+            return Ok(development);
         }
     }
     let sibling = parent.join(executable);
     if sibling.exists() {
         return Ok(sibling);
+    }
+    let development = match executable {
+        INPUT_WORKER_EXE => Some(DEV_INPUT_WORKER_EXE),
+        TRANSLATION_WORKER_EXE => Some(DEV_TRANSLATION_WORKER_EXE),
+        _ => None,
+    }
+    .map(|name| parent.join(name));
+    if let Some(development) = development.filter(|path| path.exists()) {
+        return Ok(development);
     }
 
     Err(format!(
@@ -4528,7 +4569,7 @@ fn configure_indicator_window(
         configure_indicator_native_window(
             handle,
             target_window_handle,
-            indicator.get_visualizer_style() == VisualizerStyle::CircularSpectrum.index(),
+            matches!(indicator.get_visualizer_style(), 4 | 5),
         )
     })
 }
@@ -4574,14 +4615,7 @@ fn unix_ms() -> u64 {
 }
 
 fn data_root() -> PathBuf {
-    env::var_os("LOCALAPPDATA").map_or_else(
-        || {
-            env::current_dir()
-                .unwrap_or_default()
-                .join(".rust-voice-data")
-        },
-        |root| Path::new(&root).join("KeyboopRust"),
-    )
+    rust_app_core::product::data_root()
 }
 
 fn settings_path() -> PathBuf {

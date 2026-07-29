@@ -28,19 +28,25 @@ try {
         throw 'The Rust workspace build failed.'
     }
     Copy-Item -LiteralPath (
-        Join-Path $cpuTarget "$profile\rust-speech-worker.exe"
+        Join-Path $cpuTarget "$profile\styleflex-speech-worker.exe"
     ) -Destination (
-        Join-Path $output 'rust-speech-worker-cpu.exe'
+        Join-Path $output 'StyleFlex.Speech.Cpu.exe'
     )
     Copy-Item -LiteralPath (
-        Join-Path $cpuTarget "$profile\rust-desktop.exe"
-    ) -Destination $output
+        Join-Path $cpuTarget "$profile\styleflex-desktop.exe"
+    ) -Destination (
+        Join-Path $output 'StyleFlex.exe'
+    )
     Copy-Item -LiteralPath (
-        Join-Path $cpuTarget "$profile\rust-input-host.exe"
-    ) -Destination $output
+        Join-Path $cpuTarget "$profile\styleflex-input-host.exe"
+    ) -Destination (
+        Join-Path $output 'StyleFlex.InputHost.exe'
+    )
     Copy-Item -LiteralPath (
-        Join-Path $cpuTarget "$profile\rust-translation-worker.exe"
-    ) -Destination $output
+        Join-Path $cpuTarget "$profile\styleflex-translation-worker.exe"
+    ) -Destination (
+        Join-Path $output 'StyleFlex.Translation.exe'
+    )
     Copy-Item -LiteralPath (
         Join-Path $rustRoot '..\LICENSE'
     ) -Destination (
@@ -57,18 +63,18 @@ try {
         Join-Path $output 'SECURITY.md'
     )
 
-    cargo build --target-dir $cudaTarget --profile $profile -p rust-speech-worker --features cuda
+    cargo build --target-dir $cudaTarget --profile $profile -p styleflex-speech-worker --features cuda
     if ($LASTEXITCODE -ne 0) {
         throw 'The CUDA speech worker build failed.'
     }
     Copy-Item -LiteralPath (
-        Join-Path $cudaTarget "$profile\rust-speech-worker.exe"
+        Join-Path $cudaTarget "$profile\styleflex-speech-worker.exe"
     ) -Destination (
-        Join-Path $output 'rust-speech-worker-cuda.exe'
+        Join-Path $output 'StyleFlex.Speech.Cuda.exe'
     )
 }
 finally {
     Pop-Location
 }
 
-Write-Host "Rust application published to $output"
+Write-Host "StyleFlex published to $output"

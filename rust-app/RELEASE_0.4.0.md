@@ -1,4 +1,4 @@
-# Rust Voice 0.4.0
+# StyleFlex 0.4.0
 
 This release establishes the first coherent Rust/Slint product surface.
 

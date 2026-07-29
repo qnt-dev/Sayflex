@@ -1,4 +1,4 @@
-# Rust Voice 0.1.3
+# StyleFlex 0.1.3
 
 This release replaces the unsafe `Ctrl + Windows` implementation from 0.1.2.
 

@@ -375,14 +375,7 @@ fn try_adopt_existing_windows_model(installer: &ModelInstaller, model: &ModelDes
 }
 
 fn application_data_root() -> PathBuf {
-    env::var_os("LOCALAPPDATA").map_or_else(
-        || {
-            env::current_dir()
-                .unwrap_or_default()
-                .join(".rust-voice-data")
-        },
-        |root| Path::new(&root).join("KeyboopRust"),
-    )
+    rust_app_core::product::data_root()
 }
 
 pub(crate) fn unix_ms() -> u64 {

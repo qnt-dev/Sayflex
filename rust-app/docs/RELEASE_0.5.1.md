@@ -1,4 +1,4 @@
-# Rust Voice 0.5.1
+# StyleFlex 0.5.1
 
 This release hardens the Windows input, privacy, recovery, model, and speech
 pipelines without adding latency to the visible dictation path.

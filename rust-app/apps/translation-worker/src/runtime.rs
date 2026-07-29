@@ -17,7 +17,7 @@ const RUNTIME_ARCHIVE: &str = "llama-b10164-vulkan.zip";
 const RUNTIME_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download/b10164/\
      llama-b10164-bin-win-vulkan-x64.zip";
 const RUNTIME_SHA256: &str = "5812a095d3b810b8c87fa7232aa2acbdc1279dfb008ee448ef7547a28c8f23e8";
-const INSTALL_MARKER: &str = ".qntflex-runtime";
+const INSTALL_MARKER: &str = ".styleflex-runtime";
 const REQUIRED_FILES: &[&str] = &[
     "llama-server.exe",
     "llama-server-impl.dll",
@@ -238,7 +238,7 @@ mod tests {
         let manager = LlamaRuntimeManager::new(root.path().to_owned());
         std::fs::create_dir_all(manager.runtime_path()).unwrap();
         std::fs::write(
-            manager.runtime_path().join(".qntflex-runtime"),
+            manager.runtime_path().join(".styleflex-runtime"),
             "5812a095d3b810b8c87fa7232aa2acbdc1279dfb008ee448ef7547a28c8f23e8",
         )
         .unwrap();

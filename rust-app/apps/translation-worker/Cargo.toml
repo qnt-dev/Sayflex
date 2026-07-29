@@ -1,5 +1,5 @@
 [package]
-name = "rust-translation-worker"
+name = "styleflex-translation-worker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.100"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
+rust-app-core = { version = "0.5.12", path = "../../crates/app-core" }
 rust-model-manager = { version = "0.5.12", path = "../../crates/model-manager" }
 rust-platform-windows = { version = "0.5.12", path = "../../crates/platform-windows" }
 rust-protocol = { version = "0.5.12", path = "../../crates/protocol" }

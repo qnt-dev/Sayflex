@@ -1,6 +1,6 @@
 # Latency architecture
 
-Rust Voice treats release-to-insertion as a product contract, not a single
+StyleFlex treats release-to-insertion as a product contract, not a single
 stopwatch around Whisper.
 
 ## User-visible contract
@@ -100,7 +100,7 @@ Run the optimized worker against a representative WAV:
 ```powershell
 .\scripts\benchmark-latency.ps1 `
   -WavPath C:\path\phrase.wav `
-  -ModelPath "$env:LOCALAPPDATA\KeyboopRust\models\ggml-large-v3-turbo.bin"
+  -ModelPath "$env:LOCALAPPDATA\StyleFlex\models\ggml-large-v3-turbo.bin"
 ```
 
 The script reports median and p95 inference latency from warmed CUDA passes and
