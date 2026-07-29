@@ -51,6 +51,21 @@ pub fn configure_overlay_window(
     window_handle: u64,
     target_window_handle: Option<u64>,
 ) -> Result<(), String> {
+    configure_overlay_window_impl(window_handle, target_window_handle, true)
+}
+
+pub fn configure_transparent_overlay_window(
+    window_handle: u64,
+    target_window_handle: Option<u64>,
+) -> Result<(), String> {
+    configure_overlay_window_impl(window_handle, target_window_handle, false)
+}
+
+fn configure_overlay_window_impl(
+    window_handle: u64,
+    target_window_handle: Option<u64>,
+    use_backdrop: bool,
+) -> Result<(), String> {
     let hwnd = window_handle as usize as HWND;
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
@@ -66,7 +81,11 @@ pub fn configure_overlay_window(
             | WS_EX_TOOLWINDOW as isize
             | WS_EX_TRANSPARENT as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_style);
-        apply_transient_backdrop(hwnd);
+        if use_backdrop {
+            apply_transient_backdrop(hwnd);
+        } else {
+            clear_system_backdrop(hwnd);
+        }
 
         let monitor_target = target_window_handle
             .filter(|handle| *handle != 0)
@@ -278,6 +297,18 @@ unsafe fn apply_transient_backdrop(hwnd: HWND) {
             (&raw const corner_preference).cast(),
             size_of_val(&corner_preference) as u32,
         );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            (&raw const backdrop).cast(),
+            size_of_val(&backdrop) as u32,
+        );
+    }
+}
+
+unsafe fn clear_system_backdrop(hwnd: HWND) {
+    let backdrop = DWMSBT_NONE;
+    unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE as u32,

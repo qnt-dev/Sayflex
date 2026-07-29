@@ -1,7 +1,7 @@
 use std::{
     mem,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
@@ -15,12 +15,15 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
-use rust_protocol::{SessionId, SpeechWorkerEvent};
+use rust_protocol::{AUDIO_SPECTRUM_BANDS, SessionId, SpeechWorkerEvent};
 
 const AUDIO_RING_SECONDS: usize = 8;
 const CAPTURE_RESERVE_SECONDS: usize = 15;
 const MAX_CAPTURE_SECONDS: usize = 5 * 60;
 const LEVEL_INTERVAL: Duration = Duration::from_millis(32);
+const SPECTRUM_WINDOW_SAMPLES: usize = 1_024;
+const SPECTRUM_MIN_FREQUENCY_HZ: f32 = 80.0;
+const SPECTRUM_MAX_FREQUENCY_HZ: f32 = 8_000.0;
 const POST_RELEASE_AUDIO_MS: u64 = 60;
 const SAFE_PRE_RELEASE_SILENCE_MS: u64 = 100;
 const POST_RELEASE_TIMEOUT: Duration = Duration::from_millis(140);
@@ -95,9 +98,99 @@ impl AudioSnapshotSource {
 struct ActiveCapture {
     session_id: SessionId,
     samples: Vec<f32>,
+    spectrum: SpectrumAnalyzer,
     last_level_report: Instant,
     peak_since_report: f32,
     limit_reported: bool,
+}
+
+struct SpectrumAnalyzer {
+    samples: [f32; SPECTRUM_WINDOW_SAMPLES],
+    next: usize,
+    filled: usize,
+}
+
+impl SpectrumAnalyzer {
+    fn new() -> Self {
+        Self {
+            samples: [0.0; SPECTRUM_WINDOW_SAMPLES],
+            next: 0,
+            filled: 0,
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        self.samples[self.next] = sample;
+        self.next = (self.next + 1) % SPECTRUM_WINDOW_SAMPLES;
+        self.filled = (self.filled + 1).min(SPECTRUM_WINDOW_SAMPLES);
+    }
+
+    fn normalized_bands(&self, sample_rate_hz: u32, peak: f32) -> Vec<f32> {
+        if self.filled < SPECTRUM_WINDOW_SAMPLES || sample_rate_hz == 0 || peak <= f32::EPSILON {
+            return vec![0.0; AUDIO_SPECTRUM_BANDS];
+        }
+
+        let sample_rate = sample_rate_hz as f32;
+        let window = spectrum_hann_window();
+        let mut magnitudes = Vec::with_capacity(AUDIO_SPECTRUM_BANDS);
+        for band in 0..AUDIO_SPECTRUM_BANDS {
+            let frequency = spectrum_band_frequency(band, sample_rate_hz);
+            let angular_frequency = std::f32::consts::TAU * frequency / sample_rate;
+            let coefficient = 2.0 * angular_frequency.cos();
+            let mut previous = 0.0_f32;
+            let mut previous_previous = 0.0_f32;
+            for (offset, window_weight) in window.iter().enumerate() {
+                let sample_index = (self.next + offset) % SPECTRUM_WINDOW_SAMPLES;
+                let state = (self.samples[sample_index] * window_weight) + coefficient * previous
+                    - previous_previous;
+                previous_previous = previous;
+                previous = state;
+            }
+            let power = previous.mul_add(
+                previous,
+                previous_previous.mul_add(
+                    previous_previous,
+                    -(coefficient * previous * previous_previous),
+                ),
+            );
+            let amplitude = power.max(0.0).sqrt() / (SPECTRUM_WINDOW_SAMPLES as f32 * 0.5);
+            magnitudes.push(amplitude);
+        }
+
+        let frame_max = magnitudes.iter().copied().fold(0.0_f32, f32::max);
+        if frame_max <= f32::EPSILON {
+            return vec![0.0; AUDIO_SPECTRUM_BANDS];
+        }
+        let voice_energy = (peak.clamp(0.0, 1.0).sqrt() * 2.35).clamp(0.0, 1.0);
+        let noise_floor = frame_max * 0.025;
+        magnitudes
+            .into_iter()
+            .map(|magnitude| {
+                if magnitude <= noise_floor {
+                    0.0
+                } else {
+                    ((magnitude / frame_max).powf(0.62) * voice_energy).clamp(0.0, 1.0)
+                }
+            })
+            .collect()
+    }
+}
+
+fn spectrum_band_frequency(band: usize, sample_rate_hz: u32) -> f32 {
+    let highest_frequency = SPECTRUM_MAX_FREQUENCY_HZ.min(sample_rate_hz as f32 * 0.45);
+    let frequency_ratio = highest_frequency / SPECTRUM_MIN_FREQUENCY_HZ;
+    let position = band.min(AUDIO_SPECTRUM_BANDS - 1) as f32 / (AUDIO_SPECTRUM_BANDS - 1) as f32;
+    SPECTRUM_MIN_FREQUENCY_HZ * frequency_ratio.powf(position)
+}
+
+fn spectrum_hann_window() -> &'static [f32; SPECTRUM_WINDOW_SAMPLES] {
+    static WINDOW: OnceLock<[f32; SPECTRUM_WINDOW_SAMPLES]> = OnceLock::new();
+    WINDOW.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let phase = std::f32::consts::TAU * index as f32 / (SPECTRUM_WINDOW_SAMPLES - 1) as f32;
+            0.5 - 0.5 * phase.cos()
+        })
+    })
 }
 
 struct CaptureCounters {
@@ -378,6 +471,7 @@ fn capture_loop(
                 active = Some(ActiveCapture {
                     session_id,
                     samples: Vec::with_capacity(sample_rate_hz as usize * CAPTURE_RESERVE_SECONDS),
+                    spectrum: SpectrumAnalyzer::new(),
                     last_level_report: Instant::now() - LEVEL_INTERVAL,
                     peak_since_report: 0.0,
                     limit_reported: false,
@@ -438,6 +532,7 @@ fn drain_audio(
     let max_samples = sample_rate_hz as usize * MAX_CAPTURE_SECONDS;
     while let Ok(sample) = consumer.pop() {
         active.peak_since_report = active.peak_since_report.max(sample.abs());
+        active.spectrum.push(sample);
         if active.samples.len() < max_samples {
             active.samples.push(sample);
         } else if !active.limit_reported {
@@ -453,9 +548,11 @@ fn drain_audio(
     if active.last_level_report.elapsed() >= LEVEL_INTERVAL {
         active.last_level_report = Instant::now();
         let peak = mem::take(&mut active.peak_since_report).clamp(0.0, 1.0);
+        let spectrum = active.spectrum.normalized_bands(sample_rate_hz, peak);
         let _ = events.send(SpeechWorkerEvent::AudioLevel {
             session_id: active.session_id,
             peak,
+            spectrum,
         });
     }
 }
@@ -592,7 +689,11 @@ fn sinc(value: f64) -> f64 {
 mod tests {
     use rust_protocol::SessionId;
 
-    use super::{RecordedAudio, post_release_target_sample, resample_bandlimited};
+    use super::{
+        RecordedAudio, SPECTRUM_WINDOW_SAMPLES, SpectrumAnalyzer, post_release_target_sample,
+        resample_bandlimited, spectrum_band_frequency,
+    };
+    use rust_protocol::AUDIO_SPECTRUM_BANDS;
 
     #[test]
     fn resampler_preserves_duration() {
@@ -656,5 +757,49 @@ mod tests {
     #[test]
     fn release_fence_is_free_after_a_natural_pause() {
         assert_eq!(post_release_target_sample(10_000, 5_000, 48_000), 10_000);
+    }
+
+    #[test]
+    fn silent_spectrum_is_fixed_size_and_zeroed() {
+        let mut analyzer = SpectrumAnalyzer::new();
+        for _ in 0..SPECTRUM_WINDOW_SAMPLES {
+            analyzer.push(0.0);
+        }
+
+        let bands = analyzer.normalized_bands(48_000, 0.0);
+        assert_eq!(bands.len(), AUDIO_SPECTRUM_BANDS);
+        assert!(bands.iter().all(|band| *band == 0.0));
+    }
+
+    #[test]
+    fn spectrum_places_a_tone_in_the_nearest_logarithmic_band() {
+        let sample_rate_hz = 48_000;
+        let tone_hz = 440.0_f32;
+        let mut analyzer = SpectrumAnalyzer::new();
+        for index in 0..SPECTRUM_WINDOW_SAMPLES {
+            analyzer.push(
+                0.35 * (std::f32::consts::TAU * tone_hz * index as f32 / sample_rate_hz as f32)
+                    .sin(),
+            );
+        }
+
+        let bands = analyzer.normalized_bands(sample_rate_hz, 0.35);
+        let strongest = bands
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .unwrap();
+        let expected = (0..AUDIO_SPECTRUM_BANDS)
+            .min_by(|left, right| {
+                (spectrum_band_frequency(*left, sample_rate_hz) - tone_hz)
+                    .abs()
+                    .total_cmp(&(spectrum_band_frequency(*right, sample_rate_hz) - tone_hz).abs())
+            })
+            .unwrap();
+
+        assert!(strongest.abs_diff(expected) <= 1);
+        assert!(bands[strongest] > 0.8);
+        assert!(bands.iter().all(|band| (0.0..=1.0).contains(band)));
     }
 }

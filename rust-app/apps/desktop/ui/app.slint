@@ -275,6 +275,78 @@ component SettingRow inherits Rectangle {
     }
 }
 
+component CircularPaletteChoice inherits Rectangle {
+    in property <string> label;
+    in property <color> color-a;
+    in property <color> color-b;
+    in property <color> color-c;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 34px;
+    horizontal-stretch: 1;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.selected ? Theme.orange : Theme.line-soft;
+    background: touch.pressed
+        ? #242026
+        : touch.has-hover
+            ? Theme.panel-raised
+            : root.selected
+                ? Theme.orange-soft
+                : Theme.ink;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        Rectangle {
+            width: 34px;
+            background: transparent;
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 2px;
+
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: root.color-a;
+                }
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: root.color-b;
+                }
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: root.color-c;
+                }
+            }
+        }
+
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.text : Theme.text-muted;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 export component SettingsWindow inherits Window {
     title: "Rust Voice";
     icon: @image-url("../assets/tray-icon.svg");
@@ -289,6 +361,7 @@ export component SettingsWindow inherits Window {
     in-out property <string> output-mode-label: "Output: original language";
     in-out property <string> release-optimization-label: "Release optimization: fastest";
     in-out property <int> selected-visualizer: 0;
+    in-out property <int> selected-circular-palette: 0;
     in property <[ModelRow]> model-rows;
     in property <[ModelRow]> translation-model-rows;
     in property <[HistoryRow]> history-rows;
@@ -307,6 +380,7 @@ export component SettingsWindow inherits Window {
     callback toggle-output-mode();
     callback toggle-release-optimization();
     callback select-visualizer(int);
+    callback select-circular-palette(int);
     callback toggle-translation-enabled();
     callback toggle-layout-enabled();
     callback cycle-text-action-mode();
@@ -664,7 +738,7 @@ export component SettingsWindow inherits Window {
                 spacing: 10px;
 
                 Rectangle {
-                    height: 96px;
+                    height: root.selected-visualizer == 4 ? 164px : 96px;
                     vertical-stretch: 0;
                     border-radius: 9px;
                     border-width: 1px;
@@ -716,6 +790,51 @@ export component SettingsWindow inherits Window {
                                 detail: "Mic + voice lines";
                                 selected: root.selected-visualizer == 3;
                                 clicked => { root.select-visualizer(3); }
+                            }
+                            VisualizerChoice {
+                                label: "Circular";
+                                detail: "Real frequency ring";
+                                selected: root.selected-visualizer == 4;
+                                clicked => { root.select-visualizer(4); }
+                            }
+                        }
+
+                        if root.selected-visualizer == 4 : VerticalLayout {
+                            height: 58px;
+                            vertical-stretch: 0;
+                            spacing: 6px;
+
+                            Eyebrow { text: "CIRCULAR PALETTE"; }
+
+                            HorizontalLayout {
+                                height: 34px;
+                                vertical-stretch: 0;
+                                spacing: 6px;
+
+                                CircularPaletteChoice {
+                                    label: "Sunset";
+                                    color-a: #ffad21;
+                                    color-b: #ff361b;
+                                    color-c: #ff087b;
+                                    selected: root.selected-circular-palette == 0;
+                                    clicked => { root.select-circular-palette(0); }
+                                }
+                                CircularPaletteChoice {
+                                    label: "Arctic";
+                                    color-a: #7df5ff;
+                                    color-b: #1590ff;
+                                    color-c: #315dff;
+                                    selected: root.selected-circular-palette == 1;
+                                    clicked => { root.select-circular-palette(1); }
+                                }
+                                CircularPaletteChoice {
+                                    label: "Monochrome";
+                                    color-a: #f4f6f8;
+                                    color-b: #89939e;
+                                    color-c: #56616d;
+                                    selected: root.selected-circular-palette == 2;
+                                    clicked => { root.select-circular-palette(2); }
+                                }
                             }
                         }
                     }
@@ -1199,15 +1318,17 @@ export component SettingsWindow inherits Window {
 export component RecordingIndicator inherits Window {
     title: "Rust Recording Indicator";
     icon: @image-url("../assets/tray-icon.svg");
-    width: 118px;
-    height: 42px;
+    width: root.visualizer-style == 4 ? 92px : 118px;
+    height: root.visualizer-style == 4 ? 92px : 42px;
     no-frame: true;
     always-on-top: true;
     background: transparent;
     default-font-family: "Segoe UI Variable Text";
 
     in property <[float]> bar-heights;
+    in property <[float]> spectrum-heights;
     in property <int> visualizer-style: 0;
+    in property <int> circular-palette: 0;
     in property <bool> processing: false;
     in property <float> signal-opacity: 0.54;
     in property <float> disc-opacity: 1;
@@ -1222,26 +1343,30 @@ export component RecordingIndicator inherits Window {
     in property <float> mic-middle-height: 9;
     in property <float> mic-inner-height: 6;
     in property <float> mic-near-height: 7;
+    in property <float> visual-scale: 1;
+    in property <float> visual-opacity: 1;
     in-out property <bool> prepared: false;
 
     Rectangle {
-        border-radius: 10px;
-        background: #2c2f31;
-        opacity: root.prepared ? 1 : 0;
+        border-radius: root.visualizer-style == 4 ? 18px : 10px;
+        background: root.visualizer-style == 4 ? transparent : #2c2f31;
+        opacity: root.prepared ? root.visual-opacity : 0;
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+        transform-scale: root.visual-scale;
 
         Rectangle {
-            x: 3px;
-            y: 3px;
-            width: parent.width - 6px;
-            height: parent.height - 6px;
-            border-radius: 7px;
-            background: #272727;
+            x: root.visualizer-style == 4 ? 2px : 3px;
+            y: root.visualizer-style == 4 ? 2px : 3px;
+            width: parent.width - (root.visualizer-style == 4 ? 4px : 6px);
+            height: parent.height - (root.visualizer-style == 4 ? 4px : 6px);
+            border-radius: root.visualizer-style == 4 ? 16px : 7px;
+            background: root.visualizer-style == 4 ? transparent : #272727;
 
             HorizontalLayout {
                 y: (parent.height - self.height) / 2;
-                height: 19px;
-                padding-left: 9px;
-                padding-right: 7px;
+                height: root.visualizer-style == 4 ? 88px : 19px;
+                padding-left: root.visualizer-style == 4 ? 0px : 9px;
+                padding-right: root.visualizer-style == 4 ? 0px : 7px;
                 alignment: center;
                 spacing: 3px;
 
@@ -1494,13 +1619,90 @@ export component RecordingIndicator inherits Window {
                     }
                 }
 
-                if root.visualizer-style != 3 : Rectangle {
+                if root.visualizer-style == 4 : Rectangle {
+                    width: 88px;
+                    height: 88px;
+                    background: transparent;
+
+                    // A restrained native glow approximates the reference without
+                    // embedding video, shaders, or a blur pass.
+                    // Soft duplicate bars provide a low-cost halo.
+                    for band-height[index] in root.spectrum-heights : Rectangle {
+                        width: 4px;
+                        height: band-height * 1px + 3px;
+                        x: (parent.width - self.width) / 2;
+                        y: parent.height / 2 - 22.5px - self.height;
+                        border-radius: self.width / 2;
+                        background: root.circular-palette == 1
+                            ? index < 4 ? #7df5ff
+                                : index < 9 ? #35d9ff
+                                : index < 14 ? #1590ff
+                                : index < 20 ? #315dff
+                                : index < 26 ? #1578ff
+                                : #49d7ff
+                            : root.circular-palette == 2
+                                ? #323940
+                                : index < 3 ? #ffad21
+                                    : index < 7 ? #ff6220
+                                    : index < 12 ? #ff16b7
+                                    : index < 18 ? #ff087b
+                                    : index < 24 ? #ff1847
+                                    : index < 28 ? #ff361b
+                                    : #ff7c12;
+                        opacity: root.circular-palette == 2
+                            ? 0.18 + root.signal-opacity * 0.18
+                            : root.signal-opacity * 0.18;
+                        transform-origin: {
+                            x: self.width / 2,
+                            y: parent.height / 2 - self.y,
+                        };
+                        transform-rotation: index * 11.25deg;
+                    }
+
+                    for band-height[index] in root.spectrum-heights : Rectangle {
+                        width: 2.2px;
+                        height: band-height * 1px;
+                        x: (parent.width - self.width) / 2;
+                        y: parent.height / 2 - 22.5px - self.height;
+                        border-radius: self.width / 2;
+                        background: root.circular-palette == 1
+                            ? index < 4 ? #7df5ff
+                                : index < 9 ? #35d9ff
+                                : index < 14 ? #1590ff
+                                : index < 20 ? #315dff
+                                : index < 26 ? #1578ff
+                                : #49d7ff
+                            : root.circular-palette == 2
+                                ? Math.mod(index, 7) == 0 ? #f4f6f8
+                                    : Math.mod(index, 7) == 1 ? #89939e
+                                    : Math.mod(index, 7) == 2 ? #56616d
+                                    : Math.mod(index, 7) == 3 ? #aeb6bf
+                                    : Math.mod(index, 7) == 4 ? #69747f
+                                    : Math.mod(index, 7) == 5 ? #5b6671
+                                    : #d8dde2
+                                : index < 3 ? #ffad21
+                                    : index < 7 ? #ff6220
+                                    : index < 12 ? #ff16b7
+                                    : index < 18 ? #ff087b
+                                    : index < 24 ? #ff1847
+                                    : index < 28 ? #ff361b
+                                    : #ff7c12;
+                        opacity: 0.72 + root.signal-opacity * 0.28;
+                        transform-origin: {
+                            x: self.width / 2,
+                            y: parent.height / 2 - self.y,
+                        };
+                        transform-rotation: index * 11.25deg;
+                    }
+                }
+
+                if root.visualizer-style != 3 && root.visualizer-style != 4 : Rectangle {
                     width: 4px;
                     height: 19px;
                     background: transparent;
                 }
 
-                if root.visualizer-style != 3 : Rectangle {
+                if root.visualizer-style != 3 && root.visualizer-style != 4 : Rectangle {
                     width: 18px;
                     height: 19px;
                     background: transparent;

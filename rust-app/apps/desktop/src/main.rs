@@ -22,10 +22,11 @@ use rust_app_core::{
     SessionRegistry, build_layout_candidates,
 };
 use rust_protocol::{
-    HistoryEntry, InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId,
-    SessionId, SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot,
-    TextActionIntent, Transcript, TranslationHistoryEntry, TranslationModelSummary,
-    TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
+    AUDIO_SPECTRUM_BANDS, HistoryEntry, InputHostCommand, InputHostEvent, ModelSummary,
+    PROTOCOL_VERSION, RequestId, SessionId, SpeechOutputMode, SpeechWorkerCommand,
+    SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranslationHistoryEntry,
+    TranslationModelSummary, TranslationResult, TranslationTier, TranslationWorkerCommand,
+    TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use slint::winit_030::{
@@ -610,6 +611,35 @@ enum VisualizerStyle {
     SymmetricSpectrum,
     FluidRibbon,
     BroadcastMic,
+    CircularSpectrum,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CircularSpectrumPalette {
+    #[default]
+    Sunset,
+    Arctic,
+    Monochrome,
+}
+
+impl CircularSpectrumPalette {
+    const fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::Sunset),
+            1 => Some(Self::Arctic),
+            2 => Some(Self::Monochrome),
+            _ => None,
+        }
+    }
+
+    const fn index(self) -> i32 {
+        match self {
+            Self::Sunset => 0,
+            Self::Arctic => 1,
+            Self::Monochrome => 2,
+        }
+    }
 }
 
 impl VisualizerStyle {
@@ -619,6 +649,7 @@ impl VisualizerStyle {
             1 => Some(Self::SymmetricSpectrum),
             2 => Some(Self::FluidRibbon),
             3 => Some(Self::BroadcastMic),
+            4 => Some(Self::CircularSpectrum),
             _ => None,
         }
     }
@@ -629,6 +660,7 @@ impl VisualizerStyle {
             Self::SymmetricSpectrum => 1,
             Self::FluidRibbon => 2,
             Self::BroadcastMic => 3,
+            Self::CircularSpectrum => 4,
         }
     }
 }
@@ -694,20 +726,26 @@ enum IndicatorMode {
     Hidden,
     Listening,
     Processing,
+    Success,
 }
 
 struct IndicatorAnimation {
     bars: Rc<VecModel<f32>>,
+    spectrum: Rc<VecModel<f32>>,
     style: VisualizerStyle,
     mode: IndicatorMode,
     target_level: f32,
     display_level: f32,
+    target_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
+    display_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
     phase: f32,
+    mode_progress: f32,
     last_frame: Instant,
 }
 
 struct IndicatorFrame {
     heights: Vec<f32>,
+    spectrum_heights: Vec<f32>,
     signal_opacity: f32,
     disc_opacity: f32,
     orb_size: f32,
@@ -721,17 +759,23 @@ struct IndicatorFrame {
     mic_middle_height: f32,
     mic_inner_height: f32,
     mic_near_height: f32,
+    visual_scale: f32,
+    visual_opacity: f32,
 }
 
 impl IndicatorAnimation {
-    fn new(bars: Rc<VecModel<f32>>) -> Self {
+    fn new(bars: Rc<VecModel<f32>>, spectrum: Rc<VecModel<f32>>) -> Self {
         Self {
             bars,
+            spectrum,
             style: VisualizerStyle::default(),
             mode: IndicatorMode::Hidden,
             target_level: 0.08,
             display_level: 0.08,
+            target_spectrum: [0.0; AUDIO_SPECTRUM_BANDS],
+            display_spectrum: [0.0; AUDIO_SPECTRUM_BANDS],
             phase: 0.0,
+            mode_progress: 0.0,
             last_frame: Instant::now(),
         }
     }
@@ -744,24 +788,42 @@ impl IndicatorAnimation {
         self.mode = IndicatorMode::Listening;
         self.target_level = 0.08;
         self.display_level = self.display_level.max(0.08);
+        self.target_spectrum.fill(0.0);
+        self.display_spectrum.fill(0.0);
+        self.mode_progress = 0.0;
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
     }
 
-    fn set_microphone_level(&mut self, microphone_level: f32) {
+    fn set_microphone_signal(&mut self, microphone_level: f32, spectrum: &[f32]) {
         if self.mode == IndicatorMode::Listening {
             self.target_level = (microphone_level.clamp(0.0, 1.0).sqrt() * 2.35).clamp(0.0, 1.0);
+            for (index, target) in self.target_spectrum.iter_mut().enumerate() {
+                *target = spectrum.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            }
         }
     }
 
     fn begin_processing(&mut self) {
         self.mode = IndicatorMode::Processing;
         self.target_level = 0.18;
+        self.target_spectrum.fill(0.0);
+        self.mode_progress = 0.0;
+        self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
+    }
+
+    fn begin_success(&mut self) {
+        self.mode = IndicatorMode::Success;
+        self.target_level = 0.0;
+        self.target_spectrum.fill(0.0);
+        self.mode_progress = 0.0;
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
     }
 
     fn stop(&mut self) {
         self.mode = IndicatorMode::Hidden;
         self.target_level = 0.08;
+        self.target_spectrum.fill(0.0);
+        self.mode_progress = 0.0;
     }
 
     fn tick(&mut self, indicator: &slint::Weak<RecordingIndicator>) {
@@ -777,6 +839,7 @@ impl IndicatorAnimation {
             (elapsed.as_secs_f32() / INDICATOR_FRAME_INTERVAL.as_secs_f32()).clamp(0.5, 2.5);
         let frame = self.advance_frame(frame_scale);
         self.bars.set_vec(frame.heights);
+        self.spectrum.set_vec(frame.spectrum_heights);
 
         if let Some(indicator) = indicator.upgrade() {
             indicator.set_visualizer_style(self.style.index());
@@ -794,6 +857,8 @@ impl IndicatorAnimation {
             indicator.set_mic_middle_height(frame.mic_middle_height);
             indicator.set_mic_inner_height(frame.mic_inner_height);
             indicator.set_mic_near_height(frame.mic_near_height);
+            indicator.set_visual_scale(frame.visual_scale);
+            indicator.set_visual_opacity(frame.visual_opacity);
         }
     }
 
@@ -801,16 +866,30 @@ impl IndicatorAnimation {
         let phase_step = match self.mode {
             IndicatorMode::Listening => 0.29,
             IndicatorMode::Processing => 0.18,
+            IndicatorMode::Success => 0.24,
             IndicatorMode::Hidden => 0.0,
         };
         self.phase += phase_step * frame_scale;
+        if self.mode == IndicatorMode::Success {
+            self.mode_progress = (self.mode_progress + 0.045 * frame_scale).min(1.0);
+        }
         let smoothing = 1.0 - 0.82_f32.powf(frame_scale);
         self.display_level += (self.target_level - self.display_level) * smoothing;
+        for (display, target) in self.display_spectrum.iter_mut().zip(self.target_spectrum) {
+            let response = if target > *display {
+                0.46_f32
+            } else {
+                0.16_f32
+            };
+            let spectrum_smoothing = 1.0 - (1.0 - response).powf(frame_scale);
+            *display += (target - *display) * spectrum_smoothing;
+        }
 
         let processing_pulse = ((self.phase * 0.72).sin() + 1.0) / 2.0;
         let energy = match self.mode {
             IndicatorMode::Listening => self.display_level.max(0.07),
             IndicatorMode::Processing => self.target_level + (processing_pulse * 0.08),
+            IndicatorMode::Success => 0.0,
             IndicatorMode::Hidden => 0.0,
         };
         let heights: Vec<f32> = INDICATOR_BAR_PROFILE
@@ -819,6 +898,25 @@ impl IndicatorAnimation {
             .map(|(index, profile)| {
                 let travelling_wave = ((self.phase + index as f32 * 0.62).sin() + 1.0) / 2.0;
                 (3.0 + (profile * 5.0) + (travelling_wave * energy * 12.0)).clamp(3.0, 19.0)
+            })
+            .collect();
+        let spectrum_heights = self
+            .display_spectrum
+            .iter()
+            .enumerate()
+            .map(|(index, band)| match self.mode {
+                IndicatorMode::Listening => {
+                    let voice_activation = ((self.display_level - 0.24) / 0.76).clamp(0.0, 1.0);
+                    (2.8 + band * 16.2 + band.sqrt() * voice_activation * 2.5).clamp(2.8, 21.5)
+                }
+                IndicatorMode::Processing => {
+                    let angular_position =
+                        index as f32 / AUDIO_SPECTRUM_BANDS as f32 * std::f32::consts::TAU;
+                    let travelling = ((angular_position - self.phase * 0.72).cos() + 1.0) * 0.5;
+                    2.8 + travelling.powi(5) * 9.4
+                }
+                IndicatorMode::Success => 2.8,
+                IndicatorMode::Hidden => 2.8,
             })
             .collect();
         let mic_edge_height = (3.0
@@ -838,10 +936,12 @@ impl IndicatorAnimation {
             .clamp(4.0, 15.0);
         IndicatorFrame {
             heights,
+            spectrum_heights,
             signal_opacity: (0.5 + energy.min(1.0) * 0.5).clamp(0.5, 1.0),
             disc_opacity: match self.mode {
                 IndicatorMode::Processing => 0.72 + processing_pulse * 0.28,
                 IndicatorMode::Listening => 1.0,
+                IndicatorMode::Success => 1.0 - self.mode_progress,
                 IndicatorMode::Hidden => 0.0,
             },
             orb_size: (9.0 + energy * 10.0 + processing_pulse * 1.5).clamp(8.0, 20.0),
@@ -855,6 +955,20 @@ impl IndicatorAnimation {
             mic_middle_height,
             mic_inner_height,
             mic_near_height,
+            visual_scale: match self.mode {
+                IndicatorMode::Success => {
+                    let eased =
+                        self.mode_progress * self.mode_progress * (3.0 - 2.0 * self.mode_progress);
+                    1.0 - eased * 0.55
+                }
+                IndicatorMode::Processing => 1.0 + processing_pulse * 0.025,
+                IndicatorMode::Listening | IndicatorMode::Hidden => 1.0,
+            },
+            visual_opacity: match self.mode {
+                IndicatorMode::Success => 1.0 - self.mode_progress,
+                IndicatorMode::Listening | IndicatorMode::Processing => 1.0,
+                IndicatorMode::Hidden => 0.0,
+            },
         }
     }
 }
@@ -871,6 +985,7 @@ struct AppState {
     output_mode: SpeechOutputMode,
     fast_release_previews: bool,
     visualizer_style: VisualizerStyle,
+    circular_spectrum_palette: CircularSpectrumPalette,
     input_ready: bool,
     speech_ready: bool,
     indicator_session: Option<SessionId>,
@@ -912,6 +1027,7 @@ impl AppState {
             output_mode,
             fast_release_previews: saved_settings.fast_release_previews,
             visualizer_style: saved_settings.visualizer_style,
+            circular_spectrum_palette: saved_settings.circular_spectrum_palette,
             input_ready: false,
             speech_ready: false,
             indicator_session: None,
@@ -1004,7 +1120,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     rust_app_core::diagnostics::log_line("desktop lifecycle=starting");
     configure_ui_backend()?;
     if let Some(style) = indicator_preview_style() {
-        return run_indicator_preview(style);
+        let live_microphone = env::args().any(|argument| {
+            argument == "--indicator-preview-live"
+                || argument.starts_with("--indicator-preview-live=")
+        });
+        return run_indicator_preview(style, live_microphone);
     }
     if env::args().any(|argument| argument == "--action-preview") {
         return run_action_palette_preview();
@@ -1060,6 +1180,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .borrow_mut()
         .set_style(saved_settings.visualizer_style);
     indicator.set_visualizer_style(saved_settings.visualizer_style.index());
+    indicator.set_circular_palette(saved_settings.circular_spectrum_palette.index());
     let selected_model_id = saved_settings
         .selected_model_id
         .clone()
@@ -1098,6 +1219,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &translator,
         &state,
         &workers,
+        &indicator,
         &indicator_animation,
     );
     wire_tray(&tray, &settings, &translator, &state, &workers);
@@ -1169,8 +1291,13 @@ fn new_indicator()
     let indicator_bars = Rc::new(VecModel::from(vec![
         4.0, 6.0, 9.0, 12.0, 15.0, 15.0, 12.0, 9.0, 6.0, 4.0,
     ]));
+    let spectrum_bands = Rc::new(VecModel::from(vec![2.8; AUDIO_SPECTRUM_BANDS]));
     indicator.set_bar_heights(ModelRc::from(Rc::clone(&indicator_bars)));
-    let animation = Rc::new(RefCell::new(IndicatorAnimation::new(indicator_bars)));
+    indicator.set_spectrum_heights(ModelRc::from(Rc::clone(&spectrum_bands)));
+    let animation = Rc::new(RefCell::new(IndicatorAnimation::new(
+        indicator_bars,
+        spectrum_bands,
+    )));
     Ok((indicator, animation))
 }
 
@@ -1182,8 +1309,29 @@ fn indicator_preview_style() -> Option<VisualizerStyle> {
         "--indicator-preview=mic" | "--indicator-preview=microphone" => {
             Some(VisualizerStyle::BroadcastMic)
         }
+        "--indicator-preview=circle" | "--indicator-preview=circular-spectrum" => {
+            Some(VisualizerStyle::CircularSpectrum)
+        }
+        "--indicator-preview-live=circle" | "--indicator-preview-live=circular-spectrum" => {
+            Some(VisualizerStyle::CircularSpectrum)
+        }
         _ => None,
     })
+}
+
+fn indicator_preview_palette() -> CircularSpectrumPalette {
+    env::args()
+        .find_map(|argument| match argument.as_str() {
+            "--indicator-palette=sunset" => Some(CircularSpectrumPalette::Sunset),
+            "--indicator-palette=arctic" | "--indicator-palette=blue" => {
+                Some(CircularSpectrumPalette::Arctic)
+            }
+            "--indicator-palette=monochrome" | "--indicator-palette=white" => {
+                Some(CircularSpectrumPalette::Monochrome)
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn translation_preview_mode() -> Option<bool> {
@@ -1194,7 +1342,10 @@ fn translation_preview_mode() -> Option<bool> {
     })
 }
 
-fn run_indicator_preview(style: VisualizerStyle) -> Result<(), Box<dyn Error>> {
+fn run_indicator_preview(
+    style: VisualizerStyle,
+    live_microphone: bool,
+) -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.IndicatorPreview")?;
     let (indicator, animation) = new_indicator()?;
@@ -1204,6 +1355,7 @@ fn run_indicator_preview(style: VisualizerStyle) -> Result<(), Box<dyn Error>> {
         animation.begin_listening();
     }
     indicator.set_visualizer_style(style.index());
+    indicator.set_circular_palette(indicator_preview_palette().index());
     indicator.set_prepared(true);
     indicator.show()?;
     let indicator_weak = indicator.as_weak();
@@ -1216,12 +1368,101 @@ fn run_indicator_preview(style: VisualizerStyle) -> Result<(), Box<dyn Error>> {
                 .ok()
                 .as_deref()
                 .and_then(native_window_handle)
-                .is_some_and(|handle| configure_indicator_native_window(handle, None));
+                .is_some_and(|handle| {
+                    configure_indicator_native_window(
+                        handle,
+                        None,
+                        style == VisualizerStyle::CircularSpectrum,
+                    )
+                });
             if !configured {
                 eprintln!("could not configure recording indicator preview");
             }
         }
     })?;
+
+    let live_signal = Arc::new(Mutex::new(None::<(f32, Vec<f32>)>));
+    let live_audio_worker = if live_microphone {
+        let worker_job = rust_platform_windows::WorkerJob::new()
+            .map_err(|error| format!("could not create preview worker job: {error}"))?;
+        let path = env::current_exe()?
+            .parent()
+            .ok_or("preview executable has no parent directory")?
+            .join("rust-speech-worker.exe");
+        if !path.exists() {
+            return Err(format!(
+                "preview audio worker is missing: {}. Build rust-speech-worker first.",
+                path.display()
+            )
+            .into());
+        }
+        let mut command = Command::new(&path);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command.spawn()?;
+        worker_job
+            .assign(&child)
+            .map_err(|error| format!("could not contain preview audio worker: {error}"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or("preview audio worker stdin is unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("preview audio worker stdout is unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("preview audio worker stderr is unavailable")?;
+        let writer = JsonWriter {
+            stdin: RefCell::new(BufWriter::new(stdin)),
+        };
+        let session_id = SessionId::new();
+        writer.send(&SpeechWorkerCommand::SetFastReleasePreviews { enabled: false })?;
+        writer.send(&SpeechWorkerCommand::Begin {
+            session_id,
+            started_unix_ms: unix_ms(),
+        })?;
+
+        let signal_for_reader = Arc::clone(&live_signal);
+        std::thread::Builder::new()
+            .name("indicator-preview-audio".to_owned())
+            .spawn(move || {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    let Ok(event) = serde_json::from_str::<SpeechWorkerEvent>(&line) else {
+                        continue;
+                    };
+                    if let SpeechWorkerEvent::AudioLevel {
+                        session_id: event_session,
+                        peak,
+                        spectrum,
+                    } = event
+                        && event_session == session_id
+                        && let Ok(mut latest) = signal_for_reader.lock()
+                    {
+                        *latest = Some((peak, spectrum));
+                    }
+                }
+            })?;
+        std::thread::Builder::new()
+            .name("indicator-preview-audio-diagnostics".to_owned())
+            .spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    eprintln!("preview audio worker: {line}");
+                }
+            })?;
+        Some((worker_job, child, writer, session_id))
+    } else {
+        None
+    };
 
     let timer = Timer::default();
     let indicator = indicator.as_weak();
@@ -1229,31 +1470,65 @@ fn run_indicator_preview(style: VisualizerStyle) -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     let segment = Rc::new(Cell::new(IndicatorMode::Listening));
     let segment_for_timer = Rc::clone(&segment);
+    let live_signal_for_timer = Arc::clone(&live_signal);
     timer.start(TimerMode::Repeated, Duration::from_millis(12), move || {
         let elapsed = started.elapsed().as_secs_f32();
-        let next_segment = if (elapsed % 10.0) < 7.0 {
+        let cycle_position = elapsed % 10.0;
+        let next_segment = if cycle_position < 7.0 {
             IndicatorMode::Listening
-        } else {
+        } else if cycle_position < 9.0 {
             IndicatorMode::Processing
+        } else {
+            IndicatorMode::Success
         };
         if segment_for_timer.get() != next_segment {
             segment_for_timer.set(next_segment);
             match next_segment {
                 IndicatorMode::Listening => animation_for_timer.borrow_mut().begin_listening(),
                 IndicatorMode::Processing => animation_for_timer.borrow_mut().begin_processing(),
+                IndicatorMode::Success => animation_for_timer.borrow_mut().begin_success(),
                 IndicatorMode::Hidden => {}
             }
         }
         if next_segment == IndicatorMode::Listening {
-            let simulated_level = (0.08 + ((elapsed * 2.7).sin() + 1.0) * 0.18).clamp(0.0, 1.0);
-            animation_for_timer
-                .borrow_mut()
-                .set_microphone_level(simulated_level);
+            if live_microphone {
+                if let Ok(mut latest) = live_signal_for_timer.try_lock()
+                    && let Some((peak, spectrum)) = latest.take()
+                {
+                    animation_for_timer
+                        .borrow_mut()
+                        .set_microphone_signal(peak, &spectrum);
+                }
+            } else {
+                let simulated_level = (0.08 + ((elapsed * 2.7).sin() + 1.0) * 0.18).clamp(0.0, 1.0);
+                let simulated_spectrum = (0..AUDIO_SPECTRUM_BANDS)
+                    .map(|index| {
+                        let position = index as f32 / AUDIO_SPECTRUM_BANDS as f32;
+                        let low_voice = (1.0 - (position - 0.24).abs() * 3.1).clamp(0.0, 1.0);
+                        let formant = (1.0 - (position - 0.52).abs() * 5.4).clamp(0.0, 1.0);
+                        let motion = ((elapsed * 3.2 + index as f32 * 0.47).sin() + 1.0) * 0.5;
+                        ((low_voice * 0.72 + formant * 0.38)
+                            * (0.52 + motion * 0.48)
+                            * simulated_level
+                            * 2.9)
+                            .clamp(0.0, 1.0)
+                    })
+                    .collect::<Vec<_>>();
+                animation_for_timer
+                    .borrow_mut()
+                    .set_microphone_signal(simulated_level, &simulated_spectrum);
+            }
         }
         animation_for_timer.borrow_mut().tick(&indicator);
     });
     slint::run_event_loop()?;
     timer.stop();
+    if let Some((_worker_job, mut child, writer, session_id)) = live_audio_worker {
+        let _ = writer.send(&SpeechWorkerCommand::Cancel { session_id });
+        let _ = writer.send(&SpeechWorkerCommand::Shutdown);
+        drop(writer);
+        let _ = child.wait();
+    }
     Ok(())
 }
 
@@ -2552,9 +2827,15 @@ fn handle_speech_event(
             set_indicator_status(settings, "Speech model selected.");
         }
         SpeechWorkerEvent::Listening { session_id: _ } => {}
-        SpeechWorkerEvent::AudioLevel { session_id, peak } => {
+        SpeechWorkerEvent::AudioLevel {
+            session_id,
+            peak,
+            spectrum,
+        } => {
             if state.borrow().registry.active_session() == Some(session_id) {
-                indicator_animation.borrow_mut().set_microphone_level(peak);
+                indicator_animation
+                    .borrow_mut()
+                    .set_microphone_signal(peak, &spectrum);
             }
         }
         SpeechWorkerEvent::Processing { session_id: _ } => {
@@ -3194,6 +3475,7 @@ fn wire_settings(
     translator: &TranslatorWindow,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
+    indicator: &RecordingIndicator,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
 ) {
     {
@@ -3285,6 +3567,26 @@ fn wire_settings(
             set_indicator_status(
                 &settings_weak,
                 "Visualizer updated. The next dictation uses the selected style.",
+            );
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let indicator = indicator.as_weak();
+        let state = Rc::clone(state);
+        settings.on_select_circular_palette(move |index| {
+            let Some(palette) = CircularSpectrumPalette::from_index(index) else {
+                return;
+            };
+            state.borrow_mut().circular_spectrum_palette = palette;
+            if let Some(indicator) = indicator.upgrade() {
+                indicator.set_circular_palette(palette.index());
+            }
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+            set_indicator_status(
+                &settings_weak,
+                "Circular spectrum palette updated for the next dictation.",
             );
         });
     }
@@ -3914,6 +4216,7 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
         .into(),
     );
     settings.set_selected_visualizer(state.visualizer_style.index());
+    settings.set_selected_circular_palette(state.circular_spectrum_palette.index());
     settings.set_translation_ready(state.translation_ready);
     settings.set_history_enabled_label(
         if state.history_enabled {
@@ -4185,8 +4488,9 @@ fn precreate_indicator(indicator: &RecordingIndicator) {
         let schedule_result = slint::spawn_local(async move {
             if let Some(indicator) = indicator.upgrade() {
                 let prepared = match indicator.window().winit_window().await {
-                    Ok(window) => native_window_handle(&window)
-                        .is_some_and(|handle| configure_indicator_native_window(handle, None)),
+                    Ok(window) => native_window_handle(&window).is_some_and(|handle| {
+                        configure_indicator_native_window(handle, None, false)
+                    }),
                     Err(_) => false,
                 };
                 let _ = indicator.hide();
@@ -4215,15 +4519,29 @@ fn configure_indicator_window(
     indicator: &RecordingIndicator,
     target_window_handle: Option<u64>,
 ) -> bool {
-    slint_window_handle(indicator.window())
-        .is_some_and(|handle| configure_indicator_native_window(handle, target_window_handle))
+    slint_window_handle(indicator.window()).is_some_and(|handle| {
+        configure_indicator_native_window(
+            handle,
+            target_window_handle,
+            indicator.get_visualizer_style() == VisualizerStyle::CircularSpectrum.index(),
+        )
+    })
 }
 
 fn configure_indicator_native_window(
     window_handle: u64,
     target_window_handle: Option<u64>,
+    transparent: bool,
 ) -> bool {
-    rust_platform_windows::configure_overlay_window(window_handle, target_window_handle).is_ok()
+    if transparent {
+        rust_platform_windows::configure_transparent_overlay_window(
+            window_handle,
+            target_window_handle,
+        )
+    } else {
+        rust_platform_windows::configure_overlay_window(window_handle, target_window_handle)
+    }
+    .is_ok()
 }
 
 fn slint_window_handle(window: &slint::Window) -> Option<u64> {
@@ -4270,6 +4588,7 @@ struct SavedSettings {
     output_mode: SpeechOutputMode,
     fast_release_previews: bool,
     visualizer_style: VisualizerStyle,
+    circular_spectrum_palette: CircularSpectrumPalette,
     selected_translation_tier: Option<TranslationTier>,
     translation_enabled: bool,
     layout_enabled: bool,
@@ -4286,6 +4605,7 @@ impl Default for SavedSettings {
             output_mode: SpeechOutputMode::default(),
             fast_release_previews: true,
             visualizer_style: VisualizerStyle::default(),
+            circular_spectrum_palette: CircularSpectrumPalette::default(),
             selected_translation_tier: None,
             translation_enabled: false,
             layout_enabled: true,
@@ -4319,6 +4639,11 @@ fn load_settings() -> SavedSettings {
     let visualizer_style = value
         .as_ref()
         .and_then(|value| value.get("visualizer_style"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let circular_spectrum_palette = value
+        .as_ref()
+        .and_then(|value| value.get("circular_spectrum_palette"))
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
     let selected_translation_tier = value
@@ -4360,6 +4685,7 @@ fn load_settings() -> SavedSettings {
         output_mode,
         fast_release_previews,
         visualizer_style,
+        circular_spectrum_palette,
         selected_translation_tier,
         translation_enabled,
         layout_enabled,
@@ -4380,6 +4706,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
         "output_mode": state.output_mode,
         "fast_release_previews": state.fast_release_previews,
         "visualizer_style": state.visualizer_style,
+        "circular_spectrum_palette": state.circular_spectrum_palette,
         "selected_translation_tier": state.selected_translation_tier,
         "translation_enabled": state.translation_enabled,
         "layout_enabled": state.layout_enabled,
@@ -4414,19 +4741,23 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
 mod indicator_animation_tests {
     use std::rc::Rc;
 
+    use rust_protocol::AUDIO_SPECTRUM_BANDS;
     use slint::VecModel;
 
-    use super::{IndicatorAnimation, VisualizerStyle};
+    use super::{CircularSpectrumPalette, IndicatorAnimation, VisualizerStyle};
 
     fn animation() -> IndicatorAnimation {
-        IndicatorAnimation::new(Rc::new(VecModel::from(vec![0.0; 10])))
+        IndicatorAnimation::new(
+            Rc::new(VecModel::from(vec![0.0; 10])),
+            Rc::new(VecModel::from(vec![0.0; AUDIO_SPECTRUM_BANDS])),
+        )
     }
 
     #[test]
     fn listening_frame_has_independent_bar_motion() {
         let mut animation = animation();
         animation.begin_listening();
-        animation.set_microphone_level(0.55);
+        animation.set_microphone_signal(0.55, &[]);
         let frame = animation.advance_frame(1.0);
 
         assert_eq!(frame.heights.len(), 10);
@@ -4452,6 +4783,22 @@ mod indicator_animation_tests {
     }
 
     #[test]
+    fn success_frames_collapse_and_fade_without_blocking() {
+        let mut animation = animation();
+        animation.begin_success();
+        let first = animation.advance_frame(1.0);
+        for _ in 0..12 {
+            let _ = animation.advance_frame(1.0);
+        }
+        let later = animation.advance_frame(1.0);
+
+        assert!(later.visual_scale < first.visual_scale);
+        assert!(later.visual_opacity < first.visual_opacity);
+        assert!(later.visual_scale >= 0.45);
+        assert!(later.visual_opacity >= 0.0);
+    }
+
+    #[test]
     fn every_visible_visualizer_choice_maps_to_a_style() {
         assert_eq!(
             VisualizerStyle::from_index(0),
@@ -4469,7 +4816,39 @@ mod indicator_animation_tests {
             VisualizerStyle::from_index(3),
             Some(VisualizerStyle::BroadcastMic)
         );
-        assert_eq!(VisualizerStyle::from_index(4), None);
+        assert_eq!(
+            VisualizerStyle::from_index(4),
+            Some(VisualizerStyle::CircularSpectrum)
+        );
+        assert_eq!(VisualizerStyle::from_index(5), None);
+    }
+
+    #[test]
+    fn every_circular_palette_choice_maps_to_a_persisted_value() {
+        assert_eq!(
+            CircularSpectrumPalette::from_index(0),
+            Some(CircularSpectrumPalette::Sunset)
+        );
+        assert_eq!(
+            CircularSpectrumPalette::from_index(1),
+            Some(CircularSpectrumPalette::Arctic)
+        );
+        assert_eq!(
+            CircularSpectrumPalette::from_index(2),
+            Some(CircularSpectrumPalette::Monochrome)
+        );
+        assert_eq!(CircularSpectrumPalette::from_index(3), None);
+        assert_eq!(CircularSpectrumPalette::Sunset.index(), 0);
+        assert_eq!(CircularSpectrumPalette::Arctic.index(), 1);
+        assert_eq!(CircularSpectrumPalette::Monochrome.index(), 2);
+        assert_eq!(
+            serde_json::to_string(&CircularSpectrumPalette::Arctic).unwrap(),
+            "\"arctic\""
+        );
+        assert_eq!(
+            serde_json::from_str::<CircularSpectrumPalette>("\"monochrome\"").unwrap(),
+            CircularSpectrumPalette::Monochrome
+        );
     }
 
     #[test]
@@ -4477,7 +4856,7 @@ mod indicator_animation_tests {
         let mut animation = animation();
         animation.set_style(VisualizerStyle::BroadcastMic);
         animation.begin_listening();
-        animation.set_microphone_level(0.64);
+        animation.set_microphone_signal(0.64, &[]);
         let first = animation.advance_frame(1.0);
         let second = animation.advance_frame(1.0);
 
@@ -4492,6 +4871,28 @@ mod indicator_animation_tests {
                 || (first.mic_middle_height - second.mic_middle_height).abs() > 0.01
                 || (first.mic_inner_height - second.mic_inner_height).abs() > 0.01
                 || (first.mic_near_height - second.mic_near_height).abs() > 0.01
+        );
+    }
+
+    #[test]
+    fn circular_spectrum_preserves_real_band_differences() {
+        let mut animation = animation();
+        animation.set_style(VisualizerStyle::CircularSpectrum);
+        animation.begin_listening();
+        let mut bands = vec![0.0; AUDIO_SPECTRUM_BANDS];
+        bands[5] = 1.0;
+        bands[14] = 0.52;
+        animation.set_microphone_signal(0.72, &bands);
+
+        let frame = animation.advance_frame(1.0);
+        assert_eq!(frame.spectrum_heights.len(), AUDIO_SPECTRUM_BANDS);
+        assert!(frame.spectrum_heights[5] > frame.spectrum_heights[14]);
+        assert!(frame.spectrum_heights[14] > frame.spectrum_heights[25]);
+        assert!(
+            frame
+                .spectrum_heights
+                .iter()
+                .all(|height| (2.8..=21.5).contains(height))
         );
     }
 }

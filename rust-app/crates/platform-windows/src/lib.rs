@@ -18,7 +18,7 @@ pub use job::WorkerJob;
 #[cfg(windows)]
 pub use overlay::{
     begin_window_drag, configure_action_window, configure_overlay_window,
-    configure_standard_window, configure_translation_window,
+    configure_standard_window, configure_translation_window, configure_transparent_overlay_window,
     restore_target_if_our_action_window_activated,
 };
 #[cfg(windows)]
@@ -69,6 +69,14 @@ pub fn configure_process_error_mode() {
 
 #[cfg(not(windows))]
 pub fn configure_overlay_window(
+    _window_handle: u64,
+    _target_window_handle: Option<u64>,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn configure_transparent_overlay_window(
     _window_handle: u64,
     _target_window_handle: Option<u64>,
 ) -> Result<(), String> {

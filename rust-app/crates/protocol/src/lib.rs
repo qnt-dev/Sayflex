@@ -3,10 +3,11 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 8 adds an explicit selection-input release gate and chunk-level
-// translation progress. All packaged processes must agree on this schema
-// before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 8;
+// Version 9 adds compact microphone spectrum bands for native voice-reactive
+// visualizers. All packaged processes must agree on this schema before
+// exchanging commands.
+pub const PROTOCOL_VERSION: u32 = 9;
+pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -525,6 +526,7 @@ pub enum SpeechWorkerEvent {
     AudioLevel {
         session_id: SessionId,
         peak: f32,
+        spectrum: Vec<f32>,
     },
     Processing {
         session_id: SessionId,
