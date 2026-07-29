@@ -120,6 +120,9 @@ pub struct TranscriptionLatency {
     pub audio_finalize_ms: u64,
     /// Resampling and other deterministic audio preparation.
     pub preprocessing_ms: u64,
+    /// Time between audio finalization and the final inference pass beginning.
+    #[serde(default)]
+    pub final_queue_wait_ms: u64,
     /// Time spent inside the speech model for the result that was returned.
     pub inference_ms: u64,
     /// End command receipt to completed transcript event.
@@ -553,8 +556,8 @@ pub enum SpeechWorkerEvent {
 mod tests {
     use super::{
         DictationCommand, InputHostEvent, RequestId, SelectionCaptureTiming, SessionId,
-        SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranslationLanguage,
-        TranslationResult, TranslationTier, TranslationWorkerEvent,
+        SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency,
+        TranslationLanguage, TranslationResult, TranslationTier, TranslationWorkerEvent,
     };
 
     #[test]
@@ -606,6 +609,23 @@ mod tests {
             serde_json::from_str::<SpeechWorkerEvent>(&speech_json).unwrap(),
             speech
         );
+    }
+
+    #[test]
+    fn older_latency_payloads_default_the_new_queue_metric() {
+        let latency: TranscriptionLatency = serde_json::from_str(
+            r#"{
+                "audio_finalize_ms": 12,
+                "preprocessing_ms": 34,
+                "inference_ms": 56,
+                "after_release_ms": 102,
+                "speculative_reuse": false
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(latency.final_queue_wait_ms, 0);
+        assert_eq!(latency.inference_ms, 56);
     }
 
     #[test]

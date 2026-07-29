@@ -207,6 +207,13 @@ struct ScheduledClipboardRestore {
     session_id: Option<SessionId>,
 }
 
+#[derive(Clone, Copy)]
+struct InsertionTiming {
+    started: Instant,
+    method_started: Instant,
+    release_wait_ms: u64,
+}
+
 impl ScheduledClipboardRestore {
     fn new(pending: clipboard::PendingClipboardRestore, session_id: Option<SessionId>) -> Self {
         Self {
@@ -244,22 +251,28 @@ fn insert_transcript(
             "physical modifier keys did not become idle; transcript remains in history".to_owned(),
         );
     }
-
-    if target::prefer_direct_unicode(target_snapshot) {
-        inject::insert_text(target_snapshot, text, add_trailing_space)
-            .map_err(|error| error.to_string())?;
-        send_dispatched(events, session_id, InsertionMethod::UnicodeInput, started);
-        return Ok(None);
-    }
+    let timing = InsertionTiming {
+        started,
+        method_started: Instant::now(),
+        release_wait_ms: elapsed_ms(started),
+    };
+    let paste_shortcut = target::paste_shortcut(target_snapshot);
 
     match clipboard::dispatch_paste(
         || inject::is_foreground(target_snapshot),
-        || inject::paste_shortcut().map_err(|_| clipboard::ClipboardError::Paste),
+        || inject::paste_shortcut(paste_shortcut).map_err(|_| clipboard::ClipboardError::Paste),
         text,
         add_trailing_space,
     ) {
         Ok(pending_restore) => {
-            send_dispatched(events, session_id, InsertionMethod::ClipboardPaste, started);
+            send_dispatched(
+                events,
+                session_id,
+                InsertionMethod::ClipboardPaste,
+                target_snapshot,
+                text.chars().count(),
+                timing,
+            );
             Ok(Some(ScheduledClipboardRestore::new(
                 pending_restore,
                 Some(session_id),
@@ -271,7 +284,14 @@ fn insert_transcript(
                     format!("{clipboard_error}; Unicode fallback failed: {injection_error}")
                 },
             )?;
-            send_dispatched(events, session_id, InsertionMethod::UnicodeInput, started);
+            send_dispatched(
+                events,
+                session_id,
+                InsertionMethod::UnicodeInput,
+                target_snapshot,
+                text.chars().count(),
+                timing,
+            );
             Ok(None)
         }
         Err(error) => Err(error.to_string()),
@@ -287,16 +307,11 @@ fn replace_selection(
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err("physical modifier keys did not become idle".to_owned());
     }
-
-    if target::prefer_direct_unicode(target_snapshot) {
-        inject::replace_selection(target_snapshot, text).map_err(|error| error.to_string())?;
-        let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
-        return Ok(None);
-    }
+    let paste_shortcut = target::paste_shortcut(target_snapshot);
 
     match clipboard::dispatch_paste(
         || inject::is_foreground(target_snapshot),
-        || inject::paste_shortcut().map_err(|_| clipboard::ClipboardError::Paste),
+        || inject::paste_shortcut(paste_shortcut).map_err(|_| clipboard::ClipboardError::Paste),
         text,
         false,
     ) {
@@ -319,15 +334,24 @@ fn send_dispatched(
     events: &Sender<InputHostEvent>,
     session_id: SessionId,
     method: InsertionMethod,
-    started: Instant,
+    target: TargetSnapshot,
+    chars: usize,
+    timing: InsertionTiming,
 ) {
+    let method_ms = elapsed_ms(timing.method_started);
+    let total_ms = elapsed_ms(timing.started);
     crate::diagnostic_line(&format!(
-        "insertion action=insert result=dispatched session={session_id} method={method:?} elapsed_ms={}",
-        started.elapsed().as_millis()
+        "insertion action=insert result=dispatched session={session_id} method={method:?} \
+target_pid={} chars={chars} release_wait_ms={} method_ms={method_ms} total_ms={total_ms}",
+        target.process_id, timing.release_wait_ms,
     ));
     let _ = events.send(InputHostEvent::InsertionDispatched {
         session_id,
         method,
-        dispatch_duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        dispatch_duration_ms: total_ms,
     });
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }

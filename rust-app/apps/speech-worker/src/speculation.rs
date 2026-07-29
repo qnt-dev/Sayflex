@@ -17,6 +17,10 @@ const MIN_NEW_AUDIO_MS: u64 = 420;
 const PREVIEW_COOLDOWN: Duration = Duration::from_millis(850);
 const REQUIRED_TRAILING_SILENCE_MS: u64 = 170;
 const EFFICIENT_MAX_PREVIEWS_PER_SESSION: u32 = 2;
+// A preview must never grow into a second full transcription of an arbitrarily
+// long uncommitted tail. Stable segments are excluded before this limit is
+// evaluated, so long dictations still benefit whenever segmentation advances.
+const MAX_SPECULATIVE_TAIL_MS: u64 = 12_000;
 
 enum SpeculationCommand {
     Begin {
@@ -37,6 +41,7 @@ struct ActiveSession {
     last_preview_at: Option<Instant>,
     preview_count: u32,
     fast_release_previews: bool,
+    tail_backoff_logged: bool,
 }
 
 pub struct SpeculationScheduler {
@@ -74,6 +79,7 @@ impl SpeculationScheduler {
                                 last_preview_at: None,
                                 preview_count: 0,
                                 fast_release_previews,
+                                tail_backoff_logged: false,
                             });
                         }
                         Ok(SpeculationCommand::Stop { session_id }) => {
@@ -110,6 +116,18 @@ impl SpeculationScheduler {
                         continue;
                     };
                     let new_audio_ms = recording.segment_duration_ms();
+                    if !speculative_tail_is_eligible(new_audio_ms) {
+                        if !session.tail_backoff_logged {
+                            eprintln!(
+                                "speculation session={} action=tail_backoff segment_ms={} \
+stable_source_samples={stable_source_sample_count}",
+                                session.session_id, new_audio_ms
+                            );
+                            session.tail_backoff_logged = true;
+                        }
+                        continue;
+                    }
+                    session.tail_backoff_logged = false;
                     if new_audio_ms < MIN_NEW_AUDIO_MS
                         || !has_trailing_silence(&recording, REQUIRED_TRAILING_SILENCE_MS)
                     {
@@ -151,9 +169,13 @@ const fn preview_budget_available(fast_release_previews: bool, preview_count: u3
     fast_release_previews || preview_count < EFFICIENT_MAX_PREVIEWS_PER_SESSION
 }
 
+const fn speculative_tail_is_eligible(segment_duration_ms: u64) -> bool {
+    segment_duration_ms <= MAX_SPECULATIVE_TAIL_MS
+}
+
 #[cfg(test)]
 mod tests {
-    use super::preview_budget_available;
+    use super::{MAX_SPECULATIVE_TAIL_MS, preview_budget_available, speculative_tail_is_eligible};
 
     #[test]
     fn fastest_profile_never_silently_caps_release_preparation() {
@@ -165,5 +187,11 @@ mod tests {
         assert!(preview_budget_available(false, 0));
         assert!(preview_budget_available(false, 1));
         assert!(!preview_budget_available(false, 2));
+    }
+
+    #[test]
+    fn speculative_work_is_bounded_by_the_uncommitted_tail() {
+        assert!(speculative_tail_is_eligible(MAX_SPECULATIVE_TAIL_MS));
+        assert!(!speculative_tail_is_eligible(MAX_SPECULATIVE_TAIL_MS + 1));
     }
 }

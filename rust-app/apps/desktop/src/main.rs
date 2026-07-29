@@ -2721,14 +2721,21 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 rust_protocol::InsertionMethod::UnicodeInput => "unicode",
             };
             if let Some(total) = total_after_release_ms {
-                let inference = transcript_latency.map_or(0, |latency| latency.inference_ms);
-                let speculative =
-                    transcript_latency.is_some_and(|latency| latency.speculative_reuse);
-                eprintln!(
+                let latency = transcript_latency.unwrap_or_default();
+                rust_app_core::diagnostics::log_line(&format!(
                     "latency session={} release_to_insert_ms={} insertion_dispatch_ms={} \
-inference_ms={} speculative_reuse={} method={}",
-                    session_id, total, dispatch_duration_ms, inference, speculative, method_name,
-                );
+audio_finalize_ms={} preprocessing_ms={} final_queue_wait_ms={} inference_ms={} \
+speculative_reuse={} method={}",
+                    session_id,
+                    total,
+                    dispatch_duration_ms,
+                    latency.audio_finalize_ms,
+                    latency.preprocessing_ms,
+                    latency.final_queue_wait_ms,
+                    latency.inference_ms,
+                    latency.speculative_reuse,
+                    method_name,
+                ));
             }
             set_indicator_status(
                 settings,

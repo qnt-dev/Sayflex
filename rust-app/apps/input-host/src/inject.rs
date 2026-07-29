@@ -17,7 +17,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::target::SelectionCopyShortcut;
+use crate::target::{PasteShortcut, SelectionCopyShortcut};
 
 pub const SYNTHETIC_MARKER: usize = 0x5255_5354_564f_4943;
 pub const E2E_HOTKEY_MARKER: usize = 0x514e_5446_4c45_5845;
@@ -121,8 +121,12 @@ pub fn copy_message(target: TargetSnapshot) -> Result<(), InjectionError> {
     }
 }
 
-pub fn paste_shortcut() -> Result<(), InjectionError> {
-    send_control_shortcut(VK_V, false)
+pub fn paste_shortcut(shortcut: PasteShortcut) -> Result<(), InjectionError> {
+    match shortcut {
+        PasteShortcut::ControlV => send_control_shortcut(VK_V, false),
+        PasteShortcut::ControlShiftV => send_control_shortcut(VK_V, true),
+        PasteShortcut::ShiftInsert => send_shift_shortcut(VK_INSERT),
+    }
 }
 
 pub fn is_foreground(target: TargetSnapshot) -> bool {
@@ -225,6 +229,31 @@ fn send_control_shortcut(key: u16, with_shift: bool) -> Result<(), InjectionErro
                     owned_key_ups.push(scan_code_key(VK_SHIFT, true));
                 }
                 owned_key_ups.push(scan_code_key(VK_CONTROL, true));
+                release_owned_keys_best_effort(&owned_key_ups);
+            }
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn send_shift_shortcut(key: u16) -> Result<(), InjectionError> {
+    ensure_injection_safe()?;
+    let inputs = [
+        scan_code_key(VK_SHIFT, false),
+        scan_code_key(key, false),
+        scan_code_key(key, true),
+        scan_code_key(VK_SHIFT, true),
+    ];
+    match send(&inputs) {
+        Ok(()) => Ok(()),
+        Err(error @ InjectionError::Partial { sent, .. }) => {
+            if (1..inputs.len() as u32).contains(&sent) {
+                let mut owned_key_ups = Vec::with_capacity(2);
+                if (2..3).contains(&sent) {
+                    owned_key_ups.push(scan_code_key(key, true));
+                }
+                owned_key_ups.push(scan_code_key(VK_SHIFT, true));
                 release_owned_keys_best_effort(&owned_key_ups);
             }
             Err(error)

@@ -172,9 +172,19 @@ hkl={:#x} shortcut={:?}",
 }
 
 fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(delay) = std::env::var("STYLEFLEX_INSERTION_SMOKE_DELAY_MS") {
+        thread::sleep(Duration::from_millis(delay.parse()?));
+    }
     let handle = std::env::var("STYLEFLEX_INSERTION_SMOKE_HWND")?.parse()?;
     let text = std::env::var("STYLEFLEX_INSERTION_SMOKE_TEXT")?;
     let target = target::capture_window_handle(handle);
+    if let Ok(stable_ms) = std::env::var("STYLEFLEX_INSERTION_SMOKE_STABLE_FOCUS_MS") {
+        wait_for_stable_foreground(
+            target,
+            Duration::from_millis(stable_ms.parse()?),
+            Duration::from_secs(20),
+        )?;
+    }
     let (events, receiver) = mpsc::channel();
     let insertion = insertion::InsertionService::start(events)?;
     let session_id = SessionId::new();

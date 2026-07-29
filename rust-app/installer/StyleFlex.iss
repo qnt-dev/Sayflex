@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.5.15"
+  #define AppVersion "0.5.17"
 #endif
 
 #define AppName "StyleFlex"

@@ -22,6 +22,13 @@ pub enum SelectionCopyShortcut {
     ControlInsert,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteShortcut {
+    ControlV,
+    ControlShiftV,
+    ShiftInsert,
+}
+
 pub fn capture_target() -> TargetSnapshot {
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.is_null() {
@@ -86,17 +93,18 @@ fn focused_control_is_password(target: TargetSnapshot) -> bool {
     is_edit && style & ES_PASSWORD as isize != 0
 }
 
-pub fn prefer_direct_unicode(target: TargetSnapshot) -> bool {
-    process_name(target.process_id)
-        .as_deref()
-        .is_some_and(is_wezterm)
-}
-
 pub fn selection_copy_shortcut(target: TargetSnapshot) -> SelectionCopyShortcut {
     process_name(target.process_id)
         .as_deref()
         .map(selection_copy_shortcut_for_process)
         .unwrap_or(SelectionCopyShortcut::ControlC)
+}
+
+pub fn paste_shortcut(target: TargetSnapshot) -> PasteShortcut {
+    process_name(target.process_id)
+        .as_deref()
+        .map(paste_shortcut_for_process)
+        .unwrap_or(PasteShortcut::ControlV)
 }
 
 fn selection_copy_shortcut_for_process(process_name: &str) -> SelectionCopyShortcut {
@@ -106,6 +114,16 @@ fn selection_copy_shortcut_for_process(process_name: &str) -> SelectionCopyShort
         SelectionCopyShortcut::ControlShiftC
     } else {
         SelectionCopyShortcut::ControlC
+    }
+}
+
+fn paste_shortcut_for_process(process_name: &str) -> PasteShortcut {
+    if is_wezterm(process_name) || uses_control_shift_c(process_name) {
+        PasteShortcut::ControlShiftV
+    } else if uses_control_insert(process_name) {
+        PasteShortcut::ShiftInsert
+    } else {
+        PasteShortcut::ControlV
     }
 }
 
@@ -185,7 +203,10 @@ pub fn capture_focused_target() -> TargetSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{SelectionCopyShortcut, is_wezterm, selection_copy_shortcut_for_process};
+    use super::{
+        PasteShortcut, SelectionCopyShortcut, is_wezterm, paste_shortcut_for_process,
+        selection_copy_shortcut_for_process,
+    };
 
     #[test]
     fn wezterm_never_uses_interrupt_as_its_copy_shortcut() {
@@ -197,6 +218,10 @@ mod tests {
             selection_copy_shortcut_for_process("WEZTERM-GUI"),
             SelectionCopyShortcut::ControlInsert
         );
+        assert_eq!(
+            paste_shortcut_for_process("wezterm-gui"),
+            PasteShortcut::ControlShiftV
+        );
     }
 
     #[test]
@@ -204,6 +229,10 @@ mod tests {
         assert_eq!(
             selection_copy_shortcut_for_process("notepad"),
             SelectionCopyShortcut::ControlC
+        );
+        assert_eq!(
+            paste_shortcut_for_process("notepad"),
+            PasteShortcut::ControlV
         );
         assert!(!is_wezterm("notepad"));
     }
@@ -223,6 +252,11 @@ mod tests {
                 SelectionCopyShortcut::ControlShiftC,
                 "{process}"
             );
+            assert_eq!(
+                paste_shortcut_for_process(process),
+                PasteShortcut::ControlShiftV,
+                "{process}"
+            );
         }
     }
 
@@ -232,6 +266,11 @@ mod tests {
             assert_eq!(
                 selection_copy_shortcut_for_process(process),
                 SelectionCopyShortcut::ControlInsert,
+                "{process}"
+            );
+            assert_eq!(
+                paste_shortcut_for_process(process),
+                PasteShortcut::ShiftInsert,
                 "{process}"
             );
         }

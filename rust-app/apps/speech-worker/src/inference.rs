@@ -324,6 +324,8 @@ fn inference_loop(
                 audio_finalize_ms,
                 release_started,
             } => {
+                let final_queue_wait_ms =
+                    elapsed_ms(release_started).saturating_sub(audio_finalize_ms);
                 let stable_prefix = stable_prefix.take().filter(|preview| {
                     preview.session_id == recording.session_id
                         && preview.output_mode == output_mode
@@ -354,6 +356,7 @@ fn inference_loop(
                             latency: TranscriptionLatency {
                                 audio_finalize_ms,
                                 preprocessing_ms: result.preprocessing_ms,
+                                final_queue_wait_ms,
                                 inference_ms: result.inference_ms,
                                 after_release_ms: elapsed_ms(release_started),
                                 speculative_reuse,
