@@ -12,6 +12,7 @@ const SPECTRUM_BANDS: usize = 32;
 struct RenderRequest {
     phase: f32,
     energy: f32,
+    impulse: f32,
     spectrum: [f32; SPECTRUM_BANDS],
     opacity: f32,
 }
@@ -37,6 +38,7 @@ impl FlowSphereRenderer {
                     let frame = render_flow_sphere_buffer(
                         request.phase,
                         request.energy,
+                        request.impulse,
                         &request.spectrum,
                         request.opacity,
                     );
@@ -64,6 +66,7 @@ impl FlowSphereRenderer {
         &self,
         phase: f32,
         energy: f32,
+        impulse: f32,
         spectrum: &[f32],
         opacity: f32,
     ) -> Option<Image> {
@@ -75,6 +78,7 @@ impl FlowSphereRenderer {
             match requests.try_send(RenderRequest {
                 phase,
                 energy,
+                impulse,
                 spectrum: bands,
                 opacity,
             }) {
@@ -123,17 +127,19 @@ struct DeformedPoint {
 #[derive(Clone, Copy)]
 struct AudioShape {
     envelope: f32,
+    impulse: f32,
     low: f32,
     mid: f32,
     high: f32,
 }
 
 impl AudioShape {
-    fn from_signal(energy: f32, spectrum: &[f32]) -> Self {
+    fn from_signal(energy: f32, impulse: f32, spectrum: &[f32]) -> Self {
         let envelope = smoothstep(0.14, 0.62, energy.clamp(0.0, 1.0));
         let relative_scale = energy.max(0.08);
         Self {
             envelope,
+            impulse: impulse.clamp(0.0, 1.0),
             low: spectrum_range_mean(spectrum, 0, 10) / relative_scale,
             mid: spectrum_range_mean(spectrum, 8, 23) / relative_scale,
             high: spectrum_range_mean(spectrum, 20, spectrum.len()) / relative_scale,
@@ -144,6 +150,7 @@ impl AudioShape {
     fn clamped(self) -> Self {
         Self {
             envelope: self.envelope.clamp(0.0, 1.0),
+            impulse: self.impulse.clamp(0.0, 1.0),
             low: self.low.clamp(0.0, 1.0),
             mid: self.mid.clamp(0.0, 1.0),
             high: self.high.clamp(0.0, 1.0),
@@ -154,6 +161,7 @@ impl AudioShape {
 fn render_flow_sphere_buffer(
     phase: f32,
     energy: f32,
+    impulse: f32,
     spectrum: &[f32],
     opacity: f32,
 ) -> SharedPixelBuffer<Rgba8Pixel> {
@@ -165,7 +173,7 @@ fn render_flow_sphere_buffer(
     let center = FLOW_SPHERE_IMAGE_SIZE as f32 / 2.0;
     let radius = 46.0;
     let time = phase * 0.055;
-    let audio = AudioShape::from_signal(energy, spectrum);
+    let audio = AudioShape::from_signal(energy, impulse, spectrum);
     let width = buffer.width();
     let height = buffer.height();
 
@@ -199,10 +207,10 @@ fn render_flow_sphere_buffer(
                 + 0.5)
                 .clamp(0.0, 1.0);
             let surface_alpha = (0.11 + depth * 0.46) * (0.34 + flow * 0.66);
-            let voice_presence = deformed.voice_response.powf(0.72);
+            let voice_presence = deformed.voice_response.clamp(0.0, 1.0).powf(0.68);
             let alpha = fade
-                * (surface_alpha + voice_presence * 0.055)
-                    .max(silhouette * (0.62 + flow * 0.32 + voice_presence * 0.13));
+                * (surface_alpha + voice_presence * 0.105)
+                    .max(silhouette * (0.62 + flow * 0.32 + voice_presence * 0.22));
             let color = (
                 (60.0 + vertical_mix * 195.0) as u8,
                 255,
@@ -212,8 +220,8 @@ fn render_flow_sphere_buffer(
                 x,
                 y,
                 0.27 + depth * 0.09
-                    + silhouette * (0.08 + voice_presence * 0.045)
-                    + voice_presence * 0.025,
+                    + silhouette * (0.08 + voice_presence * 0.065)
+                    + voice_presence * 0.04,
                 color,
                 alpha,
             );
@@ -234,18 +242,25 @@ fn deform_sphere(
             .rem_euclid(1.0);
     let band = smoothed_spectrum_band(spectrum, spectrum_position);
     let band_shape = (band / audio.envelope.max(0.12)).clamp(0.0, 1.0);
-    let voice_response = audio.envelope * (0.42 + band_shape * 0.58);
+    let voice_response = (audio.envelope * (0.38 + band_shape * 0.62)
+        + audio.impulse * (0.24 + band_shape * 0.76))
+        .clamp(0.0, 1.0);
     let broad_voice =
         audio.envelope * (audio.low * 0.27 + audio.mid * 0.48 + audio.high * 0.25).clamp(0.0, 1.0);
+    let onset_lobe = ((((longitude * 1.37 + latitude * 2.16 - time * 1.8).sin() + 1.0) * 0.5)
+        .powi(4)
+        * audio.impulse
+        * (0.45 + band_shape * 0.55))
+        .clamp(0.0, 1.0);
 
     let warped_latitude = (latitude
-        + (longitude * 1.52 - time * 0.91).sin() * (0.08 + voice_response * 0.105)
-        + (longitude * 3.1 + time * 0.47).cos() * voice_response * 0.036
+        + (longitude * 1.52 - time * 0.91).sin() * (0.08 + voice_response * 0.14)
+        + (longitude * 3.1 + time * 0.47).cos() * voice_response * 0.052
         + (longitude * 0.83 - time * 0.36).sin() * broad_voice * 0.045)
         .clamp(-1.54, 1.54);
     let warped_longitude = longitude
-        + (latitude * 2.08 + time * 0.73).sin() * (0.22 + voice_response * 0.18)
-        + (latitude * 4.2 - time * 1.08).cos() * voice_response * 0.055;
+        + (latitude * 2.08 + time * 0.73).sin() * (0.22 + voice_response * 0.24)
+        + (latitude * 4.2 - time * 1.08).cos() * voice_response * 0.075;
     let latitude_cos = warped_latitude.cos();
     let mut point = SurfacePoint {
         x: latitude_cos * warped_longitude.cos(),
@@ -259,15 +274,17 @@ fn deform_sphere(
     let mid_fold = (longitude * 2.61 + latitude * 1.47 + time * 0.82).sin() * audio.mid;
     let high_ripple = (longitude * 7.1 - latitude * 4.8 - time * 1.26).sin() * audio.high;
     let radial = 0.94
-        + fold * (0.036 + voice_response * 0.075)
-        + ripple * (0.012 + voice_response * 0.025)
-        + audio.envelope * (low_breath * 0.028 + mid_fold * 0.036 + high_ripple * 0.014);
+        + audio.envelope * 0.018
+        + onset_lobe * 0.085
+        + fold * (0.036 + voice_response * 0.105)
+        + ripple * (0.012 + voice_response * 0.036)
+        + audio.envelope * (low_breath * 0.036 + mid_fold * 0.048 + high_ripple * 0.019);
     point.x *= radial;
     point.y *= radial;
     point.z *= radial;
-    point.z += fold * (0.07 + voice_response * 0.11);
-    point.x += (latitude * 2.4 - time * 1.2).cos() * voice_response * 0.055;
-    point.y += (longitude * 1.7 + time * 1.8).sin() * voice_response * 0.075;
+    point.z += fold * (0.07 + voice_response * 0.15) + onset_lobe * 0.055;
+    point.x += (latitude * 2.4 - time * 1.2).cos() * voice_response * 0.072;
+    point.y += (longitude * 1.7 + time * 1.8).sin() * voice_response * 0.096;
 
     DeformedPoint {
         position: rotate_z(
@@ -401,7 +418,7 @@ mod tests {
         let spectrum = (0..32)
             .map(|index| (index as f32 * 0.37).sin().abs())
             .collect::<Vec<_>>();
-        let mut frame = render_flow_sphere_buffer(1.4, 0.72, &spectrum, 1.0);
+        let mut frame = render_flow_sphere_buffer(1.4, 0.72, 0.4, &spectrum, 1.0);
         let bytes = frame.make_mut_bytes();
         let corner_alpha = bytes[3];
         let visible_pixels = bytes.chunks_exact(4).filter(|pixel| pixel[3] > 10).count();
@@ -411,11 +428,12 @@ mod tests {
 
     #[test]
     fn audio_shape_gates_room_noise_and_preserves_voice_energy() {
-        let quiet = AudioShape::from_signal(0.08, &[0.03; 32]);
-        let voice = AudioShape::from_signal(0.54, &[0.38; 32]);
+        let quiet = AudioShape::from_signal(0.08, 0.0, &[0.03; 32]);
+        let voice = AudioShape::from_signal(0.54, 0.72, &[0.38; 32]);
 
         assert_eq!(quiet.envelope, 0.0);
         assert!(voice.envelope > 0.9);
+        assert_eq!(voice.impulse, 0.72);
         assert!(voice.low > 0.6);
         assert!(voice.mid > 0.6);
         assert!(voice.high > 0.6);
@@ -423,12 +441,12 @@ mod tests {
 
     #[test]
     fn active_voice_materially_changes_the_same_point_cloud() {
-        let silent = render_flow_sphere_buffer(2.1, 0.08, &[0.0; 32], 1.0);
+        let silent = render_flow_sphere_buffer(2.1, 0.08, 0.0, &[0.0; 32], 1.0);
         let spectrum = std::array::from_fn::<_, 32, _>(|index| {
             let position = index as f32 / 31.0;
             (0.22 + (position * std::f32::consts::TAU * 2.5).sin().abs() * 0.58).clamp(0.0, 1.0)
         });
-        let active = render_flow_sphere_buffer(2.1, 0.68, &spectrum, 1.0);
+        let active = render_flow_sphere_buffer(2.1, 0.68, 0.82, &spectrum, 1.0);
         let difference = silent
             .as_bytes()
             .iter()

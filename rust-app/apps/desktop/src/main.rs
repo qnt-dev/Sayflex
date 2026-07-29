@@ -752,6 +752,7 @@ struct IndicatorAnimation {
     display_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
     phase: f32,
     mode_progress: f32,
+    flow_voice_impulse: f32,
     last_frame: Instant,
     flow_sphere_renderer: Option<flow_sphere::FlowSphereRenderer>,
 }
@@ -789,6 +790,7 @@ impl IndicatorAnimation {
             display_spectrum: [0.0; AUDIO_SPECTRUM_BANDS],
             phase: 0.0,
             mode_progress: 0.0,
+            flow_voice_impulse: 0.0,
             last_frame: Instant::now(),
             flow_sphere_renderer: None,
         }
@@ -808,12 +810,19 @@ impl IndicatorAnimation {
         self.target_spectrum.fill(0.0);
         self.display_spectrum.fill(0.0);
         self.mode_progress = 0.0;
+        self.flow_voice_impulse = 0.0;
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
     }
 
     fn set_microphone_signal(&mut self, microphone_level: f32, spectrum: &[f32]) {
         if self.mode == IndicatorMode::Listening {
-            self.target_level = (microphone_level.clamp(0.0, 1.0).sqrt() * 2.35).clamp(0.0, 1.0);
+            let next_level = (microphone_level.clamp(0.0, 1.0).sqrt() * 2.35).clamp(0.0, 1.0);
+            if self.style == VisualizerStyle::FlowSpherePreview {
+                let onset = (next_level - self.target_level).max(0.0);
+                self.flow_voice_impulse =
+                    self.flow_voice_impulse.max((onset * 1.65).clamp(0.0, 1.0));
+            }
+            self.target_level = next_level;
             for (index, target) in self.target_spectrum.iter_mut().enumerate() {
                 *target = spectrum.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.0);
             }
@@ -825,6 +834,7 @@ impl IndicatorAnimation {
         self.target_level = 0.18;
         self.target_spectrum.fill(0.0);
         self.mode_progress = 0.0;
+        self.flow_voice_impulse = 0.0;
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
     }
 
@@ -833,6 +843,7 @@ impl IndicatorAnimation {
         self.target_level = 0.0;
         self.target_spectrum.fill(0.0);
         self.mode_progress = 0.0;
+        self.flow_voice_impulse = 0.0;
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
     }
 
@@ -841,6 +852,7 @@ impl IndicatorAnimation {
         self.target_level = 0.08;
         self.target_spectrum.fill(0.0);
         self.mode_progress = 0.0;
+        self.flow_voice_impulse = 0.0;
     }
 
     fn tick(&mut self, indicator: &slint::Weak<RecordingIndicator>) {
@@ -881,6 +893,7 @@ impl IndicatorAnimation {
                 && let Some(frame) = renderer.render_latest(
                     self.phase,
                     self.display_level,
+                    self.flow_voice_impulse,
                     &self.display_spectrum,
                     frame.visual_opacity,
                 )
@@ -891,13 +904,6 @@ impl IndicatorAnimation {
     }
 
     fn advance_frame(&mut self, frame_scale: f32) -> IndicatorFrame {
-        let phase_step = match self.mode {
-            IndicatorMode::Listening => 0.29,
-            IndicatorMode::Processing => 0.18,
-            IndicatorMode::Success => 0.24,
-            IndicatorMode::Hidden => 0.0,
-        };
-        self.phase += phase_step * frame_scale;
         if self.mode == IndicatorMode::Success {
             self.mode_progress = (self.mode_progress + 0.045 * frame_scale).min(1.0);
         }
@@ -927,6 +933,18 @@ impl IndicatorAnimation {
             let spectrum_smoothing = 1.0 - (1.0 - response).powf(frame_scale);
             *display += (target - *display) * spectrum_smoothing;
         }
+        let flow_activity = ((self.display_level - 0.14) / 0.48).clamp(0.0, 1.0);
+        let phase_step = match self.mode {
+            IndicatorMode::Listening if self.style == VisualizerStyle::FlowSpherePreview => {
+                0.045 + flow_activity * 0.245 + self.flow_voice_impulse * 0.075
+            }
+            IndicatorMode::Listening => 0.29,
+            IndicatorMode::Processing => 0.18,
+            IndicatorMode::Success => 0.24,
+            IndicatorMode::Hidden => 0.0,
+        };
+        self.phase += phase_step * frame_scale;
+        self.flow_voice_impulse *= 0.78_f32.powf(frame_scale);
 
         let processing_pulse = ((self.phase * 0.72).sin() + 1.0) / 2.0;
         let energy = match self.mode {
@@ -4897,6 +4915,26 @@ mod indicator_animation_tests {
             indicator_preview_style_for_argument("--indicator-preview-live=sphere"),
             Some(VisualizerStyle::FlowSpherePreview)
         );
+    }
+
+    #[test]
+    fn flow_sphere_is_calm_in_silence_and_accelerates_on_voice_onset() {
+        let mut animation = animation();
+        animation.set_style(VisualizerStyle::FlowSpherePreview);
+        animation.begin_listening();
+
+        let quiet_start = animation.phase;
+        let _ = animation.advance_frame(1.0);
+        let quiet_step = animation.phase - quiet_start;
+
+        animation.set_microphone_signal(0.62, &[0.55; AUDIO_SPECTRUM_BANDS]);
+        let active_start = animation.phase;
+        let _ = animation.advance_frame(1.0);
+        let active_step = animation.phase - active_start;
+
+        assert!(quiet_step < 0.06);
+        assert!(active_step > quiet_step * 3.0);
+        assert!(animation.flow_voice_impulse > 0.2);
     }
 
     #[test]
