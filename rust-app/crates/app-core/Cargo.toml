@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rust-protocol = { version = "0.5.11", path = "../protocol" }
+rust-protocol = { version = "0.5.12", path = "../protocol" }
 thiserror.workspace = true
 
 [dev-dependencies]

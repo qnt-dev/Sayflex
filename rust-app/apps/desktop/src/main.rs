@@ -10,7 +10,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -108,11 +111,129 @@ struct WorkerProcess {
     instance_id: u64,
 }
 
+struct InitialWorkers {
+    job: rust_platform_windows::WorkerJob,
+    input_child: WorkerProcess,
+    input: JsonWriter,
+    speech_child: WorkerProcess,
+    speech: JsonWriter,
+    translation_child: WorkerProcess,
+    translation: JsonWriter,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkerLifecycle {
     Running,
     SessionEnding,
     Stopping,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupSessionPhase {
+    Running,
+    Query,
+    Confirmed,
+}
+
+struct StartupSessionGate {
+    phase: Mutex<StartupSessionPhase>,
+    changed: Condvar,
+}
+
+impl StartupSessionGate {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(StartupSessionPhase::Running),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn observe(&self, event: rust_platform_windows::SessionEndEvent) {
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *phase = match event {
+            rust_platform_windows::SessionEndEvent::Query => StartupSessionPhase::Query,
+            rust_platform_windows::SessionEndEvent::Confirmed => StartupSessionPhase::Confirmed,
+            rust_platform_windows::SessionEndEvent::Cancelled => StartupSessionPhase::Running,
+        };
+        self.changed.notify_all();
+    }
+
+    fn wait_until_worker_start_is_allowed(&self) -> bool {
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            match *phase {
+                StartupSessionPhase::Confirmed => return false,
+                StartupSessionPhase::Running if !rust_platform_windows::session_is_ending() => {
+                    return true;
+                }
+                StartupSessionPhase::Running | StartupSessionPhase::Query => {
+                    phase = self
+                        .changed
+                        .wait(phase)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct SessionEventRouteState {
+    runtime_ready: bool,
+    pending: Vec<rust_platform_windows::SessionEndEvent>,
+}
+
+struct SessionEventRouter {
+    startup_gate: Arc<StartupSessionGate>,
+    state: Mutex<SessionEventRouteState>,
+}
+
+impl SessionEventRouter {
+    fn new(startup_gate: Arc<StartupSessionGate>) -> Self {
+        Self {
+            startup_gate,
+            state: Mutex::new(SessionEventRouteState::default()),
+        }
+    }
+
+    fn receive(&self, event: rust_platform_windows::SessionEndEvent) {
+        self.startup_gate.observe(event);
+        let should_dispatch = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.runtime_ready {
+                true
+            } else {
+                state.pending.push(event);
+                false
+            }
+        };
+        if should_dispatch {
+            dispatch_runtime_event(RuntimeEvent::SessionEnd(event));
+        }
+    }
+
+    fn attach_runtime(&self) {
+        let pending = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.runtime_ready = true;
+            std::mem::take(&mut state.pending)
+        };
+        for event in pending {
+            dispatch_runtime_event(RuntimeEvent::SessionEnd(event));
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -351,6 +472,109 @@ impl Drop for Workers {
             if process.child.try_wait().ok().flatten().is_none() {
                 let _ = process.child.kill();
             }
+        }
+    }
+}
+
+fn spawn_initial_workers(
+    startup_gate: &StartupSessionGate,
+) -> Result<Option<InitialWorkers>, Box<dyn Error>> {
+    if !startup_gate.wait_until_worker_start_is_allowed() {
+        return Ok(None);
+    }
+    let job = rust_platform_windows::WorkerJob::new()?;
+
+    let Some((input_child, input)) = spawn_initial_worker(
+        &job,
+        startup_gate,
+        WorkerKind::Input,
+        "rust-input-host.exe",
+        RuntimeEvent::Input,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some((speech_child, speech)) = spawn_initial_worker(
+        &job,
+        startup_gate,
+        WorkerKind::Speech,
+        "rust-speech-worker.exe",
+        RuntimeEvent::Speech,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some((translation_child, translation)) = spawn_initial_worker(
+        &job,
+        startup_gate,
+        WorkerKind::Translation,
+        "rust-translation-worker.exe",
+        RuntimeEvent::Translation,
+    )?
+    else {
+        return Ok(None);
+    };
+    if !startup_gate.wait_until_worker_start_is_allowed() {
+        return Ok(None);
+    }
+
+    Ok(Some(InitialWorkers {
+        job,
+        input_child,
+        input,
+        speech_child,
+        speech,
+        translation_child,
+        translation,
+    }))
+}
+
+fn spawn_initial_worker<T>(
+    worker_job: &rust_platform_windows::WorkerJob,
+    startup_gate: &StartupSessionGate,
+    kind: WorkerKind,
+    executable: &str,
+    wrap: fn(T) -> RuntimeEvent,
+) -> Result<Option<(WorkerProcess, JsonWriter)>, Box<dyn Error>>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    guarded_initial_spawn(
+        startup_gate,
+        || spawn_worker(worker_job, kind, executable, wrap),
+        rust_platform_windows::session_is_ending,
+        || {
+            rust_app_core::diagnostics::log_line(&format!(
+                "worker={executable} initial_spawn=retry_after_session_end_cancelled"
+            ));
+        },
+    )
+}
+
+fn guarded_initial_spawn<T, E>(
+    startup_gate: &StartupSessionGate,
+    mut spawn: impl FnMut() -> Result<T, E>,
+    session_is_ending: impl Fn() -> bool,
+    mut on_cancelled_retry: impl FnMut(),
+) -> Result<Option<T>, E> {
+    loop {
+        if !startup_gate.wait_until_worker_start_is_allowed() {
+            return Ok(None);
+        }
+        match spawn() {
+            Ok(worker) => {
+                if startup_gate.wait_until_worker_start_is_allowed() {
+                    return Ok(Some(worker));
+                }
+                return Ok(None);
+            }
+            Err(_error) if session_is_ending() => {
+                if !startup_gate.wait_until_worker_start_is_allowed() {
+                    return Ok(None);
+                }
+                on_cancelled_retry();
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -769,6 +993,13 @@ impl AppState {
 fn main() -> Result<(), Box<dyn Error>> {
     rust_platform_windows::configure_process_error_mode();
     rust_platform_windows::configure_safe_dll_search()?;
+    let startup_gate = Arc::new(StartupSessionGate::new());
+    let session_event_router = Arc::new(SessionEventRouter::new(Arc::clone(&startup_gate)));
+    let session_router_for_monitor = Arc::clone(&session_event_router);
+    let _session_end_monitor = rust_platform_windows::SessionEndMonitor::start(move |event| {
+        session_router_for_monitor.receive(event);
+    })
+    .map_err(|error| format!("Windows session-end monitoring is unavailable: {error}"))?;
     let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "desktop");
     rust_app_core::diagnostics::log_line("desktop lifecycle=starting");
     configure_ui_backend()?;
@@ -797,25 +1028,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     precreate_indicator(&indicator);
     precreate_action_windows(&chooser, &action_palette, &translation_preview);
 
-    let worker_job = rust_platform_windows::WorkerJob::new()?;
-    let (input_child, input) = spawn_worker(
-        &worker_job,
-        WorkerKind::Input,
-        "rust-input-host.exe",
-        RuntimeEvent::Input,
-    )?;
-    let (speech_child, speech) = spawn_worker(
-        &worker_job,
-        WorkerKind::Speech,
-        "rust-speech-worker.exe",
-        RuntimeEvent::Speech,
-    )?;
-    let (translation_child, translation) = spawn_worker(
-        &worker_job,
-        WorkerKind::Translation,
-        "rust-translation-worker.exe",
-        RuntimeEvent::Translation,
-    )?;
+    let Some(initial_workers) = spawn_initial_workers(&startup_gate)? else {
+        rust_app_core::diagnostics::log_line(
+            "desktop lifecycle=startup_aborted_session_end_confirmed",
+        );
+        return Ok(());
+    };
+    let InitialWorkers {
+        job: worker_job,
+        input_child,
+        input,
+        speech_child,
+        speech,
+        translation_child,
+        translation,
+    } = initial_workers;
     let workers = Rc::new(Workers {
         _job: worker_job,
         input,
@@ -896,18 +1123,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         workers: Rc::clone(&workers),
         indicator_animation: Rc::clone(&indicator_animation),
     });
-    let _session_end_monitor = match rust_platform_windows::SessionEndMonitor::start(|event| {
-        dispatch_runtime_event(RuntimeEvent::SessionEnd(event));
-    }) {
-        Ok(monitor) => Some(monitor),
-        Err(error) => {
-            rust_app_core::diagnostics::log_line(&format!(
-                "desktop lifecycle=session_end_monitor_failed error={error}"
-            ));
-            eprintln!("Windows session-end monitoring is unavailable: {error}");
-            None
-        }
-    };
+    session_event_router.attach_runtime();
     let _popup_dismiss_monitor = match rust_platform_windows::PopupDismissMonitor::start(
         || {
             dispatch_runtime_event(RuntimeEvent::DismissTranslationPreview);
@@ -4337,6 +4553,167 @@ mod selection_release_gate_tests {
             release_gate_after_input_release_failure(None, "still held".to_owned());
         assert!(gate.is_none());
         assert!(!had_deferred_replacement);
+    }
+}
+
+#[cfg(test)]
+mod startup_session_gate_tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
+        time::Duration,
+    };
+
+    use rust_platform_windows::SessionEndEvent;
+
+    use super::{StartupSessionGate, guarded_initial_spawn};
+
+    #[test]
+    fn confirmed_session_end_prevents_initial_worker_creation() {
+        let gate = StartupSessionGate::new();
+        gate.observe(SessionEndEvent::Confirmed);
+        let spawn_count = AtomicUsize::new(0);
+
+        let result = guarded_initial_spawn(
+            &gate,
+            || {
+                spawn_count.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, ()>(())
+            },
+            || true,
+            || {},
+        )
+        .unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(spawn_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn query_blocks_initial_worker_creation_until_shutdown_is_cancelled() {
+        let gate = Arc::new(StartupSessionGate::new());
+        gate.observe(SessionEndEvent::Query);
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let worker_gate = Arc::clone(&gate);
+        let worker_spawn_count = Arc::clone(&spawn_count);
+        let thread = thread::spawn(move || {
+            let result = guarded_initial_spawn(
+                &worker_gate,
+                || {
+                    worker_spawn_count.fetch_add(1, Ordering::Relaxed);
+                    Ok::<_, ()>(())
+                },
+                || true,
+                || {},
+            );
+            let _ = result_sender.send(result);
+        });
+
+        assert!(
+            result_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+        assert_eq!(spawn_count.load(Ordering::Relaxed), 0);
+
+        gate.observe(SessionEndEvent::Cancelled);
+        assert_eq!(
+            result_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            Some(())
+        );
+        assert_eq!(spawn_count.load(Ordering::Relaxed), 1);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn confirmation_during_spawn_discards_the_new_worker() {
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let gate = Arc::new(StartupSessionGate::new());
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (spawned_sender, spawned_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let worker_gate = Arc::clone(&gate);
+        let worker_dropped = Arc::clone(&dropped);
+        let thread = thread::spawn(move || {
+            guarded_initial_spawn(
+                &worker_gate,
+                || {
+                    let _ = spawned_sender.send(());
+                    let _ = release_receiver.recv();
+                    Ok::<_, ()>(DropProbe(Arc::clone(&worker_dropped)))
+                },
+                || true,
+                || {},
+            )
+            .unwrap()
+        });
+
+        spawned_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        gate.observe(SessionEndEvent::Confirmed);
+        let _ = release_sender.send(());
+
+        assert!(thread.join().unwrap().is_none());
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn failed_spawn_during_query_retries_only_after_cancellation() {
+        let gate = Arc::new(StartupSessionGate::new());
+        let session_is_ending = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let retries = Arc::new(AtomicUsize::new(0));
+        let (failed_sender, failed_receiver) = mpsc::sync_channel(1);
+        let worker_gate = Arc::clone(&gate);
+        let worker_ending = Arc::clone(&session_is_ending);
+        let worker_attempts = Arc::clone(&attempts);
+        let worker_retries = Arc::clone(&retries);
+        let thread = thread::spawn(move || {
+            guarded_initial_spawn(
+                &worker_gate,
+                || {
+                    let attempt = worker_attempts.fetch_add(1, Ordering::Relaxed);
+                    if attempt == 0 {
+                        worker_ending.store(true, Ordering::Release);
+                        worker_gate.observe(SessionEndEvent::Query);
+                        let _ = failed_sender.send(());
+                        Err("loader unavailable")
+                    } else {
+                        Ok("worker")
+                    }
+                },
+                || worker_ending.load(Ordering::Acquire),
+                || {
+                    worker_retries.fetch_add(1, Ordering::Relaxed);
+                },
+            )
+        });
+
+        failed_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        gate.observe(SessionEndEvent::Cancelled);
+        session_is_ending.store(false, Ordering::Release);
+
+        assert_eq!(thread.join().unwrap().unwrap(), Some("worker"));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(retries.load(Ordering::Relaxed), 1);
     }
 }
 
