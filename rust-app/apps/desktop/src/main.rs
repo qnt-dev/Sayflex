@@ -1139,7 +1139,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\RustVoice.Desktop")?;
     let settings = SettingsWindow::new()?;
+    let saved_settings = load_settings();
     let (indicator, indicator_animation) = new_indicator()?;
+    indicator_animation
+        .borrow_mut()
+        .set_style(saved_settings.visualizer_style);
+    indicator.set_visualizer_style(saved_settings.visualizer_style.index());
+    indicator.set_circular_palette(saved_settings.circular_spectrum_palette.index());
     let chooser = SelectionChooser::new()?;
     let action_palette = ActionPalette::new()?;
     let translation_preview = TranslationPreview::new()?;
@@ -1175,12 +1181,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         restart_attempts: RefCell::new(HashMap::new()),
         deferred_exits: RefCell::new(HashMap::new()),
     });
-    let saved_settings = load_settings();
-    indicator_animation
-        .borrow_mut()
-        .set_style(saved_settings.visualizer_style);
-    indicator.set_visualizer_style(saved_settings.visualizer_style.index());
-    indicator.set_circular_palette(saved_settings.circular_spectrum_palette.index());
     let selected_model_id = saved_settings
         .selected_model_id
         .clone()
@@ -4489,7 +4489,12 @@ fn precreate_indicator(indicator: &RecordingIndicator) {
             if let Some(indicator) = indicator.upgrade() {
                 let prepared = match indicator.window().winit_window().await {
                     Ok(window) => native_window_handle(&window).is_some_and(|handle| {
-                        configure_indicator_native_window(handle, None, false)
+                        configure_indicator_native_window(
+                            handle,
+                            None,
+                            indicator.get_visualizer_style()
+                                == VisualizerStyle::CircularSpectrum.index(),
+                        )
                     }),
                     Err(_) => false,
                 };

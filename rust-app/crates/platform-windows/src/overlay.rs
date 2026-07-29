@@ -3,13 +3,14 @@ use std::{ffi::c_void, mem::size_of};
 use windows_sys::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Dwm::{
-        DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
+        DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
         DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
         DWMWCP_ROUND, DwmEnableBlurBehindWindow, DwmExtendFrameIntoClientArea,
         DwmSetWindowAttribute,
     },
     Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
+        CreateRectRgn, DeleteObject, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+        MonitorFromPoint, MonitorFromWindow,
     },
     System::{
         LibraryLoader::{GetModuleHandleW, GetProcAddress},
@@ -84,7 +85,7 @@ fn configure_overlay_window_impl(
         if use_backdrop {
             apply_transient_backdrop(hwnd);
         } else {
-            clear_system_backdrop(hwnd);
+            apply_transparent_composition(hwnd);
         }
 
         let monitor_target = target_window_handle
@@ -306,7 +307,7 @@ unsafe fn apply_transient_backdrop(hwnd: HWND) {
     }
 }
 
-unsafe fn clear_system_backdrop(hwnd: HWND) {
+unsafe fn apply_transparent_composition(hwnd: HWND) {
     let backdrop = DWMSBT_NONE;
     unsafe {
         let _ = DwmSetWindowAttribute(
@@ -315,6 +316,24 @@ unsafe fn clear_system_backdrop(hwnd: HWND) {
             (&raw const backdrop).cast(),
             size_of_val(&backdrop) as u32,
         );
+
+        // Winit enables per-pixel alpha through DWM blur-behind when the
+        // transparent surface is first created. A system backdrop applied by a
+        // previous visualizer replaces that composition state. Re-apply the
+        // empty blur region whenever the shared indicator HWND switches back
+        // to Circular Spectrum so transparent pixels reveal the target app
+        // instead of the swapchain's black clear color.
+        let region = CreateRectRgn(0, 0, -1, -1);
+        if !region.is_null() {
+            let blur = DWM_BLURBEHIND {
+                dwFlags: DWM_BB_ENABLE | DWM_BB_BLURREGION,
+                fEnable: 1,
+                hRgnBlur: region,
+                fTransitionOnMaximized: 0,
+            };
+            let _ = DwmEnableBlurBehindWindow(hwnd, &raw const blur);
+            let _ = DeleteObject(region);
+        }
     }
 }
 
