@@ -33,7 +33,10 @@ use slint::winit_030::{
     WinitWindowAccessor,
     winit::raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
-use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{
+    ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode,
+    VecModel,
+};
 
 mod flow_sphere;
 
@@ -643,6 +646,7 @@ enum WritingSlateSurface {
     #[default]
     DarkPanel,
     MatteGlass,
+    BlueGlass,
 }
 
 impl CircularSpectrumPalette {
@@ -669,6 +673,7 @@ impl WritingSlateSurface {
         match index {
             0 => Some(Self::DarkPanel),
             1 => Some(Self::MatteGlass),
+            2 => Some(Self::BlueGlass),
             _ => None,
         }
     }
@@ -677,6 +682,7 @@ impl WritingSlateSurface {
         match self {
             Self::DarkPanel => 0,
             Self::MatteGlass => 1,
+            Self::BlueGlass => 2,
         }
     }
 }
@@ -1639,6 +1645,9 @@ fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyl
         "--indicator-preview=slate-frosted" | "--indicator-preview=writing-slate-frosted" => {
             Some(VisualizerStyle::WritingSlate)
         }
+        "--indicator-preview=slate-blue-glass" | "--indicator-preview=writing-slate-blue-glass" => {
+            Some(VisualizerStyle::WritingSlate)
+        }
         "--indicator-preview-live=circle" | "--indicator-preview-live=circular-spectrum" => {
             Some(VisualizerStyle::CircularSpectrum)
         }
@@ -1654,6 +1663,10 @@ fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyl
         }
         "--indicator-preview-live=slate-frosted"
         | "--indicator-preview-live=writing-slate-frosted" => Some(VisualizerStyle::WritingSlate),
+        "--indicator-preview-live=slate-blue-glass"
+        | "--indicator-preview-live=writing-slate-blue-glass" => {
+            Some(VisualizerStyle::WritingSlate)
+        }
         _ => None,
     }
 }
@@ -1674,6 +1687,12 @@ fn indicator_preview_slate_surface_for_argument(argument: &str) -> Option<Writin
         | "--indicator-preview=writing-slate-frosted"
         | "--indicator-preview-live=slate-frosted"
         | "--indicator-preview-live=writing-slate-frosted" => Some(WritingSlateSurface::MatteGlass),
+        "--indicator-preview=slate-blue-glass"
+        | "--indicator-preview=writing-slate-blue-glass"
+        | "--indicator-preview-live=slate-blue-glass"
+        | "--indicator-preview-live=writing-slate-blue-glass" => {
+            Some(WritingSlateSurface::BlueGlass)
+        }
         _ => None,
     }
 }
@@ -1732,24 +1751,47 @@ fn run_indicator_preview(
     indicator.set_visualizer_style(style.index());
     indicator.set_indicator_title("SayFlex Recording Indicator".into());
     indicator.set_writing_slate_surface(writing_slate_surface.index());
+    let blue_glass = writing_slate_surface == WritingSlateSurface::BlueGlass;
     indicator.set_circular_palette(indicator_preview_palette().index());
     indicator.set_prepared(true);
     indicator.show()?;
     let indicator_weak = indicator.as_weak();
     slint::spawn_local(async move {
         if let Some(indicator) = indicator_weak.upgrade() {
-            let configured = indicator
+            let handle = indicator
                 .window()
                 .winit_window()
                 .await
                 .ok()
                 .as_deref()
-                .and_then(native_window_handle)
-                .is_some_and(|handle| {
+                .and_then(native_window_handle);
+            let configured = handle.is_some_and(|handle| {
+                if blue_glass {
+                    rust_platform_windows::configure_blue_glass_overlay_window(handle, None).is_ok()
+                } else {
                     configure_indicator_native_window(handle, None, style.uses_transparent_window())
-                });
+                }
+            });
             if !configured {
                 eprintln!("could not configure recording indicator preview");
+            } else if blue_glass && let Some(handle) = handle {
+                match rust_platform_windows::capture_blurred_overlay_backdrop(handle, 1) {
+                    Ok(backdrop)
+                        if backdrop.rgba.len()
+                            == backdrop.width as usize * backdrop.height as usize * 4 =>
+                    {
+                        let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                            &backdrop.rgba,
+                            backdrop.width,
+                            backdrop.height,
+                        );
+                        indicator.set_writing_slate_glass_backdrop(Image::from_rgba8(pixels));
+                    }
+                    Ok(_) => eprintln!("captured recording-indicator backdrop has invalid length"),
+                    Err(error) => {
+                        eprintln!("could not capture recording-indicator backdrop: {error}")
+                    }
+                }
             }
         }
     })?;
@@ -4949,6 +4991,7 @@ fn show_indicator(indicator: &RecordingIndicator, target_window_handle: Option<u
     let prepared = configure_indicator_window(indicator, target_window_handle);
     indicator.set_prepared(prepared);
     if prepared {
+        refresh_indicator_backdrop(indicator);
         let _ = indicator.show();
     } else {
         eprintln!("recording indicator was not shown because native setup failed");
@@ -4960,13 +5003,50 @@ fn configure_indicator_window(
     target_window_handle: Option<u64>,
 ) -> bool {
     slint_window_handle(indicator.window()).is_some_and(|handle| {
-        configure_indicator_native_window(
-            handle,
-            target_window_handle,
-            VisualizerStyle::from_index(indicator.get_visualizer_style())
-                .is_some_and(VisualizerStyle::uses_transparent_window),
-        )
+        let style = VisualizerStyle::from_index(indicator.get_visualizer_style());
+        let blue_glass = style == Some(VisualizerStyle::WritingSlate)
+            && WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
+                == Some(WritingSlateSurface::BlueGlass);
+        if blue_glass {
+            rust_platform_windows::configure_blue_glass_overlay_window(handle, target_window_handle)
+                .is_ok()
+        } else {
+            configure_indicator_native_window(
+                handle,
+                target_window_handle,
+                style.is_some_and(VisualizerStyle::uses_transparent_window),
+            )
+        }
     })
+}
+
+fn refresh_indicator_backdrop(indicator: &RecordingIndicator) {
+    if VisualizerStyle::from_index(indicator.get_visualizer_style())
+        != Some(VisualizerStyle::WritingSlate)
+        || WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
+            != Some(WritingSlateSurface::BlueGlass)
+    {
+        return;
+    }
+
+    indicator.set_writing_slate_glass_backdrop(Image::default());
+    let Some(handle) = slint_window_handle(indicator.window()) else {
+        return;
+    };
+    match rust_platform_windows::capture_blurred_overlay_backdrop(handle, 1) {
+        Ok(backdrop)
+            if backdrop.rgba.len() == backdrop.width as usize * backdrop.height as usize * 4 =>
+        {
+            let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                &backdrop.rgba,
+                backdrop.width,
+                backdrop.height,
+            );
+            indicator.set_writing_slate_glass_backdrop(Image::from_rgba8(pixels));
+        }
+        Ok(_) => eprintln!("captured recording-indicator backdrop has invalid length"),
+        Err(error) => eprintln!("could not capture recording-indicator backdrop: {error}"),
+    }
 }
 
 fn configure_indicator_native_window(
@@ -5367,6 +5447,14 @@ mod indicator_animation_tests {
             Some(WritingSlateSurface::MatteGlass)
         );
         assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview=slate-blue-glass"),
+            Some(VisualizerStyle::WritingSlate)
+        );
+        assert_eq!(
+            indicator_preview_slate_surface_for_argument("--indicator-preview=slate-blue-glass"),
+            Some(WritingSlateSurface::BlueGlass)
+        );
+        assert_eq!(
             WritingSlateSurface::from_index(0),
             Some(WritingSlateSurface::DarkPanel)
         );
@@ -5374,10 +5462,13 @@ mod indicator_animation_tests {
             WritingSlateSurface::from_index(1),
             Some(WritingSlateSurface::MatteGlass)
         );
-        assert_eq!(WritingSlateSurface::from_index(2), None);
         assert_eq!(
-            serde_json::to_string(&WritingSlateSurface::MatteGlass).unwrap(),
-            "\"matte_glass\""
+            WritingSlateSurface::from_index(2),
+            Some(WritingSlateSurface::BlueGlass)
+        );
+        assert_eq!(
+            serde_json::to_string(&WritingSlateSurface::BlueGlass).unwrap(),
+            "\"blue_glass\""
         );
     }
 

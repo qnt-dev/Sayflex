@@ -934,6 +934,14 @@ export component SettingsWindow inherits Window {
                                     selected: root.selected-writing-slate-surface == 1;
                                     clicked => { root.select-writing-slate-surface(1); }
                                 }
+                                CircularPaletteChoice {
+                                    label: "Blue Glass";
+                                    color-a: #102639;
+                                    color-b: #3f9fc9;
+                                    color-c: #d4efff;
+                                    selected: root.selected-writing-slate-surface == 2;
+                                    clicked => { root.select-writing-slate-surface(2); }
+                                }
                             }
                         }
                     }
@@ -1444,6 +1452,8 @@ export component RecordingIndicator inherits Window {
     in property <image> flow-sphere-frame;
     in property <[SlateLine]> slate-lines;
     in property <int> writing-slate-surface: 0;
+    property <bool> writing-slate-blue-glass: root.writing-slate-surface == 2;
+    in property <image> writing-slate-glass-backdrop;
     in property <bool> processing: false;
     in property <float> signal-opacity: 0.54;
     in property <float> disc-opacity: 1;
@@ -1490,38 +1500,68 @@ export component RecordingIndicator inherits Window {
                 background: transparent;
 
                 Rectangle {
-                    x: root.writing-slate-surface == 1 ? 0px : 2px;
-                    y: root.writing-slate-surface == 1 ? 0px : 4px;
-                    width: root.writing-slate-surface == 1 ? parent.width : parent.width - 4px;
-                    height: root.writing-slate-surface == 1 ? parent.height : parent.height - 5px;
+                    x: root.writing-slate-surface != 0 ? 0px : 2px;
+                    y: root.writing-slate-surface != 0 ? 0px : 4px;
+                    width: root.writing-slate-surface != 0 ? parent.width : parent.width - 4px;
+                    height: root.writing-slate-surface != 0 ? parent.height : parent.height - 5px;
                     border-radius: 7px;
                     background: #000000;
-                    opacity: root.writing-slate-surface == 1 ? 0 : 0.28;
+                    opacity: root.writing-slate-surface != 0 ? 0 : 0.28;
                 }
 
                 Rectangle {
-                    x: root.writing-slate-surface == 1 ? 0px : 3px;
-                    y: root.writing-slate-surface == 1 ? 0px : 3px;
-                    width: root.writing-slate-surface == 1 ? parent.width : parent.width - 6px;
-                    height: root.writing-slate-surface == 1 ? parent.height : parent.height - 6px;
+                    x: root.writing-slate-surface != 0 ? 0px : 3px;
+                    y: root.writing-slate-surface != 0 ? 0px : 3px;
+                    width: root.writing-slate-surface != 0 ? parent.width : parent.width - 6px;
+                    height: root.writing-slate-surface != 0 ? parent.height : parent.height - 6px;
                     border-radius: 6px;
                     border-width: 0px;
-                    background: root.writing-slate-surface == 1 ? #73777e4d : #181b21f5;
+                    background: root.writing-slate-blue-glass
+                        ? @linear-gradient(145deg,
+                            rgba(84, 188, 235, 0.055) 0%,
+                            rgba(8, 30, 51, 0.012) 46%,
+                            rgba(77, 191, 238, 0.042) 100%)
+                        : root.writing-slate-surface == 1 ? #73777e4d : #181b21f5;
 
                     Rectangle {
-                        x: root.writing-slate-surface == 1 ? 0px : 3px;
-                        y: root.writing-slate-surface == 1 ? 0px : 3px;
-                        width: root.writing-slate-surface == 1 ? parent.width : parent.width - 6px;
-                        height: root.writing-slate-surface == 1 ? parent.height : parent.height - 6px;
-                        border-radius: root.writing-slate-surface == 1 ? 6px : 4px;
-                        background: root.writing-slate-surface == 1 ? transparent : #0b0e13f5;
+                        x: root.writing-slate-blue-glass ? 0px : root.writing-slate-surface == 1 ? 0px : 3px;
+                        y: root.writing-slate-blue-glass ? 0px : root.writing-slate-surface == 1 ? 0px : 3px;
+                        width: root.writing-slate-blue-glass
+                            ? parent.width
+                            : root.writing-slate-surface == 1 ? parent.width : parent.width - 6px;
+                        height: root.writing-slate-blue-glass
+                            ? parent.height
+                            : root.writing-slate-surface == 1 ? parent.height : parent.height - 6px;
+                        border-radius: root.writing-slate-blue-glass
+                            ? 6px
+                            : root.writing-slate-surface == 1 ? 6px : 4px;
+                        background: root.writing-slate-blue-glass
+                            ? transparent
+                            : root.writing-slate-surface == 1 ? transparent : #0b0e13f5;
+                        border-width: 0px;
                         clip: true;
 
-                        if root.writing-slate-surface == 1 : Image {
+                        if root.writing-slate-blue-glass : Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: root.writing-slate-glass-backdrop;
+                            image-fit: fill;
+                        }
+
+                        if root.writing-slate-blue-glass : Image {
+                            width: parent.width;
+                            height: parent.height;
+                            source: @image-url("../assets/slate-blue-glass-wash.svg");
+                            image-fit: fill;
+                            opacity: 0.25;
+                        }
+
+                        if root.writing-slate-surface != 0 : Image {
                             width: parent.width;
                             height: parent.height;
                             source: @image-url("../assets/slate-matte-grain.svg");
                             image-fit: fill;
+                            opacity: root.writing-slate-blue-glass ? 0.10 : 1;
                         }
 
                         for line in root.slate-lines : Rectangle {

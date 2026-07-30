@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="154" viewBox="0 0 128 154">
+  <defs>
+    <radialGradient id="cyan-glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="translate(18 24) rotate(48) scale(92 78)">
+      <stop offset="0" stop-color="#61d4ff" stop-opacity=".42"/>
+      <stop offset=".36" stop-color="#229cd8" stop-opacity=".19"/>
+      <stop offset="1" stop-color="#0b4e7b" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="blue-glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="translate(116 132) rotate(-132) scale(104 91)">
+      <stop offset="0" stop-color="#42bfff" stop-opacity=".38"/>
+      <stop offset=".43" stop-color="#116aa8" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#062d50" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="soft-center" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="translate(74 69) scale(71 88)">
+      <stop offset="0" stop-color="#aeeaff" stop-opacity=".10"/>
+      <stop offset=".58" stop-color="#2c8fbd" stop-opacity=".045"/>
+      <stop offset="1" stop-color="#0a3959" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="glass-veil" x1="7" y1="0" x2="122" y2="154" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9de4ff" stop-opacity=".085"/>
+      <stop offset=".45" stop-color="#0b2740" stop-opacity=".02"/>
+      <stop offset="1" stop-color="#55c7f4" stop-opacity=".075"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="154" fill="url(#cyan-glow)"/>
+  <rect width="128" height="154" fill="url(#blue-glow)"/>
+  <rect width="128" height="154" fill="url(#soft-center)"/>
+  <rect width="128" height="154" fill="url(#glass-veil)"/>
+</svg>

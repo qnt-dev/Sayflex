@@ -1,16 +1,20 @@
-use std::{ffi::c_void, mem::size_of};
+use std::{ffi::c_void, mem::size_of, ptr::null_mut, slice};
+
+use crate::BlurredBackdrop;
 
 use windows_sys::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Dwm::{
         DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
         DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-        DWMWCP_ROUND, DwmEnableBlurBehindWindow, DwmExtendFrameIntoClientArea,
+        DWMWCP_ROUND, DwmEnableBlurBehindWindow, DwmExtendFrameIntoClientArea, DwmFlush,
         DwmSetWindowAttribute,
     },
     Graphics::Gdi::{
-        CreateRectRgn, DeleteObject, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-        MonitorFromPoint, MonitorFromWindow,
+        BI_RGB, BITMAPINFO, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
+        CreateRectRgn, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
+        MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow, ReleaseDC,
+        SRCCOPY, SelectObject,
     },
     System::{
         LibraryLoader::{GetModuleHandleW, GetProcAddress},
@@ -22,10 +26,11 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
             GetWindowRect, GetWindowThreadProcessId, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST,
-            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WM_NCLBUTTONDOWN, WS_CAPTION,
-            WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
-            WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+            IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
+            SetWindowPos, ShowWindow, WM_NCLBUTTONDOWN, WS_CAPTION, WS_EX_APPWINDOW,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+            WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -46,6 +51,7 @@ struct WindowCompositionAttributeData {
 }
 
 const WCA_ACCENT_POLICY: i32 = 19;
+const ACCENT_DISABLED: i32 = 0;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: i32 = 4;
 
 pub fn configure_overlay_window(
@@ -60,6 +66,249 @@ pub fn configure_transparent_overlay_window(
     target_window_handle: Option<u64>,
 ) -> Result<(), String> {
     configure_overlay_window_impl(window_handle, target_window_handle, false)
+}
+
+pub fn configure_blue_glass_overlay_window(
+    window_handle: u64,
+    target_window_handle: Option<u64>,
+) -> Result<(), String> {
+    configure_overlay_window_impl(window_handle, target_window_handle, false)?;
+    let hwnd = window_handle as usize as HWND;
+    // SAFETY: configure_overlay_window_impl validated the HWND and established
+    // the common no-activate, tool-window and click-through overlay contract.
+    unsafe {
+        // Acrylic exposes any non-client pixels that remain on the Winit HWND.
+        // Remove them explicitly so the experimental surface cannot reveal a
+        // caption close glyph when DWM extends glass into the client area.
+        let current_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let desired_style = (current_style
+            & !(WS_CAPTION as isize)
+            & !(WS_SYSMENU as isize)
+            & !(WS_THICKFRAME as isize)
+            & !(WS_MINIMIZEBOX as isize)
+            & !(WS_MAXIMIZEBOX as isize))
+            | WS_POPUP as isize;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, desired_style);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+    Ok(())
+}
+
+pub fn capture_blurred_overlay_backdrop(
+    window_handle: u64,
+    blur_radius: u32,
+) -> Result<BlurredBackdrop, String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("overlay window handle is not available".to_owned());
+    }
+
+    let mut rect = RECT::default();
+    // SAFETY: hwnd is the live preview HWND owned by this process and rect is
+    // writable for the duration of the Win32 call.
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return Err("GetWindowRect failed before backdrop capture".to_owned());
+    }
+
+    let width = rect.right.saturating_sub(rect.left);
+    let height = rect.bottom.saturating_sub(rect.top);
+    if width <= 0 || height <= 0 {
+        return Err("overlay window has no capturable area".to_owned());
+    }
+    let byte_len = width as usize * height as usize * 4;
+
+    // Hide the indicator for exactly one compositor frame so BitBlt samples
+    // the real application behind it instead of recursively capturing the
+    // preview surface. The guard restores it without activation on every exit.
+    let _visibility = WindowVisibilityGuard::hide(hwnd);
+
+    // SAFETY: Every GDI handle is validated before use and released below.
+    unsafe {
+        let screen_dc = GetDC(null_mut());
+        if screen_dc.is_null() {
+            return Err("GetDC failed during backdrop capture".to_owned());
+        }
+        let memory_dc = CreateCompatibleDC(screen_dc);
+        if memory_dc.is_null() {
+            let _ = ReleaseDC(null_mut(), screen_dc);
+            return Err("CreateCompatibleDC failed during backdrop capture".to_owned());
+        }
+
+        let mut info = BITMAPINFO::default();
+        info.bmiHeader.biSize =
+            size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+
+        let mut bits = null_mut::<c_void>();
+        let bitmap = CreateDIBSection(screen_dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        if bitmap.is_null() || bits.is_null() {
+            if !bitmap.is_null() {
+                let _ = DeleteObject(bitmap);
+            }
+            let _ = DeleteDC(memory_dc);
+            let _ = ReleaseDC(null_mut(), screen_dc);
+            return Err("CreateDIBSection failed during backdrop capture".to_owned());
+        }
+
+        let previous = SelectObject(memory_dc, bitmap);
+        if previous.is_null() || previous as isize == -1 {
+            let _ = DeleteObject(bitmap);
+            let _ = DeleteDC(memory_dc);
+            let _ = ReleaseDC(null_mut(), screen_dc);
+            return Err("SelectObject failed during backdrop capture".to_owned());
+        }
+
+        let copied = BitBlt(
+            memory_dc,
+            0,
+            0,
+            width,
+            height,
+            screen_dc,
+            rect.left,
+            rect.top,
+            SRCCOPY | CAPTUREBLT,
+        );
+        let result = if copied == 0 {
+            Err("BitBlt failed during backdrop capture".to_owned())
+        } else {
+            let bgra = slice::from_raw_parts(bits.cast::<u8>(), byte_len);
+            let mut rgba = vec![0_u8; byte_len];
+            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+                target[0] = source[2];
+                target[1] = source[1];
+                target[2] = source[0];
+                target[3] = u8::MAX;
+            }
+            blur_rgba(&mut rgba, width as usize, height as usize, blur_radius);
+            Ok(BlurredBackdrop {
+                width: width as u32,
+                height: height as u32,
+                rgba,
+            })
+        };
+
+        let _ = SelectObject(memory_dc, previous);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(memory_dc);
+        let _ = ReleaseDC(null_mut(), screen_dc);
+        result
+    }
+}
+
+struct WindowVisibilityGuard {
+    hwnd: HWND,
+    was_visible: bool,
+}
+
+impl WindowVisibilityGuard {
+    fn hide(hwnd: HWND) -> Self {
+        // SAFETY: The HWND belongs to the current process. DwmFlush only waits
+        // for the compositor to apply the visibility change.
+        unsafe {
+            let was_visible = IsWindowVisible(hwnd) != 0;
+            if was_visible {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                let _ = DwmFlush();
+            }
+            Self { hwnd, was_visible }
+        }
+    }
+}
+
+impl Drop for WindowVisibilityGuard {
+    fn drop(&mut self) {
+        // SAFETY: The window remains alive while the preview owns this guard.
+        // SW_SHOWNOACTIVATE preserves the user's foreground application.
+        if self.was_visible {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                let _ = DwmFlush();
+            }
+        }
+    }
+}
+
+fn blur_rgba(pixels: &mut [u8], width: usize, height: usize, radius: u32) {
+    if width == 0 || height == 0 || pixels.len() != width * height * 4 {
+        return;
+    }
+    let radius = radius.clamp(1, 24) as usize;
+    let mut scratch = vec![0_u8; pixels.len()];
+    for _ in 0..3 {
+        blur_horizontal(pixels, &mut scratch, width, height, radius);
+        blur_vertical(&scratch, pixels, width, height, radius);
+    }
+}
+
+fn blur_horizontal(source: &[u8], target: &mut [u8], width: usize, height: usize, radius: usize) {
+    for y in 0..height {
+        for x in 0..width {
+            let start = x.saturating_sub(radius);
+            let end = (x + radius).min(width - 1);
+            let count = (end - start + 1) as u32;
+            for channel in 0..3 {
+                let mut sum = 0_u32;
+                for sample_x in start..=end {
+                    sum += source[(y * width + sample_x) * 4 + channel] as u32;
+                }
+                target[(y * width + x) * 4 + channel] = (sum / count) as u8;
+            }
+            target[(y * width + x) * 4 + 3] = u8::MAX;
+        }
+    }
+}
+
+fn blur_vertical(source: &[u8], target: &mut [u8], width: usize, height: usize, radius: usize) {
+    for y in 0..height {
+        let start = y.saturating_sub(radius);
+        let end = (y + radius).min(height - 1);
+        let count = (end - start + 1) as u32;
+        for x in 0..width {
+            for channel in 0..3 {
+                let mut sum = 0_u32;
+                for sample_y in start..=end {
+                    sum += source[(sample_y * width + x) * 4 + channel] as u32;
+                }
+                target[(y * width + x) * 4 + channel] = (sum / count) as u8;
+            }
+            target[(y * width + x) * 4 + 3] = u8::MAX;
+        }
+    }
+}
+
+#[cfg(test)]
+mod backdrop_tests {
+    use super::blur_rgba;
+
+    #[test]
+    fn blur_spreads_color_and_preserves_opaque_alpha() {
+        let mut pixels = vec![0_u8; 5 * 4];
+        pixels[2 * 4] = u8::MAX;
+        pixels[2 * 4 + 1] = u8::MAX;
+        pixels[2 * 4 + 2] = u8::MAX;
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = u8::MAX;
+        }
+
+        blur_rgba(&mut pixels, 5, 1, 1);
+
+        assert!(pixels[4] > 0);
+        assert!(pixels[2 * 4] < u8::MAX);
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX));
+    }
 }
 
 fn configure_overlay_window_impl(
@@ -310,6 +559,11 @@ unsafe fn apply_transient_backdrop(hwnd: HWND) {
 unsafe fn apply_transparent_composition(hwnd: HWND) {
     let backdrop = DWMSBT_NONE;
     unsafe {
+        // Clear a composition attribute that may have been installed by an
+        // Acrylic action window. Without this reset Windows keeps painting a
+        // second full-size material rectangle behind the transparent Slint
+        // surface.
+        apply_accent_policy(hwnd, ACCENT_DISABLED, 0, 0);
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE as u32,
@@ -338,15 +592,21 @@ unsafe fn apply_transparent_composition(hwnd: HWND) {
 }
 
 unsafe fn apply_acrylic_backdrop(hwnd: HWND) {
-    // The DWM system backdrop above is the supported Windows 11 path. This
-    // composition attribute is a best-effort Windows 10/11 fallback that keeps
-    // blur visible for a fully custom, frameless no-activate popup.
+    unsafe {
+        apply_accent_policy(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, 2, 0x58_12_10_0E);
+    }
+}
+
+unsafe fn apply_accent_policy(
+    hwnd: HWND,
+    accent_state: i32,
+    accent_flags: i32,
+    gradient_color: u32,
+) {
     let mut policy = AccentPolicy {
-        accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
-        accent_flags: 2,
-        // ABGR: a dark 35% tint. Slint adds one light glass surface over this,
-        // leaving the blurred scene visibly present behind the text.
-        gradient_color: 0x58_12_10_0E,
+        accent_state,
+        accent_flags,
+        gradient_color,
         animation_id: 0,
     };
     let mut data = WindowCompositionAttributeData {

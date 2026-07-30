@@ -1,5 +1,12 @@
 use std::time::Duration;
 
+#[derive(Clone, Debug)]
+pub struct BlurredBackdrop {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 #[cfg(windows)]
 mod job;
 #[cfg(windows)]
@@ -17,8 +24,9 @@ mod single_instance;
 pub use job::WorkerJob;
 #[cfg(windows)]
 pub use overlay::{
-    begin_window_drag, configure_action_window, configure_overlay_window,
-    configure_standard_window, configure_translation_window, configure_transparent_overlay_window,
+    begin_window_drag, capture_blurred_overlay_backdrop, configure_action_window,
+    configure_blue_glass_overlay_window, configure_overlay_window, configure_standard_window,
+    configure_translation_window, configure_transparent_overlay_window,
     restore_target_if_our_action_window_activated,
 };
 #[cfg(windows)]
@@ -81,6 +89,22 @@ pub fn configure_transparent_overlay_window(
     _target_window_handle: Option<u64>,
 ) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn configure_blue_glass_overlay_window(
+    _window_handle: u64,
+    _target_window_handle: Option<u64>,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn capture_blurred_overlay_backdrop(
+    _window_handle: u64,
+    _blur_radius: u32,
+) -> Result<BlurredBackdrop, String> {
+    Err("blurred overlay backdrop capture is only available on Windows".to_owned())
 }
 
 #[cfg(not(windows))]
