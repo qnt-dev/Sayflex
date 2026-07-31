@@ -2200,6 +2200,7 @@ export component TranslationPreview inherits Window {
     in-out property <string> translated-text;
     in-out property <bool> pinned: false;
     in-out property <float> card-width: 320;
+    in property <image> glass-backdrop;
     // Text owns its real height-for-width measurement. The extra four pixels
     // are bottom breathing room for descenders and the last rendered line.
     out property <float> result-content-height:
@@ -2226,11 +2227,45 @@ export component TranslationPreview inherits Window {
 
     Rectangle {
         border-radius: 9px;
-        border-width: 1px;
-        border-color: #f0a45d50;
-        background: #0b0e1328;
+        border-width: 0px;
+        background: @linear-gradient(145deg,
+            rgba(65, 150, 196, 0.075) 0%,
+            rgba(8, 24, 39, 0.16) 48%,
+            rgba(58, 148, 195, 0.06) 100%);
         clip: true;
         opacity: root.prepared ? 1 : 0;
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.glass-backdrop;
+            image-fit: fill;
+        }
+
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: @linear-gradient(145deg,
+                rgba(65, 150, 196, 0.075) 0%,
+                rgba(8, 24, 39, 0.16) 48%,
+                rgba(58, 148, 195, 0.06) 100%);
+        }
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: @image-url("../assets/slate-blue-glass-wash.svg");
+            image-fit: fill;
+            opacity: 0.16;
+        }
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: @image-url("../assets/slate-matte-grain.svg");
+            image-fit: fill;
+            opacity: 0.07;
+        }
 
         drag-area := TouchArea {
             x: 0;

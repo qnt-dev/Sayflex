@@ -1,5 +1,6 @@
 pub mod diagnostics;
 mod layout;
+pub mod lifecycle;
 pub mod product;
 mod session_registry;
 

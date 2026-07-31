@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io,
     sync::mpsc::{self, RecvTimeoutError, Sender},
     thread,
@@ -6,10 +7,11 @@ use std::{
 };
 
 use rust_protocol::{
-    InputHostEvent, InsertionMethod, RequestId, SessionId, TargetSnapshot, Transcript,
+    InputHostEvent, InsertionDelivery, InsertionMethod, RequestId, SessionId, TargetSnapshot,
+    Transcript,
 };
 
-use crate::{clipboard, hotkeys, inject, target};
+use crate::{clipboard, hotkeys, inject, target, wezterm};
 
 const INJECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 // Some modern editors resolve Ctrl+V asynchronously. Keeping our replacement
@@ -256,6 +258,54 @@ fn insert_transcript(
         method_started: Instant::now(),
         release_wait_ms: elapsed_ms(started),
     };
+    let payload = if add_trailing_space {
+        Cow::Owned(format!("{text} "))
+    } else {
+        Cow::Borrowed(text)
+    };
+    if target::is_wezterm_target(target_snapshot) {
+        match wezterm::send_text(target_snapshot, &payload) {
+            Ok(()) => {
+                send_dispatched(
+                    events,
+                    session_id,
+                    InsertionMethod::WezTermCli,
+                    InsertionDelivery::AdapterAcknowledged,
+                    target_snapshot,
+                    payload.chars().count(),
+                    timing,
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                crate::diagnostic_line(&format!(
+                    "insertion action=wezterm_adapter result=unicode_fallback session={session_id} \
+target_pid={} error={error}",
+                    target_snapshot.process_id
+                ));
+                if !inject::is_foreground(target_snapshot) {
+                    return Err(format!(
+                        "{error}; target changed before the Unicode fallback"
+                    ));
+                }
+                inject::insert_text(target_snapshot, text, add_trailing_space).map_err(
+                    |injection_error| {
+                        format!("{error}; deterministic Unicode fallback failed: {injection_error}")
+                    },
+                )?;
+                send_dispatched(
+                    events,
+                    session_id,
+                    InsertionMethod::UnicodeInput,
+                    InsertionDelivery::Unverified,
+                    target_snapshot,
+                    payload.chars().count(),
+                    timing,
+                );
+                return Ok(None);
+            }
+        }
+    }
     let paste_shortcut = target::paste_shortcut(target_snapshot);
 
     match clipboard::dispatch_paste(
@@ -269,6 +319,7 @@ fn insert_transcript(
                 events,
                 session_id,
                 InsertionMethod::ClipboardPaste,
+                InsertionDelivery::Unverified,
                 target_snapshot,
                 text.chars().count(),
                 timing,
@@ -288,6 +339,7 @@ fn insert_transcript(
                 events,
                 session_id,
                 InsertionMethod::UnicodeInput,
+                InsertionDelivery::Unverified,
                 target_snapshot,
                 text.chars().count(),
                 timing,
@@ -316,6 +368,11 @@ fn replace_selection(
         false,
     ) {
         Ok(pending_restore) => {
+            crate::diagnostic_line(&format!(
+                "insertion action=replace_selection result=sent_unverified request={request_id} \
+target_pid={} method=clipboard",
+                target_snapshot.process_id
+            ));
             let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
             Ok(Some(ScheduledClipboardRestore::new(pending_restore, None)))
         }
@@ -323,6 +380,11 @@ fn replace_selection(
             inject::replace_selection(target_snapshot, text).map_err(|injection_error| {
                 format!("{clipboard_error}; Unicode fallback failed: {injection_error}")
             })?;
+            crate::diagnostic_line(&format!(
+                "insertion action=replace_selection result=sent_unverified request={request_id} \
+target_pid={} method=unicode",
+                target_snapshot.process_id
+            ));
             let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
             Ok(None)
         }
@@ -334,6 +396,7 @@ fn send_dispatched(
     events: &Sender<InputHostEvent>,
     session_id: SessionId,
     method: InsertionMethod,
+    delivery: InsertionDelivery,
     target: TargetSnapshot,
     chars: usize,
     timing: InsertionTiming,
@@ -341,13 +404,14 @@ fn send_dispatched(
     let method_ms = elapsed_ms(timing.method_started);
     let total_ms = elapsed_ms(timing.started);
     crate::diagnostic_line(&format!(
-        "insertion action=insert result=dispatched session={session_id} method={method:?} \
+        "insertion action=insert result={delivery:?} session={session_id} method={method:?} \
 target_pid={} chars={chars} release_wait_ms={} method_ms={method_ms} total_ms={total_ms}",
         target.process_id, timing.release_wait_ms,
     ));
     let _ = events.send(InputHostEvent::InsertionDispatched {
         session_id,
         method,
+        delivery,
         dispatch_duration_ms: total_ms,
     });
 }

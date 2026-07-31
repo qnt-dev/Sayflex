@@ -34,8 +34,8 @@ use slint::winit_030::{
     winit::raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
 use slint::{
-    ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode,
-    VecModel,
+    ComponentHandle, Image, ModelRc, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, SharedString,
+    Timer, TimerMode, VecModel,
 };
 
 mod flow_sphere;
@@ -53,7 +53,6 @@ const DEV_SPEECH_WORKER_EXE: &str = "styleflex-speech-worker.exe";
 const DEV_TRANSLATION_WORKER_EXE: &str = "styleflex-translation-worker.exe";
 const SELECTION_WINDOW_TITLE: &str = "Correct keyboard layout";
 const ACTION_PALETTE_WINDOW_TITLE: &str = "Text actions";
-const TRANSLATION_PREVIEW_WINDOW_TITLE: &str = "Translation preview";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INDICATOR_BAR_PROFILE: [f32; 10] = [0.25, 0.4, 0.62, 0.82, 1.0, 1.0, 0.82, 0.62, 0.4, 0.25];
@@ -1445,10 +1444,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("StyleFlex data migration is deferred: {error}");
     }
     let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "desktop");
-    rust_app_core::diagnostics::log_line("desktop lifecycle=starting");
-
+    rust_app_core::lifecycle::install_panic_hook();
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.Desktop")?;
+    let mut run_session =
+        rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
     let saved_settings = load_settings();
     let (indicator, indicator_animation) = new_indicator()?;
@@ -1473,6 +1473,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         rust_app_core::diagnostics::log_line(
             "desktop lifecycle=startup_aborted_session_end_confirmed",
         );
+        run_session.finish("startup_aborted_session_end_confirmed");
         return Ok(());
     };
     let InitialWorkers {
@@ -1591,6 +1592,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         handler.borrow_mut().take();
     });
     workers.shutdown();
+    run_session.finish("event_loop_returned");
     Ok(())
 }
 
@@ -1998,8 +2000,11 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
     };
     apply_translation_preview_layout(&preview, &translated);
     preview.set_translated_text(translated.clone().into());
-    preview.set_prepared(true);
+    preview.set_prepared(false);
     wire_translation_preview(&preview);
+    preview
+        .window()
+        .set_position(PhysicalPosition::new(-32_000, -32_000));
     preview.show()?;
     let preview_weak = preview.as_weak();
     slint::spawn_local(async move {
@@ -2017,6 +2022,9 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
             {
                 eprintln!("could not configure translation preview: {error}");
             } else if let Some(handle) = handle {
+                refresh_translation_backdrop(&preview, handle);
+                preview.set_prepared(true);
+                preview.window().request_redraw();
                 rust_platform_windows::activate_popup_dismiss(handle);
             }
         }
@@ -2395,6 +2403,9 @@ fn handle_session_end(event: rust_platform_windows::SessionEndEvent, runtime: &R
             runtime.workers.begin_session_end();
         }
         rust_platform_windows::SessionEndEvent::Confirmed => {
+            rust_app_core::diagnostics::log_line(
+                "desktop lifecycle=exit_requested reason=session_end_confirmed",
+            );
             runtime.workers.confirm_session_end();
             let _ = slint::quit_event_loop();
         }
@@ -2644,6 +2655,10 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             let resolution = state.borrow_mut().request_insert_last(target);
             match resolution {
                 InsertLastResolution::Insert(transcript) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "insert_last decision=insert session={} target_pid={}",
+                        transcript.session_id, target.process_id
+                    ));
                     let _ = workers.input.send(&InputHostCommand::InsertTranscript {
                         transcript,
                         target,
@@ -2651,6 +2666,10 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     });
                 }
                 InsertLastResolution::Await(session_id) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "insert_last decision=await session={session_id} target_pid={}",
+                        target.process_id
+                    ));
                     set_indicator_status(
                         settings,
                         &format!(
@@ -2660,12 +2679,20 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     );
                 }
                 InsertLastResolution::LoadHistory => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "insert_last decision=load_history target_pid={}",
+                        target.process_id
+                    ));
                     let _ = workers
                         .speech
                         .send(&SpeechWorkerCommand::GetHistory { limit: 20 });
                     set_indicator_status(settings, "Loading the latest transcript…");
                 }
                 InsertLastResolution::Unavailable(message) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "insert_last decision=unavailable target_pid={}",
+                        target.process_id
+                    ));
                     set_indicator_status(settings, message);
                 }
             }
@@ -2793,6 +2820,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
         InputHostEvent::InsertionDispatched {
             session_id,
             method,
+            delivery,
             dispatch_duration_ms,
         } => {
             let (owns_indicator, total_after_release_ms, transcript_latency) = {
@@ -2823,13 +2851,18 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             let method_name = match method {
                 rust_protocol::InsertionMethod::ClipboardPaste => "clipboard",
                 rust_protocol::InsertionMethod::UnicodeInput => "unicode",
+                rust_protocol::InsertionMethod::WezTermCli => "wezterm_cli",
+            };
+            let delivery_name = match delivery {
+                rust_protocol::InsertionDelivery::AdapterAcknowledged => "adapter_acknowledged",
+                rust_protocol::InsertionDelivery::Unverified => "unverified",
             };
             if let Some(total) = total_after_release_ms {
                 let latency = transcript_latency.unwrap_or_default();
                 rust_app_core::diagnostics::log_line(&format!(
                     "latency session={} release_to_insert_ms={} insertion_dispatch_ms={} \
 audio_finalize_ms={} preprocessing_ms={} final_queue_wait_ms={} inference_ms={} \
-speculative_reuse={} method={}",
+speculative_reuse={} method={} delivery={}",
                     session_id,
                     total,
                     dispatch_duration_ms,
@@ -2839,16 +2872,27 @@ speculative_reuse={} method={}",
                     latency.inference_ms,
                     latency.speculative_reuse,
                     method_name,
+                    delivery_name,
                 ));
             }
-            set_indicator_status(
-                settings,
-                &format!(
-                    "Inserted {} in {} ms",
-                    short_id(session_id),
-                    total_after_release_ms.unwrap_or(dispatch_duration_ms)
-                ),
-            );
+            let elapsed = total_after_release_ms.unwrap_or(dispatch_duration_ms);
+            let status = match delivery {
+                rust_protocol::InsertionDelivery::AdapterAcknowledged => {
+                    format!(
+                        "Inserted {} through the target adapter in {} ms",
+                        short_id(session_id),
+                        elapsed
+                    )
+                }
+                rust_protocol::InsertionDelivery::Unverified => {
+                    format!(
+                        "Sent {} to the target in {} ms",
+                        short_id(session_id),
+                        elapsed
+                    )
+                }
+            };
+            set_indicator_status(settings, &status);
         }
         InputHostEvent::ClipboardRestored { session_id: _ } => {}
         InputHostEvent::Recovered { session_id } => {
@@ -2862,7 +2906,7 @@ speculative_reuse={} method={}",
         }
         InputHostEvent::SelectionReplaced { request_id } => {
             let _ = request_id;
-            set_indicator_status(settings, "Selected text was replaced.");
+            set_indicator_status(settings, "Replacement was sent to the target.");
         }
         InputHostEvent::TextCopied { .. } => {
             set_indicator_status(settings, "Translation copied to the clipboard.");
@@ -2872,6 +2916,9 @@ speculative_reuse={} method={}",
             code,
             message,
         } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "input_host_action result=failed session={session_id:?} code={code} message={message}"
+            ));
             let owns_indicator = {
                 let mut state = state.borrow_mut();
                 if session_id.is_some() && state.indicator_session == session_id {
@@ -3133,6 +3180,7 @@ fn show_selection_translation_preview(
     target: TargetSnapshot,
     translated_text: &str,
     translation_preview: &slint::Weak<TranslationPreview>,
+    final_update: bool,
 ) {
     let Some(preview) = translation_preview.upgrade() else {
         return;
@@ -3146,13 +3194,36 @@ fn show_selection_translation_preview(
     apply_translation_preview_layout(&preview, translated_text);
     preview.set_translated_text(translated_text.into());
     if first_show {
+        preview.set_prepared(false);
         preview.invoke_reset_scroll();
-        let _ = preview.show();
-        prepare_shown_translation_window(
-            slint_window_handle(preview.window()),
-            TRANSLATION_PREVIEW_WINDOW_TITLE,
+        let handle = slint_window_handle(preview.window());
+        let configured = handle.is_some_and(|handle| {
+            rust_platform_windows::configure_translation_window(handle).is_ok()
+        });
+        if configured {
+            if let Some(handle) = handle {
+                refresh_translation_backdrop(&preview, handle);
+            }
+            preview.set_prepared(true);
+            let _ = preview.show();
+            if let Some(handle) = handle {
+                rust_platform_windows::activate_popup_dismiss(handle);
+            }
+        } else {
+            preview.set_request_id("".into());
+            rust_app_core::diagnostics::log_line(
+                "translation_preview result=not_shown reason=native_configuration_failed",
+            );
+        }
+        if let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
             target.window_handle,
-        );
+        ) {
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_preview target_restore=failed error={error}"
+            ));
+        }
+    } else if final_update && let Some(handle) = slint_window_handle(preview.window()) {
+        refresh_translation_backdrop(&preview, handle);
     }
 }
 
@@ -3316,12 +3387,32 @@ fn handle_speech_event(
             };
             sync_history(settings, state);
             if let Some((target, add_trailing_space)) = delivery {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "transcription result=completed session={session_id} chars={} \
+delivery={} target_pid={}",
+                    transcript.text.chars().count(),
+                    if add_trailing_space {
+                        "original_target"
+                    } else {
+                        "insert_last_waiter"
+                    },
+                    target.process_id,
+                ));
                 let _ = workers.input.send(&InputHostCommand::InsertTranscript {
                     transcript,
                     target,
                     add_trailing_space,
                 });
             } else {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "transcription result={} session={session_id} chars={} delivery=history_only",
+                    if stored {
+                        "completed"
+                    } else {
+                        "duplicate_ignored"
+                    },
+                    transcript.text.chars().count(),
+                ));
                 state.borrow_mut().indicator_session = None;
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
@@ -3331,6 +3422,9 @@ fn handle_speech_event(
             }
         }
         SpeechWorkerEvent::Cancelled { session_id } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "transcription result=cancelled session={session_id}"
+            ));
             let (owns_indicator, insert_was_waiting) = {
                 let mut state = state.borrow_mut();
                 let _ = state.registry.cancel(session_id);
@@ -3384,6 +3478,10 @@ fn handle_speech_event(
             };
             match pending_insert {
                 Some((Some(transcript), target)) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "insert_last decision=history_resolved session={} target_pid={}",
+                        transcript.session_id, target.process_id
+                    ));
                     let _ = workers.input.send(&InputHostCommand::InsertTranscript {
                         transcript,
                         target,
@@ -3391,6 +3489,7 @@ fn handle_speech_event(
                     });
                 }
                 Some((None, _)) => {
+                    rust_app_core::diagnostics::log_line("insert_last decision=history_empty");
                     set_indicator_status(settings, "There is no transcript to insert yet.");
                 }
                 None => {}
@@ -3400,8 +3499,12 @@ fn handle_speech_event(
             session_id,
             code,
             message,
-            ..
+            retryable,
         } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "transcription result=failed session={session_id:?} code={code} \
+retryable={retryable} message={message}"
+            ));
             let (owns_indicator, insert_was_waiting) =
                 session_id.map_or((false, false), |session_id| {
                     let mut state = state.borrow_mut();
@@ -3605,6 +3708,7 @@ fn handle_translation_event(
                         target,
                         &translated_text,
                         translation_preview,
+                        false,
                     );
                 }
                 TranslationOrigin::Selection { .. } => {}
@@ -3771,6 +3875,7 @@ fn route_translation_result(
                     target,
                     &result.translated_text,
                     translation_preview,
+                    true,
                 );
                 "Translation completed locally.".to_owned()
             }
@@ -4281,6 +4386,9 @@ fn wire_settings(
     {
         let workers = Rc::clone(workers);
         settings.on_quit_requested(move || {
+            rust_app_core::diagnostics::log_line(
+                "desktop lifecycle=exit_requested reason=settings_quit",
+            );
             workers.shutdown();
             let _ = slint::quit_event_loop();
         });
@@ -4328,6 +4436,9 @@ fn wire_tray(
     {
         let workers = Rc::clone(workers);
         tray.on_quit_requested(move || {
+            rust_app_core::diagnostics::log_line(
+                "desktop lifecycle=exit_requested reason=tray_quit",
+            );
             workers.shutdown();
             let _ = slint::quit_event_loop();
         });
@@ -4473,9 +4584,15 @@ fn wire_translation_preview(preview: &TranslationPreview) {
         preview.on_begin_drag(move || {
             if let Some(preview) = preview_weak.upgrade()
                 && let Some(handle) = slint_window_handle(preview.window())
-                && let Err(error) = rust_platform_windows::begin_window_drag(handle)
             {
-                eprintln!("could not begin translation popup drag: {error}");
+                match rust_platform_windows::begin_window_drag(handle) {
+                    Ok(()) => refresh_translation_backdrop(&preview, handle),
+                    Err(error) => {
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "translation_preview drag=failed error={error}"
+                        ));
+                    }
+                }
             }
         });
     }
@@ -4800,32 +4917,25 @@ fn apply_translation_preview_layout(preview: &TranslationPreview, result_text: &
     preview.set_card_width(layout.card_width);
 }
 
-fn prepare_shown_translation_window(
-    window_handle: Option<u64>,
-    window_title: &'static str,
-    target_window_handle: u64,
-) {
-    if let Err(error) = slint::invoke_from_event_loop(move || {
-        let configured = window_handle
-            .ok_or_else(|| "native window handle is unavailable".to_owned())
-            .and_then(rust_platform_windows::configure_translation_window);
-        match configured {
-            Ok(()) => {
-                if let Some(window_handle) = window_handle {
-                    rust_platform_windows::activate_popup_dismiss(window_handle);
-                }
-            }
-            Err(error) => {
-                eprintln!("could not configure `{window_title}` as a translation popup: {error}");
-            }
+fn refresh_translation_backdrop(preview: &TranslationPreview, window_handle: u64) {
+    match rust_platform_windows::capture_blurred_overlay_backdrop(window_handle, 2) {
+        Ok(backdrop)
+            if backdrop.rgba.len() == backdrop.width as usize * backdrop.height as usize * 4 =>
+        {
+            let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                &backdrop.rgba,
+                backdrop.width,
+                backdrop.height,
+            );
+            preview.set_glass_backdrop(Image::from_rgba8(pixels));
+            preview.window().request_redraw();
         }
-        if let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
-            target_window_handle,
-        ) {
-            eprintln!("could not restore action target for `{window_title}`: {error}");
-        }
-    }) {
-        eprintln!("could not finalize `{window_title}` after showing it: {error}");
+        Ok(_) => rust_app_core::diagnostics::log_line(
+            "translation_preview backdrop=failed reason=invalid_pixel_buffer",
+        ),
+        Err(error) => rust_app_core::diagnostics::log_line(&format!(
+            "translation_preview backdrop=failed error={error}"
+        )),
     }
 }
 
@@ -4933,6 +5043,9 @@ fn precreate_action_windows(
     }
 
     preview.set_prepared(false);
+    preview
+        .window()
+        .set_position(PhysicalPosition::new(-32_000, -32_000));
     if preview.show().is_ok() {
         let preview = preview.as_weak();
         let _ = slint::spawn_local(async move {
@@ -4945,7 +5058,7 @@ fn precreate_action_windows(
                     .as_deref()
                     .and_then(native_window_handle)
                     .is_some_and(|handle| {
-                        rust_platform_windows::configure_translation_window(handle).is_ok()
+                        rust_platform_windows::prepare_translation_window(handle).is_ok()
                     });
                 if !configured {
                     eprintln!("translation preview could not be configured as no-activate");
@@ -4959,20 +5072,20 @@ fn precreate_action_windows(
 
 fn precreate_indicator(indicator: &RecordingIndicator) {
     indicator.set_prepared(false);
+    // Winit creates its native HWND on the first show. Keep that first frame
+    // outside every practical virtual desktop until the no-activate,
+    // tool-window and transparency contract has been applied.
+    indicator
+        .window()
+        .set_position(PhysicalPosition::new(-32_000, -32_000));
     if indicator.show().is_ok() {
         let indicator = indicator.as_weak();
         let fallback_indicator = indicator.clone();
         let schedule_result = slint::spawn_local(async move {
             if let Some(indicator) = indicator.upgrade() {
                 let prepared = match indicator.window().winit_window().await {
-                    Ok(window) => native_window_handle(&window).is_some_and(|handle| {
-                        configure_indicator_native_window(
-                            handle,
-                            None,
-                            VisualizerStyle::from_index(indicator.get_visualizer_style())
-                                .is_some_and(VisualizerStyle::uses_transparent_window),
-                        )
-                    }),
+                    Ok(window) => native_window_handle(&window)
+                        .is_some_and(|handle| prepare_indicator_native_window(&indicator, handle)),
                     Err(_) => false,
                 };
                 let _ = indicator.hide();
@@ -4984,6 +5097,20 @@ fn precreate_indicator(indicator: &RecordingIndicator) {
         {
             let _ = indicator.hide();
         }
+    }
+}
+
+fn prepare_indicator_native_window(indicator: &RecordingIndicator, window_handle: u64) -> bool {
+    let style = VisualizerStyle::from_index(indicator.get_visualizer_style());
+    let blue_glass = style == Some(VisualizerStyle::WritingSlate)
+        && WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
+            == Some(WritingSlateSurface::BlueGlass);
+    if blue_glass {
+        rust_platform_windows::prepare_blue_glass_overlay_window(window_handle).is_ok()
+    } else if style.is_some_and(VisualizerStyle::uses_transparent_window) {
+        rust_platform_windows::prepare_transparent_overlay_window(window_handle).is_ok()
+    } else {
+        rust_platform_windows::prepare_overlay_window(window_handle).is_ok()
     }
 }
 

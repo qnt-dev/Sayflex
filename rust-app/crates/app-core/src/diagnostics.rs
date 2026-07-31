@@ -40,7 +40,6 @@ struct FileLogger {
 
 enum LogCommand {
     Line(String),
-    #[cfg(test)]
     Flush(SyncSender<()>),
 }
 
@@ -76,7 +75,6 @@ impl FileLogger {
         }
     }
 
-    #[cfg(test)]
     fn flush(&self) -> io::Result<()> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(0);
         self.sender
@@ -94,7 +92,6 @@ fn run_writer(mut state: LogState, receiver: &Receiver<LogCommand>) {
             Ok(LogCommand::Line(line)) => {
                 let _ = state.write_line(&line);
             }
-            #[cfg(test)]
             Ok(LogCommand::Flush(acknowledge)) => {
                 let _ = state.flush();
                 let _ = acknowledge.send(());
@@ -108,6 +105,14 @@ fn run_writer(mut state: LogState, receiver: &Receiver<LogCommand>) {
             }
         }
     }
+}
+
+/// Durably drains all diagnostic lines queued before this call.
+///
+/// Lifecycle and panic paths use this explicitly because a process-wide static
+/// logger is not dropped during normal process teardown.
+pub fn flush() -> io::Result<()> {
+    LOGGER.get().map_or(Ok(()), FileLogger::flush)
 }
 
 struct LogState {

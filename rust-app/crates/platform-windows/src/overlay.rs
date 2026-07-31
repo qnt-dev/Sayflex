@@ -7,8 +7,7 @@ use windows_sys::Win32::{
     Graphics::Dwm::{
         DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
         DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-        DWMWCP_ROUND, DwmEnableBlurBehindWindow, DwmExtendFrameIntoClientArea, DwmFlush,
-        DwmSetWindowAttribute,
+        DWMWCP_ROUND, DwmEnableBlurBehindWindow, DwmFlush, DwmSetWindowAttribute,
     },
     Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
@@ -21,7 +20,6 @@ use windows_sys::Win32::{
         Threading::GetCurrentProcessId,
     },
     UI::{
-        Controls::MARGINS,
         Input::KeyboardAndMouse::ReleaseCapture,
         WindowsAndMessaging::{
             GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
@@ -52,7 +50,7 @@ struct WindowCompositionAttributeData {
 
 const WCA_ACCENT_POLICY: i32 = 19;
 const ACCENT_DISABLED: i32 = 0;
-const ACCENT_ENABLE_ACRYLICBLURBEHIND: i32 = 4;
+const PREWARM_WINDOW_COORDINATE: i32 = -32_000;
 
 pub fn configure_overlay_window(
     window_handle: u64,
@@ -74,31 +72,21 @@ pub fn configure_blue_glass_overlay_window(
 ) -> Result<(), String> {
     configure_overlay_window_impl(window_handle, target_window_handle, false)?;
     let hwnd = window_handle as usize as HWND;
-    // SAFETY: configure_overlay_window_impl validated the HWND and established
-    // the common no-activate, tool-window and click-through overlay contract.
-    unsafe {
-        // Acrylic exposes any non-client pixels that remain on the Winit HWND.
-        // Remove them explicitly so the experimental surface cannot reveal a
-        // caption close glyph when DWM extends glass into the client area.
-        let current_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        let desired_style = (current_style
-            & !(WS_CAPTION as isize)
-            & !(WS_SYSMENU as isize)
-            & !(WS_THICKFRAME as isize)
-            & !(WS_MINIMIZEBOX as isize)
-            & !(WS_MAXIMIZEBOX as isize))
-            | WS_POPUP as isize;
-        SetWindowLongPtrW(hwnd, GWL_STYLE, desired_style);
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-    }
+    apply_blue_glass_popup_style(hwnd);
+    Ok(())
+}
+
+pub fn prepare_overlay_window(window_handle: u64) -> Result<(), String> {
+    prepare_overlay_window_impl(window_handle, true)
+}
+
+pub fn prepare_transparent_overlay_window(window_handle: u64) -> Result<(), String> {
+    prepare_overlay_window_impl(window_handle, false)
+}
+
+pub fn prepare_blue_glass_overlay_window(window_handle: u64) -> Result<(), String> {
+    prepare_overlay_window_impl(window_handle, false)?;
+    apply_blue_glass_popup_style(window_handle as usize as HWND);
     Ok(())
 }
 
@@ -289,28 +277,6 @@ fn blur_vertical(source: &[u8], target: &mut [u8], width: usize, height: usize, 
     }
 }
 
-#[cfg(test)]
-mod backdrop_tests {
-    use super::blur_rgba;
-
-    #[test]
-    fn blur_spreads_color_and_preserves_opaque_alpha() {
-        let mut pixels = vec![0_u8; 5 * 4];
-        pixels[2 * 4] = u8::MAX;
-        pixels[2 * 4 + 1] = u8::MAX;
-        pixels[2 * 4 + 2] = u8::MAX;
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = u8::MAX;
-        }
-
-        blur_rgba(&mut pixels, 5, 1, 1);
-
-        assert!(pixels[4] > 0);
-        assert!(pixels[2 * 4] < u8::MAX);
-        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX));
-    }
-}
-
 fn configure_overlay_window_impl(
     window_handle: u64,
     target_window_handle: Option<u64>,
@@ -320,23 +286,12 @@ fn configure_overlay_window_impl(
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
     }
+    apply_overlay_contract(hwnd, use_backdrop);
 
     // SAFETY: All pointers refer to initialized buffers for the duration of
     // each Win32 call. The HWND belongs to this process and was resolved by
     // exact title before subsequent calls.
     unsafe {
-        let current_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let desired_style = (current_style & !(WS_EX_APPWINDOW as isize))
-            | WS_EX_NOACTIVATE as isize
-            | WS_EX_TOOLWINDOW as isize
-            | WS_EX_TRANSPARENT as isize;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_style);
-        if use_backdrop {
-            apply_transient_backdrop(hwnd);
-        } else {
-            apply_transparent_composition(hwnd);
-        }
-
         let monitor_target = target_window_handle
             .filter(|handle| *handle != 0)
             .map(|handle| handle as usize as *mut core::ffi::c_void)
@@ -384,6 +339,76 @@ fn configure_overlay_window_impl(
     Ok(())
 }
 
+fn prepare_overlay_window_impl(window_handle: u64, use_backdrop: bool) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("overlay window handle is not available".to_owned());
+    }
+    apply_overlay_contract(hwnd, use_backdrop);
+    // SAFETY: The live HWND belongs to this process. Parking it outside every
+    // practical virtual desktop prevents a native background frame from ever
+    // becoming visible while Winit and DWM finish their first composition.
+    if unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            PREWARM_WINDOW_COORDINATE,
+            PREWARM_WINDOW_COORDINATE,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    } == 0
+    {
+        return Err("SetWindowPos failed while prewarming overlay".to_owned());
+    }
+    Ok(())
+}
+
+fn apply_overlay_contract(hwnd: HWND, use_backdrop: bool) {
+    // SAFETY: hwnd is a live top-level window owned by this process. The style
+    // and compositor calls do not retain pointers beyond their invocation.
+    unsafe {
+        let current_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let desired_style = (current_style & !(WS_EX_APPWINDOW as isize))
+            | WS_EX_NOACTIVATE as isize
+            | WS_EX_TOOLWINDOW as isize
+            | WS_EX_TRANSPARENT as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_style);
+        if use_backdrop {
+            apply_transient_backdrop(hwnd);
+        } else {
+            apply_transparent_composition(hwnd);
+        }
+    }
+}
+
+fn apply_blue_glass_popup_style(hwnd: HWND) {
+    // SAFETY: The common overlay contract has validated and configured this
+    // process-owned HWND. Removing non-client styles prevents a caption glyph
+    // from appearing when DWM extends glass into the client area.
+    unsafe {
+        let current_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let desired_style = (current_style
+            & !(WS_CAPTION as isize)
+            & !(WS_SYSMENU as isize)
+            & !(WS_THICKFRAME as isize)
+            & !(WS_MINIMIZEBOX as isize)
+            & !(WS_MAXIMIZEBOX as isize))
+            | WS_POPUP as isize;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, desired_style);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
 pub fn configure_action_window(window_handle: u64) -> Result<(), String> {
     let hwnd = window_handle as usize as HWND;
     if hwnd.is_null() {
@@ -419,29 +444,10 @@ pub fn configure_action_window(window_handle: u64) -> Result<(), String> {
 pub fn configure_translation_window(window_handle: u64) -> Result<(), String> {
     configure_action_window(window_handle)?;
     let hwnd = window_handle as usize as HWND;
+    apply_translation_window_contract(hwnd);
     // SAFETY: hwnd is the live translation preview window owned by this
     // process. Cursor, monitor and rectangle buffers are fully initialized.
     unsafe {
-        // Slint requests a frameless surface, but DWM can restore native
-        // non-client chrome when the backdrop changes the frame. Enforce the
-        // contract at Win32 level so no system Close button leaks into the
-        // compact translation card.
-        let current_window_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        let native_chrome =
-            (WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
-        SetWindowLongPtrW(
-            hwnd,
-            GWL_STYLE,
-            (current_window_style & !native_chrome) | WS_POPUP as isize,
-        );
-
-        // Keep WS_EX_NOACTIVATE from configure_action_window for the complete
-        // lifetime of the preview, including its pinned state. Activating a
-        // winit-backed frameless window can make the backend restore native
-        // non-client chrome. Mouse interaction is still delivered, while
-        // scrolling is routed by PopupDismissMonitor without taking focus.
-        apply_translation_backdrop(hwnd);
-
         let mut cursor = POINT::default();
         if GetCursorPos(&mut cursor) == 0 {
             return Ok(());
@@ -481,6 +487,46 @@ pub fn configure_translation_window(window_handle: u64) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub fn prepare_translation_window(window_handle: u64) -> Result<(), String> {
+    configure_action_window(window_handle)?;
+    let hwnd = window_handle as usize as HWND;
+    apply_translation_window_contract(hwnd);
+    // SAFETY: The HWND is process-owned and remains hidden while this
+    // prewarming position is applied.
+    if unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            PREWARM_WINDOW_COORDINATE,
+            PREWARM_WINDOW_COORDINATE,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    } == 0
+    {
+        return Err("SetWindowPos failed while prewarming translation window".to_owned());
+    }
+    Ok(())
+}
+
+fn apply_translation_window_contract(hwnd: HWND) {
+    // SAFETY: Slint created this process-owned top-level HWND. Resetting the
+    // compositor to per-pixel transparency lets the captured, radius-two
+    // glass layer be the only material behind the compact card.
+    unsafe {
+        let current_window_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let native_chrome =
+            (WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_STYLE,
+            (current_window_style & !native_chrome) | WS_POPUP as isize,
+        );
+        apply_transparent_composition(hwnd);
+    }
 }
 
 pub fn begin_window_drag(window_handle: u64) -> Result<(), String> {
@@ -591,12 +637,6 @@ unsafe fn apply_transparent_composition(hwnd: HWND) {
     }
 }
 
-unsafe fn apply_acrylic_backdrop(hwnd: HWND) {
-    unsafe {
-        apply_accent_policy(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, 2, 0x58_12_10_0E);
-    }
-}
-
 unsafe fn apply_accent_policy(
     hwnd: HWND,
     accent_state: i32,
@@ -633,36 +673,6 @@ unsafe fn apply_accent_policy(
     }
 }
 
-unsafe fn apply_translation_backdrop(hwnd: HWND) {
-    // configure_action_window establishes the common no-activate action-window
-    // contract. Translation uses Acrylic instead of stacking the opaque system
-    // transient backdrop underneath it.
-    let backdrop = DWMSBT_NONE;
-    let margins = MARGINS {
-        cxLeftWidth: -1,
-        cxRightWidth: -1,
-        cyTopHeight: -1,
-        cyBottomHeight: -1,
-    };
-    let blur = DWM_BLURBEHIND {
-        dwFlags: DWM_BB_ENABLE,
-        fEnable: 1,
-        hRgnBlur: core::ptr::null_mut(),
-        fTransitionOnMaximized: 0,
-    };
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE as u32,
-            (&raw const backdrop).cast(),
-            size_of_val(&backdrop) as u32,
-        );
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
-        let _ = DwmEnableBlurBehindWindow(hwnd, &raw const blur);
-        apply_acrylic_backdrop(hwnd);
-    }
-}
-
 pub fn restore_target_if_our_action_window_activated(
     target_window_handle: u64,
 ) -> Result<(), String> {
@@ -687,4 +697,26 @@ pub fn restore_target_if_our_action_window_activated(
         return Err("Windows refused to restore the action target".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod backdrop_tests {
+    use super::blur_rgba;
+
+    #[test]
+    fn blur_spreads_color_and_preserves_opaque_alpha() {
+        let mut pixels = vec![0_u8; 5 * 4];
+        pixels[2 * 4] = u8::MAX;
+        pixels[2 * 4 + 1] = u8::MAX;
+        pixels[2 * 4 + 2] = u8::MAX;
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = u8::MAX;
+        }
+
+        blur_rgba(&mut pixels, 5, 1, 1);
+
+        assert!(pixels[4] > 0);
+        assert!(pixels[2 * 4] < u8::MAX);
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX));
+    }
 }

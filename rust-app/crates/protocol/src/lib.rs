@@ -3,10 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 9 adds compact microphone spectrum bands for native voice-reactive
-// visualizers. All packaged processes must agree on this schema before
-// exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 9;
+// Version 10 distinguishes an adapter acknowledgement from an unverified
+// synthetic-input dispatch and adds the deterministic WezTerm CLI method.
+// All packaged processes must agree on this schema before exchanging commands.
+pub const PROTOCOL_VERSION: u32 = 10;
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -308,6 +308,7 @@ pub enum InputHostEvent {
     InsertionDispatched {
         session_id: SessionId,
         method: InsertionMethod,
+        delivery: InsertionDelivery,
         dispatch_duration_ms: u64,
     },
     ClipboardRestored {
@@ -335,6 +336,17 @@ pub enum InputHostEvent {
 pub enum InsertionMethod {
     ClipboardPaste,
     UnicodeInput,
+    WezTermCli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InsertionDelivery {
+    /// A target-specific adapter accepted the operation and returned success.
+    AdapterAcknowledged,
+    /// Windows accepted synthetic input, but the target application cannot be
+    /// observed safely enough to claim that it consumed the text.
+    Unverified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,9 +567,10 @@ pub enum SpeechWorkerEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        DictationCommand, InputHostEvent, RequestId, SelectionCaptureTiming, SessionId,
-        SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency,
-        TranslationLanguage, TranslationResult, TranslationTier, TranslationWorkerEvent,
+        DictationCommand, InputHostEvent, InsertionDelivery, InsertionMethod, RequestId,
+        SelectionCaptureTiming, SessionId, SpeechWorkerEvent, TargetSnapshot, TextActionIntent,
+        Transcript, TranscriptionLatency, TranslationLanguage, TranslationResult, TranslationTier,
+        TranslationWorkerEvent,
     };
 
     #[test]
@@ -587,6 +600,18 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<InputHostEvent>(&input_json).unwrap(),
             input
+        );
+
+        let insertion = InputHostEvent::InsertionDispatched {
+            session_id,
+            method: InsertionMethod::WezTermCli,
+            delivery: InsertionDelivery::AdapterAcknowledged,
+            dispatch_duration_ms: 9,
+        };
+        let insertion_json = serde_json::to_string(&insertion).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InputHostEvent>(&insertion_json).unwrap(),
+            insertion
         );
 
         let speech = SpeechWorkerEvent::Completed {

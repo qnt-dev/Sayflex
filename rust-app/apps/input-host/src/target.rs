@@ -107,6 +107,12 @@ pub fn paste_shortcut(target: TargetSnapshot) -> PasteShortcut {
         .unwrap_or(PasteShortcut::ControlV)
 }
 
+pub fn is_wezterm_target(target: TargetSnapshot) -> bool {
+    process_name(target.process_id)
+        .as_deref()
+        .is_some_and(is_wezterm)
+}
+
 fn selection_copy_shortcut_for_process(process_name: &str) -> SelectionCopyShortcut {
     if is_wezterm(process_name) || uses_control_insert(process_name) {
         SelectionCopyShortcut::ControlInsert
@@ -151,6 +157,13 @@ fn uses_control_insert(process_name: &str) -> bool {
 }
 
 fn process_name(process_id: u32) -> Option<String> {
+    process_path(process_id)?
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
+pub fn process_path(process_id: u32) -> Option<std::path::PathBuf> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
     if process.is_null() {
         return None;
@@ -166,10 +179,7 @@ fn process_name(process_id: u32) -> Option<String> {
         return None;
     }
     let full_path = String::from_utf16(&buffer[..length as usize]).ok()?;
-    Path::new(&full_path)
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .map(str::to_owned)
+    Some(Path::new(&full_path).to_path_buf())
 }
 
 #[allow(dead_code)]

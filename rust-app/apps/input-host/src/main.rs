@@ -7,6 +7,7 @@ mod insertion;
 mod selection_capture;
 mod target;
 mod uia_selection;
+mod wezterm;
 
 use std::{
     ffi::c_void,
@@ -42,6 +43,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|argument| argument == "--insertion-smoke") {
         require_smoke_opt_in("STYLEFLEX_RUN_INSERTION_SMOKE")?;
         return run_insertion_smoke();
+    }
+    if let Some(process_id) = std::env::args()
+        .find_map(|argument| {
+            argument
+                .strip_prefix("--wezterm-adapter-probe=")
+                .map(str::to_owned)
+        })
+        .map(|value| value.parse::<u32>())
+        .transpose()?
+    {
+        require_smoke_opt_in("STYLEFLEX_RUN_WEZTERM_PROBE")?;
+        let (pane_id, cli_path) = wezterm::probe(process_id)?;
+        serde_json::to_writer(
+            io::stdout().lock(),
+            &serde_json::json!({
+                "process_id": process_id,
+                "pane_id": pane_id,
+                "cli_path": cli_path,
+                "result": "adapter_ready",
+            }),
+        )?;
+        return Ok(());
     }
     if let Some(action) = std::env::args().find_map(|argument| {
         argument
@@ -203,15 +226,18 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut method = None;
+    let mut delivery = None;
     let mut clipboard_restored = false;
     while Instant::now() < deadline {
         match receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(InputHostEvent::InsertionDispatched {
                 session_id: completed,
                 method: insertion_method,
+                delivery: insertion_delivery,
                 ..
             }) if completed == session_id => {
                 method = Some(insertion_method);
+                delivery = Some(insertion_delivery);
                 if insertion_method != rust_protocol::InsertionMethod::ClipboardPaste {
                     break;
                 }
@@ -235,11 +261,13 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
     }
     insertion.shutdown();
     let method = method.ok_or("insertion smoke timed out")?;
+    let delivery = delivery.ok_or("insertion smoke did not report delivery confidence")?;
     serde_json::to_writer(
         io::stdout().lock(),
         &serde_json::json!({
             "session_id": session_id,
             "method": format!("{method:?}"),
+            "delivery": format!("{delivery:?}"),
             "clipboard_restored": clipboard_restored,
             "chars": text.chars().count(),
         }),
