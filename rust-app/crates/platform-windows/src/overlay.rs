@@ -5,9 +5,10 @@ use crate::BlurredBackdrop;
 use windows_sys::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Dwm::{
-        DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
-        DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-        DWMWCP_ROUND, DwmEnableBlurBehindWindow, DwmFlush, DwmSetWindowAttribute,
+        DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWM_CLOAKED_APP, DWMSBT_NONE,
+        DWMSBT_TRANSIENTWINDOW, DWMWA_CLOAK, DWMWA_CLOAKED, DWMWA_SYSTEMBACKDROP_TYPE,
+        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmEnableBlurBehindWindow, DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute,
     },
     Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
@@ -94,6 +95,24 @@ pub fn capture_blurred_overlay_backdrop(
     window_handle: u64,
     blur_radius: u32,
 ) -> Result<BlurredBackdrop, String> {
+    capture_blurred_overlay_backdrop_impl(window_handle, blur_radius, true)
+}
+
+pub fn capture_blurred_cloaked_overlay_backdrop(
+    window_handle: u64,
+    blur_radius: u32,
+) -> Result<BlurredBackdrop, String> {
+    if !overlay_window_is_app_cloaked(window_handle)? {
+        return Err("overlay backdrop capture requires an app-cloaked window".to_owned());
+    }
+    capture_blurred_overlay_backdrop_impl(window_handle, blur_radius, false)
+}
+
+fn capture_blurred_overlay_backdrop_impl(
+    window_handle: u64,
+    blur_radius: u32,
+    hide_visible_window: bool,
+) -> Result<BlurredBackdrop, String> {
     let hwnd = window_handle as usize as HWND;
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
@@ -113,10 +132,11 @@ pub fn capture_blurred_overlay_backdrop(
     }
     let byte_len = width as usize * height as usize * 4;
 
-    // Hide the indicator for exactly one compositor frame so BitBlt samples
-    // the real application behind it instead of recursively capturing the
-    // preview surface. The guard restores it without activation on every exit.
-    let _visibility = WindowVisibilityGuard::hide(hwnd);
+    // Interactive previews still need the legacy visibility guard. The
+    // recording HUD is app-cloaked by its presenter, so hiding/showing it here
+    // would violate the single-lifetime overlay contract and reintroduce the
+    // exact visibility race that this capture path is designed to avoid.
+    let _visibility = hide_visible_window.then(|| WindowVisibilityGuard::hide(hwnd));
 
     // SAFETY: Every GDI handle is validated before use and released below.
     unsafe {
@@ -345,6 +365,15 @@ fn prepare_overlay_window_impl(window_handle: u64, use_backdrop: bool) -> Result
         return Err("overlay window handle is not available".to_owned());
     }
     apply_overlay_contract(hwnd, use_backdrop);
+    set_overlay_cloaked(hwnd, true)?;
+    unsafe {
+        let result = DwmFlush();
+        if result < 0 {
+            return Err(format!(
+                "DwmFlush failed while prewarming overlay: 0x{result:08X}"
+            ));
+        }
+    }
     // SAFETY: The live HWND belongs to this process. Parking it outside every
     // practical virtual desktop prevents a native background frame from ever
     // becoming visible while Winit and DWM finish their first composition.
@@ -363,6 +392,123 @@ fn prepare_overlay_window_impl(window_handle: u64, use_backdrop: bool) -> Result
         return Err("SetWindowPos failed while prewarming overlay".to_owned());
     }
     Ok(())
+}
+
+pub fn conceal_overlay_window(window_handle: u64) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("overlay window handle is not available".to_owned());
+    }
+    set_overlay_cloaked(hwnd, true)?;
+    // Wait until DWM has removed the window before moving it. The retirement
+    // path is not latency-sensitive, and this ordering prevents a visible
+    // off-screen jump on a heavily loaded compositor.
+    unsafe {
+        let _ = DwmFlush();
+        if SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            PREWARM_WINDOW_COORDINATE,
+            PREWARM_WINDOW_COORDINATE,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        ) == 0
+        {
+            return Err("SetWindowPos failed while concealing overlay".to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub fn reveal_overlay_window(window_handle: u64) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("overlay window handle is not available".to_owned());
+    }
+    set_overlay_cloaked(hwnd, false)?;
+    // DwmFlush is a compositor acknowledgement, not a timing workaround. It
+    // guarantees that the already-rendered frame has crossed the native
+    // visibility boundary before this transition is reported as Presented.
+    unsafe {
+        let result = DwmFlush();
+        if result < 0 {
+            return Err(format!(
+                "DwmFlush failed while revealing overlay: 0x{result:08X}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn verify_overlay_window_contract(
+    window_handle: u64,
+    expected_cloaked: bool,
+) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("overlay window handle is not available".to_owned());
+    }
+    unsafe {
+        let extended_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let required =
+            WS_EX_NOACTIVATE as isize | WS_EX_TOOLWINDOW as isize | WS_EX_TRANSPARENT as isize;
+        let missing = required & !extended_style;
+        let has_app_window = extended_style & WS_EX_APPWINDOW as isize != 0;
+        if missing != 0 || has_app_window {
+            return Err(format!(
+                "overlay ex-style contract mismatch: exstyle=0x{extended_style:X} \
+missing=0x{missing:X} app_window={has_app_window}"
+            ));
+        }
+    }
+    let actual_cloaked = overlay_window_is_app_cloaked(window_handle)?;
+    if actual_cloaked != expected_cloaked {
+        return Err(format!(
+            "overlay cloak contract mismatch: expected={expected_cloaked} actual={actual_cloaked}"
+        ));
+    }
+    Ok(())
+}
+
+fn set_overlay_cloaked(hwnd: HWND, cloaked: bool) -> Result<(), String> {
+    let value: i32 = i32::from(cloaked);
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK as u32,
+            (&raw const value).cast(),
+            size_of::<i32>() as u32,
+        )
+    };
+    if result < 0 {
+        return Err(format!(
+            "DwmSetWindowAttribute(DWMWA_CLOAK) failed: 0x{result:08X}"
+        ));
+    }
+    Ok(())
+}
+
+fn overlay_window_is_app_cloaked(window_handle: u64) -> Result<bool, String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("overlay window handle is not available".to_owned());
+    }
+    let mut flags = 0_u32;
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            (&raw mut flags).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+    if result < 0 {
+        return Err(format!(
+            "DwmGetWindowAttribute(DWMWA_CLOAKED) failed: 0x{result:08X}"
+        ));
+    }
+    Ok(flags & DWM_CLOAKED_APP != 0)
 }
 
 fn apply_overlay_contract(hwnd: HWND, use_backdrop: bool) {

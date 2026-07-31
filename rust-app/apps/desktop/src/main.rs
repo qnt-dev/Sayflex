@@ -39,6 +39,9 @@ use slint::{
 };
 
 mod flow_sphere;
+mod indicator_presenter;
+
+use indicator_presenter::IndicatorPresenter;
 
 slint::include_modules!();
 
@@ -93,6 +96,7 @@ thread_local! {
 struct RuntimeUi {
     settings: slint::Weak<SettingsWindow>,
     indicator: slint::Weak<RecordingIndicator>,
+    indicator_presenter: IndicatorPresenter,
     chooser: slint::Weak<SelectionChooser>,
     action_palette: slint::Weak<ActionPalette>,
     translation_preview: slint::Weak<TranslationPreview>,
@@ -1423,6 +1427,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     })
     .map_err(|error| format!("Windows session-end monitoring is unavailable: {error}"))?;
     configure_ui_backend()?;
+    if let Some(cycles) = indicator_presentation_probe_cycles() {
+        return run_indicator_presentation_probe(cycles);
+    }
     if let Some(style) = indicator_preview_style() {
         let live_microphone = env::args().any(|argument| {
             argument == "--indicator-preview-live"
@@ -1452,6 +1459,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let settings = SettingsWindow::new()?;
     let saved_settings = load_settings();
     let (indicator, indicator_animation) = new_indicator()?;
+    let indicator_presenter = IndicatorPresenter::install(&indicator)
+        .map_err(|error| format!("recording overlay initialization failed: {error}"))?;
     indicator_animation
         .borrow_mut()
         .set_style(saved_settings.visualizer_style);
@@ -1466,7 +1475,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let translation_preview = TranslationPreview::new()?;
     let translator = TranslatorWindow::new()?;
     let tray = AppTray::new()?;
-    precreate_indicator(&indicator);
+    precreate_indicator(&indicator, &indicator_presenter);
     precreate_action_windows(&chooser, &action_palette, &translation_preview);
 
     let Some(initial_workers) = spawn_initial_workers(&startup_gate)? else {
@@ -1553,6 +1562,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     install_runtime_handler(RuntimeUi {
         settings: settings.as_weak(),
         indicator: indicator.as_weak(),
+        indicator_presenter: indicator_presenter.clone(),
         chooser: chooser.as_weak(),
         action_palette: action_palette.as_weak(),
         translation_preview: translation_preview.as_weak(),
@@ -1623,6 +1633,18 @@ fn new_indicator()
 
 fn indicator_preview_style() -> Option<VisualizerStyle> {
     env::args().find_map(|argument| indicator_preview_style_for_argument(&argument))
+}
+
+fn indicator_presentation_probe_cycles() -> Option<u32> {
+    env::args().find_map(|argument| {
+        if argument == "--indicator-presentation-probe" {
+            return Some(30);
+        }
+        argument
+            .strip_prefix("--indicator-presentation-probe=")
+            .and_then(|cycles| cycles.parse::<u32>().ok())
+            .map(|cycles| cycles.clamp(1, 200))
+    })
 }
 
 fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyle> {
@@ -1942,6 +1964,67 @@ fn run_indicator_preview(
         drop(writer);
         let _ = child.wait();
     }
+    Ok(())
+}
+
+fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
+    let _single_instance =
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.OverlayProbe")?;
+    let _ = rust_app_core::diagnostics::initialize(
+        &data_root().join("logs"),
+        "recording-overlay-probe",
+    );
+    let (indicator, animation) = new_indicator()?;
+    let presenter = IndicatorPresenter::install(&indicator)?;
+    indicator.set_visualizer_style(VisualizerStyle::WritingSlate.index());
+    indicator.set_writing_slate_surface(WritingSlateSurface::BlueGlass.index());
+    {
+        let mut animation = animation.borrow_mut();
+        animation.set_style(VisualizerStyle::WritingSlate);
+        animation.begin_listening();
+    }
+    precreate_indicator(&indicator, &presenter);
+
+    let animation_timer = start_indicator_animation(&indicator, &animation);
+    let cycle_timer = Timer::default();
+    let step = Rc::new(Cell::new(0_u32));
+    let step_for_timer = Rc::clone(&step);
+    let indicator_weak = indicator.as_weak();
+    let presenter_for_timer = presenter.clone();
+    let animation_for_timer = Rc::clone(&animation);
+    cycle_timer.start(TimerMode::Repeated, Duration::from_millis(90), move || {
+        let current = step_for_timer.get();
+        if current >= cycles.saturating_mul(2).saturating_add(4) {
+            if let Some(indicator) = indicator_weak.upgrade() {
+                presenter_for_timer.retire(&indicator, "probe_complete");
+            }
+            let _ = slint::quit_event_loop();
+            return;
+        }
+        step_for_timer.set(current.saturating_add(1));
+
+        // Leave four event-loop turns for native creation and presenter
+        // attachment, then exercise full frame-gated present/retire cycles.
+        if current < 4 {
+            return;
+        }
+        if current.is_multiple_of(2) {
+            animation_for_timer.borrow_mut().begin_listening();
+            if let Some(indicator) = indicator_weak.upgrade() {
+                show_indicator(&indicator, &presenter_for_timer, None);
+            }
+        } else {
+            animation_for_timer.borrow_mut().stop();
+            if let Some(indicator) = indicator_weak.upgrade() {
+                presenter_for_timer.retire(&indicator, "probe_cycle");
+            }
+        }
+    });
+
+    slint::run_event_loop()?;
+    cycle_timer.stop();
+    animation_timer.stop();
+    let _ = rust_app_core::diagnostics::flush();
     Ok(())
 }
 
@@ -2341,6 +2424,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 event,
                 &runtime.settings,
                 &runtime.indicator,
+                &runtime.indicator_presenter,
                 &runtime.state,
                 &runtime.workers,
                 &runtime.indicator_animation,
@@ -2380,7 +2464,9 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             runtime.state.borrow_mut().indicator_session = None;
             runtime.indicator_animation.borrow_mut().stop();
             if let Some(indicator) = runtime.indicator.upgrade() {
-                let _ = indicator.hide();
+                runtime
+                    .indicator_presenter
+                    .retire(&indicator, "worker_error");
             }
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Worker error".into());
@@ -2475,7 +2561,9 @@ fn handle_worker_exit(
     }
     runtime.indicator_animation.borrow_mut().stop();
     if let Some(indicator) = runtime.indicator.upgrade() {
-        let _ = indicator.hide();
+        runtime
+            .indicator_presenter
+            .retire(&indicator, "worker_exit");
     }
 
     match runtime.workers.recover(kind, instance_id, exit) {
@@ -2544,6 +2632,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
     let state = &runtime.state;
     let workers = &runtime.workers;
     let indicator_animation = &runtime.indicator_animation;
+    let indicator_presenter = &runtime.indicator_presenter;
 
     match event {
         InputHostEvent::Ready { protocol_version } => {
@@ -2611,7 +2700,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 indicator.set_processing(false);
                 indicator.set_signal_opacity(0.54);
                 indicator.set_disc_opacity(1.0);
-                show_indicator(&indicator, Some(target.window_handle));
+                show_indicator(&indicator, indicator_presenter, Some(target.window_handle));
             }
             set_indicator_status(settings, "Listening…");
         }
@@ -2637,7 +2726,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     state.indicator_session = None;
                     indicator_animation.borrow_mut().stop();
                     if let Some(indicator) = indicator.upgrade() {
-                        let _ = indicator.hide();
+                        indicator_presenter.retire(&indicator, "speech_end_send_failed");
                     }
                     set_indicator_status(settings, &format!("Could not finish recording: {error}"));
                     return;
@@ -2845,7 +2934,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    let _ = indicator.hide();
+                    indicator_presenter.retire(&indicator, "insertion_completed");
                 }
             }
             let method_name = match method {
@@ -2931,7 +3020,7 @@ speculative_reuse={} method={} delivery={}",
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    let _ = indicator.hide();
+                    indicator_presenter.retire(&indicator, "insertion_failed");
                 }
             }
             set_indicator_status(settings, &format!("{code}: {message}"));
@@ -3231,6 +3320,7 @@ fn handle_speech_event(
     event: SpeechWorkerEvent,
     settings: &slint::Weak<SettingsWindow>,
     indicator: &slint::Weak<RecordingIndicator>,
+    indicator_presenter: &IndicatorPresenter,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
@@ -3416,7 +3506,7 @@ delivery={} target_pid={}",
                 state.borrow_mut().indicator_session = None;
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    let _ = indicator.hide();
+                    indicator_presenter.retire(&indicator, "target_lost");
                 }
                 set_indicator_status(settings, "Transcript saved to history; target was lost.");
             }
@@ -3442,7 +3532,7 @@ delivery={} target_pid={}",
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    let _ = indicator.hide();
+                    indicator_presenter.retire(&indicator, "transcription_cancelled");
                 }
             }
             if insert_was_waiting {
@@ -3529,7 +3619,7 @@ retryable={retryable} message={message}"
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    let _ = indicator.hide();
+                    indicator_presenter.retire(&indicator, "transcription_failed");
                 }
             }
             if insert_was_waiting {
@@ -5070,97 +5160,131 @@ fn precreate_action_windows(
     }
 }
 
-fn precreate_indicator(indicator: &RecordingIndicator) {
+fn precreate_indicator(indicator: &RecordingIndicator, indicator_presenter: &IndicatorPresenter) {
     indicator.set_prepared(false);
-    // Winit creates its native HWND on the first show. Keep that first frame
-    // outside every practical virtual desktop until the no-activate,
-    // tool-window and transparency contract has been applied.
+    // Slint owns creation of the native HWND, but the presenter exclusively
+    // owns its native visibility after this one lifetime-establishing show.
+    // The window remains logically visible to Slint and parked outside the
+    // virtual desktop; no production path calls Slint show/hide again.
     indicator
         .window()
         .set_position(PhysicalPosition::new(-32_000, -32_000));
     if indicator.show().is_ok() {
         let indicator = indicator.as_weak();
-        let fallback_indicator = indicator.clone();
+        let indicator_presenter = indicator_presenter.clone();
         let schedule_result = slint::spawn_local(async move {
             if let Some(indicator) = indicator.upgrade() {
-                let prepared = match indicator.window().winit_window().await {
+                let preparation = match indicator.window().winit_window().await {
                     Ok(window) => native_window_handle(&window)
-                        .is_some_and(|handle| prepare_indicator_native_window(&indicator, handle)),
-                    Err(_) => false,
+                        .ok_or_else(|| "native HWND is unavailable".to_owned())
+                        .and_then(|handle| {
+                            prepare_indicator_native_window(&indicator, handle)?;
+                            indicator_presenter.attach(handle)
+                        }),
+                    Err(error) => Err(format!("native window creation failed: {error}")),
                 };
-                let _ = indicator.hide();
-                indicator.set_prepared(prepared);
+                indicator.set_prepared(false);
+                indicator.window().request_redraw();
+                if let Err(error) = preparation {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "recording_overlay transition=failed stage=attach error={error}"
+                    ));
+                }
             }
         });
-        if schedule_result.is_err()
-            && let Some(indicator) = fallback_indicator.upgrade()
-        {
-            let _ = indicator.hide();
+        if let Err(error) = schedule_result {
+            rust_app_core::diagnostics::log_line(&format!(
+                "recording_overlay transition=failed stage=schedule_attach error={error}"
+            ));
         }
+    } else {
+        rust_app_core::diagnostics::log_line(
+            "recording_overlay transition=failed stage=create_native_window",
+        );
     }
 }
 
-fn prepare_indicator_native_window(indicator: &RecordingIndicator, window_handle: u64) -> bool {
+fn prepare_indicator_native_window(
+    indicator: &RecordingIndicator,
+    window_handle: u64,
+) -> Result<(), String> {
     let style = VisualizerStyle::from_index(indicator.get_visualizer_style());
     let blue_glass = style == Some(VisualizerStyle::WritingSlate)
         && WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
             == Some(WritingSlateSurface::BlueGlass);
     if blue_glass {
-        rust_platform_windows::prepare_blue_glass_overlay_window(window_handle).is_ok()
+        rust_platform_windows::prepare_blue_glass_overlay_window(window_handle)
     } else if style.is_some_and(VisualizerStyle::uses_transparent_window) {
-        rust_platform_windows::prepare_transparent_overlay_window(window_handle).is_ok()
+        rust_platform_windows::prepare_transparent_overlay_window(window_handle)
     } else {
-        rust_platform_windows::prepare_overlay_window(window_handle).is_ok()
+        rust_platform_windows::prepare_overlay_window(window_handle)
     }
 }
 
-fn show_indicator(indicator: &RecordingIndicator, target_window_handle: Option<u64>) {
-    let prepared = configure_indicator_window(indicator, target_window_handle);
-    indicator.set_prepared(prepared);
-    if prepared {
-        refresh_indicator_backdrop(indicator);
-        let _ = indicator.show();
-    } else {
-        eprintln!("recording indicator was not shown because native setup failed");
+fn show_indicator(
+    indicator: &RecordingIndicator,
+    indicator_presenter: &IndicatorPresenter,
+    target_window_handle: Option<u64>,
+) {
+    indicator.set_prepared(false);
+    let ticket = match indicator_presenter.begin_prepare() {
+        Ok(ticket) => ticket,
+        Err(error) => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "recording_overlay transition=failed stage=begin_prepare error={error}"
+            ));
+            return;
+        }
+    };
+    if let Err(error) = configure_indicator_window(indicator, target_window_handle) {
+        indicator_presenter.abort_prepare(indicator, ticket, "configure", &error);
+        return;
+    }
+    if let Err(error) = refresh_indicator_backdrop(indicator) {
+        rust_app_core::diagnostics::log_line(&format!(
+            "recording_overlay backdrop=fallback generation={} error={error}",
+            ticket.generation()
+        ));
+    }
+    indicator.set_prepared(true);
+    if let Err(error) = indicator_presenter.await_frame(indicator, ticket) {
+        indicator_presenter.abort_prepare(indicator, ticket, "await_frame", &error);
     }
 }
 
 fn configure_indicator_window(
     indicator: &RecordingIndicator,
     target_window_handle: Option<u64>,
-) -> bool {
-    slint_window_handle(indicator.window()).is_some_and(|handle| {
-        let style = VisualizerStyle::from_index(indicator.get_visualizer_style());
-        let blue_glass = style == Some(VisualizerStyle::WritingSlate)
-            && WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
-                == Some(WritingSlateSurface::BlueGlass);
-        if blue_glass {
-            rust_platform_windows::configure_blue_glass_overlay_window(handle, target_window_handle)
-                .is_ok()
-        } else {
-            configure_indicator_native_window(
-                handle,
-                target_window_handle,
-                style.is_some_and(VisualizerStyle::uses_transparent_window),
-            )
-        }
-    })
+) -> Result<(), String> {
+    let handle = slint_window_handle(indicator.window())
+        .ok_or_else(|| "native HWND is unavailable".to_owned())?;
+    let style = VisualizerStyle::from_index(indicator.get_visualizer_style());
+    let blue_glass = style == Some(VisualizerStyle::WritingSlate)
+        && WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
+            == Some(WritingSlateSurface::BlueGlass);
+    if blue_glass {
+        rust_platform_windows::configure_blue_glass_overlay_window(handle, target_window_handle)
+    } else if style.is_some_and(VisualizerStyle::uses_transparent_window) {
+        rust_platform_windows::configure_transparent_overlay_window(handle, target_window_handle)
+    } else {
+        rust_platform_windows::configure_overlay_window(handle, target_window_handle)
+    }
 }
 
-fn refresh_indicator_backdrop(indicator: &RecordingIndicator) {
+fn refresh_indicator_backdrop(indicator: &RecordingIndicator) -> Result<(), String> {
     if VisualizerStyle::from_index(indicator.get_visualizer_style())
         != Some(VisualizerStyle::WritingSlate)
         || WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
             != Some(WritingSlateSurface::BlueGlass)
     {
-        return;
+        return Ok(());
     }
 
     indicator.set_writing_slate_glass_backdrop(Image::default());
     let Some(handle) = slint_window_handle(indicator.window()) else {
-        return;
+        return Err("native HWND is unavailable for backdrop capture".to_owned());
     };
-    match rust_platform_windows::capture_blurred_overlay_backdrop(handle, 1) {
+    match rust_platform_windows::capture_blurred_cloaked_overlay_backdrop(handle, 1) {
         Ok(backdrop)
             if backdrop.rgba.len() == backdrop.width as usize * backdrop.height as usize * 4 =>
         {
@@ -5170,9 +5294,12 @@ fn refresh_indicator_backdrop(indicator: &RecordingIndicator) {
                 backdrop.height,
             );
             indicator.set_writing_slate_glass_backdrop(Image::from_rgba8(pixels));
+            Ok(())
         }
-        Ok(_) => eprintln!("captured recording-indicator backdrop has invalid length"),
-        Err(error) => eprintln!("could not capture recording-indicator backdrop: {error}"),
+        Ok(_) => Err("captured recording-indicator backdrop has invalid length".to_owned()),
+        Err(error) => Err(format!(
+            "could not capture recording-indicator backdrop: {error}"
+        )),
     }
 }
 
