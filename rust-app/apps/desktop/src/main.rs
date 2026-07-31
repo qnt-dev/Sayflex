@@ -39,9 +39,9 @@ use slint::{
 };
 
 mod flow_sphere;
-mod indicator_presenter;
+mod overlay_presenter;
 
-use indicator_presenter::IndicatorPresenter;
+use overlay_presenter::{OverlayContract, OverlayPresenter};
 
 slint::include_modules!();
 
@@ -54,8 +54,6 @@ const SPEECH_CUDA_EXE: &str = "StyleFlex.Speech.Cuda.exe";
 const DEV_INPUT_WORKER_EXE: &str = "styleflex-input-host.exe";
 const DEV_SPEECH_WORKER_EXE: &str = "styleflex-speech-worker.exe";
 const DEV_TRANSLATION_WORKER_EXE: &str = "styleflex-translation-worker.exe";
-const SELECTION_WINDOW_TITLE: &str = "Correct keyboard layout";
-const ACTION_PALETTE_WINDOW_TITLE: &str = "Text actions";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INDICATOR_BAR_PROFILE: [f32; 10] = [0.25, 0.4, 0.62, 0.82, 1.0, 1.0, 0.82, 0.62, 0.4, 0.25];
@@ -96,10 +94,13 @@ thread_local! {
 struct RuntimeUi {
     settings: slint::Weak<SettingsWindow>,
     indicator: slint::Weak<RecordingIndicator>,
-    indicator_presenter: IndicatorPresenter,
+    indicator_presenter: OverlayPresenter,
     chooser: slint::Weak<SelectionChooser>,
+    chooser_presenter: OverlayPresenter,
     action_palette: slint::Weak<ActionPalette>,
+    action_palette_presenter: OverlayPresenter,
     translation_preview: slint::Weak<TranslationPreview>,
+    translation_preview_presenter: OverlayPresenter,
     translator: slint::Weak<TranslatorWindow>,
     state: Rc<RefCell<AppState>>,
     workers: Rc<Workers>,
@@ -1430,6 +1431,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(cycles) = indicator_presentation_probe_cycles() {
         return run_indicator_presentation_probe(cycles);
     }
+    if let Some(cycles) = translation_presentation_probe_cycles() {
+        return run_translation_presentation_probe(cycles);
+    }
     if let Some(style) = indicator_preview_style() {
         let live_microphone = env::args().any(|argument| {
             argument == "--indicator-preview-live"
@@ -1459,8 +1463,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let settings = SettingsWindow::new()?;
     let saved_settings = load_settings();
     let (indicator, indicator_animation) = new_indicator()?;
-    let indicator_presenter = IndicatorPresenter::install(&indicator)
-        .map_err(|error| format!("recording overlay initialization failed: {error}"))?;
+    let indicator_presenter = OverlayPresenter::install(
+        indicator.window(),
+        "recording_overlay",
+        OverlayContract::ClickThrough,
+        None,
+    )
+    .map_err(|error| format!("recording overlay initialization failed: {error}"))?;
     indicator_animation
         .borrow_mut()
         .set_style(saved_settings.visualizer_style);
@@ -1473,10 +1482,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     let chooser = SelectionChooser::new()?;
     let action_palette = ActionPalette::new()?;
     let translation_preview = TranslationPreview::new()?;
+    let chooser_presenter = OverlayPresenter::install(
+        chooser.window(),
+        "selection_chooser_overlay",
+        OverlayContract::Interactive,
+        None,
+    )
+    .map_err(|error| format!("selection chooser initialization failed: {error}"))?;
+    let action_palette_presenter = OverlayPresenter::install(
+        action_palette.window(),
+        "action_palette_overlay",
+        OverlayContract::Interactive,
+        None,
+    )
+    .map_err(|error| format!("action palette initialization failed: {error}"))?;
+    let translation_preview_presenter = OverlayPresenter::install(
+        translation_preview.window(),
+        "translation_preview_overlay",
+        OverlayContract::Interactive,
+        Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
+    )
+    .map_err(|error| format!("translation preview initialization failed: {error}"))?;
     let translator = TranslatorWindow::new()?;
     let tray = AppTray::new()?;
     precreate_indicator(&indicator, &indicator_presenter);
-    precreate_action_windows(&chooser, &action_palette, &translation_preview);
+    precreate_action_windows(
+        &chooser,
+        &chooser_presenter,
+        &action_palette,
+        &action_palette_presenter,
+        &translation_preview,
+        &translation_preview_presenter,
+    );
 
     let Some(initial_workers) = spawn_initial_workers(&startup_gate)? else {
         rust_app_core::diagnostics::log_line(
@@ -1548,24 +1585,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         &indicator_animation,
     );
     wire_tray(&tray, &settings, &translator, &state, &workers);
-    wire_chooser(&chooser, &state, &workers);
+    wire_chooser(&chooser, &chooser_presenter, &state, &workers);
     wire_action_palette(
         &action_palette,
+        &action_palette_presenter,
         &translation_preview,
+        &translation_preview_presenter,
         &chooser,
+        &chooser_presenter,
         &settings,
         &state,
         &workers,
     );
-    wire_translation_preview(&translation_preview);
+    wire_translation_preview(&translation_preview, &translation_preview_presenter);
     wire_translator(&translator, &state, &workers);
     install_runtime_handler(RuntimeUi {
         settings: settings.as_weak(),
         indicator: indicator.as_weak(),
         indicator_presenter: indicator_presenter.clone(),
         chooser: chooser.as_weak(),
+        chooser_presenter: chooser_presenter.clone(),
         action_palette: action_palette.as_weak(),
+        action_palette_presenter: action_palette_presenter.clone(),
         translation_preview: translation_preview.as_weak(),
+        translation_preview_presenter: translation_preview_presenter.clone(),
         translator: translator.as_weak(),
         state: Rc::clone(&state),
         workers: Rc::clone(&workers),
@@ -1642,6 +1685,18 @@ fn indicator_presentation_probe_cycles() -> Option<u32> {
         }
         argument
             .strip_prefix("--indicator-presentation-probe=")
+            .and_then(|cycles| cycles.parse::<u32>().ok())
+            .map(|cycles| cycles.clamp(1, 200))
+    })
+}
+
+fn translation_presentation_probe_cycles() -> Option<u32> {
+    env::args().find_map(|argument| {
+        if argument == "--translation-presentation-probe" {
+            return Some(30);
+        }
+        argument
+            .strip_prefix("--translation-presentation-probe=")
             .and_then(|cycles| cycles.parse::<u32>().ok())
             .map(|cycles| cycles.clamp(1, 200))
     })
@@ -1975,7 +2030,12 @@ fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
         "recording-overlay-probe",
     );
     let (indicator, animation) = new_indicator()?;
-    let presenter = IndicatorPresenter::install(&indicator)?;
+    let presenter = OverlayPresenter::install(
+        indicator.window(),
+        "recording_overlay_probe",
+        OverlayContract::ClickThrough,
+        None,
+    )?;
     indicator.set_visualizer_style(VisualizerStyle::WritingSlate.index());
     indicator.set_writing_slate_surface(WritingSlateSurface::BlueGlass.index());
     {
@@ -1996,7 +2056,8 @@ fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
         let current = step_for_timer.get();
         if current >= cycles.saturating_mul(2).saturating_add(4) {
             if let Some(indicator) = indicator_weak.upgrade() {
-                presenter_for_timer.retire(&indicator, "probe_complete");
+                indicator.set_prepared(false);
+                presenter_for_timer.retire(indicator.window(), "probe_complete");
             }
             let _ = slint::quit_event_loop();
             return;
@@ -2016,7 +2077,8 @@ fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
         } else {
             animation_for_timer.borrow_mut().stop();
             if let Some(indicator) = indicator_weak.upgrade() {
-                presenter_for_timer.retire(&indicator, "probe_cycle");
+                indicator.set_prepared(false);
+                presenter_for_timer.retire(indicator.window(), "probe_cycle");
             }
         }
     });
@@ -2024,6 +2086,134 @@ fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
     slint::run_event_loop()?;
     cycle_timer.stop();
     animation_timer.stop();
+    let _ = rust_app_core::diagnostics::flush();
+    Ok(())
+}
+
+fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
+    let _single_instance = rust_platform_windows::SingleInstanceGuard::acquire(
+        "Local\\StyleFlex.TranslationOverlayProbe",
+    )?;
+    let _ = rust_app_core::diagnostics::initialize(
+        &data_root().join("logs"),
+        "translation-overlay-probe",
+    );
+    let preview = TranslationPreview::new()?;
+    let presenter = OverlayPresenter::install(
+        preview.window(),
+        "translation_preview_probe",
+        OverlayContract::Interactive,
+        None,
+    )?;
+    preview.set_prepared(false);
+    preview
+        .window()
+        .set_position(PhysicalPosition::new(-32_000, -32_000));
+    preview.show()?;
+    {
+        let preview = preview.as_weak();
+        let presenter = presenter.clone();
+        slint::spawn_local(async move {
+            if let Some(preview) = preview.upgrade() {
+                let result = preview
+                    .window()
+                    .winit_window()
+                    .await
+                    .ok()
+                    .as_deref()
+                    .and_then(native_window_handle)
+                    .ok_or_else(|| "translation probe HWND is unavailable".to_owned())
+                    .and_then(|handle| {
+                        rust_platform_windows::prepare_translation_window(handle)?;
+                        presenter.attach(handle)
+                    });
+                if let Err(error) = result {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_preview_probe transition=failed stage=attach error={error}"
+                    ));
+                }
+            }
+        })?;
+    }
+
+    let cycle_timer = Timer::default();
+    let step = Rc::new(Cell::new(0_u32));
+    let step_for_timer = Rc::clone(&step);
+    let preview_weak = preview.as_weak();
+    let presenter_for_timer = presenter.clone();
+    cycle_timer.start(TimerMode::Repeated, Duration::from_millis(220), move || {
+        let current = step_for_timer.get();
+        if current >= cycles.saturating_mul(2).saturating_add(4) {
+            if let Some(preview) = preview_weak.upgrade() {
+                preview.set_prepared(false);
+                presenter_for_timer.retire(preview.window(), "probe_complete");
+            }
+            let _ = slint::quit_event_loop();
+            return;
+        }
+        step_for_timer.set(current.saturating_add(1));
+        if current < 4 {
+            return;
+        }
+        let Some(preview) = preview_weak.upgrade() else {
+            return;
+        };
+        if current.is_multiple_of(2) {
+            let text = if (current / 2).is_multiple_of(2) {
+                "Frame-gated glass preview"
+            } else {
+                "The translation overlay is rendered completely before DWM reveals its native window."
+            };
+            apply_translation_preview_layout(&preview, text);
+            preview.set_translated_text(text.into());
+            preview.set_prepared(false);
+            let ticket = match presenter_for_timer.begin_prepare() {
+                Ok(ticket) => ticket,
+                Err(error) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_preview_probe transition=failed stage=begin_prepare \
+error={error}"
+                    ));
+                    return;
+                }
+            };
+            let Some(handle) = slint_window_handle(preview.window()) else {
+                presenter_for_timer.abort_prepare(
+                    preview.window(),
+                    ticket,
+                    "configure",
+                    "native HWND is unavailable",
+                );
+                return;
+            };
+            if let Err(error) = rust_platform_windows::configure_translation_window(handle) {
+                presenter_for_timer.abort_prepare(
+                    preview.window(),
+                    ticket,
+                    "configure",
+                    &error,
+                );
+                return;
+            }
+            refresh_cloaked_translation_backdrop(&preview, handle);
+            preview.set_prepared(true);
+            if let Err(error) = presenter_for_timer.await_frame(preview.window(), ticket) {
+                preview.set_prepared(false);
+                presenter_for_timer.abort_prepare(
+                    preview.window(),
+                    ticket,
+                    "await_frame",
+                    &error,
+                );
+            }
+        } else {
+            preview.set_prepared(false);
+            presenter_for_timer.retire(preview.window(), "probe_cycle");
+        }
+    });
+
+    slint::run_event_loop()?;
+    cycle_timer.stop();
     let _ = rust_app_core::diagnostics::flush();
     Ok(())
 }
@@ -2075,6 +2265,12 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.TranslationPreview")?;
     let preview = TranslationPreview::new()?;
+    let presenter = OverlayPresenter::install(
+        preview.window(),
+        "translation_preview_probe",
+        OverlayContract::Interactive,
+        Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
+    )?;
     let translated = if long_text {
         "Длинный перевод должен оставаться удобным для чтения. Карточка сохраняет компактную форму, а результат прокручивается внутри неё. Это позволяет быстро проверить смысл, не терять выбранное место в исходном приложении и не открывать отдельное большое рабочее окно. Прокрутка появляется только тогда, когда текст действительно не помещается. ".repeat(12)
     } else {
@@ -2084,12 +2280,13 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
     apply_translation_preview_layout(&preview, &translated);
     preview.set_translated_text(translated.clone().into());
     preview.set_prepared(false);
-    wire_translation_preview(&preview);
+    wire_translation_preview(&preview, &presenter);
     preview
         .window()
         .set_position(PhysicalPosition::new(-32_000, -32_000));
     preview.show()?;
     let preview_weak = preview.as_weak();
+    let presenter_for_window = presenter.clone();
     slint::spawn_local(async move {
         if let Some(preview) = preview_weak.upgrade() {
             let handle = preview
@@ -2099,16 +2296,40 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
                 .ok()
                 .as_deref()
                 .and_then(native_window_handle);
-            if let Err(error) = handle
+            let prepared = handle
                 .ok_or_else(|| "native translation window is unavailable".to_owned())
-                .and_then(rust_platform_windows::configure_translation_window)
-            {
+                .and_then(rust_platform_windows::prepare_translation_window)
+                .and_then(|()| presenter_for_window.attach(handle.unwrap_or_default()));
+            if let Err(error) = prepared {
                 eprintln!("could not configure translation preview: {error}");
             } else if let Some(handle) = handle {
-                refresh_translation_backdrop(&preview, handle);
+                let ticket = match presenter_for_window.begin_prepare() {
+                    Ok(ticket) => ticket,
+                    Err(error) => {
+                        eprintln!("could not prepare translation preview: {error}");
+                        return;
+                    }
+                };
+                if let Err(error) = rust_platform_windows::configure_translation_window(handle) {
+                    presenter_for_window.abort_prepare(
+                        preview.window(),
+                        ticket,
+                        "configure",
+                        &error,
+                    );
+                    return;
+                }
+                refresh_cloaked_translation_backdrop(&preview, handle);
                 preview.set_prepared(true);
-                preview.window().request_redraw();
-                rust_platform_windows::activate_popup_dismiss(handle);
+                if let Err(error) = presenter_for_window.await_frame(preview.window(), ticket) {
+                    preview.set_prepared(false);
+                    presenter_for_window.abort_prepare(
+                        preview.window(),
+                        ticket,
+                        "await_frame",
+                        &error,
+                    );
+                }
             }
         }
     })?;
@@ -2435,6 +2656,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 event,
                 &runtime.settings,
                 &runtime.translation_preview,
+                &runtime.translation_preview_presenter,
                 &runtime.translator,
                 &runtime.state,
                 &runtime.workers,
@@ -2443,7 +2665,10 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
         RuntimeEvent::DismissTranslationPreview => {
             if let Some(preview) = runtime.translation_preview.upgrade() {
                 preview.set_pinned(false);
-                let _ = preview.hide();
+                preview.set_prepared(false);
+                runtime
+                    .translation_preview_presenter
+                    .retire(preview.window(), "click_away");
             }
             rust_platform_windows::deactivate_popup_dismiss();
         }
@@ -2464,9 +2689,10 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             runtime.state.borrow_mut().indicator_session = None;
             runtime.indicator_animation.borrow_mut().stop();
             if let Some(indicator) = runtime.indicator.upgrade() {
+                indicator.set_prepared(false);
                 runtime
                     .indicator_presenter
-                    .retire(&indicator, "worker_error");
+                    .retire(indicator.window(), "worker_error");
             }
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Worker error".into());
@@ -2561,9 +2787,10 @@ fn handle_worker_exit(
     }
     runtime.indicator_animation.borrow_mut().stop();
     if let Some(indicator) = runtime.indicator.upgrade() {
+        indicator.set_prepared(false);
         runtime
             .indicator_presenter
-            .retire(&indicator, "worker_exit");
+            .retire(indicator.window(), "worker_exit");
     }
 
     match runtime.workers.recover(kind, instance_id, exit) {
@@ -2627,8 +2854,11 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
     let settings = &runtime.settings;
     let indicator = &runtime.indicator;
     let chooser = &runtime.chooser;
+    let chooser_presenter = &runtime.chooser_presenter;
     let action_palette = &runtime.action_palette;
+    let action_palette_presenter = &runtime.action_palette_presenter;
     let translation_preview = &runtime.translation_preview;
+    let translation_preview_presenter = &runtime.translation_preview_presenter;
     let state = &runtime.state;
     let workers = &runtime.workers;
     let indicator_animation = &runtime.indicator_animation;
@@ -2726,7 +2956,8 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     state.indicator_session = None;
                     indicator_animation.borrow_mut().stop();
                     if let Some(indicator) = indicator.upgrade() {
-                        indicator_presenter.retire(&indicator, "speech_end_send_failed");
+                        indicator.set_prepared(false);
+                        indicator_presenter.retire(indicator.window(), "speech_end_send_failed");
                     }
                     set_indicator_status(settings, &format!("Could not finish recording: {error}"));
                     return;
@@ -2802,7 +3033,8 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 && let Some(preview) = translation_preview.upgrade()
             {
                 preview.set_pinned(false);
-                let _ = preview.hide();
+                preview.set_prepared(false);
+                translation_preview_presenter.retire(preview.window(), "new_translation");
                 rust_platform_windows::deactivate_popup_dismiss();
             }
             set_indicator_status(settings, "Reading selected text…");
@@ -2841,8 +3073,11 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 request_started_unix_ms,
                 settings,
                 chooser,
+                chooser_presenter,
                 action_palette,
+                action_palette_presenter,
                 translation_preview,
+                translation_preview_presenter,
                 state,
                 workers,
             );
@@ -2934,7 +3169,8 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    indicator_presenter.retire(&indicator, "insertion_completed");
+                    indicator.set_prepared(false);
+                    indicator_presenter.retire(indicator.window(), "insertion_completed");
                 }
             }
             let method_name = match method {
@@ -3020,7 +3256,8 @@ speculative_reuse={} method={} delivery={}",
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    indicator_presenter.retire(&indicator, "insertion_failed");
+                    indicator.set_prepared(false);
+                    indicator_presenter.retire(indicator.window(), "insertion_failed");
                 }
             }
             set_indicator_status(settings, &format!("{code}: {message}"));
@@ -3037,15 +3274,26 @@ fn handle_text_action(
     request_started_unix_ms: u64,
     settings: &slint::Weak<SettingsWindow>,
     chooser: &slint::Weak<SelectionChooser>,
+    chooser_presenter: &OverlayPresenter,
     action_palette: &slint::Weak<ActionPalette>,
+    action_palette_presenter: &OverlayPresenter,
     translation_preview: &slint::Weak<TranslationPreview>,
+    translation_preview_presenter: &OverlayPresenter,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
 ) {
     match intent {
         TextActionIntent::CorrectLayout => {
             if state.borrow().layout_enabled {
-                show_layout_chooser(request_id, target, text, settings, chooser, state);
+                show_layout_chooser(
+                    request_id,
+                    target,
+                    text,
+                    settings,
+                    chooser,
+                    chooser_presenter,
+                    state,
+                );
             } else {
                 state
                     .borrow_mut()
@@ -3065,6 +3313,7 @@ fn handle_text_action(
                 },
                 settings,
                 translation_preview,
+                translation_preview_presenter,
                 state,
                 workers,
             );
@@ -3100,11 +3349,20 @@ fn handle_text_action(
                         },
                         settings,
                         translation_preview,
+                        translation_preview_presenter,
                         state,
                         workers,
                     );
                 } else {
-                    show_layout_chooser(request_id, target, text, settings, chooser, state);
+                    show_layout_chooser(
+                        request_id,
+                        target,
+                        text,
+                        settings,
+                        chooser,
+                        chooser_presenter,
+                        state,
+                    );
                 }
                 return;
             }
@@ -3116,18 +3374,50 @@ fn handle_text_action(
                 request_started_unix_ms,
             });
             if let Some(palette) = action_palette.upgrade() {
+                palette.set_prepared(false);
+                let ticket = match action_palette_presenter.begin_prepare() {
+                    Ok(ticket) => ticket,
+                    Err(error) => {
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "action_palette_overlay transition=failed stage=begin_prepare \
+error={error}"
+                        ));
+                        return;
+                    }
+                };
                 palette.set_source_panel_height(adaptive_text_panel_height(
                     &text, 70, 2, 4, 15.0, 16.0,
                 ));
                 palette.set_source_text(text.into());
                 palette.set_translation_enabled(translation_enabled);
                 palette.set_layout_enabled(layout_enabled);
-                let _ = palette.show();
-                prepare_shown_action_window(
-                    slint_window_handle(palette.window()),
-                    ACTION_PALETTE_WINDOW_TITLE,
-                    target.window_handle,
-                );
+                let configured = slint_window_handle(palette.window())
+                    .ok_or_else(|| "native action-palette HWND is unavailable".to_owned())
+                    .and_then(|handle| {
+                        rust_platform_windows::configure_action_window_for_target(
+                            handle,
+                            target.window_handle,
+                        )
+                    });
+                if let Err(error) = configured {
+                    action_palette_presenter.abort_prepare(
+                        palette.window(),
+                        ticket,
+                        "configure",
+                        &error,
+                    );
+                    return;
+                }
+                palette.set_prepared(true);
+                if let Err(error) = action_palette_presenter.await_frame(palette.window(), ticket) {
+                    palette.set_prepared(false);
+                    action_palette_presenter.abort_prepare(
+                        palette.window(),
+                        ticket,
+                        "await_frame",
+                        &error,
+                    );
+                }
             }
         }
     }
@@ -3139,6 +3429,7 @@ fn show_layout_chooser(
     text: String,
     settings: &slint::Weak<SettingsWindow>,
     chooser: &slint::Weak<SelectionChooser>,
+    chooser_presenter: &OverlayPresenter,
     state: &Rc<RefCell<AppState>>,
 ) {
     let candidates = build_layout_candidates(&text);
@@ -3151,6 +3442,16 @@ fn show_layout_chooser(
         return;
     }
     if let Some(chooser) = chooser.upgrade() {
+        chooser.set_prepared(false);
+        let ticket = match chooser_presenter.begin_prepare() {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "selection_chooser_overlay transition=failed stage=begin_prepare error={error}"
+                ));
+                return;
+            }
+        };
         chooser.set_source_panel_height(adaptive_text_panel_height(&text, 82, 2, 5, 15.0, 16.0));
         chooser.set_source_text(text.into());
         chooser.set_candidate_labels(ModelRc::new(VecModel::from(
@@ -3175,12 +3476,23 @@ fn show_layout_chooser(
             target,
             candidates,
         });
-        let _ = chooser.show();
-        prepare_shown_action_window(
-            slint_window_handle(chooser.window()),
-            SELECTION_WINDOW_TITLE,
-            target.window_handle,
-        );
+        let configured = slint_window_handle(chooser.window())
+            .ok_or_else(|| "native selection-chooser HWND is unavailable".to_owned())
+            .and_then(|handle| {
+                rust_platform_windows::configure_action_window_for_target(
+                    handle,
+                    target.window_handle,
+                )
+            });
+        if let Err(error) = configured {
+            chooser_presenter.abort_prepare(chooser.window(), ticket, "configure", &error);
+            return;
+        }
+        chooser.set_prepared(true);
+        if let Err(error) = chooser_presenter.await_frame(chooser.window(), ticket) {
+            chooser.set_prepared(false);
+            chooser_presenter.abort_prepare(chooser.window(), ticket, "await_frame", &error);
+        }
     }
 }
 
@@ -3188,6 +3500,7 @@ fn begin_selection_translation(
     request: SelectionTranslationRequest,
     settings: &slint::Weak<SettingsWindow>,
     _translation_preview: &slint::Weak<TranslationPreview>,
+    _translation_preview_presenter: &OverlayPresenter,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
 ) {
@@ -3212,6 +3525,10 @@ fn begin_selection_translation(
             .selection_release_gates
             .remove(&request_id);
         set_indicator_status(settings, "Translation is disabled in Actions.");
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_pipeline request={request_id} stage=rejected \
+reason=translation_disabled"
+        ));
         return;
     }
     if selected_tier.is_none() {
@@ -3223,6 +3540,9 @@ fn begin_selection_translation(
             settings,
             "Choose and download a translation model in Settings first.",
         );
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_pipeline request={request_id} stage=rejected reason=no_selected_model"
+        ));
         return;
     }
     if !ready {
@@ -3234,6 +3554,9 @@ fn begin_selection_translation(
             request_started_unix_ms,
         });
         set_indicator_status(settings, "The translation model is still loading.");
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_pipeline request={request_id} stage=queued reason=model_loading"
+        ));
         return;
     }
 
@@ -3261,6 +3584,9 @@ fn begin_selection_translation(
         set_indicator_status(settings, &format!("Could not start translation: {error}"));
     } else {
         set_indicator_status(settings, "Translating locally…");
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_pipeline request={request_id} stage=dispatched"
+        ));
     }
 }
 
@@ -3269,6 +3595,7 @@ fn show_selection_translation_preview(
     target: TargetSnapshot,
     translated_text: &str,
     translation_preview: &slint::Weak<TranslationPreview>,
+    translation_preview_presenter: &OverlayPresenter,
     final_update: bool,
 ) {
     let Some(preview) = translation_preview.upgrade() else {
@@ -3285,24 +3612,45 @@ fn show_selection_translation_preview(
     if first_show {
         preview.set_prepared(false);
         preview.invoke_reset_scroll();
+        let ticket = match translation_preview_presenter.begin_prepare() {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                preview.set_request_id("".into());
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_preview_overlay transition=failed stage=begin_prepare \
+error={error}"
+                ));
+                return;
+            }
+        };
         let handle = slint_window_handle(preview.window());
-        let configured = handle.is_some_and(|handle| {
-            rust_platform_windows::configure_translation_window(handle).is_ok()
-        });
-        if configured {
-            if let Some(handle) = handle {
-                refresh_translation_backdrop(&preview, handle);
-            }
-            preview.set_prepared(true);
-            let _ = preview.show();
-            if let Some(handle) = handle {
-                rust_platform_windows::activate_popup_dismiss(handle);
-            }
-        } else {
+        let configured = handle
+            .ok_or_else(|| "native translation-preview HWND is unavailable".to_owned())
+            .and_then(rust_platform_windows::configure_translation_window);
+        if let Err(error) = configured {
             preview.set_request_id("".into());
-            rust_app_core::diagnostics::log_line(
-                "translation_preview result=not_shown reason=native_configuration_failed",
+            translation_preview_presenter.abort_prepare(
+                preview.window(),
+                ticket,
+                "configure",
+                &error,
             );
+            return;
+        }
+        if let Some(handle) = handle {
+            refresh_cloaked_translation_backdrop(&preview, handle);
+        }
+        preview.set_prepared(true);
+        if let Err(error) = translation_preview_presenter.await_frame(preview.window(), ticket) {
+            preview.set_prepared(false);
+            preview.set_request_id("".into());
+            translation_preview_presenter.abort_prepare(
+                preview.window(),
+                ticket,
+                "await_frame",
+                &error,
+            );
+            return;
         }
         if let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
             target.window_handle,
@@ -3311,8 +3659,20 @@ fn show_selection_translation_preview(
                 "translation_preview target_restore=failed error={error}"
             ));
         }
-    } else if final_update && let Some(handle) = slint_window_handle(preview.window()) {
-        refresh_translation_backdrop(&preview, handle);
+    } else if final_update
+        && let Some(handle) = slint_window_handle(preview.window())
+        && let Ok(ticket) = translation_preview_presenter.begin_refresh()
+    {
+        refresh_cloaked_translation_backdrop(&preview, handle);
+        if let Err(error) = translation_preview_presenter.await_frame(preview.window(), ticket) {
+            preview.set_prepared(false);
+            translation_preview_presenter.abort_prepare(
+                preview.window(),
+                ticket,
+                "refresh_frame",
+                &error,
+            );
+        }
     }
 }
 
@@ -3320,7 +3680,7 @@ fn handle_speech_event(
     event: SpeechWorkerEvent,
     settings: &slint::Weak<SettingsWindow>,
     indicator: &slint::Weak<RecordingIndicator>,
-    indicator_presenter: &IndicatorPresenter,
+    indicator_presenter: &OverlayPresenter,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
@@ -3506,7 +3866,8 @@ delivery={} target_pid={}",
                 state.borrow_mut().indicator_session = None;
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    indicator_presenter.retire(&indicator, "target_lost");
+                    indicator.set_prepared(false);
+                    indicator_presenter.retire(indicator.window(), "target_lost");
                 }
                 set_indicator_status(settings, "Transcript saved to history; target was lost.");
             }
@@ -3532,7 +3893,8 @@ delivery={} target_pid={}",
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    indicator_presenter.retire(&indicator, "transcription_cancelled");
+                    indicator.set_prepared(false);
+                    indicator_presenter.retire(indicator.window(), "transcription_cancelled");
                 }
             }
             if insert_was_waiting {
@@ -3619,7 +3981,8 @@ retryable={retryable} message={message}"
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
-                    indicator_presenter.retire(&indicator, "transcription_failed");
+                    indicator.set_prepared(false);
+                    indicator_presenter.retire(indicator.window(), "transcription_failed");
                 }
             }
             if insert_was_waiting {
@@ -3638,6 +4001,7 @@ fn handle_translation_event(
     event: TranslationWorkerEvent,
     settings: &slint::Weak<SettingsWindow>,
     translation_preview: &slint::Weak<TranslationPreview>,
+    translation_preview_presenter: &OverlayPresenter,
     translator: &slint::Weak<TranslatorWindow>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
@@ -3655,11 +4019,23 @@ fn handle_translation_event(
                 );
                 return;
             }
-            {
+            let installed_models = models.iter().filter(|model| model.installed).count();
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_worker state=ready selected_tier={selected_tier:?} installed_models={installed_models}"
+            ));
+            let recovered_selection = {
                 let mut state = state.borrow_mut();
+                let previous = state.selected_translation_tier;
                 state.translation_models = models;
                 state.selected_translation_tier = selected_tier;
                 state.translation_ready = false;
+                previous != selected_tier && selected_tier.is_some()
+            };
+            if recovered_selection {
+                let _ = save_settings(&state.borrow());
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_model selection=recovered tier={selected_tier:?}"
+                ));
             }
             sync_translation_models(settings, state);
             sync_action_settings(settings, state);
@@ -3707,6 +4083,9 @@ fn handle_translation_event(
             tier,
             load_duration_ms,
         } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_model state=ready catalog_id={catalog_id} tier={tier:?} load_ms={load_duration_ms}"
+            ));
             let queued_selection_translation = {
                 let mut state = state.borrow_mut();
                 state.selected_translation_tier = Some(tier);
@@ -3731,7 +4110,14 @@ fn handle_translation_event(
                 "Ready · language direction is detected locally.",
             );
             if let Some(request) = queued_selection_translation {
-                begin_selection_translation(request, settings, translation_preview, state, workers);
+                begin_selection_translation(
+                    request,
+                    settings,
+                    translation_preview,
+                    translation_preview_presenter,
+                    state,
+                    workers,
+                );
             }
         }
         TranslationWorkerEvent::ModelSelected { tier } => {
@@ -3798,6 +4184,7 @@ fn handle_translation_event(
                         target,
                         &translated_text,
                         translation_preview,
+                        translation_preview_presenter,
                         false,
                     );
                 }
@@ -3840,6 +4227,7 @@ fn handle_translation_event(
                 pending,
                 settings,
                 translation_preview,
+                translation_preview_presenter,
                 translator,
                 state,
                 workers,
@@ -3863,7 +4251,8 @@ fn handle_translation_event(
                 && preview.get_request_id().as_str() == request_id.to_string()
                 && !preview.get_pinned()
             {
-                let _ = preview.hide();
+                preview.set_prepared(false);
+                translation_preview_presenter.retire(preview.window(), "translation_cancelled");
                 rust_platform_windows::deactivate_popup_dismiss();
             }
             rust_app_core::diagnostics::log_line(&format!(
@@ -3912,11 +4301,13 @@ fn handle_translation_event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn route_translation_result(
     result: TranslationResult,
     pending: Option<PendingTranslation>,
     settings: &slint::Weak<SettingsWindow>,
     translation_preview: &slint::Weak<TranslationPreview>,
+    translation_preview_presenter: &OverlayPresenter,
     translator: &slint::Weak<TranslatorWindow>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
@@ -3965,6 +4356,7 @@ fn route_translation_result(
                     target,
                     &result.translated_text,
                     translation_preview,
+                    translation_preview_presenter,
                     true,
                 );
                 "Translation completed locally.".to_owned()
@@ -4535,11 +4927,17 @@ fn wire_tray(
     }
 }
 
-fn wire_chooser(chooser: &SelectionChooser, state: &Rc<RefCell<AppState>>, workers: &Rc<Workers>) {
+fn wire_chooser(
+    chooser: &SelectionChooser,
+    presenter: &OverlayPresenter,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Rc<Workers>,
+) {
     {
         let chooser_weak = chooser.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
+        let presenter = presenter.clone();
         chooser.on_choose_candidate(move |index| {
             let pending = state.borrow_mut().pending_selection.take();
             let Some(pending) = pending else {
@@ -4552,7 +4950,8 @@ fn wire_chooser(chooser: &SelectionChooser, state: &Rc<RefCell<AppState>>, worke
                 return;
             };
             if let Some(chooser) = chooser_weak.upgrade() {
-                let _ = chooser.hide();
+                chooser.set_prepared(false);
+                presenter.retire(chooser.window(), "candidate_selected");
             }
             let _ = dispatch_or_defer_selection_replacement(
                 &state,
@@ -4567,6 +4966,7 @@ fn wire_chooser(chooser: &SelectionChooser, state: &Rc<RefCell<AppState>>, worke
         let chooser_weak = chooser.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
+        let presenter = presenter.clone();
         chooser.on_cancel(move || {
             let pending = state.borrow_mut().pending_selection.take();
             if let Some(pending) = pending {
@@ -4579,16 +4979,21 @@ fn wire_chooser(chooser: &SelectionChooser, state: &Rc<RefCell<AppState>>, worke
                 });
             }
             if let Some(chooser) = chooser_weak.upgrade() {
-                let _ = chooser.hide();
+                chooser.set_prepared(false);
+                presenter.retire(chooser.window(), "cancelled");
             }
         });
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wire_action_palette(
     palette: &ActionPalette,
+    palette_presenter: &OverlayPresenter,
     translation_preview: &TranslationPreview,
+    translation_preview_presenter: &OverlayPresenter,
     chooser: &SelectionChooser,
+    chooser_presenter: &OverlayPresenter,
     settings: &SettingsWindow,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
@@ -4599,10 +5004,13 @@ fn wire_action_palette(
         let settings = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
+        let palette_presenter = palette_presenter.clone();
+        let translation_preview_presenter = translation_preview_presenter.clone();
         palette.on_translate(move || {
             let pending = state.borrow_mut().pending_text_action.take();
             if let Some(palette) = palette_weak.upgrade() {
-                let _ = palette.hide();
+                palette.set_prepared(false);
+                palette_presenter.retire(palette.window(), "translate_selected");
             }
             let Some(pending) = pending else {
                 return;
@@ -4618,6 +5026,7 @@ fn wire_action_palette(
                 },
                 &settings,
                 &preview,
+                &translation_preview_presenter,
                 &state,
                 &workers,
             );
@@ -4628,10 +5037,13 @@ fn wire_action_palette(
         let chooser = chooser.as_weak();
         let settings = settings.as_weak();
         let state = Rc::clone(state);
+        let palette_presenter = palette_presenter.clone();
+        let chooser_presenter = chooser_presenter.clone();
         palette.on_correct_layout(move || {
             let pending = state.borrow_mut().pending_text_action.take();
             if let Some(palette) = palette_weak.upgrade() {
-                let _ = palette.hide();
+                palette.set_prepared(false);
+                palette_presenter.retire(palette.window(), "layout_selected");
             }
             let Some(pending) = pending else {
                 return;
@@ -4642,6 +5054,7 @@ fn wire_action_palette(
                 pending.text,
                 &settings,
                 &chooser,
+                &chooser_presenter,
                 &state,
             );
         });
@@ -4650,6 +5063,7 @@ fn wire_action_palette(
         let palette_weak = palette.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
+        let presenter = palette_presenter.clone();
         palette.on_cancel(move || {
             let pending = state.borrow_mut().pending_text_action.take();
             if let Some(pending) = pending {
@@ -4662,21 +5076,31 @@ fn wire_action_palette(
                 });
             }
             if let Some(palette) = palette_weak.upgrade() {
-                let _ = palette.hide();
+                palette.set_prepared(false);
+                presenter.retire(palette.window(), "cancelled");
             }
         });
     }
 }
 
-fn wire_translation_preview(preview: &TranslationPreview) {
+fn wire_translation_preview(preview: &TranslationPreview, presenter: &OverlayPresenter) {
     {
         let preview_weak = preview.as_weak();
+        let presenter = presenter.clone();
         preview.on_begin_drag(move || {
             if let Some(preview) = preview_weak.upgrade()
                 && let Some(handle) = slint_window_handle(preview.window())
             {
                 match rust_platform_windows::begin_window_drag(handle) {
-                    Ok(()) => refresh_translation_backdrop(&preview, handle),
+                    Ok(()) => {
+                        if let Err(error) =
+                            refresh_presented_translation_backdrop(&preview, &presenter, handle)
+                        {
+                            rust_app_core::diagnostics::log_line(&format!(
+                                "translation_preview backdrop_refresh=failed error={error}"
+                            ));
+                        }
+                    }
                     Err(error) => {
                         rust_app_core::diagnostics::log_line(&format!(
                             "translation_preview drag=failed error={error}"
@@ -5007,8 +5431,31 @@ fn apply_translation_preview_layout(preview: &TranslationPreview, result_text: &
     preview.set_card_width(layout.card_width);
 }
 
-fn refresh_translation_backdrop(preview: &TranslationPreview, window_handle: u64) {
-    match rust_platform_windows::capture_blurred_overlay_backdrop(window_handle, 2) {
+fn refresh_cloaked_translation_backdrop(preview: &TranslationPreview, window_handle: u64) {
+    let result = rust_platform_windows::capture_blurred_cloaked_overlay_backdrop(window_handle, 2);
+    apply_translation_backdrop(preview, result);
+}
+
+fn refresh_presented_translation_backdrop(
+    preview: &TranslationPreview,
+    presenter: &OverlayPresenter,
+    window_handle: u64,
+) -> Result<(), String> {
+    let ticket = presenter.begin_refresh()?;
+    refresh_cloaked_translation_backdrop(preview, window_handle);
+    presenter
+        .await_frame(preview.window(), ticket)
+        .inspect_err(|error| {
+            preview.set_prepared(false);
+            presenter.abort_prepare(preview.window(), ticket, "drag_refresh", error);
+        })
+}
+
+fn apply_translation_backdrop(
+    preview: &TranslationPreview,
+    result: Result<rust_platform_windows::BlurredBackdrop, String>,
+) {
+    match result {
         Ok(backdrop)
             if backdrop.rgba.len() == backdrop.width as usize * backdrop.height as usize * 4 =>
         {
@@ -5044,32 +5491,6 @@ fn set_translation_status(translator: &slint::Weak<TranslatorWindow>, message: &
     }
 }
 
-fn prepare_shown_action_window(
-    window_handle: Option<u64>,
-    window_title: &'static str,
-    target_window_handle: u64,
-) {
-    // winit can restore its default extended styles when a hidden window is
-    // shown again. Queue native finalization behind the current UI operation
-    // so it runs after winit has committed visibility and cannot be overwritten
-    // by that same show transaction.
-    if let Err(error) = slint::invoke_from_event_loop(move || {
-        if let Err(error) = window_handle
-            .ok_or_else(|| "native window handle is unavailable".to_owned())
-            .and_then(rust_platform_windows::configure_action_window)
-        {
-            eprintln!("could not configure `{window_title}` as an action window: {error}");
-        }
-        if let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
-            target_window_handle,
-        ) {
-            eprintln!("could not restore action target for `{window_title}`: {error}");
-        }
-    }) {
-        eprintln!("could not finalize `{window_title}` after showing it: {error}");
-    }
-}
-
 fn configure_standard_app_window(window: &slint::Window, name: &str) {
     if let Err(error) = slint_window_handle(window)
         .ok_or_else(|| "native window handle is unavailable".to_owned())
@@ -5081,15 +5502,22 @@ fn configure_standard_app_window(window: &slint::Window, name: &str) {
 
 fn precreate_action_windows(
     chooser: &SelectionChooser,
+    chooser_presenter: &OverlayPresenter,
     palette: &ActionPalette,
+    palette_presenter: &OverlayPresenter,
     preview: &TranslationPreview,
+    preview_presenter: &OverlayPresenter,
 ) {
     chooser.set_prepared(false);
+    chooser
+        .window()
+        .set_position(PhysicalPosition::new(-32_000, -32_000));
     if chooser.show().is_ok() {
         let chooser = chooser.as_weak();
+        let presenter = chooser_presenter.clone();
         let _ = slint::spawn_local(async move {
             if let Some(chooser) = chooser.upgrade() {
-                let configured = chooser
+                let attached = chooser
                     .window()
                     .winit_window()
                     .await
@@ -5097,23 +5525,29 @@ fn precreate_action_windows(
                     .as_deref()
                     .and_then(native_window_handle)
                     .is_some_and(|handle| {
-                        rust_platform_windows::configure_action_window(handle).is_ok()
+                        rust_platform_windows::prepare_action_window(handle)
+                            .and_then(|()| presenter.attach(handle))
+                            .is_ok()
                     });
-                if !configured {
-                    eprintln!("selection action window could not be configured as no-activate");
+                if !attached {
+                    rust_app_core::diagnostics::log_line(
+                        "selection_chooser_overlay transition=failed stage=attach",
+                    );
                 }
-                let _ = chooser.hide();
-                chooser.set_prepared(true);
             }
         });
     }
 
     palette.set_prepared(false);
+    palette
+        .window()
+        .set_position(PhysicalPosition::new(-32_000, -32_000));
     if palette.show().is_ok() {
         let palette = palette.as_weak();
+        let presenter = palette_presenter.clone();
         let _ = slint::spawn_local(async move {
             if let Some(palette) = palette.upgrade() {
-                let configured = palette
+                let attached = palette
                     .window()
                     .winit_window()
                     .await
@@ -5121,13 +5555,15 @@ fn precreate_action_windows(
                     .as_deref()
                     .and_then(native_window_handle)
                     .is_some_and(|handle| {
-                        rust_platform_windows::configure_action_window(handle).is_ok()
+                        rust_platform_windows::prepare_action_window(handle)
+                            .and_then(|()| presenter.attach(handle))
+                            .is_ok()
                     });
-                if !configured {
-                    eprintln!("text action palette could not be configured as no-activate");
+                if !attached {
+                    rust_app_core::diagnostics::log_line(
+                        "action_palette_overlay transition=failed stage=attach",
+                    );
                 }
-                let _ = palette.hide();
-                palette.set_prepared(true);
             }
         });
     }
@@ -5138,9 +5574,10 @@ fn precreate_action_windows(
         .set_position(PhysicalPosition::new(-32_000, -32_000));
     if preview.show().is_ok() {
         let preview = preview.as_weak();
+        let presenter = preview_presenter.clone();
         let _ = slint::spawn_local(async move {
             if let Some(preview) = preview.upgrade() {
-                let configured = preview
+                let attached = preview
                     .window()
                     .winit_window()
                     .await
@@ -5148,19 +5585,21 @@ fn precreate_action_windows(
                     .as_deref()
                     .and_then(native_window_handle)
                     .is_some_and(|handle| {
-                        rust_platform_windows::prepare_translation_window(handle).is_ok()
+                        rust_platform_windows::prepare_translation_window(handle)
+                            .and_then(|()| presenter.attach(handle))
+                            .is_ok()
                     });
-                if !configured {
-                    eprintln!("translation preview could not be configured as no-activate");
+                if !attached {
+                    rust_app_core::diagnostics::log_line(
+                        "translation_preview_overlay transition=failed stage=attach",
+                    );
                 }
-                let _ = preview.hide();
-                preview.set_prepared(true);
             }
         });
     }
 }
 
-fn precreate_indicator(indicator: &RecordingIndicator, indicator_presenter: &IndicatorPresenter) {
+fn precreate_indicator(indicator: &RecordingIndicator, indicator_presenter: &OverlayPresenter) {
     indicator.set_prepared(false);
     // Slint owns creation of the native HWND, but the presenter exclusively
     // owns its native visibility after this one lifetime-establishing show.
@@ -5223,7 +5662,7 @@ fn prepare_indicator_native_window(
 
 fn show_indicator(
     indicator: &RecordingIndicator,
-    indicator_presenter: &IndicatorPresenter,
+    indicator_presenter: &OverlayPresenter,
     target_window_handle: Option<u64>,
 ) {
     indicator.set_prepared(false);
@@ -5237,7 +5676,8 @@ fn show_indicator(
         }
     };
     if let Err(error) = configure_indicator_window(indicator, target_window_handle) {
-        indicator_presenter.abort_prepare(indicator, ticket, "configure", &error);
+        indicator.set_prepared(false);
+        indicator_presenter.abort_prepare(indicator.window(), ticket, "configure", &error);
         return;
     }
     if let Err(error) = refresh_indicator_backdrop(indicator) {
@@ -5247,8 +5687,9 @@ fn show_indicator(
         ));
     }
     indicator.set_prepared(true);
-    if let Err(error) = indicator_presenter.await_frame(indicator, ticket) {
-        indicator_presenter.abort_prepare(indicator, ticket, "await_frame", &error);
+    if let Err(error) = indicator_presenter.await_frame(indicator.window(), ticket) {
+        indicator.set_prepared(false);
+        indicator_presenter.abort_prepare(indicator.window(), ticket, "await_frame", &error);
     }
 }
 

@@ -421,6 +421,23 @@ pub fn conceal_overlay_window(window_handle: u64) -> Result<(), String> {
     Ok(())
 }
 
+pub fn cloak_overlay_window(window_handle: u64) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("overlay window handle is not available".to_owned());
+    }
+    set_overlay_cloaked(hwnd, true)?;
+    unsafe {
+        let result = DwmFlush();
+        if result < 0 {
+            return Err(format!(
+                "DwmFlush failed while cloaking overlay: 0x{result:08X}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn reveal_overlay_window(window_handle: u64) -> Result<(), String> {
     let hwnd = window_handle as usize as HWND;
     if hwnd.is_null() {
@@ -445,20 +462,43 @@ pub fn verify_overlay_window_contract(
     window_handle: u64,
     expected_cloaked: bool,
 ) -> Result<(), String> {
+    verify_overlay_window_contract_impl(window_handle, expected_cloaked, true)
+}
+
+pub fn verify_interactive_overlay_window_contract(
+    window_handle: u64,
+    expected_cloaked: bool,
+) -> Result<(), String> {
+    verify_overlay_window_contract_impl(window_handle, expected_cloaked, false)
+}
+
+fn verify_overlay_window_contract_impl(
+    window_handle: u64,
+    expected_cloaked: bool,
+    click_through: bool,
+) -> Result<(), String> {
     let hwnd = window_handle as usize as HWND;
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
     }
     unsafe {
         let extended_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let required =
-            WS_EX_NOACTIVATE as isize | WS_EX_TOOLWINDOW as isize | WS_EX_TRANSPARENT as isize;
+        let required = WS_EX_NOACTIVATE as isize
+            | WS_EX_TOOLWINDOW as isize
+            | if click_through {
+                WS_EX_TRANSPARENT as isize
+            } else {
+                0
+            };
         let missing = required & !extended_style;
         let has_app_window = extended_style & WS_EX_APPWINDOW as isize != 0;
-        if missing != 0 || has_app_window {
+        let has_unexpected_click_through =
+            !click_through && extended_style & WS_EX_TRANSPARENT as isize != 0;
+        if missing != 0 || has_app_window || has_unexpected_click_through {
             return Err(format!(
                 "overlay ex-style contract mismatch: exstyle=0x{extended_style:X} \
-missing=0x{missing:X} app_window={has_app_window}"
+missing=0x{missing:X} app_window={has_app_window} \
+unexpected_click_through={has_unexpected_click_through}"
             ));
         }
     }
@@ -587,6 +627,19 @@ pub fn configure_action_window(window_handle: u64) -> Result<(), String> {
     Ok(())
 }
 
+pub fn configure_action_window_for_target(
+    window_handle: u64,
+    target_window_handle: u64,
+) -> Result<(), String> {
+    configure_action_window(window_handle)?;
+    position_action_window(window_handle, target_window_handle)
+}
+
+pub fn prepare_action_window(window_handle: u64) -> Result<(), String> {
+    configure_action_window(window_handle)?;
+    prepare_interactive_window(window_handle)
+}
+
 pub fn configure_translation_window(window_handle: u64) -> Result<(), String> {
     configure_action_window(window_handle)?;
     let hwnd = window_handle as usize as HWND;
@@ -639,7 +692,24 @@ pub fn prepare_translation_window(window_handle: u64) -> Result<(), String> {
     configure_action_window(window_handle)?;
     let hwnd = window_handle as usize as HWND;
     apply_translation_window_contract(hwnd);
-    // SAFETY: The HWND is process-owned and remains hidden while this
+    prepare_interactive_window(window_handle)
+}
+
+fn prepare_interactive_window(window_handle: u64) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("interactive overlay window handle is not available".to_owned());
+    }
+    set_overlay_cloaked(hwnd, true)?;
+    unsafe {
+        let result = DwmFlush();
+        if result < 0 {
+            return Err(format!(
+                "DwmFlush failed while prewarming interactive overlay: 0x{result:08X}"
+            ));
+        }
+    }
+    // SAFETY: The HWND is process-owned and remains app-cloaked while this
     // prewarming position is applied.
     if unsafe {
         SetWindowPos(
@@ -653,7 +723,55 @@ pub fn prepare_translation_window(window_handle: u64) -> Result<(), String> {
         )
     } == 0
     {
-        return Err("SetWindowPos failed while prewarming translation window".to_owned());
+        return Err("SetWindowPos failed while prewarming interactive overlay".to_owned());
+    }
+    Ok(())
+}
+
+fn position_action_window(window_handle: u64, target_window_handle: u64) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("action window handle is not available".to_owned());
+    }
+    let target = if target_window_handle == 0 {
+        hwnd
+    } else {
+        target_window_handle as usize as HWND
+    };
+    unsafe {
+        let monitor = MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
+            return Err("Windows could not resolve the action-window monitor".to_owned());
+        }
+        let mut monitor_info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        let mut window_rect = RECT::default();
+        if GetMonitorInfoW(monitor, &mut monitor_info) == 0
+            || GetWindowRect(hwnd, &mut window_rect) == 0
+        {
+            return Err("Windows could not measure the action window".to_owned());
+        }
+        let width = window_rect.right - window_rect.left;
+        let height = window_rect.bottom - window_rect.top;
+        let work = monitor_info.rcWork;
+        let x = work.left + (work.right - work.left - width) / 2;
+        let y = work.top + (work.bottom - work.top - height) / 2;
+        if SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            return Err("SetWindowPos failed for action window placement".to_owned());
+        }
     }
     Ok(())
 }

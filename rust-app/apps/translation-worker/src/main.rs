@@ -196,13 +196,20 @@ impl WorkerState {
             .ok_or_else(|| anyhow!("translation tier is missing from the catalog"))
     }
 
-    fn installed(&self, tier: TranslationTier) -> bool {
-        self.runtime.is_installed()
-            && self.pack(tier).ok().is_some_and(|pack| {
-                self.installer
-                    .is_installed(&pack.as_bundle())
-                    .unwrap_or(false)
-            })
+    fn model_installed(&self, tier: TranslationTier) -> bool {
+        self.pack(tier).ok().is_some_and(|pack| {
+            self.installer
+                .is_installed(&pack.as_bundle())
+                .unwrap_or(false)
+        })
+    }
+
+    fn initial_tier(&self, requested: Option<TranslationTier>) -> Option<TranslationTier> {
+        choose_initial_tier(
+            requested,
+            self.model_installed(TranslationTier::Tiny),
+            self.model_installed(TranslationTier::Teacher),
+        )
     }
 
     fn summaries(&self) -> Vec<TranslationModelSummary> {
@@ -211,16 +218,25 @@ impl WorkerState {
             .iter()
             .map(|pack| {
                 pack.summary(
-                    self.runtime.is_installed()
-                        && self
-                            .installer
-                            .is_installed(&pack.as_bundle())
-                            .unwrap_or(false),
+                    self.installer
+                        .is_installed(&pack.as_bundle())
+                        .unwrap_or(false),
                     self.selected_tier == Some(pack.tier),
                     &self.locale,
                 )
             })
             .collect()
+    }
+
+    fn ensure_runtime(&self, writer: &EventWriter, catalog_id: &str) -> Result<()> {
+        self.runtime.ensure_installed(&self.fetcher, |progress| {
+            let _ = writer.send(&TranslationWorkerEvent::ModelDownloadProgress {
+                catalog_id: catalog_id.to_owned(),
+                downloaded_bytes: progress.bytes_received,
+                total_bytes: RUNTIME_DOWNLOAD_BYTES,
+            });
+        })?;
+        Ok(())
     }
 
     fn load_engine(&mut self, tier: TranslationTier, warm: bool) -> Result<(String, u64)> {
@@ -319,13 +335,15 @@ fn handle_command(
             let mut state = recover_lock(&state);
             state.keep_warm = keep_warm;
             state.history_enabled = history_enabled;
-            state.selected_tier = selected_tier.filter(|tier| state.installed(*tier));
+            state.selected_tier = state.initial_tier(selected_tier);
             writer.send(&TranslationWorkerEvent::Ready {
                 protocol_version: PROTOCOL_VERSION,
                 selected_tier: state.selected_tier,
                 models: state.summaries(),
             })?;
             if let Some(tier) = state.selected_tier {
+                let catalog_id = state.pack(tier)?.id.clone();
+                state.ensure_runtime(writer, &catalog_id)?;
                 let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
                     catalog_id,
@@ -380,11 +398,13 @@ fn handle_command(
         TranslationWorkerCommand::SelectTier { tier, keep_warm } => {
             coordinator.cancel_all();
             let mut state = recover_lock(&state);
-            if !state.installed(tier) {
+            if !state.model_installed(tier) {
                 return Err(anyhow!("translation model is not installed"));
             }
             state.keep_warm = keep_warm;
             state.selected_tier = Some(tier);
+            let catalog_id = state.pack(tier)?.id.clone();
+            state.ensure_runtime(writer, &catalog_id)?;
             let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
             writer.send(&TranslationWorkerEvent::ModelSelected { tier })?;
             writer.send(&TranslationWorkerEvent::ModelReady {
@@ -431,6 +451,26 @@ fn handle_command(
         TranslationWorkerCommand::Shutdown => {}
     }
     Ok(())
+}
+
+fn choose_initial_tier(
+    requested: Option<TranslationTier>,
+    fast_installed: bool,
+    quality_installed: bool,
+) -> Option<TranslationTier> {
+    if requested == Some(TranslationTier::Teacher) && quality_installed {
+        return Some(TranslationTier::Teacher);
+    }
+    if requested == Some(TranslationTier::Tiny) && fast_installed {
+        return Some(TranslationTier::Tiny);
+    }
+    if quality_installed {
+        Some(TranslationTier::Teacher)
+    } else if fast_installed {
+        Some(TranslationTier::Tiny)
+    } else {
+        None
+    }
 }
 
 fn translate_request(
@@ -546,4 +586,44 @@ fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn short_id(request_id: RequestId) -> String {
     request_id.to_string().chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use rust_protocol::TranslationTier;
+
+    use super::choose_initial_tier;
+
+    #[test]
+    fn preserves_an_installed_explicit_selection() {
+        assert_eq!(
+            choose_initial_tier(Some(TranslationTier::Tiny), true, true),
+            Some(TranslationTier::Tiny)
+        );
+        assert_eq!(
+            choose_initial_tier(Some(TranslationTier::Teacher), true, true),
+            Some(TranslationTier::Teacher)
+        );
+    }
+
+    #[test]
+    fn recovers_to_best_installed_model_when_selection_is_missing_or_stale() {
+        assert_eq!(
+            choose_initial_tier(None, true, true),
+            Some(TranslationTier::Teacher)
+        );
+        assert_eq!(
+            choose_initial_tier(Some(TranslationTier::Tiny), false, true),
+            Some(TranslationTier::Teacher)
+        );
+        assert_eq!(
+            choose_initial_tier(Some(TranslationTier::Teacher), true, false),
+            Some(TranslationTier::Tiny)
+        );
+    }
+
+    #[test]
+    fn leaves_translation_unselected_when_no_model_is_installed() {
+        assert_eq!(choose_initial_tier(None, false, false), None);
+    }
 }

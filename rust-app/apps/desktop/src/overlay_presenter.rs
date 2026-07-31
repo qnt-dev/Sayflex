@@ -1,8 +1,12 @@
 use std::sync::{Arc, Mutex};
 
-use slint::{ComponentHandle, RenderingState};
+use slint::RenderingState;
 
-use crate::RecordingIndicator;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OverlayContract {
+    ClickThrough,
+    Interactive,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PresentationTicket {
@@ -44,7 +48,7 @@ impl Default for PresentationState {
 impl PresentationState {
     fn attach(&mut self, window_handle: u64) -> Result<(), String> {
         if window_handle == 0 {
-            return Err("recording overlay has no native window handle".to_owned());
+            return Err("overlay has no native window handle".to_owned());
         }
         match self.phase {
             PresentationPhase::Detached => {
@@ -54,33 +58,38 @@ impl PresentationState {
             PresentationPhase::Parked {
                 window_handle: current,
             } if current == window_handle => Ok(()),
-            _ => Err(format!(
-                "recording overlay cannot attach in phase {:?}",
-                self.phase
-            )),
+            _ => Err(format!("overlay cannot attach in phase {:?}", self.phase)),
         }
     }
 
-    fn begin_prepare(&mut self) -> Result<PresentationTicket, String> {
-        let PresentationPhase::Parked { window_handle } = self.phase else {
-            return Err(format!(
-                "recording overlay cannot prepare in phase {:?}",
-                self.phase
-            ));
-        };
+    fn next_ticket(&mut self, window_handle: u64) -> PresentationTicket {
         let ticket = PresentationTicket {
             generation: self.next_generation,
             window_handle,
         };
         self.next_generation = self.next_generation.saturating_add(1);
         self.phase = PresentationPhase::Preparing(ticket);
-        Ok(ticket)
+        ticket
+    }
+
+    fn begin_prepare(&mut self) -> Result<PresentationTicket, String> {
+        let PresentationPhase::Parked { window_handle } = self.phase else {
+            return Err(format!("overlay cannot prepare in phase {:?}", self.phase));
+        };
+        Ok(self.next_ticket(window_handle))
+    }
+
+    fn begin_refresh(&mut self) -> Result<PresentationTicket, String> {
+        let PresentationPhase::Presented(current) = self.phase else {
+            return Err(format!("overlay cannot refresh in phase {:?}", self.phase));
+        };
+        Ok(self.next_ticket(current.window_handle))
     }
 
     fn await_frame(&mut self, ticket: PresentationTicket) -> Result<(), String> {
         if self.phase != PresentationPhase::Preparing(ticket) {
             return Err(format!(
-                "recording overlay rejected prepared frame generation={} phase={:?}",
+                "overlay rejected prepared frame generation={} phase={:?}",
                 ticket.generation, self.phase
             ));
         }
@@ -128,8 +137,7 @@ impl PresentationState {
 
     fn retire(&mut self) -> Option<(u64, Option<u64>)> {
         let (window_handle, generation) = match self.phase {
-            PresentationPhase::Detached => return None,
-            PresentationPhase::Parked { .. } => return None,
+            PresentationPhase::Detached | PresentationPhase::Parked { .. } => return None,
             PresentationPhase::Preparing(ticket)
             | PresentationPhase::AwaitingFrame(ticket)
             | PresentationPhase::RevealQueued(ticket)
@@ -142,17 +150,26 @@ impl PresentationState {
     }
 }
 
+type PresentedCallback = Arc<dyn Fn(u64) + Send + Sync>;
+
 #[derive(Clone)]
-pub(crate) struct IndicatorPresenter {
+pub(crate) struct OverlayPresenter {
     state: Arc<Mutex<PresentationState>>,
+    name: &'static str,
+    contract: OverlayContract,
 }
 
-impl IndicatorPresenter {
-    pub(crate) fn install(indicator: &RecordingIndicator) -> Result<Self, String> {
+impl OverlayPresenter {
+    pub(crate) fn install(
+        window: &slint::Window,
+        name: &'static str,
+        contract: OverlayContract,
+        on_presented: Option<PresentedCallback>,
+    ) -> Result<Self, String> {
         let state = Arc::new(Mutex::new(PresentationState::default()));
         let render_state = Arc::clone(&state);
-        indicator
-            .window()
+        let callback = on_presented;
+        window
             .set_rendering_notifier(move |rendering_state, _graphics_api| {
                 if !matches!(rendering_state, RenderingState::AfterRendering) {
                     return;
@@ -166,6 +183,7 @@ impl IndicatorPresenter {
                 };
 
                 let queued_state = Arc::clone(&render_state);
+                let queued_callback = callback.clone();
                 let queue_result = slint::invoke_from_event_loop(move || {
                     let can_reveal = queued_state
                         .lock()
@@ -174,20 +192,11 @@ impl IndicatorPresenter {
                     if !can_reveal {
                         return;
                     }
-
-                    let result = rust_platform_windows::verify_overlay_window_contract(
-                        ticket.window_handle,
-                        true,
-                    )
-                    .and_then(|()| {
-                        rust_platform_windows::reveal_overlay_window(ticket.window_handle)
-                    })
-                    .and_then(|()| {
-                        rust_platform_windows::verify_overlay_window_contract(
-                            ticket.window_handle,
-                            false,
-                        )
-                    });
+                    let result = verify_contract(contract, ticket.window_handle, true)
+                        .and_then(|()| {
+                            rust_platform_windows::reveal_overlay_window(ticket.window_handle)
+                        })
+                        .and_then(|()| verify_contract(contract, ticket.window_handle, false));
 
                     match result {
                         Ok(()) => {
@@ -196,8 +205,11 @@ impl IndicatorPresenter {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .complete_reveal(ticket);
                             if completed {
+                                if let Some(callback) = queued_callback {
+                                    callback(ticket.window_handle);
+                                }
                                 rust_app_core::diagnostics::log_line(&format!(
-                                    "recording_overlay transition=presented generation={} hwnd={}",
+                                    "{name} transition=presented generation={} hwnd={}",
                                     ticket.generation, ticket.window_handle
                                 ));
                             }
@@ -210,8 +222,7 @@ impl IndicatorPresenter {
                             let _ =
                                 rust_platform_windows::conceal_overlay_window(ticket.window_handle);
                             rust_app_core::diagnostics::log_line(&format!(
-                                "recording_overlay transition=failed generation={} \
-stage=reveal error={error}",
+                                "{name} transition=failed generation={} stage=reveal error={error}",
                                 ticket.generation
                             ));
                         }
@@ -225,26 +236,28 @@ stage=reveal error={error}",
                         .cancel(ticket);
                     let _ = rust_platform_windows::conceal_overlay_window(ticket.window_handle);
                     rust_app_core::diagnostics::log_line(&format!(
-                        "recording_overlay transition=failed generation={} \
-stage=queue_reveal error={error}",
+                        "{name} transition=failed generation={} stage=queue_reveal error={error}",
                         ticket.generation
                     ));
                 }
             })
-            .map_err(|error| {
-                format!("recording overlay renderer cannot acknowledge frames: {error:?}")
-            })?;
-        Ok(Self { state })
+            .map_err(|error| format!("{name} renderer cannot acknowledge frames: {error:?}"))?;
+        Ok(Self {
+            state,
+            name,
+            contract,
+        })
     }
 
     pub(crate) fn attach(&self, window_handle: u64) -> Result<(), String> {
-        rust_platform_windows::verify_overlay_window_contract(window_handle, true)?;
+        verify_contract(self.contract, window_handle, true)?;
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .attach(window_handle)?;
         rust_app_core::diagnostics::log_line(&format!(
-            "recording_overlay transition=parked hwnd={window_handle}"
+            "{} transition=parked hwnd={window_handle}",
+            self.name
         ));
         Ok(())
     }
@@ -256,9 +269,7 @@ stage=queue_reveal error={error}",
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .begin_prepare()?;
         if let Err(error) = rust_platform_windows::conceal_overlay_window(ticket.window_handle)
-            .and_then(|()| {
-                rust_platform_windows::verify_overlay_window_contract(ticket.window_handle, true)
-            })
+            .and_then(|()| verify_contract(self.contract, ticket.window_handle, true))
         {
             self.state
                 .lock()
@@ -266,29 +277,52 @@ stage=queue_reveal error={error}",
                 .cancel(ticket);
             return Err(error);
         }
-        rust_app_core::diagnostics::log_line(&format!(
-            "recording_overlay transition=preparing generation={} hwnd={}",
-            ticket.generation, ticket.window_handle
-        ));
+        self.log_preparing(ticket, "present");
         Ok(ticket)
+    }
+
+    pub(crate) fn begin_refresh(&self) -> Result<PresentationTicket, String> {
+        let ticket = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_refresh()?;
+        if let Err(error) = rust_platform_windows::cloak_overlay_window(ticket.window_handle)
+            .and_then(|()| verify_contract(self.contract, ticket.window_handle, true))
+        {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancel(ticket);
+            return Err(error);
+        }
+        self.log_preparing(ticket, "refresh");
+        Ok(ticket)
+    }
+
+    fn log_preparing(&self, ticket: PresentationTicket, operation: &str) {
+        rust_app_core::diagnostics::log_line(&format!(
+            "{} transition=preparing generation={} hwnd={} operation={operation}",
+            self.name, ticket.generation, ticket.window_handle
+        ));
     }
 
     pub(crate) fn await_frame(
         &self,
-        indicator: &RecordingIndicator,
+        window: &slint::Window,
         ticket: PresentationTicket,
     ) -> Result<(), String> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .await_frame(ticket)?;
-        indicator.window().request_redraw();
+        window.request_redraw();
         Ok(())
     }
 
     pub(crate) fn abort_prepare(
         &self,
-        indicator: &RecordingIndicator,
+        window: &slint::Window,
         ticket: PresentationTicket,
         stage: &str,
         error: &str,
@@ -301,15 +335,14 @@ stage=queue_reveal error={error}",
         if let Some(window_handle) = window_handle {
             let _ = rust_platform_windows::conceal_overlay_window(window_handle);
         }
-        indicator.set_prepared(false);
-        indicator.window().request_redraw();
+        window.request_redraw();
         rust_app_core::diagnostics::log_line(&format!(
-            "recording_overlay transition=failed generation={} stage={stage} error={error}",
-            ticket.generation
+            "{} transition=failed generation={} stage={stage} error={error}",
+            self.name, ticket.generation
         ));
     }
 
-    pub(crate) fn retire(&self, indicator: &RecordingIndicator, reason: &str) {
+    pub(crate) fn retire(&self, window: &slint::Window, reason: &str) {
         let retirement = self
             .state
             .lock()
@@ -318,22 +351,38 @@ stage=queue_reveal error={error}",
         let Some((window_handle, generation)) = retirement else {
             return;
         };
-        let conceal_result =
-            rust_platform_windows::conceal_overlay_window(window_handle).and_then(|()| {
-                rust_platform_windows::verify_overlay_window_contract(window_handle, true)
-            });
-        indicator.set_prepared(false);
-        indicator.window().request_redraw();
+        let conceal_result = rust_platform_windows::conceal_overlay_window(window_handle)
+            .and_then(|()| verify_contract(self.contract, window_handle, true));
+        window.request_redraw();
         match conceal_result {
             Ok(()) => rust_app_core::diagnostics::log_line(&format!(
-                "recording_overlay transition=parked generation={} reason={reason}",
+                "{} transition=parked generation={} reason={reason}",
+                self.name,
                 generation.unwrap_or_default()
             )),
             Err(error) => rust_app_core::diagnostics::log_line(&format!(
-                "recording_overlay transition=failed generation={} \
-stage=retire reason={reason} error={error}",
+                "{} transition=failed generation={} stage=retire reason={reason} error={error}",
+                self.name,
                 generation.unwrap_or_default()
             )),
+        }
+    }
+}
+
+fn verify_contract(
+    contract: OverlayContract,
+    window_handle: u64,
+    expected_cloaked: bool,
+) -> Result<(), String> {
+    match contract {
+        OverlayContract::ClickThrough => {
+            rust_platform_windows::verify_overlay_window_contract(window_handle, expected_cloaked)
+        }
+        OverlayContract::Interactive => {
+            rust_platform_windows::verify_interactive_overlay_window_contract(
+                window_handle,
+                expected_cloaked,
+            )
         }
     }
 }
@@ -371,6 +420,21 @@ mod tests {
     }
 
     #[test]
+    fn visible_overlay_can_enter_a_frame_gated_refresh() {
+        let mut state = PresentationState::default();
+        state.attach(42).unwrap();
+        let first = state.begin_prepare().unwrap();
+        state.await_frame(first).unwrap();
+        assert_eq!(state.frame_rendered(), Some(first));
+        assert!(state.complete_reveal(first));
+
+        let refresh = state.begin_refresh().unwrap();
+        assert_ne!(refresh.generation, first.generation);
+        assert_eq!(refresh.window_handle, first.window_handle);
+        assert_eq!(state.phase, PresentationPhase::Preparing(refresh));
+    }
+
+    #[test]
     fn duplicate_render_callbacks_queue_only_one_reveal() {
         let mut state = PresentationState::default();
         state.attach(42).unwrap();
@@ -389,5 +453,6 @@ mod tests {
         state.attach(42).unwrap();
         let _ticket = state.begin_prepare().unwrap();
         assert!(state.begin_prepare().is_err());
+        assert!(state.begin_refresh().is_err());
     }
 }

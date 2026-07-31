@@ -25,12 +25,13 @@ pub use job::WorkerJob;
 #[cfg(windows)]
 pub use overlay::{
     begin_window_drag, capture_blurred_cloaked_overlay_backdrop, capture_blurred_overlay_backdrop,
-    conceal_overlay_window, configure_action_window, configure_blue_glass_overlay_window,
+    cloak_overlay_window, conceal_overlay_window, configure_action_window,
+    configure_action_window_for_target, configure_blue_glass_overlay_window,
     configure_overlay_window, configure_standard_window, configure_translation_window,
-    configure_transparent_overlay_window, prepare_blue_glass_overlay_window,
+    configure_transparent_overlay_window, prepare_action_window, prepare_blue_glass_overlay_window,
     prepare_overlay_window, prepare_translation_window, prepare_transparent_overlay_window,
     restore_target_if_our_action_window_activated, reveal_overlay_window,
-    verify_overlay_window_contract,
+    verify_interactive_overlay_window_contract, verify_overlay_window_contract,
 };
 #[cfg(windows)]
 pub use popup_dismiss::{PopupDismissMonitor, activate_popup_dismiss, deactivate_popup_dismiss};
@@ -139,6 +140,11 @@ pub fn conceal_overlay_window(_window_handle: u64) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
+pub fn cloak_overlay_window(_window_handle: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn reveal_overlay_window(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
@@ -152,7 +158,28 @@ pub fn verify_overlay_window_contract(
 }
 
 #[cfg(not(windows))]
+pub fn verify_interactive_overlay_window_contract(
+    _window_handle: u64,
+    _expected_cloaked: bool,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn configure_action_window(_window_handle: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn configure_action_window_for_target(
+    _window_handle: u64,
+    _target_window_handle: u64,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn prepare_action_window(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
 
