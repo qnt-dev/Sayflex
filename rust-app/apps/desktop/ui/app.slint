@@ -2199,6 +2199,8 @@ export component TranslationPreview inherits Window {
     in-out property <bool> prepared: false;
     in-out property <string> translated-text;
     in-out property <bool> pinned: false;
+    in-out property <bool> live-glass: false;
+    in-out property <bool> dark-text: false;
     in-out property <float> card-width: 320;
     in property <image> glass-backdrop;
     // Text owns its real height-for-width measurement. The extra four pixels
@@ -2240,6 +2242,7 @@ export component TranslationPreview inherits Window {
             height: parent.height;
             source: root.glass-backdrop;
             image-fit: fill;
+            opacity: root.live-glass ? 0 : 1;
         }
 
         Rectangle {
@@ -2267,18 +2270,6 @@ export component TranslationPreview inherits Window {
             opacity: 0.07;
         }
 
-        drag-area := TouchArea {
-            x: 0;
-            y: 0;
-            width: parent.width - 54px;
-            height: 32px;
-            pointer-event(event) => {
-                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                    root.begin-drag();
-                }
-            }
-        }
-
         result-scroll := Flickable {
             x: 14px;
             y: 12px;
@@ -2294,7 +2285,7 @@ export component TranslationPreview inherits Window {
                 width: result-scroll.width;
                 height: root.result-content-height * 1px;
                 text: root.translated-text;
-                color: #f5f3ef;
+                color: root.dark-text ? #111820 : #f5f3ef;
                 font-size: 14px;
                 font-weight: 470;
                 wrap: word-wrap;
@@ -2308,7 +2299,7 @@ export component TranslationPreview inherits Window {
             width: 2px;
             height: root.result-panel-height * 1px;
             border-radius: 1px;
-            background: #080a0d80;
+            background: root.dark-text ? #f4f6f880 : #080a0d80;
 
             Rectangle {
                 width: 2px;
@@ -2323,6 +2314,21 @@ export component TranslationPreview inherits Window {
             }
         }
 
+        // Keep the drag surface above the text/flickable so the first press is
+        // never consumed by the content layer. The pin remains outside this
+        // exact hit area and wheel scrolling is handled by the popup monitor.
+        drag-area := TouchArea {
+            x: 0;
+            y: 0;
+            width: parent.width - 54px;
+            height: 32px;
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                    root.begin-drag();
+                }
+            }
+        }
+
         pin-button := Rectangle {
             x: parent.width - 52px;
             y: 7px;
@@ -2330,16 +2336,18 @@ export component TranslationPreview inherits Window {
             height: 24px;
             border-radius: 6px;
             border-width: 1px;
-            border-color: root.pinned ? Theme.orange : #d7d3cc48;
+            border-color: root.pinned
+                ? Theme.orange
+                : root.dark-text ? #10182070 : #d7d3cc48;
             background: root.pinned
                 ? Theme.orange
                 : pin-touch.has-hover
                     ? #f0a45d20
-                    : #0c0f1450;
+                    : root.dark-text ? #ffffff42 : #0c0f1450;
 
             Text {
                 text: "PIN";
-                color: root.pinned ? #0b0e13 : #dedad3;
+                color: root.pinned ? #0b0e13 : root.dark-text ? #111820 : #dedad3;
                 opacity: root.pinned ? 1 : (pin-touch.has-hover ? 0.92 : 0.62);
                 font-size: 10px;
                 font-weight: 650;

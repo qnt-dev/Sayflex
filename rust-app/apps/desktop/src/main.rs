@@ -12,7 +12,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -5084,31 +5084,145 @@ fn wire_action_palette(
 }
 
 fn wire_translation_preview(preview: &TranslationPreview, presenter: &OverlayPresenter) {
+    let drag_active = Arc::new(AtomicBool::new(false));
     {
         let preview_weak = preview.as_weak();
         let presenter = presenter.clone();
+        let drag_active = Arc::clone(&drag_active);
         preview.on_begin_drag(move || {
+            if drag_active.swap(true, Ordering::AcqRel) {
+                return;
+            }
             if let Some(preview) = preview_weak.upgrade()
                 && let Some(handle) = slint_window_handle(preview.window())
             {
-                match rust_platform_windows::begin_window_drag(handle) {
-                    Ok(()) => {
-                        if let Err(error) =
-                            refresh_presented_translation_backdrop(&preview, &presenter, handle)
-                        {
-                            rust_app_core::diagnostics::log_line(&format!(
-                                "translation_preview backdrop_refresh=failed error={error}"
-                            ));
-                        }
-                    }
-                    Err(error) => {
-                        rust_app_core::diagnostics::log_line(&format!(
-                            "translation_preview drag=failed error={error}"
-                        ));
-                    }
+                preview.set_live_glass(true);
+                if let Err(error) = rust_platform_windows::enable_translation_live_backdrop(handle)
+                {
+                    drag_active.store(false, Ordering::Release);
+                    preview.set_live_glass(false);
+                    let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_preview drag=failed stage=enable_live_glass error={error}"
+                    ));
+                    return;
                 }
+
+                let preview_after_frame = preview_weak.clone();
+                let presenter_after_frame = presenter.clone();
+                let drag_after_frame = Arc::clone(&drag_active);
+                let queue_result = presenter.after_next_frame(preview.window(), move || {
+                    let Some(preview) = preview_after_frame.upgrade() else {
+                        drag_after_frame.store(false, Ordering::Release);
+                        return;
+                    };
+                    if !preview.get_prepared()
+                        || !preview.get_live_glass()
+                        || slint_window_handle(preview.window()) != Some(handle)
+                    {
+                        drag_after_frame.store(false, Ordering::Release);
+                        let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
+                        return;
+                    }
+
+                    if let Err(error) = begin_slint_window_drag(preview.window()) {
+                        drag_after_frame.store(false, Ordering::Release);
+                        preview.set_live_glass(false);
+                        let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "translation_preview drag=failed stage=native_drag error={error}"
+                        ));
+                        return;
+                    }
+
+                    start_translation_drag_watcher(
+                        preview_after_frame,
+                        presenter_after_frame,
+                        drag_after_frame,
+                        handle,
+                    );
+                });
+                if let Err(error) = queue_result {
+                    drag_active.store(false, Ordering::Release);
+                    preview.set_live_glass(false);
+                    let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_preview drag=failed stage=queue_rendered_frame error={error}"
+                    ));
+                }
+                return;
             }
+            drag_active.store(false, Ordering::Release);
         });
+    }
+}
+
+fn start_translation_drag_watcher(
+    preview_after_drag: slint::Weak<TranslationPreview>,
+    presenter_after_drag: OverlayPresenter,
+    drag_active: Arc<AtomicBool>,
+    window_handle: u64,
+) {
+    let watcher_active = Arc::clone(&drag_active);
+    let preview_on_spawn_failure = preview_after_drag.clone();
+    let presenter_on_spawn_failure = presenter_after_drag.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("translation-preview-drag-watch".to_owned())
+        .spawn(move || {
+            wait_for_primary_pointer_release();
+            watcher_active.store(false, Ordering::Release);
+            let _ = preview_after_drag.upgrade_in_event_loop(move |preview| {
+                if preview.get_prepared()
+                    && preview.get_live_glass()
+                    && slint_window_handle(preview.window()) == Some(window_handle)
+                    && let Err(error) = settle_translation_preview_backdrop(
+                        &preview,
+                        &presenter_after_drag,
+                        window_handle,
+                    )
+                {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_preview backdrop_refresh=failed error={error}"
+                    ));
+                }
+            });
+        });
+    if let Err(error) = spawn_result {
+        drag_active.store(false, Ordering::Release);
+        if let Some(preview) = preview_on_spawn_failure.upgrade()
+            && let Err(refresh_error) = settle_translation_preview_backdrop(
+                &preview,
+                &presenter_on_spawn_failure,
+                window_handle,
+            )
+        {
+            preview.set_live_glass(false);
+            let _ = rust_platform_windows::disable_translation_live_backdrop(window_handle);
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_preview backdrop_refresh=failed error={refresh_error}"
+            ));
+        }
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_preview drag=failed stage=watcher error={error}"
+        ));
+    }
+}
+
+fn begin_slint_window_drag(window: &slint::Window) -> Result<(), String> {
+    window
+        .with_winit_window(|window| window.drag_window().map_err(|error| error.to_string()))
+        .ok_or_else(|| "translation window is not backed by winit".to_owned())?
+}
+
+fn wait_for_primary_pointer_release() {
+    let pressed_deadline = Instant::now() + Duration::from_millis(120);
+    while !rust_platform_windows::primary_pointer_button_is_down()
+        && Instant::now() < pressed_deadline
+    {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    while rust_platform_windows::primary_pointer_button_is_down() {
+        std::thread::sleep(Duration::from_millis(8));
     }
 }
 
@@ -5433,15 +5547,35 @@ fn apply_translation_preview_layout(preview: &TranslationPreview, result_text: &
 
 fn refresh_cloaked_translation_backdrop(preview: &TranslationPreview, window_handle: u64) {
     let result = rust_platform_windows::capture_blurred_cloaked_overlay_backdrop(window_handle, 2);
-    apply_translation_backdrop(preview, result);
+    match result.and_then(|backdrop| apply_translation_backdrop(preview, backdrop)) {
+        Ok(()) => preview.set_live_glass(false),
+        Err(error) => {
+            preview.set_live_glass(true);
+            if let Err(live_error) =
+                rust_platform_windows::enable_translation_live_backdrop(window_handle)
+            {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_preview backdrop=failed error={error}; live_fallback={live_error}"
+                ));
+            } else {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_preview backdrop=captured_failed fallback=live error={error}"
+                ));
+            }
+        }
+    }
 }
 
-fn refresh_presented_translation_backdrop(
+fn settle_translation_preview_backdrop(
     preview: &TranslationPreview,
     presenter: &OverlayPresenter,
     window_handle: u64,
 ) -> Result<(), String> {
     let ticket = presenter.begin_refresh()?;
+    if let Err(error) = rust_platform_windows::disable_translation_live_backdrop(window_handle) {
+        presenter.abort_prepare(preview.window(), ticket, "disable_live_glass", &error);
+        return Err(error);
+    }
     refresh_cloaked_translation_backdrop(preview, window_handle);
     presenter
         .await_frame(preview.window(), ticket)
@@ -5453,26 +5587,51 @@ fn refresh_presented_translation_backdrop(
 
 fn apply_translation_backdrop(
     preview: &TranslationPreview,
-    result: Result<rust_platform_windows::BlurredBackdrop, String>,
-) {
-    match result {
-        Ok(backdrop)
-            if backdrop.rgba.len() == backdrop.width as usize * backdrop.height as usize * 4 =>
-        {
-            let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                &backdrop.rgba,
-                backdrop.width,
-                backdrop.height,
-            );
-            preview.set_glass_backdrop(Image::from_rgba8(pixels));
-            preview.window().request_redraw();
-        }
-        Ok(_) => rust_app_core::diagnostics::log_line(
-            "translation_preview backdrop=failed reason=invalid_pixel_buffer",
-        ),
-        Err(error) => rust_app_core::diagnostics::log_line(&format!(
-            "translation_preview backdrop=failed error={error}"
-        )),
+    backdrop: rust_platform_windows::BlurredBackdrop,
+) -> Result<(), String> {
+    if backdrop.rgba.len() != backdrop.width as usize * backdrop.height as usize * 4 {
+        return Err("invalid pixel buffer".to_owned());
+    }
+    preview.set_dark_text(backdrop_prefers_dark_text(
+        &backdrop.rgba,
+        preview.get_dark_text(),
+    ));
+    let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        &backdrop.rgba,
+        backdrop.width,
+        backdrop.height,
+    );
+    preview.set_glass_backdrop(Image::from_rgba8(pixels));
+    preview.window().request_redraw();
+    Ok(())
+}
+
+fn backdrop_prefers_dark_text(rgba: &[u8], currently_dark: bool) -> bool {
+    const SAMPLE_BUDGET: usize = 4_096;
+    const SWITCH_TO_DARK: u8 = 156;
+    const SWITCH_TO_LIGHT: u8 = 116;
+
+    let pixels = rgba.len() / 4;
+    if pixels == 0 {
+        return currently_dark;
+    }
+    let stride = pixels.div_ceil(SAMPLE_BUDGET).max(1);
+    let mut luminances = rgba
+        .chunks_exact(4)
+        .step_by(stride)
+        .map(|pixel| {
+            let red = u32::from(pixel[0]);
+            let green = u32::from(pixel[1]);
+            let blue = u32::from(pixel[2]);
+            ((54 * red + 183 * green + 19 * blue) >> 8) as u8
+        })
+        .collect::<Vec<_>>();
+    let midpoint = luminances.len() / 2;
+    let (_, median, _) = luminances.select_nth_unstable(midpoint);
+    if currently_dark {
+        *median >= SWITCH_TO_LIGHT
+    } else {
+        *median >= SWITCH_TO_DARK
     }
 }
 
@@ -6606,7 +6765,14 @@ mod worker_lifecycle_tests {
 
 #[cfg(test)]
 mod adaptive_popup_tests {
-    use super::{TranslationPreview, adaptive_text_panel_height, translation_preview_layout};
+    use super::{
+        TranslationPreview, adaptive_text_panel_height, backdrop_prefers_dark_text,
+        translation_preview_layout,
+    };
+
+    fn uniform_backdrop(value: u8) -> Vec<u8> {
+        [value, value, value, u8::MAX].repeat(5_000)
+    }
 
     #[test]
     fn short_text_uses_the_compact_minimum() {
@@ -6643,6 +6809,23 @@ mod adaptive_popup_tests {
     fn long_translation_uses_the_readable_width() {
         let layout = translation_preview_layout(&"translated text ".repeat(500));
         assert_eq!(layout.card_width, 560.0);
+    }
+
+    #[test]
+    fn backdrop_contrast_uses_dark_text_on_light_material() {
+        assert!(backdrop_prefers_dark_text(&uniform_backdrop(230), false));
+    }
+
+    #[test]
+    fn backdrop_contrast_uses_light_text_on_dark_material() {
+        assert!(!backdrop_prefers_dark_text(&uniform_backdrop(40), true));
+    }
+
+    #[test]
+    fn backdrop_contrast_has_hysteresis_around_midtones() {
+        let backdrop = uniform_backdrop(135);
+        assert!(!backdrop_prefers_dark_text(&backdrop, false));
+        assert!(backdrop_prefers_dark_text(&backdrop, true));
     }
 
     #[test]

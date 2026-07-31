@@ -21,15 +21,14 @@ use windows_sys::Win32::{
         Threading::GetCurrentProcessId,
     },
     UI::{
-        Input::KeyboardAndMouse::ReleaseCapture,
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
         WindowsAndMessaging::{
             GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
-            GetWindowRect, GetWindowThreadProcessId, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST,
-            IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-            SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-            SetWindowPos, ShowWindow, WM_NCLBUTTONDOWN, WS_CAPTION, WS_EX_APPWINDOW,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-            WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+            GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible,
+            SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_CAPTION,
+            WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
+            WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -793,18 +792,44 @@ fn apply_translation_window_contract(hwnd: HWND) {
     }
 }
 
-pub fn begin_window_drag(window_handle: u64) -> Result<(), String> {
+pub fn enable_translation_live_backdrop(window_handle: u64) -> Result<(), String> {
     let hwnd = window_handle as usize as HWND;
     if hwnd.is_null() {
-        return Err("drag window handle is not available".to_owned());
+        return Err("translation window handle is not available".to_owned());
     }
-    // SAFETY: ReleaseCapture and WM_NCLBUTTONDOWN are the standard Win32
-    // contract for initiating a native caption drag from custom chrome.
+    // SAFETY: DWM owns this process-local HWND's composition material. A
+    // transient system backdrop is continuously recomposed by Windows while
+    // the window moves, unlike a captured bitmap.
     unsafe {
-        let _ = ReleaseCapture();
-        let _ = SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+        apply_transient_backdrop(hwnd);
     }
+    flush_composition("enabling live translation backdrop")?;
     Ok(())
+}
+
+pub fn disable_translation_live_backdrop(window_handle: u64) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("translation window handle is not available".to_owned());
+    }
+    apply_translation_window_contract(hwnd);
+    flush_composition("restoring captured translation backdrop")
+}
+
+#[must_use]
+pub fn primary_pointer_button_is_down() -> bool {
+    // SAFETY: GetAsyncKeyState does not retain pointers and VK_LBUTTON is a
+    // documented virtual-key constant. This query runs outside input hooks.
+    unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 }
+}
+
+fn flush_composition(operation: &str) -> Result<(), String> {
+    let result = unsafe { DwmFlush() };
+    if result < 0 {
+        Err(format!("DwmFlush failed while {operation}: 0x{result:08X}"))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn configure_standard_window(window_handle: u64) -> Result<(), String> {

@@ -151,10 +151,12 @@ impl PresentationState {
 }
 
 type PresentedCallback = Arc<dyn Fn(u64) + Send + Sync>;
+type RenderedFrameCallback = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub(crate) struct OverlayPresenter {
     state: Arc<Mutex<PresentationState>>,
+    rendered_frame_callback: Arc<Mutex<Option<RenderedFrameCallback>>>,
     name: &'static str,
     contract: OverlayContract,
 }
@@ -168,11 +170,23 @@ impl OverlayPresenter {
     ) -> Result<Self, String> {
         let state = Arc::new(Mutex::new(PresentationState::default()));
         let render_state = Arc::clone(&state);
+        let rendered_frame_callback = Arc::new(Mutex::new(None::<RenderedFrameCallback>));
+        let render_callback = Arc::clone(&rendered_frame_callback);
         let callback = on_presented;
         window
             .set_rendering_notifier(move |rendering_state, _graphics_api| {
                 if !matches!(rendering_state, RenderingState::AfterRendering) {
                     return;
+                }
+                if let Some(callback) = render_callback
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    && let Err(error) = slint::invoke_from_event_loop(callback)
+                {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "{name} transition=failed stage=queue_frame_callback error={error}"
+                    ));
                 }
                 let ticket = render_state
                     .lock()
@@ -244,6 +258,7 @@ impl OverlayPresenter {
             .map_err(|error| format!("{name} renderer cannot acknowledge frames: {error:?}"))?;
         Ok(Self {
             state,
+            rendered_frame_callback,
             name,
             contract,
         })
@@ -316,6 +331,34 @@ impl OverlayPresenter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .await_frame(ticket)?;
+        window.request_redraw();
+        Ok(())
+    }
+
+    pub(crate) fn after_next_frame(
+        &self,
+        window: &slint::Window,
+        callback: impl FnOnce() + Send + 'static,
+    ) -> Result<(), String> {
+        let presented = matches!(
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .phase,
+            PresentationPhase::Presented(_)
+        );
+        if !presented {
+            return Err("overlay is not presented for a frame-gated interaction".to_owned());
+        }
+        let mut pending = self
+            .rendered_frame_callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.is_some() {
+            return Err("overlay already has a frame-gated interaction pending".to_owned());
+        }
+        *pending = Some(Box::new(callback));
+        drop(pending);
         window.request_redraw();
         Ok(())
     }
