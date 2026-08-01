@@ -20,6 +20,17 @@ commercial product receives its own final name.
   `WM_CLOSE`, `WM_QUIT`, or an explicit `shutdown` control command.
 - Runtime files are declared in `assets/runtime-assets.json` and published only
   by this workspace's own scripts.
+- Traversal decisions and fixed, allocation-free action timelines live in the
+  independent `pet_motion` crate. Rendering consumes those plans; it does not
+  choose mechanics or run per-layer action timers.
+
+## Character production assets
+
+The approved visual contract is documented in
+`docs/CHARACTER_ASSET_SPEC.md`. Prompts written specifically for sequential
+OpenAI Image editing live in `assets/OPENAI_IMAGE_PRODUCTION_RIG_PROMPTS.md`.
+Generate and approve the clean front master before any action pose; later
+images inherit identity from that approved master.
 
 Debug builds may load generated assets from the workspace. Published builds
 load the allow-listed files from `assets` beside `DesktopPet.exe` and fail

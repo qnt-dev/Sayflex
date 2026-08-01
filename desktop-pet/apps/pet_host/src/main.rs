@@ -61,11 +61,7 @@ const RUN_SPEED: f32 = 3.2;
 /// Ширина кисти в долях ширины персонажа.
 const HAND_WIDTH: f32 = 0.34;
 
-const PET_PARTICLES: usize = 700;
 const ORB_PARTICLES: usize = 320;
-/// Частиц на каждый якорь — уши и хвост. Ровное кольцо вокруг тела читалось
-/// как рамка, поэтому облако собрано в три небольшие группы.
-const PARTICLES_PER_ANCHOR: usize = 9;
 const ORB_ORBIT_COUNT: usize = 20;
 
 const MOVING_THRESHOLD: f32 = 12.0;
@@ -115,8 +111,6 @@ struct Rig {
     /// Левый верхний угол визора в координатах холста.
     visor_origin: Vec2,
     visor: pet_face::Visor,
-    /// Уши и хвост в координатах холста: (центр, радиус).
-    anchors: Vec<(Vec2, f32)>,
     /// Ноги: спрайт, пивот и левый верхний угол в координатах холста.
     legs: Vec<(Sprite, (f32, f32), Vec2)>,
     /// Манжеты карманов в координатах холста: левая, правая.
@@ -324,20 +318,6 @@ impl Assets {
             creature_origin.y + (self.manifest.visor.y.saturating_sub(offset_y) as f32) * scale,
         );
 
-        let anchors = self
-            .manifest
-            .particle_anchors
-            .iter()
-            .map(|anchor| {
-                (
-                    Vec2::new(
-                        creature_origin.x + (anchor.x - offset_x as f32) * scale,
-                        creature_origin.y + (anchor.y - offset_y as f32) * scale,
-                    ),
-                    anchor.radius * scale,
-                )
-            })
-            .collect();
         let legs = self
             .legs
             .iter()
@@ -380,7 +360,6 @@ impl Assets {
             orb_rest,
             visor_origin,
             visor: self.manifest.visor_geometry(),
-            anchors,
             legs,
             pockets,
             ground,
@@ -1120,17 +1099,11 @@ impl OrbLife {
 }
 
 struct Clouds {
-    pet: Particles,
     orb: Particles,
 }
 
 impl Clouds {
     fn new(rig: &Rig) -> Self {
-        let mut pet = Particles::with_capacity(PET_PARTICLES, 0x5F1E_C7ED, rig.scale);
-        // Облако собрано у ушей и хвоста, а не размазано вокруг силуэта.
-        for (centre, radius) in &rig.anchors {
-            pet.seed_orbit(*centre, radius * 0.35, *radius, PARTICLES_PER_ANCHOR);
-        }
         let mut orb = Particles::with_capacity(ORB_PARTICLES, 0x0B1D_2E3F, rig.scale);
         let orb_half = rig.orb.width().max(rig.orb.height()) as f32 / 2.0;
         orb.seed_orbit(
@@ -1139,11 +1112,11 @@ impl Clouds {
             orb_half * 1.8,
             ORB_ORBIT_COUNT,
         );
-        Self { pet, orb }
+        Self { orb }
     }
 
     fn alive(&self) -> usize {
-        self.pet.alive() + self.orb.alive()
+        self.orb.alive()
     }
 }
 
@@ -1169,13 +1142,12 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
     let mut character_layers = CharacterLayers::new(rig.canvas_size);
     let mut clouds = Clouds::new(&rig);
     let mut mood = Mood::new(0x1234_5678);
-    let mut quads: Vec<Quad> = Vec::with_capacity(PET_PARTICLES.max(ORB_PARTICLES));
+    let mut quads: Vec<Quad> = Vec::with_capacity(ORB_PARTICLES);
     // По умолчанию приложение полностью автономно. stdin активируется только
     // явным флагом и не связывает жизненный цикл с каким-либо другим продуктом.
     let events = stdin_control.then(Events::from_stdin);
     let mut inbox: Vec<Event> = Vec::new();
     let mut mind = Engagement::default();
-    let mut typing_pulse = 0.0_f32;
     let mut body = Body::default();
     let mut walk = Walk::default();
     let mut orientation = Orientation::default();
@@ -1321,10 +1293,9 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
             rig.creature.height() as f32 * HOP_HEIGHT,
         );
         overlay.set_position(anchor.x as i32, anchor.y as i32)?;
-        // Частицы живут в координатах холста; при переезде окна хвост должен
-        // остаться на месте в экранных, поэтому сдвигаем на обратную величину.
+        // Разлетевшиеся частицы сферы живут в экранных координатах. При
+        // переезде окна компенсируем его движение, чтобы взрыв не ехал следом.
         let drift = previous_anchor - anchor;
-        clouds.pet.shift(drift);
         clouds.orb.shift(drift);
 
         let offset = orb_motion.update(dt, orbit_radius);
@@ -1334,22 +1305,6 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
         clouds.orb.move_home(next_orb - orb_position);
         orb_position = next_orb;
 
-        let emitter = rig.creature_centre + Vec2::new(0.0, rig.creature.height() as f32 * 0.18);
-        // Кометный хвост тянется за бегом: на шаге его нет, иначе персонаж
-        // всё время выглядел бы разогнавшимся.
-        if gait == Gait::Run {
-            clouds.pet.emit_trail(
-                emitter,
-                34.0 * rig.scale,
-                Vec2::new(-direction * gait.speed(width) * 0.18, 0.0),
-            );
-        } else {
-            clouds.pet.emit_trail(emitter, f32::MAX, Vec2::default());
-        }
-        // Облако у ушей и хвоста обязано следовать за телом: при прыжке
-        // персонаж поднимается, и частицы должны подняться вместе с ним.
-        clouds.pet.set_anchor_offset(Vec2::new(0.0, -hopper.height));
-        clouds.pet.update(dt);
         clouds.orb.update(dt);
         let orb_visible = orb_life.update(dt, &mut clouds.orb, orb_position, orb_body_radius);
 
@@ -1361,11 +1316,9 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
         body.update(dt, &mind, activity, hopper.squash);
         hands.update(dt, &mind, gait);
 
-        // Печать отзывается в облаке: частицы у ушей вспыхивают в ритм ударов
-        // по клавишам, а не просто светятся ярче.
-        typing_pulse += dt * (3.0 + mind.typing * 9.0);
-        let pulse = 1.0 + mind.typing * (0.35 + typing_pulse.sin() * 0.25);
-        clouds.pet.set_brightness(pulse);
+        // Свободные пиксельные частицы принадлежат только сфере. Вокруг тела
+        // персонажа их нет: контактные эффекты ходьбы и бега будут отдельными
+        // формами (пыль, линии скорости, ударные дуги), а не квадратным шумом.
         clouds.orb.set_brightness(1.0 + mind.voice * 0.5);
 
         compose(
@@ -1454,8 +1407,6 @@ fn compose(
     // землёй, тем она мельче и слабее. Это и читается как переступание.
     draw_shadow(canvas, rig, hopper);
 
-    clouds.pet.collect(quads);
-    draw_layer(canvas, quads, true);
     clouds.orb.collect(quads);
     draw_layer(canvas, quads, true);
 
@@ -1470,8 +1421,6 @@ fn compose(
         );
     }
 
-    clouds.pet.collect(quads);
-    draw_layer(canvas, quads, false);
     clouds.orb.collect(quads);
     draw_layer(canvas, quads, false);
 }
@@ -1770,7 +1719,6 @@ fn dump_sheet(path: &Path, scale: f32) -> Result<(), String> {
         let mut canvas = Canvas::new(rig.canvas_size.0, rig.canvas_size.1);
         let mut clouds = Clouds::new(&rig);
         for _ in 0..180 {
-            clouds.pet.update(1.0 / 60.0);
             clouds.orb.update(1.0 / 60.0);
         }
         let mut mood = Mood::new(0x1234_5678);

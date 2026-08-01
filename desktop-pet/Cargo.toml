@@ -5,6 +5,7 @@ members = [
     "crates/pet_face",
     "crates/pet_hands",
     "crates/pet_ipc",
+    "crates/pet_motion",
     "crates/pet_particles",
     "crates/pet_platform",
     "crates/pet_render",
