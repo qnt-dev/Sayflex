@@ -59,9 +59,16 @@
     }
   },
   "arms": {
+    "far": {
+      "sprite": "profile_motion_right_arm_far.png",
+      "pivot_x": 255.22,
+      "pivot_y": 464.23,
+      "origin_x": 0,
+      "origin_y": 0
+    },
     "near": {
       "sprite": "profile_motion_right_arm_near.png",
-      "pivot_x": 255.22,
+      "pivot_x": 451.98,
       "pivot_y": 464.23,
       "origin_x": 0,
       "origin_y": 0

@@ -889,6 +889,7 @@ struct SolvedLeg {
     hip: f32,
     knee: f32,
     foot: f32,
+    translation: Vec2,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -912,6 +913,14 @@ struct ProfileLegFrame {
     pelvis: ProfilePelvis,
     track_x: f32,
     stride: f32,
+    metrics: ProfileLegMetrics,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProfileLegMetrics {
+    upper: f32,
+    lower: f32,
+    ankle_drop: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1892,6 +1901,7 @@ fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>, body_layer: &m
     };
     let leg_tracks = profile_leg_tracks(&pose.leg_chains, facing_right);
     let leg_stride = profile_common_stride(&pose.leg_chains, frame.walk);
+    let leg_metrics = profile_leg_metrics(&pose.leg_chains);
     let lift = frame.hopper.height + pelvis.lift;
     let offset = Vec2::new(pelvis.horizontal, -lift);
     let body_warp = profile_body_warp(frame.warp, frame.walk, facing_right);
@@ -1938,6 +1948,7 @@ fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>, body_layer: &m
                     pelvis,
                     track_x: leg_tracks[index.min(leg_tracks.len() - 1)],
                     stride: leg_stride,
+                    metrics: leg_metrics,
                 },
             );
             if index == 0 {
@@ -1946,13 +1957,11 @@ fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>, body_layer: &m
         }
     }
 
-    // The profile artwork has one painted torso and one near sleeve, not a
-    // volumetric shoulder rig. Rotating that sleeve independently made the
-    // shoulder detach from the jacket. Keep it attached to the rigid torso;
-    // proper arm swing requires authored arm layers with matching shoulder
-    // sockets, rather than deforming this master asset.
+    // Reference contract: each arm counter-swings with the leg on the same
+    // side. Both sockets follow the exact torso attachment below, so the
+    // shoulder never tears away while the hand still describes a readable arc.
     let arm_margin = (pose.creature.height() as f32 * 0.15).ceil() as i32 + 2;
-    let arm_angles = (0.0, 0.0);
+    let arm_angles = profile_arm_angles(leg_motions, frame.walk, facing);
     if let Some((sprite, pivot, position)) = &pose.arm_far {
         let attachment = warped_profile_attachment(
             &body_warp,
@@ -1967,27 +1976,6 @@ fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>, body_layer: &m
             (position.y + offset.y + attachment.y) as i32,
             *pivot,
             arm_angles.0,
-            arm_margin,
-        );
-    }
-
-    // The near sleeve is also drawn before the torso. The torso's retained
-    // shoulder cap then overlaps the rotating sleeve and makes the two parts
-    // one continuous silhouette instead of exposing a cut line.
-    if let Some((sprite, pivot, position)) = &pose.arm_near {
-        let attachment = warped_profile_attachment(
-            &body_warp,
-            pose.creature_origin,
-            (pose.creature.width(), pose.creature.height()),
-            *position,
-            *pivot,
-        );
-        canvas.draw_rotated(
-            sprite,
-            (position.x + offset.x + attachment.x) as i32,
-            (position.y + offset.y + attachment.y) as i32,
-            *pivot,
-            arm_angles.1,
             arm_margin,
         );
     }
@@ -2014,6 +2002,28 @@ fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>, body_layer: &m
         &body_warp,
         body_margin,
     );
+
+    // Depth order from the profile references: the far sleeve is behind the
+    // ribcage, while the near sleeve crosses in front. Keeping this draw after
+    // the torso prevents the forward arm from vanishing during the passing
+    // pose; its source mask retains only a small shoulder overlap.
+    if let Some((sprite, pivot, position)) = &pose.arm_near {
+        let attachment = warped_profile_attachment(
+            &body_warp,
+            pose.creature_origin,
+            (pose.creature.width(), pose.creature.height()),
+            *position,
+            *pivot,
+        );
+        canvas.draw_rotated(
+            sprite,
+            (position.x + offset.x + attachment.x) as i32,
+            (position.y + offset.y + attachment.y) as i32,
+            *pivot,
+            arm_angles.1,
+            arm_margin,
+        );
+    }
 }
 
 /// Draws the continuous tail between the far and near leg.  The root follows
@@ -2085,6 +2095,25 @@ fn profile_body_warp(mut warp: Warp, _walk: &Walk, _facing_right: bool) -> Warp 
     warp
 }
 
+/// Arm drive sampled from the same foot trajectories as the legs.
+///
+/// This is intentionally not another free-running sine. At forward contact the
+/// matching arm is behind; at trailing contact it is ahead. The result retains
+/// exact opposition during contact/down/passing/up and cannot drift out of phase
+/// when walk speed or stance duration changes.
+fn profile_arm_angles(motions: [LegMotion; 2], walk: &Walk, facing: f32) -> (f32, f32) {
+    // The two authored sleeves are deliberately supplied in the first contact
+    // pose (far arm back, near arm ahead), not vertically neutral. Subtracting
+    // that authored lean converts both paintings to one canonical shoulder
+    // angle before applying the reference-driven counter-swing.
+    const AUTHORED_LEAN: [f32; 2] = [0.34, -0.52];
+    let amplitude = mix(0.64, 0.88, smooth_unit(walk.run));
+    (
+        (motions[0].horizontal * amplitude - AUTHORED_LEAN[0]) * facing * walk.blend,
+        (motions[1].horizontal * amplitude - AUTHORED_LEAN[1]) * facing * walk.blend,
+    )
+}
+
 fn draw_profile_leg_chain(
     canvas: &mut Canvas,
     chain: &ProfileLegChain,
@@ -2094,8 +2123,8 @@ fn draw_profile_leg_chain(
     let pose = solve_profile_leg(chain, frame);
     canvas.draw_skinned_limb(
         &chain.sprite,
-        (chain.origin.x + offset.x).round() as i32,
-        (chain.origin.y + offset.y).round() as i32,
+        (chain.origin.x + offset.x + pose.translation.x).round() as i32,
+        (chain.origin.y + offset.y + pose.translation.y).round() as i32,
         chain.hip,
         chain.knee,
         chain.ankle,
@@ -2231,23 +2260,51 @@ fn solve_profile_leg(chain: &ProfileLegChain, frame: ProfileLegFrame) -> SolvedL
     );
     let hip = normalize_angle(desired_thigh - source_thigh);
     let shin = normalize_angle(desired_shin - source_shin);
+    let knee = normalize_angle(shin - hip);
+    let actual_knee = add_pair(
+        chain.hip,
+        rotate_pair(
+            (chain.knee.0 - chain.hip.0, chain.knee.1 - chain.hip.1),
+            hip,
+        ),
+    );
+    let actual_ankle = add_pair(
+        actual_knee,
+        rotate_pair(
+            (chain.ankle.0 - chain.knee.0, chain.ankle.1 - chain.knee.1),
+            hip + knee,
+        ),
+    );
     SolvedLeg {
         hip,
-        knee: normalize_angle(shin - hip),
+        knee,
         foot: -facing * frame.motion.toe_lift * (0.13 + frame.run * 0.05) * frame.blend,
+        // Both source layers now follow one canonical skeleton. Their authored
+        // bone lengths differ by less than a pixel at runtime; this sub-pixel
+        // socket correction keeps the planted paw exact while the jacket drawn
+        // above hides the corresponding movement at the hip.
+        translation: Vec2::new(
+            geometry.ankle.0 - actual_ankle.0,
+            geometry.ankle.1 - actual_ankle.1,
+        ),
     }
 }
 
 fn solve_profile_leg_geometry(chain: &ProfileLegChain, frame: ProfileLegFrame) -> LegGeometry {
-    let upper = point_distance(chain.hip, chain.knee);
-    let lower = point_distance(chain.knee, chain.ankle);
+    let upper = frame.metrics.upper;
+    let lower = frame.metrics.lower;
     let length = upper + lower;
     let facing = if frame.facing_right { 1.0 } else { -1.0 };
     let clearance = length * (0.19 + frame.run * 0.06) * frame.motion.lift * frame.blend;
     let gait_target_x = frame.track_x + facing * frame.motion.horizontal * frame.stride;
     let mut target = (
         mix(chain.ankle.0, gait_target_x, frame.blend) - frame.pelvis.horizontal,
-        chain.ankle.1 + frame.pelvis.lift - clearance,
+        mix(
+            chain.ankle.1,
+            chain.hip.1 + frame.metrics.ankle_drop,
+            frame.blend,
+        ) + frame.pelvis.lift
+            - clearance,
     );
 
     let mut direction = (target.0 - chain.hip.0, target.1 - chain.hip.1);
@@ -2287,6 +2344,15 @@ fn solve_profile_leg_geometry(chain: &ProfileLegChain, frame: ProfileLegFrame) -
         knee: desired_knee,
         ankle: target,
     }
+}
+
+fn add_pair(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    (a.0 + b.0, a.1 + b.1)
+}
+
+fn rotate_pair(point: (f32, f32), angle: f32) -> (f32, f32) {
+    let (sin, cos) = angle.sin_cos();
+    (point.0 * cos - point.1 * sin, point.0 * sin + point.1 * cos)
 }
 
 fn point_distance(a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -2330,19 +2396,32 @@ fn profile_leg_origin_shifts(chains: &[ProfileLegChain]) -> [f32; 2] {
     ]
 }
 
+/// One kinematic skeleton shared by the depth-separated leg paintings.  The
+/// source artist drew the far knee at a different resting angle, but that is a
+/// texture property, not a different anatomy.  Averaging segment lengths makes
+/// the desired thigh and shin angles identical for both half-steps.
+fn profile_leg_metrics(chains: &[ProfileLegChain]) -> ProfileLegMetrics {
+    if chains.is_empty() {
+        return ProfileLegMetrics::default();
+    }
+    let count = chains.len().min(2) as f32;
+    chains
+        .iter()
+        .take(2)
+        .fold(ProfileLegMetrics::default(), |mut metrics, chain| {
+            metrics.upper += point_distance(chain.hip, chain.knee) / count;
+            metrics.lower += point_distance(chain.knee, chain.ankle) / count;
+            metrics.ankle_drop += (chain.ankle.1 - chain.hip.1) / count;
+            metrics
+        })
+}
+
 fn profile_common_stride(chains: &[ProfileLegChain], walk: &Walk) -> f32 {
     if chains.is_empty() {
         return 0.0;
     }
-    let count = chains.len().min(2) as f32;
-    let mean_length = chains
-        .iter()
-        .take(2)
-        .map(|chain| {
-            point_distance(chain.hip, chain.knee) + point_distance(chain.knee, chain.ankle)
-        })
-        .sum::<f32>()
-        / count;
+    let metrics = profile_leg_metrics(chains);
+    let mean_length = metrics.upper + metrics.lower;
     // A contact pose needs visible separation between the two large boots.
     // Both legs deliberately use this one mean length, otherwise small source
     // rig differences turn into a visible asymmetric stride.
@@ -2892,6 +2971,7 @@ mod gait_tests {
                         pelvis,
                         track_x: tracks[index],
                         stride,
+                        metrics: profile_leg_metrics(&pose.leg_chains),
                     },
                 );
                 let world_y = chain.origin.y - pelvis.lift + geometry.ankle.1;
@@ -2945,6 +3025,7 @@ mod gait_tests {
                             pelvis,
                             track_x: tracks[index.min(1)],
                             stride,
+                            metrics: profile_leg_metrics(&pose.leg_chains),
                         },
                     );
                     let leg_axis = (
@@ -3013,6 +3094,7 @@ mod gait_tests {
                 pelvis: contact_pelvis,
                 track_x: tracks[0],
                 stride,
+                metrics: profile_leg_metrics(&rig.profile_right.leg_chains),
             },
         );
 
@@ -3041,6 +3123,7 @@ mod gait_tests {
                 pelvis: passing_pelvis,
                 track_x: tracks[0],
                 stride,
+                metrics: profile_leg_metrics(&rig.profile_right.leg_chains),
             },
         );
 
@@ -3094,6 +3177,7 @@ mod gait_tests {
                             pelvis,
                             track_x: tracks[index],
                             stride,
+                            metrics: profile_leg_metrics(&pose.leg_chains),
                         },
                     );
                     pose.leg_chains[index].origin.x
@@ -3220,6 +3304,7 @@ mod gait_tests {
                         pelvis,
                         track_x: tracks[index],
                         stride,
+                        metrics: profile_leg_metrics(&pose.leg_chains),
                     },
                 );
                 let world_x =
@@ -3288,6 +3373,7 @@ mod gait_tests {
                     pelvis,
                     track_x: tracks[support_index],
                     stride,
+                    metrics: profile_leg_metrics(&pose.leg_chains),
                 },
             );
             joint_flexion(&pose.leg_chains[support_index], geometry)
@@ -3312,6 +3398,107 @@ mod gait_tests {
                 "support leg {support_index} remained visibly crouched at toe-off: {up_flexion:.3} rad"
             );
         }
+    }
+
+    #[test]
+    fn both_painted_legs_follow_one_canonical_joint_pose() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        for (pose, facing_right) in [(&rig.profile_right, true), (&rig.profile_left, false)] {
+            let metrics = profile_leg_metrics(&pose.leg_chains);
+            let tracks = profile_leg_tracks(&pose.leg_chains, facing_right);
+            for sample in 0..64 {
+                let walk = Walk {
+                    phase: sample as f32 / 64.0 * std::f32::consts::TAU,
+                    blend: 1.0,
+                    ..Walk::default()
+                };
+                let motion = walk.profile_leg_motion(0);
+                let motions = [motion, motion];
+                let pelvis = profile_pelvis_for_walk(
+                    &pose.leg_chains,
+                    [walk.profile_leg_motion(0), walk.profile_leg_motion(1)],
+                    facing_right,
+                    &walk,
+                );
+                let stride = profile_common_stride(&pose.leg_chains, &walk);
+                let geometry = pose
+                    .leg_chains
+                    .iter()
+                    .enumerate()
+                    .map(|(index, chain)| {
+                        solve_profile_leg_geometry(
+                            chain,
+                            ProfileLegFrame {
+                                motion: motions[index],
+                                facing_right,
+                                run: 0.0,
+                                blend: 1.0,
+                                pelvis,
+                                track_x: tracks[index],
+                                stride,
+                                metrics,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let joint_angles = |index: usize| {
+                    let chain = &pose.leg_chains[index];
+                    let solved = geometry[index];
+                    (
+                        point_angle(solved.knee.0 - chain.hip.0, solved.knee.1 - chain.hip.1),
+                        point_angle(
+                            solved.ankle.0 - solved.knee.0,
+                            solved.ankle.1 - solved.knee.1,
+                        ),
+                    )
+                };
+                let far = joint_angles(0);
+                let near = joint_angles(1);
+                assert!(normalize_angle(far.0 - near.0).abs() < 1e-4);
+                assert!(normalize_angle(far.1 - near.1).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn arms_counter_swing_with_their_matching_legs() {
+        for sample in 0..64 {
+            let walk = Walk {
+                phase: sample as f32 / 64.0 * std::f32::consts::TAU,
+                blend: 1.0,
+                ..Walk::default()
+            };
+            let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
+            let angles = profile_arm_angles(motions, &walk, 1.0);
+            let expected = (
+                motions[0].horizontal * 0.64 - 0.34,
+                motions[1].horizontal * 0.64 + 0.52,
+            );
+            assert!((angles.0 - expected.0).abs() < 1e-5);
+            assert!((angles.1 - expected.1).abs() < 1e-5);
+        }
+
+        let contact = Walk {
+            phase: 0.0,
+            blend: 1.0,
+            ..Walk::default()
+        };
+        let motions = [contact.profile_leg_motion(0), contact.profile_leg_motion(1)];
+        let angles = profile_arm_angles(motions, &contact, 1.0);
+        assert!(angles.0.abs() < 0.03 && angles.1 > 0.20);
+
+        let opposite = Walk {
+            phase: std::f32::consts::PI,
+            blend: 1.0,
+            ..Walk::default()
+        };
+        let motions = [
+            opposite.profile_leg_motion(0),
+            opposite.profile_leg_motion(1),
+        ];
+        let angles = profile_arm_angles(motions, &opposite, 1.0);
+        assert!(angles.0 < -0.55 && angles.1 > 0.80);
     }
 
     #[test]
