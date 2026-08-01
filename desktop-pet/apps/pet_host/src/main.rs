@@ -1921,11 +1921,15 @@ fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>, body_layer: &m
     } else {
         // Far leg first, near leg second. The jacket overlaps both hip joints,
         // and the body is drawn afterwards, hiding the mechanical cut lines.
+        let leg_origin_shifts = profile_leg_origin_shifts(&pose.leg_chains);
         for (index, chain) in pose.leg_chains.iter().enumerate() {
             draw_profile_leg_chain(
                 canvas,
                 chain,
-                offset,
+                Vec2::new(
+                    offset.x + leg_origin_shifts[index.min(leg_origin_shifts.len() - 1)],
+                    offset.y,
+                ),
                 ProfileLegFrame {
                     motion: leg_motions[index.min(leg_motions.len() - 1)],
                     facing_right,
@@ -2145,7 +2149,14 @@ fn profile_pelvis_motion(
     }
     let baseline = contact_ceiling - reference_length * 0.002;
 
-    let walk_lift = baseline + walk.body_lift(reference_length * 0.040);
+    // The support leg must visibly extend between the down pose and toe-off.
+    // Four percent of leg length left both knees permanently flexed: the root
+    // never rose far enough for the planted leg to open, even though the paw
+    // itself followed the reference track.  The local eight-frame references
+    // show roughly a tenth of a leg-length between the compressed down pose and
+    // the high/toe-off pose.  The reach ceiling below remains the hard physical
+    // limit, so a shorter custom rig cannot hyperextend.
+    let walk_lift = baseline + walk.body_lift(reference_length * 0.095);
     let run_lift = baseline
         + if motions.iter().all(|motion| !motion.grounded) {
             reference_length * 0.075 * walk.run_flight_lift()
@@ -2282,27 +2293,40 @@ fn point_distance(a: (f32, f32), b: (f32, f32)) -> f32 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
 
-/// Both feet use one sagittal track in profile.
+/// Both feet use the same hip-relative sagittal track in profile.
 ///
-/// The extracted source has a shallow three-quarter stance, but preserving its
-/// two neutral lanes made one swing travel much farther past the support foot
-/// than the other. A shared track gives both half-steps identical geometry;
-/// the canonical pelvis baseline above keeps that track anatomically reachable.
+/// The generated source is a shallow three-quarter view: its painted hip
+/// sockets are about one third of a stride apart on the screen. Treating that
+/// depth offset as fore/aft anatomy made one support leg pass underneath its hip
+/// while the other remained far behind it. `profile_leg_origin_shifts` projects
+/// both sockets into one sagittal plane for rendering; using the hip itself as
+/// the neutral track then gives both legs identical contact geometry.
 fn profile_leg_tracks(chains: &[ProfileLegChain], _facing_right: bool) -> [f32; 2] {
     if chains.is_empty() {
         return [0.0, 0.0];
     }
+    [chains[0].hip.0, chains.get(1).unwrap_or(&chains[0]).hip.0]
+}
+
+/// Horizontal render offsets that collapse the source's depth-separated hip
+/// sockets onto one profile-plane joint. The jacket is painted afterwards and
+/// covers the small socket overlap, while knees, ankles and paw tracks remain
+/// articulated as one continuous limb.
+fn profile_leg_origin_shifts(chains: &[ProfileLegChain]) -> [f32; 2] {
+    if chains.is_empty() {
+        return [0.0, 0.0];
+    }
     let count = chains.len().min(2) as f32;
-    let centre = chains
+    let hip_centre = chains
         .iter()
         .take(2)
-        .map(|chain| chain.origin.x + chain.ankle.0)
+        .map(|chain| chain.origin.x + chain.hip.0)
         .sum::<f32>()
         / count;
-    let track = |chain: &ProfileLegChain| centre - chain.origin.x;
+    let shift = |chain: &ProfileLegChain| hip_centre - (chain.origin.x + chain.hip.0);
     [
-        track(&chains[0]),
-        track(chains.get(1).unwrap_or(&chains[0])),
+        shift(&chains[0]),
+        shift(chains.get(1).unwrap_or(&chains[0])),
     ]
 }
 
@@ -3032,14 +3056,15 @@ mod gait_tests {
         for (pose, facing_right) in [(&rig.profile_right, true), (&rig.profile_left, false)] {
             let facing = if facing_right { 1.0 } else { -1.0 };
             let tracks = profile_leg_tracks(&pose.leg_chains, facing_right);
+            let origin_shifts = profile_leg_origin_shifts(&pose.leg_chains);
             let stride_walk = Walk {
                 blend: 1.0,
                 ..Walk::default()
             };
             let stride = profile_common_stride(&pose.leg_chains, &stride_walk);
             let world_tracks = [
-                pose.leg_chains[0].origin.x + tracks[0],
-                pose.leg_chains[1].origin.x + tracks[1],
+                pose.leg_chains[0].origin.x + origin_shifts[0] + tracks[0],
+                pose.leg_chains[1].origin.x + origin_shifts[1] + tracks[1],
             ];
             assert!(
                 (world_tracks[0] - world_tracks[1]).abs() < 0.01,
@@ -3071,7 +3096,10 @@ mod gait_tests {
                             stride,
                         },
                     );
-                    pose.leg_chains[index].origin.x + pelvis.horizontal + geometry.ankle.0
+                    pose.leg_chains[index].origin.x
+                        + origin_shifts[index]
+                        + pelvis.horizontal
+                        + geometry.ankle.0
                 };
                 let advance = (ankle_x(swing_index) - ankle_x(support_index)) * facing;
                 advances[swing_index] = advance;
@@ -3231,6 +3259,59 @@ mod gait_tests {
         }
         assert!(lift_at(0.125) < lift_at(0.0), "down pose did not descend");
         assert!(lift_at(0.375) > lift_at(0.0), "up pose did not rise");
+    }
+
+    #[test]
+    fn each_support_knee_opens_from_down_pose_to_toe_off() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        let pose = &rig.profile_right;
+        let tracks = profile_leg_tracks(&pose.leg_chains, true);
+
+        let support_flexion = |cycle: f32, support_index: usize| {
+            let walk = Walk {
+                phase: cycle * std::f32::consts::TAU,
+                blend: 1.0,
+                ..Walk::default()
+            };
+            let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
+            assert!(motions[support_index].grounded);
+            let pelvis = profile_pelvis_for_walk(&pose.leg_chains, motions, true, &walk);
+            let stride = profile_common_stride(&pose.leg_chains, &walk);
+            let geometry = solve_profile_leg_geometry(
+                &pose.leg_chains[support_index],
+                ProfileLegFrame {
+                    motion: motions[support_index],
+                    facing_right: true,
+                    run: 0.0,
+                    blend: 1.0,
+                    pelvis,
+                    track_x: tracks[support_index],
+                    stride,
+                },
+            );
+            joint_flexion(&pose.leg_chains[support_index], geometry)
+        };
+
+        for (support_index, down, passing, up) in
+            [(0, 0.08_f32, 0.25_f32, 0.375_f32), (1, 0.58, 0.75, 0.875)]
+        {
+            let down_flexion = support_flexion(down, support_index);
+            let passing_flexion = support_flexion(passing, support_index);
+            let up_flexion = support_flexion(up, support_index);
+            assert!(
+                down_flexion > passing_flexion + 0.20,
+                "support leg {support_index} did not open after the down pose: down={down_flexion:.3}, passing={passing_flexion:.3}"
+            );
+            assert!(
+                up_flexion <= passing_flexion + 0.05,
+                "support leg {support_index} folded again before toe-off: passing={passing_flexion:.3}, up={up_flexion:.3}"
+            );
+            assert!(
+                up_flexion < 0.45,
+                "support leg {support_index} remained visibly crouched at toe-off: {up_flexion:.3} rad"
+            );
+        }
     }
 
     #[test]
