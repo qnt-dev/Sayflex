@@ -8,48 +8,64 @@ than asking the model for a sprite sheet.
 The prompts are written specifically for OpenAI Image. Put approved outputs in
 `desktop-pet/assets/source/` using the exact file names below.
 
-## Step 1 — clean front identity master
+## Step 1A — clean identity plate
 
-Reference image: `source/stand.png`
+Reference image: the original `source/stand.png`, not a previously generated
+variation.
+
+Output: `source/rig_master_front_clean.png`
+
+This pass changes no pose. It removes visual elements only.
+
+```text
+Edit the supplied image. Keep the character itself in exactly the same front-
+facing pose, at exactly the same scale, position, proportions, silhouette,
+colours, materials, lighting, outlines and level of detail. Do not redesign or
+beautify the character and do not move any body part.
+
+Make ONLY these removals:
+1. Remove the floating orb completely.
+2. Remove every detached square, pixel, glitch tile and particle outside the
+   character silhouette, including those near the ears and tail.
+3. Remove the eyes, mouth, cross, stars and every other face graphic from the
+   visor. Leave the visor as one clean, blank, dark glossy surface.
+4. Remove the background, background glow, bloom, floor and shadow. Everything
+   outside the character silhouette must be truly transparent alpha.
+
+Keep embedded cyan and magenta technical details that physically touch the
+clothing. Keep the current arms in the pockets and keep the current leg pose in
+this pass. Exactly one unchanged character on a 1024 x 1536 transparent PNG.
+No orb, no detached particles, no scenery, no text, no watermark and no extra
+object. Do not replace transparency with black, grey, gradient or checkerboard.
+```
+
+## Step 1B — riggable front pose
+
+Reference image: the approved `source/rig_master_front_clean.png` only.
 
 Output: `source/rig_master_front.png`
 
 ```text
-Edit the supplied character reference into a clean production animation-rig
-source. Preserve the exact same original character identity, silhouette,
-proportions, large pointed cybernetic ears, hood geometry, glossy oval visor,
-oversized technical jacket, trousers, rounded paws, luminous tail, line weight,
-cel-shaded rendering and material detail. This is an original small
-hacker-alien creature with playful mischievous energy. Do not imitate or copy
-any existing franchise character.
+Edit the supplied clean character plate. Preserve the exact same character,
+front view, canvas, scale, position, head, ears, hood, blank visor, jacket,
+trousers, tail, palette, lighting, outlines and transparent background. Change
+ONLY the arms, the jacket areas beneath them and the spacing of the legs.
 
-Keep a strict orthographic front view and the same standing height and body-to-
-head ratio. Place the feet on one shared baseline. Move the arms only enough to
-make them riggable: both arms are fully visible beside the torso, slightly away
-from the jacket, elbows relaxed, paws visible, with clean background gaps from
-upper sleeve to wrist. Separate the legs slightly so both complete legs and
-feet have clean independent silhouettes. Keep the torso and jacket complete
-behind the limbs.
+Remove both paws from the jacket pockets. Show two complete relaxed arms beside
+the torso, each slightly away from the jacket, with gently bent elbows and both
+rounded paws fully visible. Leave a continuous transparent gap around each arm
+from upper sleeve to paw, except for the natural shoulder connection. The arms
+must be easy to cut into independent animation layers. Reconstruct both empty
+pockets and the complete jacket body beneath the removed arms.
 
-Remove the floating orb from this image. Remove every free-floating square,
-pixel block, glitch tile and particle around the ears, body and tail. Keep only
-small embedded technical light panels that are physically part of the clothing.
-The visor must be blank, dark and glossy: remove the eyes, mouth, symbols and
-all baked facial graphics.
+Separate the legs slightly while keeping both feet on the same baseline. Both
+complete legs and feet must have distinct silhouettes with a narrow transparent
+gap between them. Do not change their length or the character's height.
 
-Use the same premium deep-violet and near-black material palette, restrained
-magenta construction accents and electric-cyan technical lights. Do not make
-every accent equally bright; the character must read clearly without a noisy
-halo.
-
-Create exactly one full-body character on a 1024 x 1536 transparent canvas.
-No floor, no cast shadow, no scenery, no text, no logo, no watermark, no extra
-objects and no extra characters. If real alpha transparency cannot be produced,
-use a perfectly flat #202126 background with no gradient, texture or bloom.
-
-Do not redesign the ears, hood, visor, jacket, tail, paws, colour placement or
-body proportions. Do not crop any body part. Do not add fur realism, weapons,
-backpack, cables, wings or decorative particles.
+Do not change anything else. Do not add an orb, face, free particles, glow,
+floor, shadow, scenery, text or watermark. Everything outside the character
+silhouette remains truly transparent alpha. Exactly one character on the same
+1024 x 1536 canvas.
 ```
 
 ## Step 2 — clean right-profile rig master
