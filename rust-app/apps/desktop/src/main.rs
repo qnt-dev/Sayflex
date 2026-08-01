@@ -40,7 +40,6 @@ use slint::{
 
 mod flow_sphere;
 mod overlay_presenter;
-mod pet;
 
 use overlay_presenter::{OverlayContract, OverlayPresenter};
 
@@ -308,8 +307,6 @@ impl Workers {
         let _ = self.input.send(&InputHostCommand::Shutdown);
         let _ = self.speech.send(&SpeechWorkerCommand::Shutdown);
         let _ = self.translation.send(&TranslationWorkerCommand::Shutdown);
-        // Питомец получает shutdown и также обязан выйти по закрытому stdin.
-        pet::stop();
     }
 
     fn begin_session_end(&self) {
@@ -538,10 +535,6 @@ fn spawn_initial_workers(
     if !startup_gate.wait_until_worker_start_is_allowed() {
         return Ok(None);
     }
-    // Питомец необязателен: если его нет рядом, запуск молча пропускается.
-    // В том же job-объекте, чтобы он не пережил приложение.
-    pet::start(&job);
-
     Ok(Some(InitialWorkers {
         job,
         input_child,
@@ -2931,7 +2924,6 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 set_indicator_status(settings, &format!("Could not start recording: {error}"));
                 return;
             }
-            pet::dictation_started();
             indicator_animation.borrow_mut().begin_listening();
             if let Some(indicator) = indicator.upgrade() {
                 indicator.set_processing(false);
@@ -2945,7 +2937,6 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             session_id,
             target: _,
         } => {
-            pet::dictation_finished();
             state
                 .borrow_mut()
                 .release_started
@@ -2978,9 +2969,6 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 }
                 set_indicator_status(settings, "Processing locally…");
             }
-        }
-        InputHostEvent::TypingActivity { intensity_percent } => {
-            pet::typing(f32::from(intensity_percent) / 100.0);
         }
         InputHostEvent::InsertLastRequested { target } => {
             let resolution = state.borrow_mut().request_insert_last(target);
@@ -3158,7 +3146,6 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             delivery,
             dispatch_duration_ms,
         } => {
-            pet::insert_succeeded();
             let (owns_indicator, total_after_release_ms, transcript_latency) = {
                 let mut state = state.borrow_mut();
                 state.targets.remove(&session_id);
@@ -3253,7 +3240,6 @@ speculative_reuse={} method={} delivery={}",
             code,
             message,
         } => {
-            pet::insert_failed();
             rust_app_core::diagnostics::log_line(&format!(
                 "input_host_action result=failed session={session_id:?} code={code} message={message}"
             ));
@@ -3801,9 +3787,6 @@ fn handle_speech_event(
                 indicator_animation
                     .borrow_mut()
                     .set_microphone_signal(peak, &spectrum);
-                // Питомцу уходит только громкость: спектр ему не нужен, а по
-                // одному числу восстановить речь нельзя.
-                pet::voice(peak);
             }
         }
         SpeechWorkerEvent::Processing { session_id: _ } => {
@@ -4226,7 +4209,6 @@ fn handle_translation_event(
             result,
             created_unix_ms,
         } => {
-            pet::translation_ready();
             let pending = {
                 let mut state = state.borrow_mut();
                 state.translation_history.insert(

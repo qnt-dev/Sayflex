@@ -280,14 +280,6 @@ pub enum InputHostEvent {
     InsertLastRequested {
         target: TargetSnapshot,
     },
-    /// Пользователь печатает. Уходит только интенсивность в процентах,
-    /// прорежённая по времени: ни кодов клавиш, ни их числа здесь нет и быть
-    /// не должно. Событие существует ради реакции настольного питомца, и по
-    /// нему нельзя восстановить ничего из набранного. Проценты, а не доля,
-    /// потому что событие обязано оставаться сравнимым по `Eq`.
-    TypingActivity {
-        intensity_percent: u8,
-    },
     SelectionCaptureStarted {
         request_id: RequestId,
         intent: TextActionIntent,
@@ -620,15 +612,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<InputHostEvent>(&insertion_json).unwrap(),
             insertion
-        );
-
-        let typing = InputHostEvent::TypingActivity {
-            intensity_percent: 67,
-        };
-        let typing_json = serde_json::to_string(&typing).unwrap();
-        assert_eq!(
-            serde_json::from_str::<InputHostEvent>(&typing_json).unwrap(),
-            typing
         );
 
         let speech = SpeechWorkerEvent::Completed {

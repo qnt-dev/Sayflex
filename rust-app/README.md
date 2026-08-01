@@ -6,7 +6,7 @@ build dependency of this workspace.
 
 ## Process architecture
 
-The release contains five failure-isolated process roles and six executables:
+The release contains four failure-isolated process roles and five executables:
 
 - `SayFlex.exe` — Slint settings, tray, history, model selection and
   recording/selection overlays.
@@ -16,9 +16,6 @@ The release contains five failure-isolated process roles and six executables:
   installation, CUDA/CPU `whisper.cpp` inference and durable history.
 - `SayFlex.Translation.exe` — verified Qwen3.5 model/runtime installation,
   lifecycle-isolated local llama.cpp inference and translation history.
-- `SayFlex.Pet.exe` — optional, privacy-preserving desktop companion. It has no
-  hooks or microphone access and receives only bounded activity values over
-  its parent-owned stdin pipe.
 
 When translation is enabled, its worker owns one authenticated
 `llama-server.exe` sidecar from the verified optional Vulkan runtime. The

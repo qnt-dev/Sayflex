@@ -41,6 +41,10 @@ Type: files; Name: "{group}\Rust Voice.lnk"
 Type: files; Name: "{autodesktop}\StyleFlex.lnk"
 Type: files; Name: "{userstartup}\StyleFlex.lnk"
 Type: files; Name: "{group}\StyleFlex.lnk"
+; Remove files from the short-lived development build that accidentally
+; bundled an unrelated experimental product into SayFlex.
+Type: files; Name: "{app}\SayFlex.Pet.exe"
+Type: filesandordirs; Name: "{app}\pet-assets"
 
 [Files]
 Source: "..\dist\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

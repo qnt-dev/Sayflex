@@ -1,35 +1,54 @@
-# SayFlex desktop pet
+# Desktop Pet
 
-The desktop pet is an optional, isolated Windows process. It owns one native
-layered `HWND`, renders premultiplied BGRA frames on the CPU and never installs
-a keyboard hook or opens the microphone.
+This directory is an independent Rust application and product workspace. It is
+not a SayFlex component, worker, optional feature, or release dependency. The
+two products share only the parent repository and the Rust engineering stack.
+
+The current technical name `DesktopPet` is intentionally neutral until the
+commercial product receives its own final name.
 
 ## Runtime contract
 
-- SayFlex starts `SayFlex.Pet.exe` in the same kill-on-close Job Object as its
-  workers.
-- The parent writes bounded activity events to the pet's stdin. No key codes,
-  dictated audio or text cross this pipe.
-- `shutdown`, parent EOF, `WM_CLOSE` and Job Object termination are all valid
-  stop paths.
-- The overlay is created once and never hidden or shown again; transparency is
-  entirely per-pixel through `UpdateLayeredWindow`.
-- Runtime files are declared once in `assets/runtime-assets.json`. Publishing
-  and release validation consume that same manifest.
+- `DesktopPet.exe` starts and runs on its own.
+- It never launches SayFlex and SayFlex never launches it.
+- The default runtime does not read stdin, install a keyboard hook, or open a
+  microphone.
+- `--stdin-control` explicitly enables a small product-neutral control protocol
+  for automated checks and future integrations. EOF terminates only instances
+  launched in that mode.
+- The native layered overlay is created once and remains alive until
+  `WM_CLOSE`, `WM_QUIT`, or an explicit `shutdown` control command.
+- Runtime files are declared in `assets/runtime-assets.json` and published only
+  by this workspace's own scripts.
 
-Installed builds resolve assets from `pet-assets` beside the executable.
-Debug builds additionally fall back to this workspace's `assets` directory;
-release builds deliberately do not, so packaging mistakes fail visibly.
+Debug builds may load generated assets from the workspace. Published builds
+load the allow-listed files from `assets` beside `DesktopPet.exe` and fail
+visibly if the package is incomplete.
 
-## Verification
+## Run locally
 
 ```powershell
-cargo fmt --all
+cd C:\PRDJKT\qntflex\desktop-pet
+cargo run --release -p pet_host
+```
+
+The standalone process remains alive after launch. Close it through Task
+Manager during this prototype phase, or send `WM_CLOSE` from a test harness.
+
+## Build and validate the independent package
+
+```powershell
+.\scripts\publish.ps1 -Configuration Release
+.\scripts\validate-release.ps1
+```
+
+Output: `dist\app\DesktopPet.exe` plus `dist\app\assets`.
+
+## Engineering verification
+
+```powershell
+cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --release -p pet_host
 ```
-
-`rust-app/scripts/publish.ps1` builds and packages the process as part of the
-normal SayFlex release, and `validate-release.ps1` hashes the executable plus
-every manifest-listed runtime asset.

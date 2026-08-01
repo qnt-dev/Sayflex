@@ -1,4 +1,6 @@
-//! Настольный питомец.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+//! Самостоятельное приложение настольного питомца.
 //!
 //! Своё окно через `CreateWindowExW` и `UpdateLayeredWindow`: показ и скрытие
 //! не выполняются никогда, поэтому потеря extended-стилей при показе, из-за
@@ -9,6 +11,7 @@
 //! Запуск:
 //!   `cargo run -p pet_host --release`
 //!   `cargo run -p pet_host --release -- --scale 0.28`
+//!   `cargo run -p pet_host --release -- --stdin-control`
 //!   `cargo run -p pet_host --release -- --dump sheet.png`
 
 mod manifest;
@@ -75,6 +78,9 @@ fn main() {
         .and_then(|value| value.parse::<f32>().ok())
         .unwrap_or(DEFAULT_SCALE)
         .clamp(MIN_SCALE, MAX_SCALE);
+    let stdin_control = arguments
+        .iter()
+        .any(|argument| argument == "--stdin-control");
 
     let result = match (
         argument_value(&arguments, "--dump"),
@@ -84,7 +90,7 @@ fn main() {
         (_, _, Some(path)) => dump_hands(Path::new(&path), scale),
         (_, Some(path), None) => dump_walk(Path::new(&path), scale),
         (Some(path), None, None) => dump_sheet(Path::new(&path), scale),
-        (None, None, None) => run(scale),
+        (None, None, None) => run(scale, stdin_control),
     };
     if let Err(error) = result {
         eprintln!("pet_host: {error}");
@@ -384,7 +390,9 @@ impl Assets {
     }
 }
 
-/// Во что персонаж вовлечён прямо сейчас. Приходит из основного приложения.
+/// Во что персонаж вовлечён прямо сейчас. Обычный самостоятельный запуск
+/// оставляет значения в покое; явная интеграция может прислать нейтральные
+/// события через `--stdin-control`.
 #[derive(Clone, Copy, Default)]
 struct Engagement {
     /// Насколько активно пользователь печатает, 0…1 с затуханием.
@@ -410,14 +418,14 @@ impl Engagement {
         match event {
             // Каждое нажатие подбрасывает уровень, а не задаёт его: так
             // получается ощущение ритма печати, а не ступенька.
-            Event::Typing(intensity) => {
+            Event::Activity(intensity) => {
                 self.typing = (self.typing + 0.22 + intensity * 0.25).min(1.0);
             }
-            Event::Voice(level) => self.voice = self.voice.max(level),
-            Event::DictationStarted => self.listening = true,
-            Event::DictationFinished => self.listening = false,
-            Event::InsertSucceeded | Event::TranslationReady => self.cheer = 1.0,
-            Event::InsertFailed => self.upset = 1.0,
+            Event::Sound(level) => self.voice = self.voice.max(level),
+            Event::FocusStarted => self.listening = true,
+            Event::FocusFinished => self.listening = false,
+            Event::Celebrate => self.cheer = 1.0,
+            Event::Upset => self.upset = 1.0,
             Event::Shutdown => {}
         }
     }
@@ -1139,7 +1147,7 @@ impl Clouds {
     }
 }
 
-fn run(initial_scale: f32) -> Result<(), String> {
+fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
     let assets = Assets::load()?;
     let rig = assets.build(initial_scale);
 
@@ -1162,9 +1170,9 @@ fn run(initial_scale: f32) -> Result<(), String> {
     let mut clouds = Clouds::new(&rig);
     let mut mood = Mood::new(0x1234_5678);
     let mut quads: Vec<Quad> = Vec::with_capacity(PET_PARTICLES.max(ORB_PARTICLES));
-    // Питомец не ставит своих хуков: о печати и речи ему рассказывает
-    // основное приложение через stdin.
-    let events = Events::from_stdin();
+    // По умолчанию приложение полностью автономно. stdin активируется только
+    // явным флагом и не связывает жизненный цикл с каким-либо другим продуктом.
+    let events = stdin_control.then(Events::from_stdin);
     let mut inbox: Vec<Event> = Vec::new();
     let mut mind = Engagement::default();
     let mut typing_pulse = 0.0_f32;
@@ -1215,11 +1223,16 @@ fn run(initial_scale: f32) -> Result<(), String> {
             cursor_y as f32 - rig.creature_centre.y,
         );
 
-        let ipc_connected = events.drain(&mut inbox);
-        if !ipc_connected || inbox.contains(&Event::Shutdown) {
-            break;
-        }
-        let had_events = !inbox.is_empty();
+        let had_events = if let Some(events) = &events {
+            let ipc_connected = events.drain(&mut inbox);
+            if !ipc_connected || inbox.contains(&Event::Shutdown) {
+                break;
+            }
+            !inbox.is_empty()
+        } else {
+            inbox.clear();
+            false
+        };
         for event in &inbox {
             mind.apply(*event);
         }
@@ -1959,7 +1972,7 @@ fn set_both(face: &mut FaceState, glyph: EyeGlyph) {
 }
 
 fn asset_path(name: &str) -> PathBuf {
-    if let Some(root) = std::env::var_os("SAYFLEX_PET_ASSETS") {
+    if let Some(root) = std::env::var_os("DESKTOP_PET_ASSETS") {
         return PathBuf::from(root).join(name);
     }
 
@@ -1967,7 +1980,7 @@ fn asset_path(name: &str) -> PathBuf {
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_default()
-        .join("pet-assets")
+        .join("assets")
         .join(name);
     if installed.is_file() {
         return installed;
