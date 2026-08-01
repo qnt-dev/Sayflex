@@ -1,4 +1,13 @@
-# Prompt: side-profile arm rig for walking and running
+# Archived prompt: rejected side-profile arm candidate
+
+`source/profile_arms_right.png` is retained for provenance but is not a runtime
+input. Its shallow three-quarter shoulders do not match the approved strict
+profile torso. `extract_profile_motion.py` deliberately derives both arm depth
+layers from the one complete strict-profile sleeve in
+`source/rig_master_profile_right.png`, preventing the attachment mismatch from
+returning through asset regeneration.
+
+The prompt below is historical and must not be used to replace the active rig.
 
 Use the newly generated right-facing side-profile image as the **primary
 reference**. Use `source/stand.png` only as a secondary identity reference.

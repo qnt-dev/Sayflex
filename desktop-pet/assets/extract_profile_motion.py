@@ -2,8 +2,11 @@
 
 The approved body source is a flattened RGBA illustration, not a layered rig.
 This build-time step removes faint generated backdrop residue, keeps the
-character's largest alpha component, and combines it with the separately
-approved two-arm source.
+character's largest alpha component. Both depth layers of each paired limb are
+derived from one strict-profile painting. This is intentional: mixing the
+strict-profile torso with a shallow three-quarter arm or a differently bent
+far leg makes the visible silhouette disagree even when the runtime skeleton
+is mathematically symmetric.
 The jacket and pelvis remain in the body layer.  The tail is emitted as one
 continuous articulated layer with an overlap under the jacket, so it can wag
 without pulling the torso mesh or opening a transparent seam at its root.
@@ -25,10 +28,6 @@ from PIL import Image
 SOURCE_NAME = "rig_master_profile_right.png"
 SOURCE_SHA256 = "0043535F4DFE4C26DC1908FEB78D28B4B7EABD89B4099CCDA26CBBEA618FE81F"
 SOURCE_SIZE = (1024, 1536)
-ARMS_SOURCE_NAME = "profile_arms_right.png"
-ARMS_SOURCE_SHA256 = "5F2E7DAE42CE8D420CBC3266F041E1231EDA0D540EF2BAAFB45091A757D64CB2"
-ARMS_SOURCE_SIZE = (944, 1667)
-ARMS_GRABCUT_RECT = (80, 65, 760, 1450)
 OUTPUT_SIZE = (625, 1105)
 CONTENT_HEIGHT = 1000
 CONTENT_TOP = 90
@@ -47,25 +46,6 @@ BODY_ARM_CUTOUT = np.array(
     dtype=np.int32,
 )
 
-# The strict side master contains only one complete sleeve.  The approved arm
-# master was generated specifically with two unobstructed limbs and a complete
-# jacket underneath them.  Their masks stay independent all the way to runtime:
-# far arm -> torso -> near arm is the same depth order used by the walk refs.
-ARMS_FAR = np.array(
-    [
-        [305, 660], [420, 675], [403, 790], [360, 900], [326, 1015],
-        [275, 1085], [200, 1058], [215, 965], [242, 875], [255, 760],
-    ],
-    dtype=np.int32,
-)
-ARMS_NEAR = np.array(
-    [
-        [545, 675], [610, 680], [615, 785], [665, 855], [735, 915],
-        [795, 966], [785, 1035], [735, 1060], [674, 1018], [623, 950],
-        [555, 904], [535, 800],
-    ],
-    dtype=np.int32,
-)
 LEG_FAR_THIGH = np.array(
     [
         [370, 930], [550, 930], [550, 1030], [505, 1145], [325, 1145],
@@ -168,46 +148,6 @@ def approved_rgba(path: Path) -> np.ndarray:
     return rgba
 
 
-def approved_arm_rgba(path: Path) -> np.ndarray:
-    actual_hash = sha256(path)
-    if actual_hash != ARMS_SOURCE_SHA256:
-        raise SystemExit(
-            f"{path.name} is not the approved arm master: "
-            f"{actual_hash} != {ARMS_SOURCE_SHA256}"
-        )
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    if image is None:
-        raise SystemExit(f"cannot read approved arm master: {path}")
-    actual_size = (image.shape[1], image.shape[0])
-    if actual_size != ARMS_SOURCE_SIZE:
-        raise SystemExit(f"arm extraction calibrated for {ARMS_SOURCE_SIZE}, source is {actual_size}")
-
-    mask = np.full(image.shape[:2], cv2.GC_BGD, dtype=np.uint8)
-    background = np.zeros((1, 65), dtype=np.float64)
-    foreground = np.zeros((1, 65), dtype=np.float64)
-    cv2.grabCut(
-        image,
-        mask,
-        ARMS_GRABCUT_RECT,
-        background,
-        foreground,
-        8,
-        cv2.GC_INIT_WITH_RECT,
-    )
-    alpha = np.where(
-        (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0
-    ).astype(np.uint8)
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(alpha, 8)
-    if count <= 1:
-        raise SystemExit("approved arm foreground was not found")
-    component = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    alpha = np.where(labels == component, 255, 0).astype(np.uint8)
-    alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    alpha = cv2.GaussianBlur(alpha, (0, 0), 0.7)
-    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    return np.dstack((rgb, alpha))
-
-
 def selection(alpha: np.ndarray, polygon: np.ndarray) -> np.ndarray:
     matte = np.zeros_like(alpha)
     cv2.fillPoly(matte, [polygon], 255)
@@ -254,7 +194,20 @@ def map_point(
     )
 
 
+def depth_tint(layer: np.ndarray, factor: float) -> np.ndarray:
+    """Darken one identical limb copy without changing its silhouette."""
+    tinted = layer.copy()
+    visible = tinted[..., 3] > 0
+    tinted[..., :3][visible] = np.clip(
+        tinted[..., :3][visible].astype(np.float32) * factor,
+        0,
+        255,
+    ).astype(np.uint8)
+    return tinted
+
+
 def shift_layer(layer: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """Move a complete layer and its socket together in the shared canvas."""
     matrix = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
     return cv2.warpAffine(
         layer,
@@ -273,13 +226,6 @@ def main() -> None:
     alpha = rgba[..., 3]
     bounds = cv2.boundingRect((alpha > ALPHA_FLOOR).astype(np.uint8))
     rgb = rgba[..., :3]
-
-    arm_rgba = approved_arm_rgba(base / "source" / ARMS_SOURCE_NAME)
-    arm_alpha = arm_rgba[..., 3]
-    arm_bounds = cv2.boundingRect((arm_alpha > ALPHA_FLOOR).astype(np.uint8))
-    arm_rgb = arm_rgba[..., :3]
-    arm_far_source = selection(arm_alpha, ARMS_FAR)
-    arm_near_source = selection(arm_alpha, ARMS_NEAR)
 
     body_arm_cutout = selection(alpha, BODY_ARM_CUTOUT)
     leg_far_thigh = selection(alpha, LEG_FAR_THIGH)
@@ -316,10 +262,13 @@ def main() -> None:
     body_rgb = cv2.inpaint(rgb, backing_holes, 5.0, cv2.INPAINT_TELEA)
     body = cv2.bitwise_or(body, backing)
 
+    # The near leg is the only clean, nearly straight profile painting in the
+    # approved master. Reusing that exact silhouette for the far depth layer is
+    # what makes both support phases visibly symmetric; joint-coordinate tests
+    # alone cannot straighten wrinkles painted into the old far leg.
     layers = {
         "body": (body_rgb, body),
         "tail": (rgb, tail),
-        "leg_far": (rgb, leg_far),
         "leg_near": (rgb, leg_near),
     }
     transformed: dict[str, np.ndarray] = {}
@@ -333,29 +282,34 @@ def main() -> None:
             base / f"profile_motion_left_{name}.png"
         )
 
+    canonical_leg = transformed["leg_near"]
+    transformed["leg_far"] = depth_tint(canonical_leg, 0.78)
+    for facing, layer in (
+        ("right", transformed["leg_far"]),
+        ("left", np.flip(transformed["leg_far"], axis=1).copy()),
+    ):
+        Image.fromarray(layer, "RGBA").save(
+            base / f"profile_motion_{facing}_leg_far.png"
+        )
+
     mapped = lambda point: map_point(point, bounds, scale, origin_x, origin_y)
     visor_top_left = mapped((515.0, 300.0))
     visor_bottom_right = mapped((730.0, 605.0))
+    # One complete strict-profile sleeve supplies both arms. Their sockets are
+    # separated only by a few source pixels so the depth reads as two shoulders
+    # without moving either limb to the opposite edge of a side-view torso.
+    canonical_arm, _, _, _ = runtime_layer(rgb, body_arm_cutout, bounds)
+    canonical_arm_pivot = mapped((365.0, 555.0))
     arm_pivots = {
-        "arm_far": mapped((365.0, 555.0)),
-        "arm_near": mapped((620.0, 555.0)),
+        "arm_far": (canonical_arm_pivot[0] - 6.0, canonical_arm_pivot[1] - 3.0),
+        "arm_near": (canonical_arm_pivot[0] + 6.0, canonical_arm_pivot[1] + 3.0),
     }
-    donor_pivots = {
-        "arm_far": (330.0, 700.0),
-        "arm_near": (540.0, 700.0),
-    }
-    for name, matte in (("arm_far", arm_far_source), ("arm_near", arm_near_source)):
-        layer, donor_scale, donor_origin_x, donor_origin_y = runtime_layer(
-            arm_rgb, matte, arm_bounds
-        )
-        donor_pivot = map_point(
-            donor_pivots[name], arm_bounds, donor_scale, donor_origin_x, donor_origin_y
-        )
-        target_pivot = arm_pivots[name]
+    arm_offsets = {"arm_far": (-6.0, -3.0), "arm_near": (6.0, 3.0)}
+    for name, factor in (("arm_far", 0.76), ("arm_near", 1.0)):
         layer = shift_layer(
-            layer,
-            target_pivot[0] - donor_pivot[0],
-            target_pivot[1] - donor_pivot[1],
+            depth_tint(canonical_arm, factor),
+            arm_offsets[name][0],
+            arm_offsets[name][1],
         )
         transformed[name] = layer
         Image.fromarray(layer, "RGBA").save(base / f"profile_motion_right_{name}.png")
@@ -363,17 +317,14 @@ def main() -> None:
             base / f"profile_motion_left_{name}.png"
         )
     tail_pivot = mapped((410.0, 970.0))
+    canonical_leg_joints = {
+        "hip": mapped((575.0, 885.0)),
+        "knee": mapped((585.0, 1115.0)),
+        "ankle": mapped((610.0, 1265.0)),
+    }
     leg_joints = {
-        "far": {
-            "hip": mapped((430.0, 885.0)),
-            "knee": mapped((375.0, 1110.0)),
-            "ankle": mapped((385.0, 1265.0)),
-        },
-        "near": {
-            "hip": mapped((575.0, 885.0)),
-            "knee": mapped((585.0, 1115.0)),
-            "ankle": mapped((610.0, 1265.0)),
-        },
+        "far": dict(canonical_leg_joints),
+        "near": dict(canonical_leg_joints),
     }
 
     def limb(filename: str, pivot: tuple[float, float]) -> dict[str, float | str]:

@@ -2085,12 +2085,22 @@ fn warped_profile_attachment(
 /// stretches the hood and opens a gap at the separate sleeve. Locomotion must
 /// therefore preserve this silhouette until matching authored torso/arm poses
 /// exist.
-fn profile_body_warp(mut warp: Warp, _walk: &Walk, _facing_right: bool) -> Warp {
+fn profile_body_warp(mut warp: Warp, walk: &Walk, _facing_right: bool) -> Warp {
     // The hood and head occupy the first two control rows.  They are a single
     // painted solid, so unequal row offsets stretch the skull and upper back.
     // Copying the complete row preserves any ear expression but makes this
     // vertical band rigid before locomotion is layered on top.
     warp.copy_row(0, 1);
+
+    // The approved profile painting has its hood mass slightly behind the
+    // pelvis. Without an explicit locomotion lean that authored balance reads
+    // as falling backwards as soon as the paws advance. Move the complete head
+    // band as one rigid unit and taper the translation into the ribcage; the
+    // pelvis remains the hierarchy root, and arm sockets sample this same warp.
+    let forward = walk.body_lean() * 0.16 * walk.blend;
+    warp.add_row(0, -forward, 0.0);
+    warp.add_row(1, -forward, 0.0);
+    warp.add_row(2, -forward * 0.44, 0.0);
 
     warp
 }
@@ -2102,12 +2112,12 @@ fn profile_body_warp(mut warp: Warp, _walk: &Walk, _facing_right: bool) -> Warp 
 /// exact opposition during contact/down/passing/up and cannot drift out of phase
 /// when walk speed or stance duration changes.
 fn profile_arm_angles(motions: [LegMotion; 2], walk: &Walk, facing: f32) -> (f32, f32) {
-    // The two authored sleeves are deliberately supplied in the first contact
-    // pose (far arm back, near arm ahead), not vertically neutral. Subtracting
-    // that authored lean converts both paintings to one canonical shoulder
-    // angle before applying the reference-driven counter-swing.
-    const AUTHORED_LEAN: [f32; 2] = [0.34, -0.52];
-    let amplitude = mix(0.64, 0.88, smooth_unit(walk.run));
+    // Both depth layers are copies of the same almost-vertical strict-profile
+    // sleeve. Their authored correction is therefore shared and neutral. At
+    // contact this leaves both arms at opposite readable extremes instead of
+    // parking one behind the ribcage for each half-step.
+    const AUTHORED_LEAN: [f32; 2] = [0.0, 0.0];
+    let amplitude = mix(0.90, 1.06, smooth_unit(walk.run));
     (
         (motions[0].horizontal * amplitude - AUTHORED_LEAN[0]) * facing * walk.blend,
         (motions[1].horizontal * amplitude - AUTHORED_LEAN[1]) * facing * walk.blend,
@@ -3241,6 +3251,7 @@ mod gait_tests {
         let stride_pose = Walk {
             phase: std::f32::consts::FRAC_PI_2,
             blend: 1.0,
+            lean: 0.30,
             ..Walk::default()
         };
         let warp = profile_body_warp(Warp::identity(), &stride_pose, true);
@@ -3257,13 +3268,13 @@ mod gait_tests {
             assert!((head_top.y - head_base.y).abs() < 0.01);
         }
 
-        // A one-layer profile torso cannot be twisted into a convincing 3D
-        // shoulder turn. Every point remains on the authored silhouette; arm
-        // motion will return only with matching authored socket layers.
+        // The torso receives one forward sagittal lean, not an artificial 3D
+        // shoulder twist. Both sides of a row must therefore move together.
         let near_shoulder = visible(0.38, 0.50);
         let far_shoulder = visible(0.62, 0.50);
-        assert_eq!(near_shoulder, Vec2::default());
-        assert_eq!(far_shoulder, Vec2::default());
+        assert!((near_shoulder.x - far_shoulder.x).abs() < 0.01);
+        assert!((near_shoulder.y - far_shoulder.y).abs() < 0.01);
+        assert!(near_shoulder.x > body_size.0 as f32 * 0.015);
         assert_eq!(visible(0.5, 0.75), Vec2::default());
     }
 
@@ -3405,6 +3416,21 @@ mod gait_tests {
         let assets = Assets::load().expect("production assets load");
         let rig = assets.build(0.22);
         for (pose, facing_right) in [(&rig.profile_right, true), (&rig.profile_left, false)] {
+            assert_eq!(pose.leg_chains.len(), 2);
+            let far = &pose.leg_chains[0];
+            let near = &pose.leg_chains[1];
+            for (far_joint, near_joint) in [
+                (far.hip, near.hip),
+                (far.knee, near.knee),
+                (far.ankle, near.ankle),
+            ] {
+                assert!(point_distance(far_joint, near_joint) < 1e-4);
+            }
+            assert_eq!(
+                (far.sprite.width(), far.sprite.height()),
+                (near.sprite.width(), near.sprite.height()),
+                "far and near depth layers must retain one visible silhouette"
+            );
             let metrics = profile_leg_metrics(&pose.leg_chains);
             let tracks = profile_leg_tracks(&pose.leg_chains, facing_right);
             for sample in 0..64 {
@@ -3462,6 +3488,26 @@ mod gait_tests {
     }
 
     #[test]
+    fn profile_arms_use_two_nearby_depth_sockets() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        for pose in [&rig.profile_right, &rig.profile_left] {
+            let (Some((_, far_pivot, far_origin)), Some((_, near_pivot, near_origin))) =
+                (&pose.arm_far, &pose.arm_near)
+            else {
+                panic!("production profile rig must contain both arm depth layers");
+            };
+            let far_socket = Vec2::new(far_origin.x + far_pivot.0, far_origin.y + far_pivot.1);
+            let near_socket = Vec2::new(near_origin.x + near_pivot.0, near_origin.y + near_pivot.1);
+            let separation = (far_socket.x - near_socket.x).hypot(far_socket.y - near_socket.y);
+            assert!(
+                (1.5..=4.0).contains(&separation),
+                "arm sockets must read as two depth planes of one shoulder: {separation}"
+            );
+        }
+    }
+
+    #[test]
     fn arms_counter_swing_with_their_matching_legs() {
         for sample in 0..64 {
             let walk = Walk {
@@ -3471,10 +3517,7 @@ mod gait_tests {
             };
             let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
             let angles = profile_arm_angles(motions, &walk, 1.0);
-            let expected = (
-                motions[0].horizontal * 0.64 - 0.34,
-                motions[1].horizontal * 0.64 + 0.52,
-            );
+            let expected = (motions[0].horizontal * 0.90, motions[1].horizontal * 0.90);
             assert!((angles.0 - expected.0).abs() < 1e-5);
             assert!((angles.1 - expected.1).abs() < 1e-5);
         }
@@ -3486,7 +3529,7 @@ mod gait_tests {
         };
         let motions = [contact.profile_leg_motion(0), contact.profile_leg_motion(1)];
         let angles = profile_arm_angles(motions, &contact, 1.0);
-        assert!(angles.0.abs() < 0.03 && angles.1 > 0.20);
+        assert!(angles.0 > 0.30 && angles.1 < -0.30);
 
         let opposite = Walk {
             phase: std::f32::consts::PI,
@@ -3498,7 +3541,7 @@ mod gait_tests {
             opposite.profile_leg_motion(1),
         ];
         let angles = profile_arm_angles(motions, &opposite, 1.0);
-        assert!(angles.0 < -0.55 && angles.1 > 0.80);
+        assert!(angles.0 < -0.30 && angles.1 > 0.30);
     }
 
     #[test]

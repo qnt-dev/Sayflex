@@ -30,15 +30,15 @@
     "far": {
       "sprite": "profile_motion_left_leg_far.png",
       "hip": [
-        319.63,
+        207.75,
         718.86
       ],
       "knee": [
-        362.07,
-        892.47
+        200.03,
+        896.33
       ],
       "ankle": [
-        354.35,
+        180.74,
         1012.07
       ]
     },
@@ -61,15 +61,15 @@
   "arms": {
     "far": {
       "sprite": "profile_motion_left_arm_far.png",
-      "pivot_x": 369.78,
-      "pivot_y": 464.23,
+      "pivot_x": 375.78,
+      "pivot_y": 461.23,
       "origin_x": 0,
       "origin_y": 0
     },
     "near": {
       "sprite": "profile_motion_left_arm_near.png",
-      "pivot_x": 173.02,
-      "pivot_y": 464.23,
+      "pivot_x": 363.78,
+      "pivot_y": 467.23,
       "origin_x": 0,
       "origin_y": 0
     }
