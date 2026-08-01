@@ -1,14 +1,29 @@
 # OpenAI Image prompt pack: production motion rig
 
-Generate these files **sequentially**, not in one request. For each generation,
-attach the identity reference named in the step. After a step is approved, use
-its output as the primary reference for the next step. This is more reliable
-than asking the model for a sprite sheet.
+Generate the remaining files **sequentially**, not in one request. For each
+generation, attach the identity reference named in the step. After a step is
+approved, use its output as the primary reference for the next step. This is
+more reliable than asking the model for a sprite sheet.
 
 The prompts are written specifically for OpenAI Image. Put approved outputs in
 `desktop-pet/assets/source/` using the exact file names below.
 
-## Step 1A — clean identity plate
+## Approved front master — completed
+
+`source/rig_master_front.png` is the approved identity and front rig master.
+It is built deterministically from `source/image.png` by
+`prepare_front_master.py`; no generative redraw is used for the character.
+The accepted image already has visible paws, relaxed external arms and
+separated legs, so the former Step 1B generation is no longer required.
+
+`source/front_visor_donor.png` is a tightly cropped source plate used only for
+the blank visor glass. It is not a second character identity reference.
+
+The two prompts below are retained as history only. **Do not run them.** The
+next OpenAI Image request starts at Step 2 and uses the approved
+`source/rig_master_front.png`.
+
+## Archived Step 1A — clean identity plate
 
 Reference image: the original `source/stand.png`, not a previously generated
 variation.
@@ -39,7 +54,7 @@ No orb, no detached particles, no scenery, no text, no watermark and no extra
 object. Do not replace transparency with black, grey, gradient or checkerboard.
 ```
 
-## Step 1B — riggable front pose
+## Archived Step 1B — riggable front pose
 
 Reference image: the approved `source/rig_master_front_clean.png` only.
 
@@ -189,8 +204,8 @@ transparent canvas. No floor, shadow, scenery, text, logo or watermark.
 
 ## Generation order and stop rule
 
-Generate Step 1 first and inspect it before continuing. Do not compensate for a
-bad Step 1 in later prompts. Reject and regenerate an image if identity changes,
-if free particles remain around the creature, if the visor contains a face, or
-if any required limb is fused/cropped. Once Step 1 is approved, use it as the
-identity source for all later generations.
+Step 1 is approved and must not be regenerated. Generate Step 2 next and inspect
+it before continuing. Reject and regenerate an image if identity changes, if
+free particles remain around the creature, if the visor contains a face, or if
+any required limb is fused or cropped. Once Step 2 is approved, use it as the
+profile source for all later profile poses.
