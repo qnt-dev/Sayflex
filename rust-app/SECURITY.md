@@ -1,6 +1,6 @@
 # Security and privacy
 
-StyleFlex is designed as a local desktop utility. Audio capture, speech
+SayFlex is designed as a local desktop utility. Audio capture, speech
 recognition, layout conversion, and installed translation-model inference run
 on the user's machine.
 
@@ -49,7 +49,7 @@ on the user's machine.
   command keys are still held. Long Unicode insertion revalidates the target
   between bounded chunks.
 - Input into elevated applications is not supported from the normal
-  non-elevated process because of Windows UIPI. StyleFlex does not attempt to
+  non-elevated process because of Windows UIPI. SayFlex does not attempt to
   bypass UAC.
 
 ## Model and update integrity

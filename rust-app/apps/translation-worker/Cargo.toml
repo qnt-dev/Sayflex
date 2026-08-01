@@ -1,5 +1,5 @@
 [package]
-name = "styleflex-translation-worker"
+name = "sayflex-translation-worker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

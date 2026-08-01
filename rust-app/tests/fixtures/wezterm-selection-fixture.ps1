@@ -1,4 +1,4 @@
-$Host.UI.RawUI.WindowTitle = 'StyleFlex WezTerm Selection E2E'
+$Host.UI.RawUI.WindowTitle = 'SayFlex WezTerm Selection E2E'
 Clear-Host
 Write-Host 'Hello world.'
 Write-Host ''

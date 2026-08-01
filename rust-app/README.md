@@ -1,4 +1,4 @@
-# StyleFlex
+# SayFlex
 
 This directory is an independent Rust/Slint application. The existing Windows
 C# application in the repository root remains a separate product and is not a
@@ -6,16 +6,19 @@ build dependency of this workspace.
 
 ## Process architecture
 
-The release contains four failure-isolated process roles and five executables:
+The release contains five failure-isolated process roles and six executables:
 
-- `StyleFlex.exe` — Slint settings, tray, history, model selection and
+- `SayFlex.exe` — Slint settings, tray, history, model selection and
   recording/selection overlays.
-- `StyleFlex.InputHost.exe` — Windows low-level keyboard hook, immutable target
+- `SayFlex.InputHost.exe` — Windows low-level keyboard hook, immutable target
   capture, Unicode insertion, clipboard recovery and selected-text capture.
-- `StyleFlex.Speech.*.exe` — CPAL microphone capture, verified model
+- `SayFlex.Speech.*.exe` — CPAL microphone capture, verified model
   installation, CUDA/CPU `whisper.cpp` inference and durable history.
-- `StyleFlex.Translation.exe` — verified Qwen3.5 model/runtime installation,
+- `SayFlex.Translation.exe` — verified Qwen3.5 model/runtime installation,
   lifecycle-isolated local llama.cpp inference and translation history.
+- `SayFlex.Pet.exe` — optional, privacy-preserving desktop companion. It has no
+  hooks or microphone access and receives only bounded activity values over
+  its parent-owned stdin pipe.
 
 When translation is enabled, its worker owns one authenticated
 `llama-server.exe` sidecar from the verified optional Vulkan runtime. The
@@ -56,7 +59,7 @@ Password fields, secure desktop and higher-integrity targets fail closed.
 
 UI Automation runs in a persistent MTA actor with a cached client and bounded
 provider timeouts. Release diagnostics are written without captured text to
-`%LOCALAPPDATA%\StyleFlex\logs\desktop.log` and `input-host.log`, with bounded
+`%LOCALAPPDATA%\SayFlex\logs\desktop.log` and `input-host.log`, with bounded
 rotation.
 
 The indicator is pre-created and shown from the input-host event pump, before
@@ -116,21 +119,21 @@ Transient windows have isolated visual preview modes that do not register the
 global hook or touch another application:
 
 ```powershell
-.\target\debug\styleflex-desktop.exe --indicator-preview=orb
-.\target\debug\styleflex-desktop.exe --indicator-preview=spectrum
-.\target\debug\styleflex-desktop.exe --indicator-preview=ribbon
-.\target\debug\styleflex-desktop.exe --action-preview
-.\target\debug\styleflex-desktop.exe --translation-preview
-.\target\debug\styleflex-desktop.exe --translation-preview=long
-.\target\debug\styleflex-desktop.exe --layout-preview
+.\target\debug\sayflex-desktop.exe --indicator-preview=orb
+.\target\debug\sayflex-desktop.exe --indicator-preview=spectrum
+.\target\debug\sayflex-desktop.exe --indicator-preview=ribbon
+.\target\debug\sayflex-desktop.exe --action-preview
+.\target\debug\sayflex-desktop.exe --translation-preview
+.\target\debug\sayflex-desktop.exe --translation-preview=long
+.\target\debug\sayflex-desktop.exe --layout-preview
 ```
 
 Three controlled selection fixtures exercise UI Automation, native-message and
 keyboard-shortcut capture without depending on a user's document:
 
 ```powershell
-$env:STYLEFLEX_RUN_SELECTION_SMOKE = '1'
-$env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER = 'STYLEFLEX_CLIPBOARD_SENTINEL'
+$env:SAYFLEX_RUN_SELECTION_SMOKE = '1'
+$env:SAYFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER = 'SAYFLEX_CLIPBOARD_SENTINEL'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-uia-fixture.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-fixture.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\selection-shortcut-fixture.ps1
@@ -145,11 +148,11 @@ published release input host:
 ```powershell
 .\scripts\validate-windows-integration.ps1
 .\scripts\validate-windows-integration.ps1 `
-  -InputHost .\dist\app\StyleFlex.InputHost.exe
+  -InputHost .\dist\app\SayFlex.InputHost.exe
 ```
 
 The isolated smoke modes are available in release builds only when their
-explicit `STYLEFLEX_RUN_*_SMOKE=1` opt-in is present. They do not install the
+explicit `SAYFLEX_RUN_*_SMOKE=1` opt-in is present. They do not install the
 global hook and are not reachable from the normal application lifecycle.
 
 The installer is emitted under `rust-app\dist`; it does not overwrite the

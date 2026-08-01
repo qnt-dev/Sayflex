@@ -1,4 +1,4 @@
-# StyleFlex 0.3.1
+# SayFlex 0.3.1
 
 Critical Windows terminal safety hotfix:
 

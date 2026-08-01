@@ -1,0 +1,71 @@
+{
+  "sprite": "stand_body.png",
+  "source_size": [
+    625,
+    1105
+  ],
+  "visor": {
+    "x": 130,
+    "y": 232,
+    "w": 300,
+    "h": 178
+  },
+  "anchors": {
+    "left_eye": [
+      0.283,
+      0.41
+    ],
+    "right_eye": [
+      0.74,
+      0.494
+    ],
+    "mouth": [
+      0.51,
+      0.764
+    ]
+  },
+  "particle_anchors": {
+    "left_ear": {
+      "x": 95,
+      "y": 130,
+      "r": 74
+    },
+    "right_ear": {
+      "x": 455,
+      "y": 130,
+      "r": 74
+    },
+    "tail": {
+      "x": 555,
+      "y": 835,
+      "r": 88
+    }
+  },
+  "legs": {
+    "left": {
+      "sprite": "stand_leg_left.png",
+      "pivot_x": 168,
+      "pivot_y": 828,
+      "origin_x": 73,
+      "origin_y": 815
+    },
+    "right": {
+      "sprite": "stand_leg_right.png",
+      "pivot_x": 372,
+      "pivot_y": 828,
+      "origin_x": 268,
+      "origin_y": 815
+    }
+  },
+  "pockets": {
+    "left": {
+      "x": 123,
+      "y": 678
+    },
+    "right": {
+      "x": 424,
+      "y": 678
+    }
+  },
+  "ground": 1090
+}

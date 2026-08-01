@@ -35,7 +35,7 @@ public static class FixtureForeground
 '@
 
 $form = [System.Windows.Forms.Form]::new()
-$form.Text = "StyleFlex Hotkey E2E - $Action"
+$form.Text = "SayFlex Hotkey E2E - $Action"
 $form.StartPosition = 'Manual'
 $form.Location = [System.Drawing.Point]::new(80, 80)
 $form.Size = [System.Drawing.Size]::new(720, 240)
@@ -70,7 +70,7 @@ $form.Add_Shown({
         }
         if (-not $script:sent -and [DateTime]::UtcNow -ge $script:started.AddMilliseconds(350)) {
             $script:sent = $true
-            $env:STYLEFLEX_RUN_HOTKEY_E2E = '1'
+            $env:SAYFLEX_RUN_HOTKEY_E2E = '1'
             Start-Process -FilePath $InputHost `
                 -ArgumentList "--hotkey-e2e-send=$Action" `
                 -WindowStyle Hidden

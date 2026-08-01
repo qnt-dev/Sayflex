@@ -35,7 +35,7 @@ public sealed class ShortcutSelectionFixture : Form
 
     public ShortcutSelectionFixture()
     {
-        Text = "StyleFlex Shortcut Selection Fixture";
+        Text = "SayFlex Shortcut Selection Fixture";
         StartPosition = FormStartPosition.Manual;
         Location = new System.Drawing.Point(80, 360);
         Size = new System.Drawing.Size(640, 240);
@@ -44,7 +44,7 @@ public sealed class ShortcutSelectionFixture : Form
         editor.Multiline = true;
         editor.Dock = DockStyle.Fill;
         editor.Font = new System.Drawing.Font("Segoe UI", 14);
-        editor.Text = "STYLEFLEX_SHORTCUT_SELECTION_TEXT";
+        editor.Text = "SAYFLEX_SHORTCUT_SELECTION_TEXT";
         Controls.Add(editor);
 
         Shown += (_, __) => SelectFixtureText();
@@ -84,13 +84,13 @@ public sealed class ShortcutSelectionFixture : Form
 
 $form = [ShortcutSelectionFixture]::new()
 $form.Add_Shown({
-    if ($env:STYLEFLEX_RUN_SELECTION_SMOKE -ne '1') {
+    if ($env:SAYFLEX_RUN_SELECTION_SMOKE -ne '1') {
         return
     }
 
-    if ($env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER) {
+    if ($env:SAYFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER) {
         [System.Windows.Forms.Clipboard]::SetText(
-            $env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER
+            $env:SAYFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER
         )
     }
     $form.TopMost = $true
@@ -118,10 +118,10 @@ $form.Add_Shown({
     $script:selectionFocusTimer.Start()
 
     $rustRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-    $hostPath = if ($env:STYLEFLEX_SELECTION_SMOKE_HOST_PATH) {
-        $env:STYLEFLEX_SELECTION_SMOKE_HOST_PATH
+    $hostPath = if ($env:SAYFLEX_SELECTION_SMOKE_HOST_PATH) {
+        $env:SAYFLEX_SELECTION_SMOKE_HOST_PATH
     } else {
-        Join-Path $rustRoot 'target\debug\styleflex-input-host.exe'
+        Join-Path $rustRoot 'target\debug\sayflex-input-host.exe'
     }
     $outputPath = Join-Path $rustRoot 'target\shortcut-smoke.out'
     $errorPath = Join-Path $rustRoot 'target\shortcut-smoke.err'
@@ -129,7 +129,7 @@ $form.Add_Shown({
     [System.IO.File]::WriteAllText($outputPath, '')
     [System.IO.File]::WriteAllText($errorPath, '')
     $handle = $form.Handle.ToInt64()
-    $command = "set STYLEFLEX_SELECTION_SMOKE_DELAY_MS=300&& set STYLEFLEX_SELECTION_SMOKE_HWND=$handle&& `"$hostPath`" --selection-capture-smoke > `"$outputPath`" 2> `"$errorPath`""
+    $command = "set SAYFLEX_SELECTION_SMOKE_DELAY_MS=300&& set SAYFLEX_SELECTION_SMOKE_HWND=$handle&& `"$hostPath`" --selection-capture-smoke > `"$outputPath`" 2> `"$errorPath`""
     [FixtureForeground]::Focus($form.Handle)
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/d', '/c', $command -WindowStyle Hidden
 })

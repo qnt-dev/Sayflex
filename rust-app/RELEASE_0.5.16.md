@@ -1,4 +1,4 @@
-# StyleFlex 0.5.16
+# SayFlex 0.5.16
 
 This release promotes the voice-reactive Writing Slate visualizer from an
 isolated design preview into the production recording experience.

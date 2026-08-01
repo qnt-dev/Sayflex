@@ -1,4 +1,4 @@
-# StyleFlex 0.4.0
+# SayFlex 0.4.0
 
 This release establishes the first coherent Rust/Slint product surface.
 

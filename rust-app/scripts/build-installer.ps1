@@ -26,16 +26,16 @@ if (-not $compiler) {
 }
 
 & $compiler "/DAppVersion=$Version" (
-    Join-Path $rustRoot 'installer\StyleFlex.iss'
+    Join-Path $rustRoot 'installer\SayFlex.iss'
 )
 if ($LASTEXITCODE -ne 0) {
     throw 'Inno Setup compilation failed.'
 }
 
-$installer = Join-Path $rustRoot "dist\StyleFlex-$Version-win-x64-setup.exe"
+$installer = Join-Path $rustRoot "dist\SayFlex-$Version-win-x64-setup.exe"
 $checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
 Set-Content -LiteralPath "$installer.sha256" -Encoding ascii -NoNewline -Value (
     "$checksum  $([System.IO.Path]::GetFileName($installer))"
 )
 
-Write-Host "StyleFlex installer created in $(Join-Path $rustRoot 'dist')"
+Write-Host "SayFlex installer created in $(Join-Path $rustRoot 'dist')"

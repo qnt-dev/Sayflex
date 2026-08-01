@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$InputHost = (
-        Join-Path $PSScriptRoot '..\target\debug\styleflex-input-host.exe'
+        Join-Path $PSScriptRoot '..\target\debug\sayflex-input-host.exe'
     )
 )
 
@@ -13,8 +13,8 @@ if (-not (Test-Path -LiteralPath $inputHostPath)) {
 }
 
 $originalClipboard = Get-Clipboard -Raw -ErrorAction SilentlyContinue
-$env:STYLEFLEX_RUN_SELECTION_SMOKE = '1'
-$env:STYLEFLEX_SELECTION_SMOKE_HOST_PATH = $inputHostPath
+$env:SAYFLEX_RUN_SELECTION_SMOKE = '1'
+$env:SAYFLEX_SELECTION_SMOKE_HOST_PATH = $inputHostPath
 
 function Invoke-SelectionFixture {
     param(
@@ -25,7 +25,7 @@ function Invoke-SelectionFixture {
         [Parameter(Mandatory)][string]$ClipboardMarker
     )
 
-    $env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER = $ClipboardMarker
+    $env:SAYFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER = $ClipboardMarker
     & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File (
         Join-Path $rustRoot $Script
     )
@@ -65,26 +65,26 @@ try {
         Invoke-SelectionFixture `
             -Script 'tests\fixtures\selection-uia-fixture.ps1' `
             -Output 'target\uia-smoke.out' `
-            -ExpectedText 'STYLEFLEX_UIA_SELECTION_TEXT' `
+            -ExpectedText 'SAYFLEX_UIA_SELECTION_TEXT' `
             -ExpectedMethod 'UiAutomation' `
-            -ClipboardMarker 'STYLEFLEX_UIA_CLIPBOARD_SENTINEL'
+            -ClipboardMarker 'SAYFLEX_UIA_CLIPBOARD_SENTINEL'
         Invoke-SelectionFixture `
             -Script 'tests\fixtures\selection-fixture.ps1' `
             -Output 'target\window-message-smoke.out' `
-            -ExpectedText 'STYLEFLEX_SELECTION_FIXTURE_TEXT' `
+            -ExpectedText 'SAYFLEX_SELECTION_FIXTURE_TEXT' `
             -ExpectedMethod 'WindowMessage' `
-            -ClipboardMarker 'STYLEFLEX_WINDOW_MESSAGE_CLIPBOARD_SENTINEL'
+            -ClipboardMarker 'SAYFLEX_WINDOW_MESSAGE_CLIPBOARD_SENTINEL'
         Invoke-SelectionFixture `
             -Script 'tests\fixtures\selection-shortcut-fixture.ps1' `
             -Output 'target\shortcut-smoke.out' `
-            -ExpectedText 'STYLEFLEX_SHORTCUT_SELECTION_TEXT' `
+            -ExpectedText 'SAYFLEX_SHORTCUT_SELECTION_TEXT' `
             -ExpectedMethod 'Shortcut(ControlC)' `
-            -ClipboardMarker 'STYLEFLEX_SHORTCUT_CLIPBOARD_SENTINEL'
+            -ClipboardMarker 'SAYFLEX_SHORTCUT_CLIPBOARD_SENTINEL'
     )
     $insertionClipboard = Get-Clipboard -Raw
-    $env:STYLEFLEX_RUN_INSERTION_SMOKE = '1'
-    $env:STYLEFLEX_INSERTION_SMOKE_HOST_PATH = $inputHostPath
-    $env:STYLEFLEX_INSERTION_SMOKE_TEXT = 'STYLEFLEX_INSERT_LAST_SMOKE'
+    $env:SAYFLEX_RUN_INSERTION_SMOKE = '1'
+    $env:SAYFLEX_INSERTION_SMOKE_HOST_PATH = $inputHostPath
+    $env:SAYFLEX_INSERTION_SMOKE_TEXT = 'SAYFLEX_INSERT_LAST_SMOKE'
     & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File (
         Join-Path $rustRoot 'tests\fixtures\insertion-fixture.ps1'
     )
@@ -94,7 +94,7 @@ try {
     $inserted = Get-Content -LiteralPath (
         Join-Path $rustRoot 'target\insertion-smoke.txt'
     ) -Raw
-    if ($inserted -ne $env:STYLEFLEX_INSERTION_SMOKE_TEXT) {
+    if ($inserted -ne $env:SAYFLEX_INSERTION_SMOKE_TEXT) {
         throw "insertion fixture received unexpected text: $inserted"
     }
     $insertionEvent = (
@@ -122,10 +122,10 @@ finally {
     if ($null -ne $originalClipboard) {
         Set-Clipboard -Value $originalClipboard
     }
-    Remove-Item Env:STYLEFLEX_RUN_SELECTION_SMOKE -ErrorAction SilentlyContinue
-    Remove-Item Env:STYLEFLEX_SELECTION_SMOKE_HOST_PATH -ErrorAction SilentlyContinue
-    Remove-Item Env:STYLEFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER -ErrorAction SilentlyContinue
-    Remove-Item Env:STYLEFLEX_RUN_INSERTION_SMOKE -ErrorAction SilentlyContinue
-    Remove-Item Env:STYLEFLEX_INSERTION_SMOKE_HOST_PATH -ErrorAction SilentlyContinue
-    Remove-Item Env:STYLEFLEX_INSERTION_SMOKE_TEXT -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_RUN_SELECTION_SMOKE -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_SELECTION_SMOKE_HOST_PATH -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_RUN_INSERTION_SMOKE -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_HOST_PATH -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_TEXT -ErrorAction SilentlyContinue
 }

@@ -1,5 +1,5 @@
 [package]
-name = "styleflex-speech-worker"
+name = "sayflex-speech-worker"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

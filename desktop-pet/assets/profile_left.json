@@ -1,0 +1,62 @@
+{
+  "sprite": "profile_left_body.png",
+  "source_size": [
+    625,
+    1105
+  ],
+  "visor": {
+    "x": 125,
+    "y": 273,
+    "w": 131,
+    "h": 204
+  },
+  "anchors": {
+    "left_eye": [
+      0.5,
+      0.43
+    ],
+    "right_eye": [
+      0.5,
+      0.43
+    ],
+    "mouth": [
+      0.66,
+      0.72
+    ]
+  },
+  "particle_anchors": {
+    "left_ear": {
+      "x": 307,
+      "y": 191,
+      "r": 55
+    },
+    "right_ear": {
+      "x": 242,
+      "y": 227,
+      "r": 48
+    },
+    "tail": {
+      "x": 421,
+      "y": 807,
+      "r": 62
+    }
+  },
+  "legs": {
+    "left": {
+      "sprite": "profile_left_leg_far.png",
+      "pivot_x": 220.92,
+      "pivot_y": 745.69,
+      "origin_x": 0,
+      "origin_y": 0
+    },
+    "right": {
+      "sprite": "profile_left_leg_near.png",
+      "pivot_x": 292.51,
+      "pivot_y": 745.69,
+      "origin_x": 0,
+      "origin_y": 0
+    }
+  },
+  "pockets": {},
+  "ground": 1090
+}

@@ -17,7 +17,10 @@ const RUNTIME_ARCHIVE: &str = "llama-b10164-vulkan.zip";
 const RUNTIME_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download/b10164/\
      llama-b10164-bin-win-vulkan-x64.zip";
 const RUNTIME_SHA256: &str = "5812a095d3b810b8c87fa7232aa2acbdc1279dfb008ee448ef7547a28c8f23e8";
-const INSTALL_MARKER: &str = ".styleflex-runtime";
+const INSTALL_MARKER: &str = ".sayflex-runtime";
+// Read-only upgrade compatibility. New installations always write the
+// canonical SayFlex marker.
+const LEGACY_INSTALL_MARKER: &str = ".styleflex-runtime";
 const REQUIRED_FILES: &[&str] = &[
     "llama-server.exe",
     "llama-server-impl.dll",
@@ -46,11 +49,9 @@ impl LlamaRuntimeManager {
     #[must_use]
     pub fn is_installed(&self) -> bool {
         let path = self.runtime_path();
-        path.join(INSTALL_MARKER)
-            .is_file()
-            .then(|| fs::read_to_string(path.join(INSTALL_MARKER)).ok())
-            .flatten()
-            .is_some_and(|marker| marker.trim().eq_ignore_ascii_case(RUNTIME_SHA256))
+        [INSTALL_MARKER, LEGACY_INSTALL_MARKER]
+            .iter()
+            .any(|marker| marker_matches(&path.join(marker)))
             && REQUIRED_FILES.iter().all(|file| path.join(file).is_file())
     }
 
@@ -170,6 +171,12 @@ impl LlamaRuntimeManager {
     }
 }
 
+fn marker_matches(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|marker| marker.trim().eq_ignore_ascii_case(RUNTIME_SHA256))
+}
+
 fn archive_matches(path: &Path) -> Result<bool> {
     let metadata = match path.metadata() {
         Ok(metadata) => metadata,
@@ -230,7 +237,7 @@ fn remove_directory_if_present(path: &Path) -> Result<()> {
 mod tests {
     use tempfile::tempdir;
 
-    use super::LlamaRuntimeManager;
+    use super::{LlamaRuntimeManager, REQUIRED_FILES, RUNTIME_SHA256};
 
     #[test]
     fn incomplete_runtime_is_never_reported_as_installed() {
@@ -238,10 +245,27 @@ mod tests {
         let manager = LlamaRuntimeManager::new(root.path().to_owned());
         std::fs::create_dir_all(manager.runtime_path()).unwrap();
         std::fs::write(
-            manager.runtime_path().join(".styleflex-runtime"),
+            manager.runtime_path().join(".sayflex-runtime"),
             "5812a095d3b810b8c87fa7232aa2acbdc1279dfb008ee448ef7547a28c8f23e8",
         )
         .unwrap();
         assert!(!manager.is_installed());
+    }
+
+    #[test]
+    fn complete_runtime_with_legacy_marker_remains_available_after_upgrade() {
+        let root = tempdir().unwrap();
+        let manager = LlamaRuntimeManager::new(root.path().to_owned());
+        std::fs::create_dir_all(manager.runtime_path()).unwrap();
+        for file in REQUIRED_FILES {
+            std::fs::write(manager.runtime_path().join(file), b"runtime").unwrap();
+        }
+        std::fs::write(
+            manager.runtime_path().join(".styleflex-runtime"),
+            RUNTIME_SHA256,
+        )
+        .unwrap();
+
+        assert!(manager.is_installed());
     }
 }

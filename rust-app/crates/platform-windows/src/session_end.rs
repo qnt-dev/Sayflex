@@ -136,7 +136,7 @@ pub fn session_is_ending() -> bool {
 }
 
 fn run_native_window(ready: mpsc::SyncSender<Result<u32, String>>) {
-    let class_name = format!("StyleFlex.SessionEnd.{}", std::process::id())
+    let class_name = format!("SayFlex.SessionEnd.{}", std::process::id())
         .encode_utf16()
         .chain(Some(0))
         .collect::<Vec<_>>();

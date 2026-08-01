@@ -3,44 +3,52 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const DISPLAY_NAME: &str = "StyleFlex";
-pub const DATA_DIRECTORY_NAME: &str = "StyleFlex";
-pub const USER_AGENT_PRODUCT: &str = "StyleFlex/0.5";
+pub const DISPLAY_NAME: &str = "SayFlex";
+pub const DATA_DIRECTORY_NAME: &str = "SayFlex";
+pub const USER_AGENT_PRODUCT: &str = "SayFlex/0.5";
 
-const LEGACY_DATA_DIRECTORY_NAME: &str = "KeyboopRust";
+// Compatibility-only names. They are deliberately kept out of every visible
+// product surface, but upgrades must not strand an existing model or history.
+const LEGACY_DATA_DIRECTORY_NAMES: &[&str] = &["StyleFlex", "KeyboopRust"];
 
 pub fn data_root() -> PathBuf {
     env::var_os("LOCALAPPDATA").map_or_else(
-        || {
-            env::current_dir()
-                .unwrap_or_default()
-                .join(".styleflex-data")
-        },
+        || env::current_dir().unwrap_or_default().join(".sayflex-data"),
         |root| {
             let root = Path::new(&root);
             let current = root.join(DATA_DIRECTORY_NAME);
-            let legacy = root.join(LEGACY_DATA_DIRECTORY_NAME);
-            if current.exists() || !legacy.exists() {
-                current
-            } else {
+            if current.exists() {
+                return current;
+            }
+            if let Some(legacy) = LEGACY_DATA_DIRECTORY_NAMES
+                .iter()
+                .map(|name| root.join(name))
+                .find(|path| path.exists())
+            {
                 // If an older running process temporarily prevents the atomic
                 // rename, keep using its data instead of starting empty.
                 legacy
+            } else {
+                current
             }
         },
     )
 }
 
 /// Moves the previous Rust application's data directory into the canonical
-/// StyleFlex location. The rename is atomic on the LOCALAPPDATA volume, never
-/// overwrites an existing StyleFlex directory, and keeps upgrades lossless.
+/// SayFlex location. The rename is atomic on the LOCALAPPDATA volume, never
+/// overwrites an existing SayFlex directory, and keeps upgrades lossless.
 pub fn migrate_legacy_data_root() -> io::Result<bool> {
     let Some(local_app_data) = env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
         return Ok(false);
     };
     let current = local_app_data.join(DATA_DIRECTORY_NAME);
-    let legacy = local_app_data.join(LEGACY_DATA_DIRECTORY_NAME);
-    migrate_data_root(&legacy, &current)
+    for name in LEGACY_DATA_DIRECTORY_NAMES {
+        if migrate_data_root(&local_app_data.join(name), &current)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn migrate_data_root(legacy: &Path, current: &Path) -> io::Result<bool> {

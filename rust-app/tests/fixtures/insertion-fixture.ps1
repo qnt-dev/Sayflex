@@ -25,7 +25,7 @@ public static class FixtureForeground
 '@
 
 $form = [System.Windows.Forms.Form]::new()
-$form.Text = 'StyleFlex Insertion Fixture'
+$form.Text = 'SayFlex Insertion Fixture'
 $form.StartPosition = 'Manual'
 $form.Location = [System.Drawing.Point]::new(80, 80)
 $form.Size = [System.Drawing.Size]::new(640, 240)
@@ -38,16 +38,16 @@ $form.Controls.Add($editor)
 
 $form.Add_Shown({
     $editor.Focus()
-    if ($env:STYLEFLEX_RUN_INSERTION_SMOKE -ne '1') {
+    if ($env:SAYFLEX_RUN_INSERTION_SMOKE -ne '1') {
         return
     }
 
     $form.TopMost = $true
     $rustRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-    $hostPath = if ($env:STYLEFLEX_INSERTION_SMOKE_HOST_PATH) {
-        $env:STYLEFLEX_INSERTION_SMOKE_HOST_PATH
+    $hostPath = if ($env:SAYFLEX_INSERTION_SMOKE_HOST_PATH) {
+        $env:SAYFLEX_INSERTION_SMOKE_HOST_PATH
     } else {
-        Join-Path $rustRoot 'target\debug\styleflex-input-host.exe'
+        Join-Path $rustRoot 'target\debug\sayflex-input-host.exe'
     }
     $outputPath = Join-Path $rustRoot 'target\insertion-smoke.out'
     $errorPath = Join-Path $rustRoot 'target\insertion-smoke.err'
@@ -57,8 +57,8 @@ $form.Add_Shown({
     [System.IO.File]::WriteAllText($outputPath, '')
     [System.IO.File]::WriteAllText($resultPath, '')
     $handle = $form.Handle.ToInt64()
-    $text = $env:STYLEFLEX_INSERTION_SMOKE_TEXT
-    $command = "set STYLEFLEX_RUN_INSERTION_SMOKE=1&& set STYLEFLEX_INSERTION_SMOKE_HWND=$handle&& set STYLEFLEX_INSERTION_SMOKE_TEXT=$text&& `"$hostPath`" --insertion-smoke > `"$outputPath`" 2> `"$errorPath`""
+    $text = $env:SAYFLEX_INSERTION_SMOKE_TEXT
+    $command = "set SAYFLEX_RUN_INSERTION_SMOKE=1&& set SAYFLEX_INSERTION_SMOKE_HWND=$handle&& set SAYFLEX_INSERTION_SMOKE_TEXT=$text&& `"$hostPath`" --insertion-smoke > `"$outputPath`" 2> `"$errorPath`""
     [FixtureForeground]::Focus($form.Handle)
     $script:insertionProcess = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d', '/c', $command -WindowStyle Hidden -PassThru
 

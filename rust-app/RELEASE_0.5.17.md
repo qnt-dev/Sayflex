@@ -1,4 +1,4 @@
-# StyleFlex 0.5.17
+# SayFlex 0.5.17
 
 This release removes the long-text insertion bottleneck in terminal targets
 and bounds speculative speech work without changing the installed Whisper or
@@ -6,7 +6,7 @@ translation models.
 
 ## Faster, application-aware insertion
 
-- StyleFlex now selects the native paste shortcut for the foreground
+- SayFlex now selects the native paste shortcut for the foreground
   application;
 - WezTerm and modern terminal hosts use `Ctrl+Shift+V`;
 - classic terminal hosts use `Shift+Insert`;

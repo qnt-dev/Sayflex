@@ -10,3 +10,7 @@ dist/
 *.suo
 *.nupkg
 TestResults/
+/desktop-pet/target/
+/desktop-pet/frame.png
+/desktop-pet/sheet.png
+/desktop-pet/walk.png

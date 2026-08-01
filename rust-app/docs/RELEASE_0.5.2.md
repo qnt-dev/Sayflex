@@ -1,4 +1,4 @@
-# StyleFlex 0.5.2
+# SayFlex 0.5.2
 
 ## Long-dictation latency
 

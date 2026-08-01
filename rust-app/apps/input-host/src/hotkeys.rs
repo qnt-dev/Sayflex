@@ -59,6 +59,16 @@ static LAST_HOOK_EVENT_US: AtomicU64 = AtomicU64::new(0);
 static SELECTION_BUSY: AtomicBool = AtomicBool::new(false);
 static REGISTERED_COMMANDS: AtomicU32 = AtomicU32::new(0);
 
+/// Как часто хук сообщает о печати. Событие нужно настольному питомцу, чтобы
+/// оживляться под ритм набора; чаще этого — бессмысленный трафик, реже —
+/// реакция отстаёт от пальцев.
+const TYPING_REPORT_INTERVAL_US: u64 = 150_000;
+/// Сколько нажатий за интервал считается предельной скоростью набора. Двадцать
+/// клавиш в секунду — уже очень быстрая печать.
+const TYPING_KEYS_AT_FULL: u32 = 3;
+static LAST_TYPING_REPORT_US: AtomicU64 = AtomicU64::new(0);
+static TYPING_KEYS_SINCE_REPORT: AtomicU32 = AtomicU32::new(0);
+
 pub const HOTKEY_ID_CORRECT_LAYOUT: i32 = 0x5141;
 pub const HOTKEY_ID_INSERT_LAST: i32 = 0x5142;
 pub const HOTKEY_ID_TRANSLATE: i32 = 0x5143;
@@ -87,10 +97,22 @@ enum EndReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookAction {
-    DictationStarted { gesture_id: u64 },
-    DictationEnded { gesture_id: u64, reason: EndReason },
+    DictationStarted {
+        gesture_id: u64,
+    },
+    DictationEnded {
+        gesture_id: u64,
+        reason: EndReason,
+    },
     InsertLastRequested,
-    SelectionRequested { intent: TextActionIntent },
+    SelectionRequested {
+        intent: TextActionIntent,
+    },
+    /// Пользователь печатает, с указанной интенсивностью в процентах.
+    /// Отправляется не чаще, чем раз в [`TYPING_REPORT_INTERVAL_US`].
+    TypingActivity {
+        intensity_percent: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -205,6 +227,9 @@ pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LP
     }
 
     let now = monotonic_us();
+    if key_down && origin == EventOrigin::Physical && is_typing_key(input.vkCode as u16) {
+        report_typing(now);
+    }
     let previous_hook_event = LAST_HOOK_EVENT_US.swap(now, Ordering::AcqRel);
     let needs_reconciliation =
         previous_hook_event == 0 || now.saturating_sub(previous_hook_event) >= 1_000_000;
@@ -253,6 +278,46 @@ fn classify_event(flags: u32, extra_info: usize) -> EventOrigin {
     } else {
         EventOrigin::Physical
     }
+}
+
+/// Считает нажатия и изредка отправляет наверх интенсивность печати.
+///
+/// Работает только на атомиках: хук выполняется в контексте чужого ввода, и
+/// любая блокировка здесь задерживала бы клавиатуру всей системы. Наружу
+/// уходит одно число — какие клавиши нажаты, не выясняется и не передаётся.
+fn report_typing(now: u64) {
+    TYPING_KEYS_SINCE_REPORT.fetch_add(1, Ordering::Relaxed);
+    let previous = LAST_TYPING_REPORT_US.load(Ordering::Relaxed);
+    if now.saturating_sub(previous) < TYPING_REPORT_INTERVAL_US {
+        return;
+    }
+    // Обмен, а не запись: при одновременных нажатиях отчёт уйдёт один раз.
+    if LAST_TYPING_REPORT_US
+        .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let keys = TYPING_KEYS_SINCE_REPORT.swap(0, Ordering::Relaxed);
+    let intensity_percent = (keys * 100 / TYPING_KEYS_AT_FULL).min(100) as u8;
+    dispatch_hook_action(HookAction::TypingActivity { intensity_percent });
+}
+
+const fn is_typing_key(virtual_key: u16) -> bool {
+    !matches!(
+        virtual_key,
+        VK_CONTROL
+            | VK_LCONTROL
+            | VK_RCONTROL
+            | VK_MENU
+            | VK_LMENU
+            | VK_RMENU
+            | VK_SHIFT
+            | VK_LSHIFT
+            | VK_RSHIFT
+            | VK_LWIN
+            | VK_RWIN
+    )
 }
 
 fn dispatch_hook_action(action: HookAction) -> bool {
@@ -385,6 +450,11 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
                 {
                     break;
                 }
+            }
+            HookAction::TypingActivity { intensity_percent } => {
+                // Печать никого не блокирует и ничего не запускает: если канал
+                // переполнен или закрыт, событие просто теряется.
+                let _ = events.send(InputHostEvent::TypingActivity { intensity_percent });
             }
             HookAction::InsertLastRequested => {
                 let Some(target) = target::capture_text_target() else {
@@ -1226,7 +1296,9 @@ const fn action_gesture_id(action: HookAction) -> Option<u64> {
     match action {
         HookAction::DictationStarted { gesture_id }
         | HookAction::DictationEnded { gesture_id, .. } => Some(gesture_id),
-        HookAction::InsertLastRequested | HookAction::SelectionRequested { .. } => None,
+        HookAction::InsertLastRequested
+        | HookAction::SelectionRequested { .. }
+        | HookAction::TypingActivity { .. } => None,
     }
 }
 
@@ -1239,9 +1311,10 @@ mod tests {
     use super::{
         EndReason, EventOrigin, GestureState, HOTKEY_ID_CORRECT_LAYOUT, HOTKEY_ID_INSERT_LAST,
         HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_K, INPUT_T,
-        INPUT_V, PhysicalKeys, classify_event, monotonic_us, registered_hotkey_action,
-        selection_chord_mask, wait_for_mask_clear_using,
+        INPUT_V, PhysicalKeys, classify_event, is_typing_key, monotonic_us,
+        registered_hotkey_action, selection_chord_mask, wait_for_mask_clear_using,
     };
+
     use crate::inject::SYNTHETIC_MARKER;
     use windows_sys::Win32::UI::{
         Input::KeyboardAndMouse::{
@@ -1250,6 +1323,22 @@ mod tests {
         },
         WindowsAndMessaging::LLKHF_INJECTED,
     };
+
+    #[test]
+    fn typing_activity_excludes_command_modifiers() {
+        for key in [
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_LMENU,
+            VK_RMENU,
+            VK_LSHIFT,
+            VK_LWIN,
+        ] {
+            assert!(!is_typing_key(key));
+        }
+        assert!(is_typing_key(VK_SPACE));
+        assert!(is_typing_key(VK_T));
+    }
 
     fn event(state: &mut HotkeyState, key: u16, down: bool) -> super::HookDecision {
         state.process_event(key, down, !down, 0)

@@ -1,4 +1,4 @@
-# StyleFlex 0.1.3
+# SayFlex 0.1.3
 
 This release replaces the unsafe `Ctrl + Windows` implementation from 0.1.2.
 

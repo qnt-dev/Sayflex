@@ -37,11 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "input-host");
     diagnostic_line("input_host lifecycle=starting");
     if std::env::args().any(|argument| argument == "--selection-capture-smoke") {
-        require_smoke_opt_in("STYLEFLEX_RUN_SELECTION_SMOKE")?;
+        require_smoke_opt_in("SAYFLEX_RUN_SELECTION_SMOKE")?;
         return run_selection_capture_smoke();
     }
     if std::env::args().any(|argument| argument == "--insertion-smoke") {
-        require_smoke_opt_in("STYLEFLEX_RUN_INSERTION_SMOKE")?;
+        require_smoke_opt_in("SAYFLEX_RUN_INSERTION_SMOKE")?;
         return run_insertion_smoke();
     }
     if let Some(process_id) = std::env::args()
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value.parse::<u32>())
         .transpose()?
     {
-        require_smoke_opt_in("STYLEFLEX_RUN_WEZTERM_PROBE")?;
+        require_smoke_opt_in("SAYFLEX_RUN_WEZTERM_PROBE")?;
         let (pane_id, cli_path) = wezterm::probe(process_id)?;
         serde_json::to_writer(
             io::stdout().lock(),
@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .strip_prefix("--hotkey-e2e-send=")
             .map(str::to_owned)
     }) {
-        require_smoke_opt_in("STYLEFLEX_RUN_HOTKEY_E2E")?;
+        require_smoke_opt_in("SAYFLEX_RUN_HOTKEY_E2E")?;
         let trigger = match action.as_str() {
             "translation" => VK_T,
             "insert-last" => VK_V,
@@ -154,16 +154,16 @@ fn data_root() -> PathBuf {
 }
 
 fn run_selection_capture_smoke() -> Result<(), Box<dyn std::error::Error>> {
-    if let Ok(delay) = std::env::var("STYLEFLEX_SELECTION_SMOKE_DELAY_MS") {
+    if let Ok(delay) = std::env::var("SAYFLEX_SELECTION_SMOKE_DELAY_MS") {
         thread::sleep(std::time::Duration::from_millis(delay.parse()?));
     }
-    let target = if let Ok(handle) = std::env::var("STYLEFLEX_SELECTION_SMOKE_HWND") {
+    let target = if let Ok(handle) = std::env::var("SAYFLEX_SELECTION_SMOKE_HWND") {
         target::capture_window_handle(handle.parse()?)
     } else {
         target::capture_text_target()
             .ok_or_else(|| io::Error::other("no unprotected foreground text target"))?
     };
-    if let Ok(stable_ms) = std::env::var("STYLEFLEX_SELECTION_SMOKE_STABLE_FOCUS_MS") {
+    if let Ok(stable_ms) = std::env::var("SAYFLEX_SELECTION_SMOKE_STABLE_FOCUS_MS") {
         wait_for_stable_foreground(
             target,
             std::time::Duration::from_millis(stable_ms.parse()?),
@@ -195,13 +195,13 @@ hkl={:#x} shortcut={:?}",
 }
 
 fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
-    if let Ok(delay) = std::env::var("STYLEFLEX_INSERTION_SMOKE_DELAY_MS") {
+    if let Ok(delay) = std::env::var("SAYFLEX_INSERTION_SMOKE_DELAY_MS") {
         thread::sleep(Duration::from_millis(delay.parse()?));
     }
-    let handle = std::env::var("STYLEFLEX_INSERTION_SMOKE_HWND")?.parse()?;
-    let text = std::env::var("STYLEFLEX_INSERTION_SMOKE_TEXT")?;
+    let handle = std::env::var("SAYFLEX_INSERTION_SMOKE_HWND")?.parse()?;
+    let text = std::env::var("SAYFLEX_INSERTION_SMOKE_TEXT")?;
     let target = target::capture_window_handle(handle);
-    if let Ok(stable_ms) = std::env::var("STYLEFLEX_INSERTION_SMOKE_STABLE_FOCUS_MS") {
+    if let Ok(stable_ms) = std::env::var("SAYFLEX_INSERTION_SMOKE_STABLE_FOCUS_MS") {
         wait_for_stable_foreground(
             target,
             Duration::from_millis(stable_ms.parse()?),

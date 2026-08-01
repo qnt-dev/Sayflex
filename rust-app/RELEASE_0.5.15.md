@@ -1,6 +1,6 @@
-# StyleFlex 0.5.15
+# SayFlex 0.5.15
 
-This release establishes the StyleFlex product identity across the Windows
+This release establishes the SayFlex product identity across the Windows
 application, tray, windows, process names, installer, diagnostics and data
 directory. Existing local settings, histories, runtimes and models are moved
 atomically from the previous Rust application directory on first launch.

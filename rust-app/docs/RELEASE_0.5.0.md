@@ -1,4 +1,4 @@
-# StyleFlex 0.5.0
+# SayFlex 0.5.0
 
 ## Interface
 

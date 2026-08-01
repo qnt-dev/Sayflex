@@ -1,4 +1,4 @@
-# StyleFlex 0.3.0
+# SayFlex 0.3.0
 
 This release adds a failure-isolated local translation subsystem and selected
 text command palette. The C# reference application remains unchanged.

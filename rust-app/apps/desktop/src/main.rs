@@ -40,20 +40,21 @@ use slint::{
 
 mod flow_sphere;
 mod overlay_presenter;
+mod pet;
 
 use overlay_presenter::{OverlayContract, OverlayPresenter};
 
 slint::include_modules!();
 
 const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
-const INPUT_WORKER_EXE: &str = "StyleFlex.InputHost.exe";
-const SPEECH_WORKER_EXE: &str = "StyleFlex.Speech.exe";
-const TRANSLATION_WORKER_EXE: &str = "StyleFlex.Translation.exe";
-const SPEECH_CPU_EXE: &str = "StyleFlex.Speech.Cpu.exe";
-const SPEECH_CUDA_EXE: &str = "StyleFlex.Speech.Cuda.exe";
-const DEV_INPUT_WORKER_EXE: &str = "styleflex-input-host.exe";
-const DEV_SPEECH_WORKER_EXE: &str = "styleflex-speech-worker.exe";
-const DEV_TRANSLATION_WORKER_EXE: &str = "styleflex-translation-worker.exe";
+const INPUT_WORKER_EXE: &str = "SayFlex.InputHost.exe";
+const SPEECH_WORKER_EXE: &str = "SayFlex.Speech.exe";
+const TRANSLATION_WORKER_EXE: &str = "SayFlex.Translation.exe";
+const SPEECH_CPU_EXE: &str = "SayFlex.Speech.Cpu.exe";
+const SPEECH_CUDA_EXE: &str = "SayFlex.Speech.Cuda.exe";
+const DEV_INPUT_WORKER_EXE: &str = "sayflex-input-host.exe";
+const DEV_SPEECH_WORKER_EXE: &str = "sayflex-speech-worker.exe";
+const DEV_TRANSLATION_WORKER_EXE: &str = "sayflex-translation-worker.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INDICATOR_BAR_PROFILE: [f32; 10] = [0.25, 0.4, 0.62, 0.82, 1.0, 1.0, 0.82, 0.62, 0.4, 0.25];
@@ -307,6 +308,8 @@ impl Workers {
         let _ = self.input.send(&InputHostCommand::Shutdown);
         let _ = self.speech.send(&SpeechWorkerCommand::Shutdown);
         let _ = self.translation.send(&TranslationWorkerCommand::Shutdown);
+        // Питомец получает shutdown и также обязан выйти по закрытому stdin.
+        pet::stop();
     }
 
     fn begin_session_end(&self) {
@@ -535,6 +538,9 @@ fn spawn_initial_workers(
     if !startup_gate.wait_until_worker_start_is_allowed() {
         return Ok(None);
     }
+    // Питомец необязателен: если его нет рядом, запуск молча пропускается.
+    // В том же job-объекте, чтобы он не пережил приложение.
+    pet::start(&job);
 
     Ok(Some(InitialWorkers {
         job,
@@ -1452,12 +1458,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if let Err(error) = rust_app_core::product::migrate_legacy_data_root() {
-        eprintln!("StyleFlex data migration is deferred: {error}");
+        eprintln!("SayFlex data migration is deferred: {error}");
     }
     let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "desktop");
     rust_app_core::lifecycle::install_panic_hook();
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.Desktop")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.Desktop")?;
     let mut run_session =
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
@@ -1819,7 +1825,7 @@ fn run_indicator_preview(
     writing_slate_surface: WritingSlateSurface,
 ) -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.IndicatorPreview")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.IndicatorPreview")?;
     let (indicator, animation) = new_indicator()?;
     {
         let mut animation = animation.borrow_mut();
@@ -2024,7 +2030,7 @@ fn run_indicator_preview(
 
 fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.OverlayProbe")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.OverlayProbe")?;
     let _ = rust_app_core::diagnostics::initialize(
         &data_root().join("logs"),
         "recording-overlay-probe",
@@ -2092,7 +2098,7 @@ fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
 
 fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
     let _single_instance = rust_platform_windows::SingleInstanceGuard::acquire(
-        "Local\\StyleFlex.TranslationOverlayProbe",
+        "Local\\SayFlex.TranslationOverlayProbe",
     )?;
     let _ = rust_app_core::diagnostics::initialize(
         &data_root().join("logs"),
@@ -2220,7 +2226,7 @@ error={error}"
 
 fn run_action_palette_preview() -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.ActionPreview")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.ActionPreview")?;
     let palette = ActionPalette::new()?;
     let source =
         "A compact command surface should fit the selected text and preserve editor focus.";
@@ -2263,7 +2269,7 @@ fn run_action_palette_preview() -> Result<(), Box<dyn Error>> {
 
 fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.TranslationPreview")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.TranslationPreview")?;
     let preview = TranslationPreview::new()?;
     let presenter = OverlayPresenter::install(
         preview.window(),
@@ -2366,7 +2372,7 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
 
 fn run_layout_preview() -> Result<(), Box<dyn Error>> {
     let _single_instance =
-        rust_platform_windows::SingleInstanceGuard::acquire("Local\\StyleFlex.LayoutPreview")?;
+        rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.LayoutPreview")?;
     let chooser = SelectionChooser::new()?;
     let source = "ghbdtn vbh";
     chooser.set_source_text(source.into());
@@ -2925,6 +2931,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 set_indicator_status(settings, &format!("Could not start recording: {error}"));
                 return;
             }
+            pet::dictation_started();
             indicator_animation.borrow_mut().begin_listening();
             if let Some(indicator) = indicator.upgrade() {
                 indicator.set_processing(false);
@@ -2938,6 +2945,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             session_id,
             target: _,
         } => {
+            pet::dictation_finished();
             state
                 .borrow_mut()
                 .release_started
@@ -2970,6 +2978,9 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 }
                 set_indicator_status(settings, "Processing locally…");
             }
+        }
+        InputHostEvent::TypingActivity { intensity_percent } => {
+            pet::typing(f32::from(intensity_percent) / 100.0);
         }
         InputHostEvent::InsertLastRequested { target } => {
             let resolution = state.borrow_mut().request_insert_last(target);
@@ -3147,6 +3158,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             delivery,
             dispatch_duration_ms,
         } => {
+            pet::insert_succeeded();
             let (owns_indicator, total_after_release_ms, transcript_latency) = {
                 let mut state = state.borrow_mut();
                 state.targets.remove(&session_id);
@@ -3241,6 +3253,7 @@ speculative_reuse={} method={} delivery={}",
             code,
             message,
         } => {
+            pet::insert_failed();
             rust_app_core::diagnostics::log_line(&format!(
                 "input_host_action result=failed session={session_id:?} code={code} message={message}"
             ));
@@ -3788,6 +3801,9 @@ fn handle_speech_event(
                 indicator_animation
                     .borrow_mut()
                     .set_microphone_signal(peak, &spectrum);
+                // Питомцу уходит только громкость: спектр ему не нужен, а по
+                // одному числу восстановить речь нельзя.
+                pet::voice(peak);
             }
         }
         SpeechWorkerEvent::Processing { session_id: _ } => {
@@ -4210,6 +4226,7 @@ fn handle_translation_event(
             result,
             created_unix_ms,
         } => {
+            pet::translation_ready();
             let pending = {
                 let mut state = state.borrow_mut();
                 state.translation_history.insert(
