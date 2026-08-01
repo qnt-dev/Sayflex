@@ -19,9 +19,7 @@ separated legs, so the former Step 1B generation is no longer required.
 `source/front_visor_donor.png` is a tightly cropped source plate used only for
 the blank visor glass. It is not a second character identity reference.
 
-The two prompts below are retained as history only. **Do not run them.** The
-next OpenAI Image request starts at Step 2 and uses the approved
-`source/rig_master_front.png`.
+The two prompts below are retained as history only. **Do not run them.**
 
 ## Archived Step 1A — clean identity plate
 
@@ -83,7 +81,16 @@ silhouette remains truly transparent alpha. Exactly one character on the same
 1024 x 1536 canvas.
 ```
 
-## Step 2 — clean right-profile rig master
+## Approved right-profile master — completed
+
+`source/rig_master_profile_right.png` is the approved right-facing locomotion
+master. `extract_profile_motion.py` validates its exact SHA-256, removes only
+detached low-alpha backdrop residue, and prepares mirrored runtime layers.
+
+The Step 2 prompt below is retained as history only. **Do not run it.** The next
+OpenAI Image request starts at Step 3 and uses the approved profile master.
+
+## Archived Step 2 — clean right-profile rig master
 
 References, in priority order:
 
@@ -204,8 +211,8 @@ transparent canvas. No floor, shadow, scenery, text, logo or watermark.
 
 ## Generation order and stop rule
 
-Step 1 is approved and must not be regenerated. Generate Step 2 next and inspect
-it before continuing. Reject and regenerate an image if identity changes, if
-free particles remain around the creature, if the visor contains a face, or if
-any required limb is fused or cropped. Once Step 2 is approved, use it as the
-profile source for all later profile poses.
+Steps 1 and 2 are approved and must not be regenerated. Generate Step 3 next.
+Reject and regenerate any later pose if identity changes, if free particles
+remain around the creature, if the visor contains a face, or if any required
+limb is cropped. Use `source/rig_master_profile_right.png` as the profile
+identity source for all later profile poses.

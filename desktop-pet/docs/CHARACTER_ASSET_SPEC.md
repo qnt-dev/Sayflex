@@ -47,13 +47,19 @@ separate setting.
 - The foot baseline and character scale are identical between views.
 - Generate the right-facing view only; left-facing runtime assets are mirrored
   by the deterministic extraction pipeline.
-- Limbs must have clean silhouettes and visible negative space. A pose that
-  looks attractive but cannot be segmented is rejected.
+- Limbs must have clean silhouettes. Negative space is preferred; a flattened
+  pose is acceptable for modest locomotion only when calibrated overlap masks
+  keep every animated frame continuous at runtime.
 - A production motion rig needs separate upper arm, forearm, paw, thigh, lower
   leg and foot layers, plus torso, head/hood, ears and tail. Hidden joint areas
   are reconstructed during extraction from approved source poses.
 - Free-floating particles, floor, cast shadow, scenery, text, logo and watermark
   are forbidden in rig sources.
+
+The currently approved front and right-profile masters are hash-pinned by the
+extractors. The front pose remains an intact sprite. The profile master drives
+the modest walk/run cycle; larger traversal mechanics use dedicated key poses
+instead of forcing the flattened limbs beyond their safe angular range.
 
 ## First vertical slice
 

@@ -5,10 +5,10 @@
     1105
   ],
   "visor": {
-    "x": 130,
-    "y": 232,
-    "w": 300,
-    "h": 178
+    "x": 150,
+    "y": 282,
+    "w": 267,
+    "h": 181
   },
   "anchors": {
     "left_eye": [
@@ -27,45 +27,21 @@
   "particle_anchors": {
     "left_ear": {
       "x": 95,
-      "y": 130,
-      "r": 74
+      "y": 200,
+      "r": 58
     },
     "right_ear": {
-      "x": 455,
-      "y": 130,
-      "r": 74
+      "x": 472,
+      "y": 200,
+      "r": 58
     },
     "tail": {
-      "x": 555,
-      "y": 835,
-      "r": 88
+      "x": 527,
+      "y": 836,
+      "r": 69
     }
   },
-  "legs": {
-    "left": {
-      "sprite": "stand_leg_left.png",
-      "pivot_x": 168,
-      "pivot_y": 828,
-      "origin_x": 73,
-      "origin_y": 815
-    },
-    "right": {
-      "sprite": "stand_leg_right.png",
-      "pivot_x": 372,
-      "pivot_y": 828,
-      "origin_x": 268,
-      "origin_y": 815
-    }
-  },
-  "pockets": {
-    "left": {
-      "x": 123,
-      "y": 678
-    },
-    "right": {
-      "x": 424,
-      "y": 678
-    }
-  },
+  "legs": {},
+  "pockets": {},
   "ground": 1090
 }

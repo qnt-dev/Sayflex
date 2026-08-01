@@ -216,6 +216,72 @@ impl Canvas {
         }
     }
 
+    /// Draws a dynamic canvas through the same deformation grid as a sprite.
+    /// This is used for the profile torso after its procedural face has been
+    /// composited, so body motion and expression can never drift apart.
+    pub fn draw_canvas_warped(&mut self, other: &Self, x: i32, y: i32, warp: &Warp, margin: i32) {
+        if warp.is_identity() && margin == 0 {
+            self.draw_canvas(other, x, y);
+            return;
+        }
+        let sw = other.width as f32;
+        let sh = other.height as f32;
+        let x0 = (x - margin).max(0);
+        let y0 = (y - margin).max(0);
+        let x1 = (x + other.width as i32 + margin).min(self.width as i32);
+        let y1 = (y + other.height as i32 + margin).min(self.height as i32);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let dst_stride = self.width as usize * 4;
+        for row in y0..y1 {
+            let v = (row - y) as f32 / sh;
+            let dst_row = row as usize * dst_stride;
+            for column in x0..x1 {
+                let u = (column - x) as f32 / sw;
+                let (du, dv) = warp.sample(u, v);
+                let src_x = (u + du) * sw;
+                let src_y = (v + dv) * sh;
+                let Some(src) = other.sample(src_x, src_y) else {
+                    continue;
+                };
+                if src[3] == 0 {
+                    continue;
+                }
+                let dst_offset = dst_row + column as usize * 4;
+                Self::over(&mut self.pixels[dst_offset..dst_offset + 4], src);
+            }
+        }
+    }
+
+    fn sample(&self, x: f32, y: f32) -> Option<[u8; 4]> {
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let x0 = x.floor() as u32;
+        let y0 = y.floor() as u32;
+        if x0 >= self.width || y0 >= self.height {
+            return None;
+        }
+        let x1 = (x0 + 1).min(self.width - 1);
+        let y1 = (y0 + 1).min(self.height - 1);
+        let tx = x - x0 as f32;
+        let ty = y - y0 as f32;
+        let at = |cx: u32, cy: u32| -> &[u8] {
+            let offset = (cy as usize * self.width as usize + cx as usize) * 4;
+            &self.pixels[offset..offset + 4]
+        };
+        let (a, b, c, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+        let mut out = [0_u8; 4];
+        for channel in 0..4 {
+            let top = f32::from(a[channel]) + (f32::from(b[channel]) - f32::from(a[channel])) * tx;
+            let bottom =
+                f32::from(c[channel]) + (f32::from(d[channel]) - f32::from(c[channel])) * tx;
+            out[channel] = (top + (bottom - top) * ty).round().clamp(0.0, 255.0) as u8;
+        }
+        Some(out)
+    }
+
     /// Накладывает спрайт, повёрнутый вокруг точки `pivot`.
     ///
     /// `pivot` задаётся в координатах спрайта. Идёт обратным отображением:
@@ -261,6 +327,130 @@ impl Canvas {
                 }
                 let dst_offset = dst_row + column as usize * 4;
                 Self::over(&mut self.pixels[dst_offset..dst_offset + 4], src);
+            }
+        }
+    }
+
+    /// Deforms one continuous limb with three skeletal transforms.
+    ///
+    /// Unlike drawing thigh, shin and foot as separate sprites, linear blend
+    /// skinning keeps the source texture continuous across the knee and ankle.
+    /// A small regular mesh is rasterized directly into the destination; the
+    /// mesh is created on the stack and performs no per-frame allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_skinned_limb(
+        &mut self,
+        sprite: &Sprite,
+        x: i32,
+        y: i32,
+        hip: (f32, f32),
+        knee: (f32, f32),
+        ankle: (f32, f32),
+        hip_angle: f32,
+        knee_angle: f32,
+        foot_angle: f32,
+    ) {
+        const COLS: usize = 5;
+        const ROWS: usize = 24;
+        let shin_angle = hip_angle + knee_angle;
+        let new_knee = add_point(hip, rotate_point(sub_point(knee, hip), hip_angle));
+        let new_ankle = add_point(new_knee, rotate_point(sub_point(ankle, knee), shin_angle));
+        let thigh_blend = (distance(hip, knee) * 0.13).max(2.0);
+        let ankle_blend = (distance(knee, ankle) * 0.13).max(2.0);
+
+        let deform = |point: (f32, f32)| {
+            let thigh = add_point(hip, rotate_point(sub_point(point, hip), hip_angle));
+            let shin = add_point(new_knee, rotate_point(sub_point(point, knee), shin_angle));
+            let foot = add_point(new_ankle, rotate_point(sub_point(point, ankle), foot_angle));
+            let knee_mix = smoothstep(knee.1 - thigh_blend, knee.1 + thigh_blend, point.1);
+            let upper = mix_point(thigh, shin, knee_mix);
+            let foot_mix = smoothstep(ankle.1 - ankle_blend, ankle.1 + ankle_blend, point.1);
+            mix_point(upper, foot, foot_mix)
+        };
+
+        let mut vertices = [[MeshVertex::default(); COLS]; ROWS];
+        let width = sprite.width as f32;
+        let height = sprite.height as f32;
+        for (row, line) in vertices.iter_mut().enumerate() {
+            let source_y = height * row as f32 / (ROWS - 1) as f32;
+            for (column, vertex) in line.iter_mut().enumerate() {
+                let source_x = width * column as f32 / (COLS - 1) as f32;
+                let destination = deform((source_x, source_y));
+                *vertex = MeshVertex {
+                    destination: (destination.0 + x as f32, destination.1 + y as f32),
+                    source: (source_x, source_y),
+                };
+            }
+        }
+
+        for row in 0..ROWS - 1 {
+            for column in 0..COLS - 1 {
+                let top_left = vertices[row][column];
+                let top_right = vertices[row][column + 1];
+                let bottom_left = vertices[row + 1][column];
+                let bottom_right = vertices[row + 1][column + 1];
+                self.draw_textured_triangle(sprite, [top_left, top_right, bottom_right]);
+                self.draw_textured_triangle(sprite, [top_left, bottom_right, bottom_left]);
+            }
+        }
+    }
+
+    fn draw_textured_triangle(&mut self, sprite: &Sprite, triangle: [MeshVertex; 3]) {
+        let [a, b, c] = triangle;
+        let area = edge(a.destination, b.destination, c.destination);
+        if area.abs() < 1e-5 {
+            return;
+        }
+        let min_x = a
+            .destination
+            .0
+            .min(b.destination.0)
+            .min(c.destination.0)
+            .floor()
+            .max(0.0) as i32;
+        let max_x = a
+            .destination
+            .0
+            .max(b.destination.0)
+            .max(c.destination.0)
+            .ceil()
+            .min(self.width as f32) as i32;
+        let min_y = a
+            .destination
+            .1
+            .min(b.destination.1)
+            .min(c.destination.1)
+            .floor()
+            .max(0.0) as i32;
+        let max_y = a
+            .destination
+            .1
+            .max(b.destination.1)
+            .max(c.destination.1)
+            .ceil()
+            .min(self.height as f32) as i32;
+        let inverse_area = 1.0 / area;
+        let stride = self.width as usize * 4;
+        for row in min_y..max_y {
+            let destination_row = row as usize * stride;
+            for column in min_x..max_x {
+                let point = (column as f32 + 0.5, row as f32 + 0.5);
+                let wa = edge(b.destination, c.destination, point) * inverse_area;
+                let wb = edge(c.destination, a.destination, point) * inverse_area;
+                let wc = 1.0 - wa - wb;
+                if wa < -1e-4 || wb < -1e-4 || wc < -1e-4 {
+                    continue;
+                }
+                let source_x = a.source.0 * wa + b.source.0 * wb + c.source.0 * wc;
+                let source_y = a.source.1 * wa + b.source.1 * wb + c.source.1 * wc;
+                let Some(source) = sprite.sample(source_x, source_y) else {
+                    continue;
+                };
+                if source[3] == 0 {
+                    continue;
+                }
+                let offset = destination_row + column as usize * 4;
+                Self::over(&mut self.pixels[offset..offset + 4], source);
             }
         }
     }
@@ -345,6 +535,42 @@ impl Canvas {
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct MeshVertex {
+    destination: (f32, f32),
+    source: (f32, f32),
+}
+
+fn add_point(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    (a.0 + b.0, a.1 + b.1)
+}
+
+fn sub_point(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    (a.0 - b.0, a.1 - b.1)
+}
+
+fn rotate_point(point: (f32, f32), angle: f32) -> (f32, f32) {
+    let (sin, cos) = angle.sin_cos();
+    (point.0 * cos - point.1 * sin, point.0 * sin + point.1 * cos)
+}
+
+fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
+    (a.0 - b.0).hypot(a.1 - b.1)
+}
+
+fn mix_point(a: (f32, f32), b: (f32, f32), amount: f32) -> (f32, f32) {
+    (a.0 + (b.0 - a.0) * amount, a.1 + (b.1 - a.1) * amount)
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let amount = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    amount * amount * (3.0 - 2.0 * amount)
+}
+
+fn edge(a: (f32, f32), b: (f32, f32), point: (f32, f32)) -> f32 {
+    (point.0 - a.0) * (b.1 - a.1) - (point.1 - a.1) * (b.0 - a.0)
 }
 
 fn content_bounds_rgba(image: &image::RgbaImage, threshold: u8) -> Option<(u32, u32, u32, u32)> {
@@ -680,7 +906,7 @@ impl Sprite {
 
 #[cfg(test)]
 mod tests {
-    use super::Canvas;
+    use super::{Canvas, Sprite};
 
     #[test]
     fn opaque_fill_replaces_and_transparent_fill_leaves_canvas_untouched() {
@@ -726,5 +952,68 @@ mod tests {
         let unchanged = target.pixels().to_vec();
         target.draw_canvas_opacity(&source, 0.0);
         assert_eq!(target.pixels(), unchanged);
+    }
+
+    #[test]
+    fn skinned_limb_remains_one_connected_surface_across_joints() {
+        let width = 28_u32;
+        let height = 100_u32;
+        let sprite = Sprite {
+            width,
+            height,
+            pixels: vec![255; width as usize * height as usize * 4],
+        };
+        let mut canvas = Canvas::new(180, 180);
+        canvas.draw_skinned_limb(
+            &sprite,
+            70,
+            25,
+            (14.0, 4.0),
+            (14.0, 48.0),
+            (14.0, 84.0),
+            -0.22,
+            0.82,
+            -0.12,
+        );
+
+        let mut opaque = Vec::new();
+        for y in 0..canvas.height() {
+            for x in 0..canvas.width() {
+                let alpha =
+                    canvas.pixels()[(y as usize * canvas.width() as usize + x as usize) * 4 + 3];
+                if alpha > 0 {
+                    opaque.push((x, y));
+                }
+            }
+        }
+        assert!(!opaque.is_empty());
+
+        let mut visited = vec![false; (canvas.width() * canvas.height()) as usize];
+        let mut queue = std::collections::VecDeque::from([opaque[0]]);
+        visited[(opaque[0].1 * canvas.width() + opaque[0].0) as usize] = true;
+        while let Some((x, y)) = queue.pop_front() {
+            for (nx, ny) in [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ] {
+                if nx >= canvas.width() || ny >= canvas.height() {
+                    continue;
+                }
+                let index = (ny * canvas.width() + nx) as usize;
+                let alpha = canvas.pixels()[index * 4 + 3];
+                if alpha > 0 && !visited[index] {
+                    visited[index] = true;
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+        assert!(
+            opaque
+                .iter()
+                .all(|&(x, y)| visited[(y * canvas.width() + x) as usize]),
+            "the deformed limb split into disconnected thigh/shin/foot islands"
+        );
     }
 }

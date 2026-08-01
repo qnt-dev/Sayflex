@@ -77,6 +77,16 @@ fn main() {
     let stdin_control = arguments
         .iter()
         .any(|argument| argument == "--stdin-control");
+    let walk_style = match argument_value(&arguments, "--walk-style") {
+        Some(value) => match WalkStyle::parse(&value) {
+            Some(style) => style,
+            None => {
+                eprintln!("pet_host: unknown walk style '{value}'; expected confident or woodland");
+                std::process::exit(2);
+            }
+        },
+        None => WalkStyle::default(),
+    };
 
     let result = match (
         argument_value(&arguments, "--dump"),
@@ -84,9 +94,9 @@ fn main() {
         argument_value(&arguments, "--hands"),
     ) {
         (_, _, Some(path)) => dump_hands(Path::new(&path), scale),
-        (_, Some(path), None) => dump_walk(Path::new(&path), scale),
+        (_, Some(path), None) => dump_walk(Path::new(&path), scale, walk_style),
         (Some(path), None, None) => dump_sheet(Path::new(&path), scale),
-        (None, None, None) => run(scale, stdin_control),
+        (None, None, None) => run(scale, stdin_control, walk_style),
     };
     if let Err(error) = result {
         eprintln!("pet_host: {error}");
@@ -129,8 +139,14 @@ struct ProfileRig {
     visor_origin: Vec2,
     visor: pet_face::Visor,
     legs: Vec<(Sprite, (f32, f32), Vec2)>,
-    /// Дальняя рука рисуется за корпусом, ближняя — перед ним.
-    arms: Vec<(Sprite, (f32, f32), Vec2)>,
+    leg_chains: Vec<ProfileLegChain>,
+    /// Profile depth is explicit because a flattened master may contain only
+    /// one cleanly separable arm.
+    arm_far: Option<(Sprite, (f32, f32), Vec2)>,
+    arm_near: Option<(Sprite, (f32, f32), Vec2)>,
+    /// Tail is a single continuous layer behind the torso.  Keeping it out of
+    /// the body mesh prevents a wag from pulling the pelvis and upper back.
+    tail: Option<(Sprite, (f32, f32), Vec2)>,
 }
 
 /// Нога в полном разрешении со своей геометрией.
@@ -140,6 +156,24 @@ struct LegSource {
     pivot: (f32, f32),
     /// Где нога стоит относительно корпуса, в координатах исходного арта.
     origin: (f32, f32),
+}
+
+struct LegChainSource {
+    sprite: SpriteSource,
+    /// Crop origin in the shared source canvas.
+    origin: (f32, f32),
+    /// Joints in the cropped continuous leg texture.
+    hip: (f32, f32),
+    knee: (f32, f32),
+    ankle: (f32, f32),
+}
+
+struct ProfileLegChain {
+    sprite: Sprite,
+    origin: Vec2,
+    hip: (f32, f32),
+    knee: (f32, f32),
+    ankle: (f32, f32),
 }
 
 struct Assets {
@@ -154,7 +188,10 @@ struct Assets {
 struct PoseAssets {
     creature: SpriteSource,
     legs: Vec<LegSource>,
-    arms: Vec<LegSource>,
+    leg_chains: Vec<LegChainSource>,
+    arm_far: Option<LegSource>,
+    arm_near: Option<LegSource>,
+    tail: Option<LegSource>,
     manifest: FaceManifest,
 }
 
@@ -177,24 +214,43 @@ impl PoseAssets {
                 sprite,
             });
         }
-        let mut arms = Vec::new();
-        for arm in &manifest.arms {
-            let sprite = SpriteSource::load(&asset_path(&arm.sprite), 10)
-                .map_err(|error| format!("{}: {error}", arm.sprite))?;
+        let load_limb = |limb: &manifest::LegManifest| -> Result<LegSource, String> {
+            let sprite = SpriteSource::load(&asset_path(&limb.sprite), 10)
+                .map_err(|error| format!("{}: {error}", limb.sprite))?;
             let (crop_x, crop_y) = sprite.offset();
-            arms.push(LegSource {
+            Ok(LegSource {
                 pivot: (
-                    arm.pivot.0 - arm.origin.0 - crop_x as f32,
-                    arm.pivot.1 - arm.origin.1 - crop_y as f32,
+                    limb.pivot.0 - limb.origin.0 - crop_x as f32,
+                    limb.pivot.1 - limb.origin.1 - crop_y as f32,
                 ),
-                origin: arm.origin,
+                origin: limb.origin,
                 sprite,
+            })
+        };
+        let arm_far = manifest.arms.far.as_ref().map(load_limb).transpose()?;
+        let arm_near = manifest.arms.near.as_ref().map(load_limb).transpose()?;
+        let tail = manifest.tail.as_ref().map(load_limb).transpose()?;
+        let mut leg_chains = Vec::new();
+        for leg in &manifest.leg_chains {
+            let sprite = SpriteSource::load(&asset_path(&leg.sprite), 10)
+                .map_err(|error| format!("{}: {error}", leg.sprite))?;
+            let (crop_x, crop_y) = sprite.offset();
+            let local = |joint: (f32, f32)| (joint.0 - crop_x as f32, joint.1 - crop_y as f32);
+            leg_chains.push(LegChainSource {
+                sprite,
+                origin: (crop_x as f32, crop_y as f32),
+                hip: local(leg.hip),
+                knee: local(leg.knee),
+                ankle: local(leg.ankle),
             });
         }
         Ok(Self {
             creature,
             legs,
-            arms,
+            leg_chains,
+            arm_far,
+            arm_near,
+            tail,
             manifest,
         })
     }
@@ -223,17 +279,34 @@ impl PoseAssets {
                 (sprite, (leg.pivot.0 * scale, leg.pivot.1 * scale), position)
             })
             .collect();
-        let arms = self
-            .arms
+        let build_limb = |limb: &LegSource| {
+            let sprite = limb.sprite.scaled(scale);
+            let (crop_x, crop_y) = limb.sprite.offset();
+            let position = Vec2::new(
+                creature_origin.x + (limb.origin.0 + crop_x as f32 - offset_x as f32) * scale,
+                creature_origin.y + (limb.origin.1 + crop_y as f32 - offset_y as f32) * scale,
+            );
+            (
+                sprite,
+                (limb.pivot.0 * scale, limb.pivot.1 * scale),
+                position,
+            )
+        };
+        let arm_far = self.arm_far.as_ref().map(build_limb);
+        let arm_near = self.arm_near.as_ref().map(build_limb);
+        let tail = self.tail.as_ref().map(build_limb);
+        let leg_chains = self
+            .leg_chains
             .iter()
-            .map(|arm| {
-                let sprite = arm.sprite.scaled(scale);
-                let (crop_x, crop_y) = arm.sprite.offset();
-                let position = Vec2::new(
-                    creature_origin.x + (arm.origin.0 + crop_x as f32 - offset_x as f32) * scale,
-                    creature_origin.y + (arm.origin.1 + crop_y as f32 - offset_y as f32) * scale,
-                );
-                (sprite, (arm.pivot.0 * scale, arm.pivot.1 * scale), position)
+            .map(|leg| ProfileLegChain {
+                sprite: leg.sprite.scaled(scale),
+                origin: Vec2::new(
+                    creature_origin.x + (leg.origin.0 - offset_x as f32) * scale,
+                    creature_origin.y + (leg.origin.1 - offset_y as f32) * scale,
+                ),
+                hip: (leg.hip.0 * scale, leg.hip.1 * scale),
+                knee: (leg.knee.0 * scale, leg.knee.1 * scale),
+                ankle: (leg.ankle.0 * scale, leg.ankle.1 * scale),
             })
             .collect();
         ProfileRig {
@@ -242,7 +315,10 @@ impl PoseAssets {
             visor_origin,
             visor: self.manifest.visor_geometry(),
             legs,
-            arms,
+            leg_chains,
+            arm_far,
+            arm_near,
+            tail,
         }
     }
 }
@@ -706,6 +782,65 @@ enum Gait {
     Run,
 }
 
+/// Character of the ordinary walking cycle. Both variants use the same
+/// articulated rig and IK solver; only physically meaningful gait parameters
+/// differ, so adding a style cannot reintroduce detached limbs or foot sliding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum WalkStyle {
+    /// Springy, self-assured gait used by the hacker character by default.
+    #[default]
+    Confident,
+    /// Quieter, longer-support stride based on the local woods-walk reference.
+    Woodland,
+}
+
+impl WalkStyle {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "confident" | "default" => Some(Self::Confident),
+            "woodland" | "woods" => Some(Self::Woodland),
+            _ => None,
+        }
+    }
+
+    fn profile(self) -> WalkProfile {
+        match self {
+            Self::Confident => WalkProfile {
+                stance: 0.60,
+                stride_scale: 0.46,
+                swing_height: 1.0,
+                rise: 1.0,
+                swagger: 1.0,
+                speed: 1.0,
+            },
+            Self::Woodland => WalkProfile {
+                stance: 0.66,
+                stride_scale: 0.40,
+                swing_height: 0.72,
+                rise: 0.78,
+                swagger: 0.62,
+                speed: 0.78,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WalkProfile {
+    /// Fraction of a leg cycle during which the paw carries weight.
+    stance: f32,
+    /// Step length relative to the articulated leg length.
+    stride_scale: f32,
+    /// Swing-paw ground clearance.
+    swing_height: f32,
+    /// Rise-and-fall amplitude of the torso.
+    rise: f32,
+    /// Shoulder counter-rotation amplitude.
+    swagger: f32,
+    /// Translation speed without changing contact geometry.
+    speed: f32,
+}
+
 impl Gait {
     /// Выбор аллюра по оставшемуся расстоянию, в ширинах персонажа.
     fn choose(distance: f32, width: f32) -> Self {
@@ -719,10 +854,10 @@ impl Gait {
     }
 
     /// Скорость в пикселях за секунду.
-    fn speed(self, width: f32) -> f32 {
+    fn speed(self, width: f32, walk_style: WalkStyle) -> f32 {
         match self {
             Self::Stand => 0.0,
-            Self::Walk => width * WALK_SPEED,
+            Self::Walk => width * WALK_SPEED * walk_style.profile().speed,
             Self::Run => width * RUN_SPEED,
         }
     }
@@ -735,10 +870,54 @@ impl Gait {
 /// Ноги вращаются вокруг бедра в противофазе, корпус слегка приподнимается на
 /// каждом шаге и покачивается на опорную ногу.
 ///
-/// Бег — не отдельный цикл, а тот же с растянутым шагом, большей амплитудой ног
-/// и наклоном корпуса вперёд. Отдельный цикл потребовал бы второго набора
-/// спрайтов, а разница читается и так.
-#[derive(Default)]
+/// Ходьба и бег используют один профильный риг, но разные траектории стопы.
+/// У бега есть настоящая фаза полёта; ускорять обычный шаг для этого нельзя.
+#[derive(Clone, Copy, Default)]
+struct LegMotion {
+    /// -0.5 is the trailing contact, +0.5 the forward contact.
+    horizontal: f32,
+    /// Ground clearance during swing, normalized to 0..=1.
+    lift: f32,
+    /// Toe lift during swing, normalized to 0..=1.
+    toe_lift: f32,
+    /// The paw is carrying weight and must remain locked to the ground plane.
+    grounded: bool,
+    /// Small loading-response flex. A planted leg is otherwise almost straight;
+    /// the visible knee belongs to the lifted swing leg.
+    support_flex: f32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SolvedLeg {
+    hip: f32,
+    knee: f32,
+    foot: f32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LegGeometry {
+    knee: (f32, f32),
+    ankle: (f32, f32),
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProfilePelvis {
+    horizontal: f32,
+    lift: f32,
+}
+
+#[derive(Clone, Copy)]
+struct ProfileLegFrame {
+    motion: LegMotion,
+    facing_right: bool,
+    run: f32,
+    blend: f32,
+    pelvis: ProfilePelvis,
+    track_x: f32,
+    stride: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Walk {
     phase: f32,
     /// Насколько цикл активен: 0 — стоит, 1 — идёт.
@@ -747,14 +926,32 @@ struct Walk {
     run: f32,
     /// Наклон корпуса по ходу движения, -1…1.
     lean: f32,
+    style: WalkStyle,
+}
+
+impl Default for Walk {
+    fn default() -> Self {
+        Self {
+            phase: 0.0,
+            blend: 0.0,
+            run: 0.0,
+            lean: 0.0,
+            style: WalkStyle::default(),
+        }
+    }
 }
 
 impl Walk {
     /// `travelled` — путь за кадр, `stride` — длина шага в пикселях,
     /// `direction` — знак движения по горизонтали.
     fn update(&mut self, dt: f32, travelled: f32, stride: f32, gait: Gait, direction: f32) {
-        // На бегу шаг длиннее: иначе ноги мельтешат, как при перемотке.
-        let stride = stride.max(1.0) * (1.0 + self.run * 0.6);
+        // Phase follows travelled distance. The divisor changes with the same
+        // stride profile as the feet, keeping a planted paw from skating when a
+        // quieter walking style is selected. Running deliberately covers more
+        // ground per cycle than either walk.
+        let walk_stride = self.style.profile().stride_scale / 0.46;
+        let run_stride = 1.60;
+        let stride = stride.max(1.0) * mix(walk_stride, run_stride, self.run);
         if travelled > 0.01 {
             self.phase += travelled / stride * std::f32::consts::PI;
         }
@@ -785,9 +982,127 @@ impl Walk {
         (swing, -swing)
     }
 
-    /// Подъём корпуса: на каждом шаге тело слегка выталкивается вверх.
+    /// One complete locomotion cycle. Walk and run trajectories are evaluated
+    /// separately and blended during acceleration; the joints are solved later
+    /// by IK, so this function describes the paw rather than arbitrary angles.
+    fn profile_leg_motion(&self, index: usize) -> LegMotion {
+        let walk = self.profile_walk_leg_motion(index);
+        if self.run <= 1e-4 {
+            return walk;
+        }
+        let run = self.profile_run_leg_motion(index);
+        if self.run >= 1.0 - 1e-4 {
+            return run;
+        }
+        let amount = smooth_unit(self.run);
+        LegMotion {
+            horizontal: mix(walk.horizontal, run.horizontal, amount),
+            lift: mix(walk.lift, run.lift, amount),
+            toe_lift: mix(walk.toe_lift, run.toe_lift, amount),
+            // Contact semantics cannot be fractional: below the midpoint the
+            // walking support leg owns the ground, above it the run contact does.
+            grounded: if amount < 0.5 {
+                walk.grounded
+            } else {
+                run.grounded
+            },
+            support_flex: mix(walk.support_flex, run.support_flex, amount),
+        }
+    }
+
+    fn profile_walk_leg_motion(&self, index: usize) -> LegMotion {
+        let profile = self.style.profile();
+        let stance = profile.stance;
+        let offset = if index == 0 { 0.0 } else { 0.5 };
+        let cycle = (self.phase / std::f32::consts::TAU + offset).rem_euclid(1.0);
+        if cycle < stance {
+            // A planted paw travels backwards at a constant rate relative to
+            // the moving pelvis. Easing this part made the foot visibly skate.
+            let amount = (cycle / stance).clamp(0.0, 1.0);
+            let support_flex = if amount < 0.18 {
+                smooth_unit(amount / 0.18)
+            } else if amount < 0.62 {
+                1.0 - smooth_unit((amount - 0.18) / 0.44)
+            } else {
+                smooth_unit((amount - 0.62) / 0.38) * 0.35
+            };
+            LegMotion {
+                horizontal: 0.5 - amount,
+                lift: 0.0,
+                toe_lift: 0.0,
+                grounded: true,
+                support_flex,
+            }
+        } else {
+            let amount = ((cycle - stance) / (1.0 - stance)).clamp(0.0, 1.0);
+            // Flexion peaks shortly after the paw passes the support leg, then
+            // the knee opens while the heel reaches for the next contact.
+            let lift = (if amount < 0.56 {
+                smooth_unit(amount / 0.56)
+            } else {
+                1.0 - smooth_unit((amount - 0.56) / 0.44)
+            }) * profile.swing_height;
+            let advance =
+                smooth_unit(amount + (amount * std::f32::consts::PI).sin().max(0.0) * 0.08);
+            LegMotion {
+                horizontal: -0.5 + advance,
+                lift,
+                toe_lift: lift,
+                grounded: false,
+                support_flex: 0.0,
+            }
+        }
+    }
+
+    /// Running spends less time on the ground and includes a real aerial
+    /// interval. Each leg absorbs one contact, drives backwards through takeoff,
+    /// folds underneath the body, then opens for the next landing.
+    fn profile_run_leg_motion(&self, index: usize) -> LegMotion {
+        const CONTACT: f32 = 0.36;
+        let offset = if index == 0 { 0.0 } else { 0.5 };
+        let cycle = (self.phase / std::f32::consts::TAU + offset).rem_euclid(1.0);
+        if cycle < CONTACT {
+            let amount = (cycle / CONTACT).clamp(0.0, 1.0);
+            LegMotion {
+                horizontal: 0.56 - amount * 1.12,
+                lift: 0.0,
+                toe_lift: 0.0,
+                grounded: true,
+                support_flex: (amount * std::f32::consts::PI).sin().max(0.0),
+            }
+        } else {
+            let amount = ((cycle - CONTACT) / (1.0 - CONTACT)).clamp(0.0, 1.0);
+            let lift = if amount < 0.46 {
+                smooth_unit(amount / 0.46)
+            } else {
+                1.0 - smooth_unit((amount - 0.46) / 0.54)
+            };
+            let advance = smooth_unit(amount);
+            LegMotion {
+                horizontal: -0.56 + advance * 1.12,
+                lift,
+                toe_lift: lift,
+                grounded: false,
+                support_flex: 0.0,
+            }
+        }
+    }
+
+    /// Vertical weight transfer follows the four animation poses: contact,
+    /// down, passing and up. A piecewise curve prevents the body from floating
+    /// on an unrelated sine while the foot is supposed to carry weight.
     fn body_lift(&self, amount: f32) -> f32 {
-        (self.phase * 2.0).sin().abs() * amount * self.blend * (1.0 + self.run * 1.3)
+        let phase = (self.phase / std::f32::consts::PI).rem_euclid(1.0);
+        let normalized = if phase < 0.16 {
+            mix(0.0, -0.35, smooth_unit(phase / 0.16))
+        } else if phase < 0.50 {
+            mix(-0.35, 0.45, smooth_unit((phase - 0.16) / 0.34))
+        } else if phase < 0.75 {
+            mix(0.45, 1.0, smooth_unit((phase - 0.50) / 0.25))
+        } else {
+            mix(1.0, 0.0, smooth_unit((phase - 0.75) / 0.25))
+        };
+        normalized * amount * self.blend * mix(self.style.profile().rise, 1.30, self.run)
     }
 
     /// Покачивание в сторону опорной ноги.
@@ -795,10 +1110,36 @@ impl Walk {
         self.phase.sin() * amount * self.blend
     }
 
+    /// Deliberate shoulder-led swagger. It follows the supporting leg and is
+    /// stronger at a walk than at a sprint, where the torso instead leans.
+    fn swagger(&self) -> f32 {
+        self.phase.sin() * self.blend * mix(self.style.profile().swagger, 0.65, self.run)
+    }
+
+    /// Aerial height for the run. `step_phase` repeats once per footfall; the
+    /// last 28% is exactly the interval where neither run paw is grounded.
+    fn run_flight_lift(&self) -> f32 {
+        let step_phase = (self.phase / std::f32::consts::PI).rem_euclid(1.0);
+        if step_phase <= 0.72 {
+            return 0.0;
+        }
+        let air = ((step_phase - 0.72) / 0.28).clamp(0.0, 1.0);
+        (air * std::f32::consts::PI).sin().max(0.0) * self.run * self.blend
+    }
+
     /// Наклон корпуса по ходу движения, в долях размера спрайта.
     fn body_lean(&self) -> f32 {
         self.lean
     }
+}
+
+fn smooth_unit(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
+}
+
+fn mix(from: f32, to: f32, amount: f32) -> f32 {
+    from + (to - from) * amount
 }
 
 /// Разворот между фронтальной позой и профилем.
@@ -866,7 +1207,7 @@ struct Body {
 
 impl Body {
     /// `squash` приходит от прыжка: при приземлении тело сплющивается.
-    fn update(&mut self, dt: f32, mind: &Engagement, activity: Activity, squash: f32) {
+    fn update(&mut self, dt: f32, mind: &Engagement, activity: Activity, gait: Gait, squash: f32) {
         self.breath += dt * (1.1 + mind.typing * 0.9);
         self.tail += dt * (2.0 + self.wag * 6.0);
 
@@ -878,7 +1219,16 @@ impl Body {
         };
         self.ear_droop += (target_droop - self.ear_droop) * (dt * 3.5).min(1.0);
 
-        let target_wag = (mind.cheer * 0.9 + mind.typing * 0.5).min(1.0);
+        // A walking animal does not hold its tail like a rigid prop. Walking
+        // produces a relaxed wag, while a sprint keeps it steadier for balance.
+        let locomotion_wag: f32 = match gait {
+            Gait::Stand => 0.0,
+            Gait::Walk => 0.58,
+            Gait::Run => 0.28,
+        };
+        let target_wag = (mind.cheer * 0.9 + mind.typing * 0.5)
+            .min(1.0)
+            .max(locomotion_wag);
         self.wag += (target_wag - self.wag) * (dt * 2.5).min(1.0);
 
         let _ = squash;
@@ -908,12 +1258,16 @@ impl Body {
         warp.add(1, 0, -droop * 0.03, -droop * 0.02);
         warp.add(2, 0, droop * 0.03, -droop * 0.02);
 
-        // Хвост живёт в правой нижней четверти: качается по горизонтали.
-        let swing = self.tail.sin() * self.wag * 0.05;
-        warp.add(3, 3, swing, 0.0);
-        warp.add(3, WARP_ROWS - 1, swing * 0.7, 0.0);
-
         warp
+    }
+
+    /// Normalized tail phase shared by the front mesh and articulated profile
+    /// tail. A slow envelope makes the wag come and go rather than ticking at a
+    /// mechanical constant amplitude on every step.
+    fn tail_swing(&self) -> f32 {
+        let wave = (self.tail.sin() + (self.tail * 2.07 + 0.4).sin() * 0.22) / 1.22;
+        let envelope = 0.55 + (self.tail * 0.23).sin() * 0.45;
+        wave * self.wag * envelope
     }
 }
 
@@ -1120,7 +1474,7 @@ impl Clouds {
     }
 }
 
-fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
+fn run(initial_scale: f32, stdin_control: bool, walk_style: WalkStyle) -> Result<(), String> {
     let assets = Assets::load()?;
     let rig = assets.build(initial_scale);
 
@@ -1139,7 +1493,7 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
         anchor.y as i32,
     )?;
     let mut canvas = Canvas::new(rig.canvas_size.0, rig.canvas_size.1);
-    let mut character_layers = CharacterLayers::new(rig.canvas_size);
+    let mut character_layers = CharacterLayers::new(&rig);
     let mut clouds = Clouds::new(&rig);
     let mut mood = Mood::new(0x1234_5678);
     let mut quads: Vec<Quad> = Vec::with_capacity(ORB_PARTICLES);
@@ -1149,7 +1503,10 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
     let mut inbox: Vec<Event> = Vec::new();
     let mut mind = Engagement::default();
     let mut body = Body::default();
-    let mut walk = Walk::default();
+    let mut walk = Walk {
+        style: walk_style,
+        ..Walk::default()
+    };
     let mut orientation = Orientation::default();
     let mut hands = Hands::new(0x00BA_DA55);
 
@@ -1272,7 +1629,7 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
             Gait::choose(distance, width)
         };
         // Шаг не должен перелетать цель, иначе персонаж дрожит вокруг курсора.
-        let mut travel = direction * gait.speed(width) * dt;
+        let mut travel = direction * gait.speed(width, walk.style) * dt;
         if travel.abs() > distance {
             travel = to_target.x;
         }
@@ -1313,7 +1670,7 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
             (to_target.y / (rig.canvas_size.1 as f32 * 0.6)).clamp(-1.0, 1.0),
         );
         mood.update(dt, gaze, activity, &mind);
-        body.update(dt, &mind, activity, hopper.squash);
+        body.update(dt, &mind, activity, gait, hopper.squash);
         hands.update(dt, &mind, gait);
 
         // Свободные пиксельные частицы принадлежат только сфере. Вокруг тела
@@ -1328,6 +1685,7 @@ fn run(initial_scale: f32, stdin_control: bool) -> Result<(), String> {
                 mood: &mood,
                 hopper: &hopper,
                 warp: body.warp(hopper.squash),
+                tail_swing: body.tail_swing(),
                 walk: &walk,
                 hands: &hands,
                 orientation: &orientation,
@@ -1366,6 +1724,8 @@ struct Frame<'a> {
     hopper: &'a Hopper,
     /// Пластика тела на этот кадр.
     warp: Warp,
+    /// Normalized, smoothly enveloped tail motion kept separate from the torso.
+    tail_swing: f32,
     walk: &'a Walk,
     hands: &'a Hands,
     orientation: &'a Orientation,
@@ -1376,13 +1736,18 @@ struct Frame<'a> {
 struct CharacterLayers {
     front: Canvas,
     profile: Canvas,
+    profile_body: Canvas,
 }
 
 impl CharacterLayers {
-    fn new(size: (u32, u32)) -> Self {
+    fn new(rig: &Rig) -> Self {
         Self {
-            front: Canvas::new(size.0, size.1),
-            profile: Canvas::new(size.0, size.1),
+            front: Canvas::new(rig.canvas_size.0, rig.canvas_size.1),
+            profile: Canvas::new(rig.canvas_size.0, rig.canvas_size.1),
+            profile_body: Canvas::new(
+                rig.profile_right.creature.width(),
+                rig.profile_right.creature.height(),
+            ),
         }
     }
 }
@@ -1430,12 +1795,12 @@ fn draw_character_transition(canvas: &mut Canvas, frame: &Frame<'_>, layers: &mu
     if mix <= 0.001 {
         draw_front_character(canvas, frame);
     } else if mix >= 0.999 {
-        draw_profile_character(canvas, frame);
+        draw_profile_character(canvas, frame, &mut layers.profile_body);
     } else {
         layers.front.clear();
         layers.profile.clear();
         draw_front_character(&mut layers.front, frame);
-        draw_profile_character(&mut layers.profile, frame);
+        draw_profile_character(&mut layers.profile, frame, &mut layers.profile_body);
         canvas.draw_canvas_opacity(&layers.front, 1.0 - mix);
         canvas.draw_canvas_opacity(&layers.profile, mix);
     }
@@ -1447,6 +1812,7 @@ fn draw_front_character(canvas: &mut Canvas, frame: &Frame<'_>) {
         mood,
         hopper,
         warp,
+        tail_swing,
         walk,
         hands,
         ..
@@ -1458,7 +1824,7 @@ fn draw_front_character(canvas: &mut Canvas, frame: &Frame<'_>) {
     // Наклон корпуса по ходу движения. Верх уходит вперёд, низ остаётся на
     // ногах — именно этим бег отличается от быстрой ходьбы сильнее всего.
     // Смещение отрицательное, потому что сетка сдвигает точку выборки.
-    let mut warp = warp;
+    let mut warp = front_tail_warp(warp, tail_swing);
     let lean = walk.body_lean() * 0.05;
     warp.add_row(0, -lean, 0.0);
     warp.add_row(1, -lean * 0.70, 0.0);
@@ -1504,62 +1870,504 @@ fn draw_front_character(canvas: &mut Canvas, frame: &Frame<'_>) {
     draw_hands(canvas, rig, hands, sway, lift);
 }
 
-fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>) {
+/// The approved front master still contains its tail in the body painting.
+/// Apply that local deformation only in the front pose; the profile uses a
+/// dedicated articulated tail and must never inherit these right-side nodes.
+fn front_tail_warp(mut warp: Warp, swing: f32) -> Warp {
+    warp.add(3, 3, swing * 0.050, 0.0);
+    warp.add(3, WARP_ROWS - 1, swing * 0.035, 0.0);
+    warp
+}
+
+fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>, body_layer: &mut Canvas) {
     let rig = frame.rig;
     let pose = frame.orientation.profile_rig(rig);
-    let lift = frame.hopper.height + frame.walk.body_lift(pose.creature.height() as f32 * 0.022);
-    let sway = frame.walk.body_sway(pose.creature.width() as f32 * 0.008);
-    let (far_angle, near_angle) = frame.walk.leg_angles(0.48);
-    let far_angle = far_angle.clamp(-0.60, 0.60);
-    let near_angle = near_angle.clamp(-0.60, 0.60);
+    let facing_right = frame.orientation.facing > 0.0;
+    let facing = if facing_right { 1.0 } else { -1.0 };
+    let swagger = frame.walk.swagger();
+    let leg_motions = [
+        frame.walk.profile_leg_motion(0),
+        frame.walk.profile_leg_motion(1),
+    ];
+    // Pelvis height is derived from the planted leg, not from an unrelated
+    // sine. The same value is fed back into the IK target, locking the support
+    // paw to the ground while the body transfers its weight above it.
+    let pelvis = if pose.leg_chains.is_empty() {
+        ProfilePelvis {
+            horizontal: frame.walk.body_sway(pose.creature.width() as f32 * 0.014),
+            lift: frame.walk.body_lift(pose.creature.height() as f32 * 0.022),
+        }
+    } else {
+        profile_pelvis_for_walk(&pose.leg_chains, leg_motions, facing_right, frame.walk)
+    };
+    let leg_tracks = profile_leg_tracks(&pose.leg_chains, facing_right);
+    let leg_stride = profile_common_stride(&pose.leg_chains, frame.walk);
+    let lift = frame.hopper.height + pelvis.lift;
+    let offset = Vec2::new(pelvis.horizontal, -lift);
+    let body_warp = profile_body_warp(frame.warp, frame.walk, facing_right);
     let leg_margin = (pose.creature.height() as f32 * 0.12).ceil() as i32 + 2;
-    for (index, (sprite, pivot, position)) in pose.legs.iter().enumerate() {
-        let angle = if index == 0 { far_angle } else { near_angle };
-        canvas.draw_rotated(
-            sprite,
-            (position.x + sway) as i32,
-            (position.y - lift) as i32,
-            *pivot,
-            angle,
-            leg_margin,
-        );
+
+    if pose.leg_chains.is_empty() {
+        // Compatibility with an older asset pack. New production manifests
+        // always provide articulated legs and never enter this branch.
+        let (far_angle, near_angle) = frame.walk.leg_angles(0.20);
+        for (index, (sprite, pivot, position)) in pose.legs.iter().enumerate() {
+            let angle = if index == 0 { far_angle } else { near_angle };
+            canvas.draw_rotated(
+                sprite,
+                (position.x + offset.x) as i32,
+                (position.y + offset.y) as i32,
+                *pivot,
+                angle,
+                leg_margin,
+            );
+            if index == 0 {
+                draw_profile_tail(canvas, pose, offset, &body_warp, frame, facing);
+            }
+        }
+        if pose.legs.is_empty() {
+            draw_profile_tail(canvas, pose, offset, &body_warp, frame, facing);
+        }
+    } else {
+        // Far leg first, near leg second. The jacket overlaps both hip joints,
+        // and the body is drawn afterwards, hiding the mechanical cut lines.
+        for (index, chain) in pose.leg_chains.iter().enumerate() {
+            draw_profile_leg_chain(
+                canvas,
+                chain,
+                offset,
+                ProfileLegFrame {
+                    motion: leg_motions[index.min(leg_motions.len() - 1)],
+                    facing_right,
+                    run: frame.walk.run,
+                    blend: frame.walk.blend,
+                    pelvis,
+                    track_x: leg_tracks[index.min(leg_tracks.len() - 1)],
+                    stride: leg_stride,
+                },
+            );
+            if index == 0 {
+                draw_profile_tail(canvas, pose, offset, &body_warp, frame, facing);
+            }
+        }
     }
+
+    // The torso follows the supporting leg, while shoulders counter-rotate.
+    // A profile silhouette reads this as deliberate swagger instead of a
+    // frozen sticker sliding across the desktop. The head moves less than the
+    // shoulder row, so the character still appears self-assured and focused.
+    // Arm swing stays subordinate to the ribcage twist below. A large
+    // independent sleeve rotation reads as a detached arm on this flat rig.
+    let shoulder_angle = swagger * facing * (0.11 + frame.walk.run * 0.05);
     let arm_margin = (pose.creature.height() as f32 * 0.15).ceil() as i32 + 2;
-    let arm_angles = (-far_angle * 0.86, -near_angle * 0.86);
-    if let Some((sprite, pivot, position)) = pose.arms.first() {
+    let arm_angles = (shoulder_angle, -shoulder_angle);
+    if let Some((sprite, pivot, position)) = &pose.arm_far {
+        let attachment = warped_profile_attachment(
+            &body_warp,
+            pose.creature_origin,
+            (pose.creature.width(), pose.creature.height()),
+            *position,
+            *pivot,
+        );
         canvas.draw_rotated(
             sprite,
-            (position.x + sway) as i32,
-            (position.y - lift) as i32,
+            (position.x + offset.x + attachment.x) as i32,
+            (position.y + offset.y + attachment.y) as i32,
             *pivot,
             arm_angles.0,
             arm_margin,
         );
     }
-    canvas.draw(
-        &pose.creature,
-        (pose.creature_origin.x + sway) as i32,
-        (pose.creature_origin.y - lift) as i32,
-    );
-    let facing_right = frame.orientation.facing > 0.0;
-    let face = pet_face::render_profile(&frame.mood.face, pose.visor, rig.scale, facing_right);
-    canvas.draw_rgba(
-        face.data(),
-        face.width(),
-        face.height(),
-        (pose.visor_origin.x + sway) as i32,
-        (pose.visor_origin.y - lift) as i32,
-    );
-    if let Some((sprite, pivot, position)) = pose.arms.get(1) {
+
+    // The near sleeve is also drawn before the torso. The torso's retained
+    // shoulder cap then overlaps the rotating sleeve and makes the two parts
+    // one continuous silhouette instead of exposing a cut line.
+    if let Some((sprite, pivot, position)) = &pose.arm_near {
+        let attachment = warped_profile_attachment(
+            &body_warp,
+            pose.creature_origin,
+            (pose.creature.width(), pose.creature.height()),
+            *position,
+            *pivot,
+        );
         canvas.draw_rotated(
             sprite,
-            (position.x + sway) as i32,
-            (position.y - lift) as i32,
+            (position.x + offset.x + attachment.x) as i32,
+            (position.y + offset.y + attachment.y) as i32,
             *pivot,
             arm_angles.1,
             arm_margin,
         );
     }
+
+    // Composite the expression into the torso before deformation. Previously
+    // the body warped and the procedural face did not, which made the visor
+    // appear to slide across the profile sprite during a step.
+    body_layer.clear();
+    body_layer.draw(&pose.creature, 0, 0);
+    let face = pet_face::render_profile(&frame.mood.face, pose.visor, rig.scale, facing_right);
+    body_layer.draw_rgba(
+        face.data(),
+        face.width(),
+        face.height(),
+        (pose.visor_origin.x - pose.creature_origin.x) as i32,
+        (pose.visor_origin.y - pose.creature_origin.y) as i32,
+    );
+    let (extent_x, extent_y) = body_warp.extent();
+    let body_margin = (extent_x.max(extent_y) * pose.creature.height() as f32).ceil() as i32 + 2;
+    canvas.draw_canvas_warped(
+        body_layer,
+        (pose.creature_origin.x + offset.x) as i32,
+        (pose.creature_origin.y + offset.y) as i32,
+        &body_warp,
+        body_margin,
+    );
+}
+
+/// Draws the continuous tail between the far and near leg.  The root follows
+/// the exact pelvis/torso attachment, while the tail itself rotates as one
+/// piece; no body pixels are stretched to fake the wag.
+fn draw_profile_tail(
+    canvas: &mut Canvas,
+    pose: &ProfileRig,
+    offset: Vec2,
+    body_warp: &Warp,
+    frame: &Frame<'_>,
+    facing: f32,
+) {
+    let Some((sprite, pivot, position)) = &pose.tail else {
+        return;
+    };
+    let attachment = warped_profile_attachment(
+        body_warp,
+        pose.creature_origin,
+        (pose.creature.width(), pose.creature.height()),
+        *position,
+        *pivot,
+    );
+    let angle = frame.tail_swing * facing * (0.18 + frame.walk.blend * 0.10);
+    let margin = (pose.creature.height() as f32 * 0.16).ceil() as i32 + 2;
+    canvas.draw_rotated(
+        sprite,
+        (position.x + offset.x + attachment.x) as i32,
+        (position.y + offset.y + attachment.y) as i32,
+        *pivot,
+        angle,
+        margin,
+    );
+}
+
+/// Maps an articulated attachment through the exact torso deformation used
+/// for rendering. This is the hierarchy boundary: a sleeve can rotate around
+/// its shoulder, but the shoulder itself is owned by the ribcage and therefore
+/// can never drift away from it.
+fn warped_profile_attachment(
+    warp: &Warp,
+    body_origin: Vec2,
+    body_size: (u32, u32),
+    limb_origin: Vec2,
+    limb_pivot: (f32, f32),
+) -> Vec2 {
+    let width = body_size.0.max(1) as f32;
+    let height = body_size.1.max(1) as f32;
+    let u = (limb_origin.x + limb_pivot.0 - body_origin.x) / width;
+    let v = (limb_origin.y + limb_pivot.1 - body_origin.y) / height;
+    let (du, dv) = warp.sample(u, v);
+    Vec2::new(-du * width, -dv * height)
+}
+
+/// Builds the articulated upper-body pose from the same gait phase that drives
+/// the feet. The body is one painted layer, so a shallow deformation down the
+/// spine supplies the thorax/pelvis counter-rotation without separating the
+/// head, jacket and shoulders into mechanical-looking pieces.
+fn profile_body_warp(mut warp: Warp, walk: &Walk, facing_right: bool) -> Warp {
+    let facing = if facing_right { 1.0 } else { -1.0 };
+    let swagger = walk.swagger();
+
+    // The hood and head occupy the first two control rows.  They are a single
+    // painted solid, so unequal row offsets stretch the skull and upper back.
+    // Copying the complete row preserves any ear expression but makes this
+    // vertical band rigid before locomotion is layered on top.
+    warp.copy_row(0, 1);
+
+    let extension = walk.body_lift(1.0);
+    let lean = walk.body_lean() * 0.035;
+    let head_follow = swagger * facing * 0.010;
+    let head_y = extension * 0.0105;
+    for row in 0..=1 {
+        warp.add_row(row, -head_follow - lean, head_y);
+    }
+
+    // Approximate a shallow 3D thorax turn below the neck.  No column-specific
+    // twist touches the rigid head band; the two shoulders only diverge at the
+    // chest row and settle again towards the pelvis.
+    const SHOULDER_X: [f32; 4] = [0.028, 0.038, -0.038, -0.028];
+    const SHOULDER_Y: [f32; 4] = [0.006, 0.009, -0.009, -0.006];
+    for column in 0..4 {
+        let dx = SHOULDER_X[column] * swagger;
+        let dy = SHOULDER_Y[column] * swagger;
+        warp.add(column, 2, -dx, -dy);
+        warp.add(column, 3, -dx * 0.24, -dy * 0.20);
+    }
+
+    // Chest and pelvis follow the supporting leg as connected masses.  Their
+    // smaller uniform translation joins the rigid head block to the articulated
+    // lower body without introducing a rubber hinge at the neck.
+    let chest_follow = swagger * facing;
+    warp.add_row(2, -chest_follow * 0.003, 0.0);
+    warp.add_row(3, chest_follow * 0.004, 0.0);
+
+    // Root motion provides the main rise and fall. This tiny chest compression
+    // adds follow-through while the head itself stays shape-preserving.
+    warp.add_row(2, 0.0, extension * 0.0040);
+    warp.add_row(2, -lean * 0.42, 0.0);
+    warp
+}
+
+fn draw_profile_leg_chain(
+    canvas: &mut Canvas,
+    chain: &ProfileLegChain,
+    offset: Vec2,
+    frame: ProfileLegFrame,
+) {
+    let pose = solve_profile_leg(chain, frame);
+    canvas.draw_skinned_limb(
+        &chain.sprite,
+        (chain.origin.x + offset.x).round() as i32,
+        (chain.origin.y + offset.y).round() as i32,
+        chain.hip,
+        chain.knee,
+        chain.ankle,
+        pose.hip,
+        pose.knee,
+        pose.foot,
+    );
+}
+
+/// Computes pelvis height from whichever paw currently carries weight.
+///
+/// The planted leg stays close to full extension. At contact the lateral
+/// reach lowers the pelvis slightly; near mid-stance it rises above the
+/// support paw. During double support we choose the lower valid pelvis height
+/// so neither leg can be pulled beyond its anatomical reach.
+fn profile_pelvis_motion(
+    chains: &[ProfileLegChain],
+    motions: [LegMotion; 2],
+    facing_right: bool,
+    walk: &Walk,
+) -> ProfilePelvis {
+    if walk.blend <= 1e-4 {
+        return ProfilePelvis::default();
+    }
+    let facing = if facing_right { 1.0 } else { -1.0 };
+    let tracks = profile_leg_tracks(chains, facing_right);
+    let stride = profile_common_stride(chains, walk);
+    let mut support_horizontal = 0.0_f32;
+    let mut support_count = 0_u32;
+    for index in 0..chains.len() {
+        let motion = motions[index.min(motions.len() - 1)];
+        if motion.grounded {
+            support_horizontal += facing * motion.horizontal * stride;
+            support_count += 1;
+        }
+    }
+    // During double support the pelvis sits between the two planted paws.
+    // With one support paw it keeps travelling over that leg instead of
+    // snapping directly above it.
+    let horizontal = if support_count > 1 {
+        support_horizontal / support_count as f32 * walk.blend
+    } else {
+        0.0
+    };
+    let mut support_lift: Option<f32> = None;
+    let mut reference_length = 0.0_f32;
+    for (index, chain) in chains.iter().enumerate() {
+        let motion = motions[index.min(motions.len() - 1)];
+        let upper = point_distance(chain.hip, chain.knee);
+        let lower = point_distance(chain.knee, chain.ankle);
+        let length = upper + lower;
+        reference_length = reference_length.max(length);
+        if !motion.grounded {
+            continue;
+        }
+        let gait_target_x =
+            tracks[index.min(tracks.len() - 1)] + facing * motion.horizontal * stride;
+        let target_x = mix(chain.ankle.0, gait_target_x, walk.blend) - horizontal;
+        let horizontal = target_x - chain.hip.0;
+        // Roughly 4-8 degrees of planted-knee flexion: enough to absorb the
+        // contact without drawing a conspicuous crouched knee on the ground.
+        let reach_ratio = 0.999 - motion.support_flex * 0.0015;
+        // Stay below the solver's hard extension boundary. Otherwise IK would
+        // shorten the requested target by a fraction of a pixel and the paw
+        // would no longer be mathematically ground-locked.
+        let reach = (length * reach_ratio).min(length - 0.30);
+        let vertical = (reach * reach - horizontal * horizontal).max(0.0).sqrt();
+        let neutral_vertical = chain.ankle.1 - chain.hip.1;
+        let candidate = vertical - neutral_vertical;
+        support_lift = Some(match support_lift {
+            Some(current) => current.min(candidate),
+            None => candidate,
+        });
+    }
+    // The shared side-view track deliberately moves the painted three-quarter
+    // hips towards one sagittal axis. A run landing has a wider reach and a
+    // deeper loading response than a walk, so its anatomical root allowance is
+    // larger. This is still root translation, not a backwards knee bend.
+    let limit = reference_length * mix(0.12, 0.16, walk.run);
+    let mut lift = support_lift.unwrap_or(0.0).clamp(-limit, limit) * walk.blend;
+    if support_count == 0 {
+        // During a true run both paws leave the desktop. The whole body follows
+        // one compact arc; legs remain free to fold because no ground lock is
+        // active in this interval.
+        lift += reference_length * 0.075 * walk.run_flight_lift();
+    }
+    ProfilePelvis { horizontal, lift }
+}
+
+/// Couples lower- and upper-body motion. IK-derived pelvis displacement keeps
+/// every support paw planted and naturally produces contact/down/passing/up;
+/// a run-only aerial arc is added only while neither paw owns the ground.
+fn profile_pelvis_for_walk(
+    chains: &[ProfileLegChain],
+    motions: [LegMotion; 2],
+    facing_right: bool,
+    walk: &Walk,
+) -> ProfilePelvis {
+    profile_pelvis_motion(chains, motions, facing_right, walk)
+}
+
+fn solve_profile_leg(chain: &ProfileLegChain, frame: ProfileLegFrame) -> SolvedLeg {
+    let geometry = solve_profile_leg_geometry(chain, frame);
+    let facing = if frame.facing_right { 1.0 } else { -1.0 };
+    let source_thigh = point_angle(chain.knee.0 - chain.hip.0, chain.knee.1 - chain.hip.1);
+    let source_shin = point_angle(chain.ankle.0 - chain.knee.0, chain.ankle.1 - chain.knee.1);
+    let desired_thigh = point_angle(geometry.knee.0 - chain.hip.0, geometry.knee.1 - chain.hip.1);
+    let desired_shin = point_angle(
+        geometry.ankle.0 - geometry.knee.0,
+        geometry.ankle.1 - geometry.knee.1,
+    );
+    let hip = normalize_angle(desired_thigh - source_thigh);
+    let shin = normalize_angle(desired_shin - source_shin);
+    SolvedLeg {
+        hip,
+        knee: normalize_angle(shin - hip),
+        foot: -facing * frame.motion.toe_lift * (0.13 + frame.run * 0.05) * frame.blend,
+    }
+}
+
+fn solve_profile_leg_geometry(chain: &ProfileLegChain, frame: ProfileLegFrame) -> LegGeometry {
+    let upper = point_distance(chain.hip, chain.knee);
+    let lower = point_distance(chain.knee, chain.ankle);
+    let length = upper + lower;
+    let facing = if frame.facing_right { 1.0 } else { -1.0 };
+    let clearance = length * (0.19 + frame.run * 0.06) * frame.motion.lift * frame.blend;
+    let gait_target_x = frame.track_x + facing * frame.motion.horizontal * frame.stride;
+    let mut target = (
+        mix(chain.ankle.0, gait_target_x, frame.blend) - frame.pelvis.horizontal,
+        chain.ankle.1 + frame.pelvis.lift - clearance,
+    );
+
+    let mut direction = (target.0 - chain.hip.0, target.1 - chain.hip.1);
+    let mut reach = direction.0.hypot(direction.1).max(1e-4);
+    let minimum = (upper - lower).abs() + 0.25;
+    let maximum = upper + lower - 0.25;
+    if reach < minimum || reach > maximum {
+        let clamped = reach.clamp(minimum, maximum);
+        let scale = clamped / reach;
+        direction.0 *= scale;
+        direction.1 *= scale;
+        target = (chain.hip.0 + direction.0, chain.hip.1 + direction.1);
+        reach = clamped;
+    }
+
+    let unit = (direction.0 / reach, direction.1 / reach);
+    let along = (upper * upper - lower * lower + reach * reach) / (2.0 * reach);
+    let bend = (upper * upper - along * along).max(0.0).sqrt();
+    // The only allowed branch puts the knee in front of the leg. There is no
+    // second solution to interpolate through, so hyperextension backwards is
+    // impossible even at the contact/swing boundary.
+    let perpendicular = (unit.1 * facing, -unit.0 * facing);
+    let desired_knee = (
+        chain.hip.0 + unit.0 * along + perpendicular.0 * bend,
+        chain.hip.1 + unit.1 * along + perpendicular.1 * bend,
+    );
+    debug_assert!(
+        cross_product(
+            direction,
+            (desired_knee.0 - chain.hip.0, desired_knee.1 - chain.hip.1)
+        ) * facing
+            <= 1e-3,
+        "profile IK selected a backwards knee branch"
+    );
+
+    LegGeometry {
+        knee: desired_knee,
+        ankle: target,
+    }
+}
+
+fn point_distance(a: (f32, f32), b: (f32, f32)) -> f32 {
+    (a.0 - b.0).hypot(a.1 - b.1)
+}
+
+/// Both feet in a side-view gait use the exact same sagittal track. Depth is
+/// conveyed by draw order, never by shortening or shifting the far step: an
+/// x-offset here made that leg appear to limp even though its phase was valid.
+fn profile_leg_tracks(chains: &[ProfileLegChain], _facing_right: bool) -> [f32; 2] {
+    if chains.is_empty() {
+        return [0.0, 0.0];
+    }
+    let count = chains.len().min(2) as f32;
+    let centre = chains
+        .iter()
+        .take(2)
+        .map(|chain| chain.origin.x + chain.hip.0)
+        .sum::<f32>()
+        / count;
+    [
+        centre - chains[0].origin.x,
+        centre
+            - chains
+                .get(1)
+                .map_or(chains[0].origin.x, |chain| chain.origin.x),
+    ]
+}
+
+fn profile_common_stride(chains: &[ProfileLegChain], walk: &Walk) -> f32 {
+    if chains.is_empty() {
+        return 0.0;
+    }
+    let count = chains.len().min(2) as f32;
+    let mean_length = chains
+        .iter()
+        .take(2)
+        .map(|chain| {
+            point_distance(chain.hip, chain.knee) + point_distance(chain.knee, chain.ankle)
+        })
+        .sum::<f32>()
+        / count;
+    // A contact pose needs visible separation between the two large boots.
+    // Both legs deliberately use this one mean length, otherwise small source
+    // rig differences turn into a visible asymmetric stride.
+    mean_length * mix(walk.style.profile().stride_scale, 0.58, walk.run)
+}
+
+fn point_angle(x: f32, y: f32) -> f32 {
+    y.atan2(x)
+}
+
+fn cross_product(a: (f32, f32), b: (f32, f32)) -> f32 {
+    a.0 * b.1 - a.1 * b.0
+}
+
+fn normalize_angle(mut angle: f32) -> f32 {
+    while angle > std::f32::consts::PI {
+        angle -= std::f32::consts::TAU;
+    }
+    while angle < -std::f32::consts::PI {
+        angle += std::f32::consts::TAU;
+    }
+    angle
 }
 
 /// Голографические кисти по обе стороны куртки.
@@ -1731,7 +2539,7 @@ fn dump_sheet(path: &Path, scale: f32) -> Result<(), String> {
             breath: 0.0,
         };
         let mut quads = Vec::new();
-        let mut character_layers = CharacterLayers::new(rig.canvas_size);
+        let mut character_layers = CharacterLayers::new(&rig);
         compose(
             &mut canvas,
             &Frame {
@@ -1739,6 +2547,7 @@ fn dump_sheet(path: &Path, scale: f32) -> Result<(), String> {
                 mood: &mood,
                 hopper: &Hopper::new(1),
                 warp: body.warp(1.0),
+                tail_swing: body.tail_swing(),
                 walk: &Walk::default(),
                 hands: &Hands::new(1),
                 orientation: &Orientation::default(),
@@ -1774,28 +2583,27 @@ fn dump_sheet(path: &Path, scale: f32) -> Result<(), String> {
 ///
 /// Верхний ряд — шаг, нижний — бег: разницу в амплитуде и наклоне на статичном
 /// кадре иначе не оценить.
-fn dump_walk(path: &Path, scale: f32) -> Result<(), String> {
+fn dump_walk(path: &Path, scale: f32, walk_style: WalkStyle) -> Result<(), String> {
     let assets = Assets::load()?;
     let rig = assets.build(scale.clamp(MIN_SCALE, MAX_SCALE));
-    if rig.legs.is_empty() {
-        return Err("текущая поза не содержит ног: ходьбу показать нечем".to_owned());
+    if rig.profile_right.legs.is_empty() && rig.profile_right.leg_chains.is_empty() {
+        return Err("профильная поза не содержит ног: ходьбу показать нечем".to_owned());
     }
     const FRAMES: usize = 8;
-    let width = rig.creature.width() as f32;
-    let stride = rig.creature.height() as f32 * 0.26;
     let mut rows = Vec::new();
     for gait in [Gait::Walk, Gait::Run] {
-        let speed = gait.speed(width);
         let mut tiles = Vec::new();
         for frame in 0..FRAMES {
-            let mut walk = Walk::default();
-            // Разгоняем цикл ровно тем же путём, что и в живом ходе: иначе
-            // полоса показала бы не то, что видно на экране.
-            for _ in 0..90 {
-                walk.update(1.0 / 60.0, speed / 60.0, stride, gait, 1.0);
-            }
-            let travel = stride * 2.0 * frame as f32 / FRAMES as f32;
-            walk.update(1.0 / 60.0, travel, stride, gait, 1.0);
+            // Exact evenly-spaced phases make contact/down/passing/up directly
+            // comparable and keep the QA sheet deterministic.
+            let run = if gait == Gait::Run { 1.0 } else { 0.0 };
+            let walk = Walk {
+                phase: frame as f32 / FRAMES as f32 * std::f32::consts::TAU,
+                blend: 1.0,
+                run,
+                lean: 0.30 + run * 0.70,
+                style: walk_style,
+            };
 
             let mut canvas = Canvas::new(rig.canvas_size.0, rig.canvas_size.1);
             let mut clouds = Clouds::new(&rig);
@@ -1805,7 +2613,7 @@ fn dump_walk(path: &Path, scale: f32) -> Result<(), String> {
                 profile: 1.0,
                 facing: 1.0,
             };
-            let mut character_layers = CharacterLayers::new(rig.canvas_size);
+            let mut character_layers = CharacterLayers::new(&rig);
             compose(
                 &mut canvas,
                 &Frame {
@@ -1813,6 +2621,7 @@ fn dump_walk(path: &Path, scale: f32) -> Result<(), String> {
                     mood: &mood,
                     hopper: &Hopper::new(1),
                     warp: Warp::identity(),
+                    tail_swing: (walk.phase * 1.37).sin() * 0.48,
                     walk: &walk,
                     hands: &Hands::new(1),
                     orientation: &orientation,
@@ -1841,8 +2650,8 @@ fn dump_walk(path: &Path, scale: f32) -> Result<(), String> {
     }
     pet_render::save_on_checkerboard(&sheet, path).map_err(|error| error.to_string())?;
     eprintln!(
-        "полоса ходьбы: {} (шаг и бег, по {FRAMES} кадров)",
-        path.display()
+        "полоса ходьбы: {} ({walk_style:?}, шаг и бег, по {FRAMES} кадров)",
+        path.display(),
     );
     Ok(())
 }
@@ -1877,7 +2686,7 @@ fn dump_hands(path: &Path, scale: f32) -> Result<(), String> {
         let mut clouds = Clouds::new(&rig);
         let mood = Mood::new(0x1234_5678);
         let mut quads = Vec::new();
-        let mut character_layers = CharacterLayers::new(rig.canvas_size);
+        let mut character_layers = CharacterLayers::new(&rig);
         compose(
             &mut canvas,
             &Frame {
@@ -1885,6 +2694,7 @@ fn dump_hands(path: &Path, scale: f32) -> Result<(), String> {
                 mood: &mood,
                 hopper: &Hopper::new(1),
                 warp: Warp::identity(),
+                tail_swing: 0.0,
                 walk: &Walk::default(),
                 hands: &hands,
                 orientation: &Orientation::default(),
@@ -1945,4 +2755,454 @@ fn asset_path(name: &str) -> PathBuf {
 
     #[cfg(not(debug_assertions))]
     installed
+}
+
+#[cfg(test)]
+mod gait_tests {
+    use super::*;
+
+    fn joint_flexion(chain: &ProfileLegChain, geometry: LegGeometry) -> f32 {
+        let thigh = point_angle(geometry.knee.0 - chain.hip.0, geometry.knee.1 - chain.hip.1);
+        let shin = point_angle(
+            geometry.ankle.0 - geometry.knee.0,
+            geometry.ankle.1 - geometry.knee.1,
+        );
+        normalize_angle(shin - thigh).abs()
+    }
+
+    #[test]
+    fn profile_step_locks_stance_and_lifts_swing() {
+        let mut walk = Walk {
+            blend: 1.0,
+            ..Walk::default()
+        };
+
+        walk.phase = 0.0;
+        let contact = walk.profile_leg_motion(0);
+        assert!(contact.grounded);
+        assert_eq!(contact.lift, 0.0);
+        assert!((contact.horizontal - 0.5).abs() < 1e-6);
+
+        walk.phase = std::f32::consts::TAU * 0.824;
+        let passing = walk.profile_leg_motion(0);
+        assert!(!passing.grounded);
+        assert!(passing.lift > 0.99);
+        assert!(passing.horizontal > 0.1 && passing.horizontal < 0.3);
+
+        walk.phase = std::f32::consts::TAU * 0.999;
+        let landing = walk.profile_leg_motion(0);
+        assert!(!landing.grounded);
+        assert!(landing.lift < 0.01);
+        assert!(landing.horizontal > 0.49);
+    }
+
+    #[test]
+    fn woodland_walk_holds_support_longer_and_swings_lower() {
+        assert_eq!(WalkStyle::parse("woods"), Some(WalkStyle::Woodland));
+
+        let confident = Walk {
+            phase: std::f32::consts::TAU * 0.62,
+            blend: 1.0,
+            style: WalkStyle::Confident,
+            ..Walk::default()
+        };
+        let woodland = Walk {
+            style: WalkStyle::Woodland,
+            ..confident
+        };
+        assert!(!confident.profile_leg_motion(0).grounded);
+        assert!(woodland.profile_leg_motion(0).grounded);
+
+        let confident = Walk {
+            phase: std::f32::consts::TAU * 0.82,
+            ..confident
+        };
+        let woodland = Walk {
+            style: WalkStyle::Woodland,
+            ..confident
+        };
+        assert!(woodland.profile_leg_motion(0).lift < confident.profile_leg_motion(0).lift * 0.85);
+    }
+
+    #[test]
+    fn running_has_a_true_aerial_phase() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        let walk = Walk {
+            phase: std::f32::consts::TAU * 0.43,
+            blend: 1.0,
+            run: 1.0,
+            lean: 1.0,
+            ..Walk::default()
+        };
+        let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
+        assert!(motions.iter().all(|motion| !motion.grounded));
+        assert!(walk.run_flight_lift() > 0.95);
+
+        let pelvis = profile_pelvis_for_walk(&rig.profile_right.leg_chains, motions, true, &walk);
+        assert!(pelvis.lift > 0.0, "run flight did not lift the body root");
+    }
+
+    #[test]
+    fn run_contacts_stay_locked_between_aerial_phases() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        let pose = &rig.profile_right;
+        let tracks = profile_leg_tracks(&pose.leg_chains, true);
+        let mut flight_samples = 0;
+
+        for sample in 0..240 {
+            let walk = Walk {
+                phase: sample as f32 / 240.0 * std::f32::consts::TAU,
+                blend: 1.0,
+                run: 1.0,
+                lean: 1.0,
+                ..Walk::default()
+            };
+            let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
+            if motions.iter().all(|motion| !motion.grounded) {
+                flight_samples += 1;
+            }
+            let pelvis = profile_pelvis_for_walk(&pose.leg_chains, motions, true, &walk);
+            let stride = profile_common_stride(&pose.leg_chains, &walk);
+            for (index, chain) in pose.leg_chains.iter().enumerate() {
+                if !motions[index].grounded {
+                    continue;
+                }
+                let geometry = solve_profile_leg_geometry(
+                    chain,
+                    ProfileLegFrame {
+                        motion: motions[index],
+                        facing_right: true,
+                        run: walk.run,
+                        blend: walk.blend,
+                        pelvis,
+                        track_x: tracks[index],
+                        stride,
+                    },
+                );
+                let world_y = chain.origin.y - pelvis.lift + geometry.ankle.1;
+                let ground_y = chain.origin.y + chain.ankle.1;
+                assert!(
+                    (world_y - ground_y).abs() < 0.05,
+                    "sample {sample} leg {index} moved run contact by {:.3}px",
+                    world_y - ground_y
+                );
+            }
+        }
+
+        assert!(
+            (48..=80).contains(&flight_samples),
+            "unexpected flight duration: {flight_samples}/240 samples"
+        );
+    }
+
+    #[test]
+    fn profile_ik_never_reverses_knee_and_keeps_support_paw_grounded() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        for (pose, facing_right) in [(&rig.profile_right, true), (&rig.profile_left, false)] {
+            let facing = if facing_right { 1.0 } else { -1.0 };
+            let stride_walk = Walk {
+                blend: 1.0,
+                ..Walk::default()
+            };
+            let stride = profile_common_stride(&pose.leg_chains, &stride_walk);
+            for sample in 0..240 {
+                let walk = Walk {
+                    phase: sample as f32 / 240.0 * std::f32::consts::TAU,
+                    blend: 1.0,
+                    run: 0.0,
+                    lean: 0.3 * facing,
+                    style: WalkStyle::default(),
+                };
+                let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
+                let pelvis =
+                    profile_pelvis_for_walk(&pose.leg_chains, motions, facing_right, &walk);
+                let tracks = profile_leg_tracks(&pose.leg_chains, facing_right);
+                for (index, chain) in pose.leg_chains.iter().enumerate() {
+                    let motion = motions[index.min(1)];
+                    let geometry = solve_profile_leg_geometry(
+                        chain,
+                        ProfileLegFrame {
+                            motion,
+                            facing_right,
+                            run: walk.run,
+                            blend: walk.blend,
+                            pelvis,
+                            track_x: tracks[index.min(1)],
+                            stride,
+                        },
+                    );
+                    let leg_axis = (
+                        geometry.ankle.0 - chain.hip.0,
+                        geometry.ankle.1 - chain.hip.1,
+                    );
+                    let knee_axis = (geometry.knee.0 - chain.hip.0, geometry.knee.1 - chain.hip.1);
+                    assert!(
+                        cross_product(leg_axis, knee_axis) * facing <= 1e-3,
+                        "sample {sample} selected a backwards knee"
+                    );
+                    if motion.grounded {
+                        let world_ankle = chain.origin.y - pelvis.lift + geometry.ankle.1;
+                        let neutral_ground = chain.origin.y + chain.ankle.1;
+                        assert!(
+                            (world_ankle - neutral_ground).abs() < 0.05,
+                            "sample {sample} moved a planted paw by {} px",
+                            world_ankle - neutral_ground
+                        );
+                        let expected_x = chain.origin.x
+                            + tracks[index.min(1)]
+                            + facing * motion.horizontal * stride;
+                        let world_x = chain.origin.x + pelvis.horizontal + geometry.ankle.0;
+                        assert!((world_x - expected_x).abs() < 0.05);
+                        let flexion = joint_flexion(chain, geometry);
+                        assert!(
+                            flexion < 0.38,
+                            "sample {sample} leg {index} exposed {flexion:.3} rad of crouched knee flexion on the ground"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lifted_paw_raises_and_flexes_the_knee() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        let chain = &rig.profile_right.leg_chains[0];
+
+        let contact_walk = Walk {
+            phase: 0.0,
+            blend: 1.0,
+            ..Walk::default()
+        };
+        let contact_motions = [
+            contact_walk.profile_leg_motion(0),
+            contact_walk.profile_leg_motion(1),
+        ];
+        let contact_pelvis = profile_pelvis_for_walk(
+            &rig.profile_right.leg_chains,
+            contact_motions,
+            true,
+            &contact_walk,
+        );
+        let tracks = profile_leg_tracks(&rig.profile_right.leg_chains, true);
+        let stride = profile_common_stride(&rig.profile_right.leg_chains, &contact_walk);
+        let contact = solve_profile_leg_geometry(
+            chain,
+            ProfileLegFrame {
+                motion: contact_motions[0],
+                facing_right: true,
+                run: 0.0,
+                blend: 1.0,
+                pelvis: contact_pelvis,
+                track_x: tracks[0],
+                stride,
+            },
+        );
+
+        let passing_walk = Walk {
+            phase: std::f32::consts::TAU * 0.824,
+            blend: 1.0,
+            ..Walk::default()
+        };
+        let passing_motions = [
+            passing_walk.profile_leg_motion(0),
+            passing_walk.profile_leg_motion(1),
+        ];
+        let passing_pelvis = profile_pelvis_for_walk(
+            &rig.profile_right.leg_chains,
+            passing_motions,
+            true,
+            &passing_walk,
+        );
+        let passing = solve_profile_leg_geometry(
+            chain,
+            ProfileLegFrame {
+                motion: passing_motions[0],
+                facing_right: true,
+                run: 0.0,
+                blend: 1.0,
+                pelvis: passing_pelvis,
+                track_x: tracks[0],
+                stride,
+            },
+        );
+
+        assert!(passing.ankle.1 < contact.ankle.1);
+        assert!(passing.knee.1 < contact.knee.1);
+        assert!(joint_flexion(chain, passing) > joint_flexion(chain, contact) + 0.25);
+    }
+
+    #[test]
+    fn each_swing_paw_advances_past_the_support_paw() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        for (pose, facing_right) in [(&rig.profile_right, true), (&rig.profile_left, false)] {
+            let facing = if facing_right { 1.0 } else { -1.0 };
+            let tracks = profile_leg_tracks(&pose.leg_chains, facing_right);
+            let stride_walk = Walk {
+                blend: 1.0,
+                ..Walk::default()
+            };
+            let stride = profile_common_stride(&pose.leg_chains, &stride_walk);
+            let world_tracks = [
+                pose.leg_chains[0].origin.x + tracks[0],
+                pose.leg_chains[1].origin.x + tracks[1],
+            ];
+            assert!(
+                (world_tracks[0] - world_tracks[1]).abs() < 0.01,
+                "far and near feet do not share one sagittal track"
+            );
+            let mut advances = [0.0_f32; 2];
+            for (swing_index, cycle) in [(0, 0.90_f32), (1, 0.40_f32)] {
+                let walk = Walk {
+                    phase: std::f32::consts::TAU * cycle,
+                    blend: 1.0,
+                    ..Walk::default()
+                };
+                let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
+                let support_index = 1 - swing_index;
+                assert!(!motions[swing_index].grounded);
+                assert!(motions[support_index].grounded);
+                let pelvis =
+                    profile_pelvis_for_walk(&pose.leg_chains, motions, facing_right, &walk);
+                let ankle_x = |index: usize| {
+                    let geometry = solve_profile_leg_geometry(
+                        &pose.leg_chains[index],
+                        ProfileLegFrame {
+                            motion: motions[index],
+                            facing_right,
+                            run: 0.0,
+                            blend: 1.0,
+                            pelvis,
+                            track_x: tracks[index],
+                            stride,
+                        },
+                    );
+                    pose.leg_chains[index].origin.x + pelvis.horizontal + geometry.ankle.0
+                };
+                let advance = (ankle_x(swing_index) - ankle_x(support_index)) * facing;
+                advances[swing_index] = advance;
+                assert!(
+                    advance > stride * 0.18,
+                    "swing leg {swing_index} stayed behind support leg by {:.2}px",
+                    -advance
+                );
+            }
+            assert!(
+                (advances[0] - advances[1]).abs() < 0.05,
+                "asymmetric stride: far={:.2}px near={:.2}px",
+                advances[0],
+                advances[1]
+            );
+        }
+    }
+
+    #[test]
+    fn profile_head_back_and_shoulders_follow_the_step() {
+        let assets = Assets::load().expect("production assets load");
+        let rig = assets.build(0.22);
+        let pose = &rig.profile_right;
+        let body_size = (pose.creature.width(), pose.creature.height());
+
+        let contact = Walk {
+            phase: 0.0,
+            blend: 1.0,
+            ..Walk::default()
+        };
+        let up = Walk {
+            phase: std::f32::consts::TAU * 0.375,
+            blend: 1.0,
+            ..Walk::default()
+        };
+        let world_y = |walk: &Walk, row: f32| {
+            let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
+            let pelvis = profile_pelvis_for_walk(&pose.leg_chains, motions, true, walk);
+            let warp = profile_body_warp(Warp::identity(), walk, true);
+            let (_, inverse_dy) = warp.sample(0.5, row);
+            -pelvis.lift - inverse_dy * body_size.1 as f32
+        };
+
+        let head_travel = (world_y(&up, 0.08) - world_y(&contact, 0.08)).abs();
+        let back_travel = (world_y(&up, 0.36) - world_y(&contact, 0.36)).abs();
+        assert!(
+            head_travel > body_size.1 as f32 * 0.014,
+            "head stayed fixed: travel={head_travel:.2}px"
+        );
+        assert!(
+            back_travel > body_size.1 as f32 * 0.012,
+            "back stayed fixed: travel={back_travel:.2}px"
+        );
+
+        let swagger = Walk {
+            phase: std::f32::consts::FRAC_PI_2,
+            blend: 1.0,
+            ..Walk::default()
+        };
+        let warp = profile_body_warp(Warp::identity(), &swagger, true);
+        let visible = |u: f32, v: f32| {
+            let (dx, dy) = warp.sample(u, v);
+            Vec2::new(-dx * body_size.0 as f32, -dy * body_size.1 as f32)
+        };
+        // The hood/head band is rigid: every point at its top and base receives
+        // the exact same translation, so the skull cannot rubber-stretch.
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let head_top = visible(u, 0.0);
+            let head_base = visible(u, 0.25);
+            assert!((head_top.x - head_base.x).abs() < 0.01);
+            assert!((head_top.y - head_base.y).abs() < 0.01);
+        }
+
+        // Shoulder counter-rotation starts below the rigid head band.
+        let near_shoulder = visible(0.38, 0.50);
+        let far_shoulder = visible(0.62, 0.50);
+        assert!(
+            near_shoulder.x * far_shoulder.x < 0.0,
+            "shoulders did not rotate in opposite directions"
+        );
+        assert!(
+            near_shoulder.y * far_shoulder.y < 0.0,
+            "shoulder line did not move diagonally"
+        );
+        assert!(near_shoulder.x.abs() > body_size.0 as f32 * 0.012);
+        assert!(far_shoulder.x.abs() > body_size.0 as f32 * 0.012);
+        let head = visible(0.5, 0.0);
+        let pelvis = visible(0.5, 0.75);
+        assert!(head.x * pelvis.x < 0.0, "pelvis did not counter-rotate");
+    }
+
+    #[test]
+    fn walking_drives_a_smooth_non_constant_tail_wag() {
+        let mut body = Body::default();
+        let mind = Engagement::default();
+        let mut minimum = f32::INFINITY;
+        let mut maximum = f32::NEG_INFINITY;
+        for _ in 0..240 {
+            body.update(1.0 / 60.0, &mind, Activity::Attentive, Gait::Walk, 1.0);
+            let swing = body.tail_swing();
+            minimum = minimum.min(swing);
+            maximum = maximum.max(swing);
+        }
+        assert!(body.wag > 0.50, "walk did not raise wag amplitude");
+        assert!(maximum > 0.20 && minimum < -0.20);
+        assert!(maximum - minimum < 1.5, "tail motion is too violent");
+    }
+
+    #[test]
+    fn shoulder_attachment_uses_the_exact_torso_warp() {
+        let mut warp = Warp::identity();
+        warp.add_row(2, -0.10, 0.05);
+        let attachment = warped_profile_attachment(
+            &warp,
+            Vec2::new(100.0, 50.0),
+            (200, 400),
+            Vec2::new(120.0, 100.0),
+            (80.0, 150.0),
+        );
+        assert!((attachment.x - 20.0).abs() < 1e-4);
+        assert!((attachment.y + 20.0).abs() < 1e-4);
+    }
 }

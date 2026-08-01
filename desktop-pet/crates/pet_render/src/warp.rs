@@ -66,6 +66,21 @@ impl Warp {
         }
     }
 
+    /// Copies one complete control row to another.
+    ///
+    /// A rigid painted region (for example a profile hood and head) must not
+    /// receive different offsets at its upper and lower boundaries.  Copying
+    /// the row expresses that invariant without exposing the grid storage to
+    /// the application.
+    pub fn copy_row(&mut self, source: usize, target: usize) {
+        let Some(source_row) = self.offsets.get(source).copied() else {
+            return;
+        };
+        if let Some(target_row) = self.offsets.get_mut(target) {
+            *target_row = source_row;
+        }
+    }
+
     /// Билинейная интерполяция смещения в точке (`u`, `v`), обе в 0…1.
     #[must_use]
     pub fn sample(&self, u: f32, v: f32) -> (f32, f32) {
@@ -156,5 +171,18 @@ mod tests {
             assert!((warp.sample(u, 1.0).1 - 0.2).abs() < 1e-5);
         }
         assert!(!warp.is_identity());
+    }
+
+    #[test]
+    fn copied_rows_form_a_rigid_vertical_band() {
+        let mut warp = Warp::identity();
+        warp.set(0, 0, -0.08, 0.03);
+        warp.set(WARP_COLS - 1, 0, 0.04, -0.02);
+        warp.copy_row(0, 1);
+
+        for step in 0..=10 {
+            let u = step as f32 / 10.0;
+            assert_eq!(warp.sample(u, 0.0), warp.sample(u, 0.25));
+        }
     }
 }

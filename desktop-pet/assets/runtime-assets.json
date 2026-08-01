@@ -3,19 +3,17 @@
   "files": [
     "stand.json",
     "stand_body.png",
-    "stand_leg_left.png",
-    "stand_leg_right.png",
     "orb.png",
     "profile_motion_right.json",
     "profile_motion_right_body.png",
-    "profile_motion_right_arm_far.png",
     "profile_motion_right_arm_near.png",
+    "profile_motion_right_tail.png",
     "profile_motion_right_leg_far.png",
     "profile_motion_right_leg_near.png",
     "profile_motion_left.json",
     "profile_motion_left_body.png",
-    "profile_motion_left_arm_far.png",
     "profile_motion_left_arm_near.png",
+    "profile_motion_left_tail.png",
     "profile_motion_left_leg_far.png",
     "profile_motion_left_leg_near.png"
   ]

@@ -32,6 +32,20 @@ OpenAI Image editing live in `assets/OPENAI_IMAGE_PRODUCTION_RIG_PROMPTS.md`.
 Generate and approve the clean front master before any action pose; later
 images inherit identity from that approved master.
 
+Approved masters are converted into the small runtime coordinate system by
+deterministic, hash-pinned build scripts:
+
+```powershell
+python .\assets\prepare_front_master.py
+python .\assets\extract_stand.py
+python .\assets\extract_profile_motion.py
+```
+
+`extract_stand.py` deliberately keeps the approved front pose intact.
+Locomotion uses the right/left profile layers, with conservative overlap masks
+around the jacket, pelvis and tail root so the flattened source cannot split
+apart while moving.
+
 Debug builds may load generated assets from the workspace. Published builds
 load the allow-listed files from `assets` beside `DesktopPet.exe` and fail
 visibly if the package is incomplete.
@@ -42,6 +56,17 @@ visibly if the package is incomplete.
 cd C:\PRDJKT\qntflex\desktop-pet
 cargo run --release -p pet_host
 ```
+
+The default `confident` walk is the character's springy, self-assured motion.
+The same articulated rig also supports a quieter, longer-support gait without
+duplicating assets or bypassing IK:
+
+```powershell
+cargo run --release -p pet_host -- --walk-style woodland
+```
+
+Both styles keep the planted paw locked to the desktop. Running is a separate
+procedural cycle with an aerial phase, not ordinary walking played faster.
 
 The standalone process remains alive after launch. Close it through Task
 Manager during this prototype phase, or send `WM_CLOSE` from a test harness.

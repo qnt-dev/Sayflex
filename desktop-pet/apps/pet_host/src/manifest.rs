@@ -37,6 +37,32 @@ pub struct LegManifest {
     pub origin: (f32, f32),
 }
 
+/// Profile arms retain their semantic depth. A flattened source may expose
+/// only one complete arm, so positional vectors are not sufficient: omitting
+/// the far arm must never make the near arm render behind the torso.
+#[derive(Debug, Clone, Default)]
+pub struct ArmManifests {
+    pub far: Option<LegManifest>,
+    pub near: Option<LegManifest>,
+}
+
+impl ArmManifests {
+    fn iter(&self) -> impl Iterator<Item = &LegManifest> {
+        self.far.iter().chain(self.near.iter())
+    }
+}
+
+/// Continuous leg used by the profile gait. Joint positions are expressed in
+/// the common source canvas; the renderer deforms the one texture with a small
+/// skinning mesh, so no raster seam can open at the knee or ankle.
+#[derive(Debug, Clone)]
+pub struct LegChainManifest {
+    pub sprite: String,
+    pub hip: (f32, f32),
+    pub knee: (f32, f32),
+    pub ankle: (f32, f32),
+}
+
 #[derive(Debug)]
 pub struct FaceManifest {
     pub sprite: String,
@@ -47,7 +73,11 @@ pub struct FaceManifest {
     pub mouth: (f32, f32),
     pub particle_anchors: Vec<ParticleAnchor>,
     pub legs: Vec<LegManifest>,
-    pub arms: Vec<LegManifest>,
+    pub leg_chains: Vec<LegChainManifest>,
+    pub arms: ArmManifests,
+    /// Optional profile tail.  It is articulated independently so wagging it
+    /// never stretches the pelvis, jacket, or head through the torso mesh.
+    pub tail: Option<LegManifest>,
     pub pockets: Vec<(f32, f32)>,
     pub ground: Option<f32>,
 }
@@ -64,7 +94,11 @@ struct RawManifest {
     #[serde(default)]
     legs: RawLegs,
     #[serde(default)]
+    leg_chains: RawLegChains,
+    #[serde(default)]
     arms: RawArms,
+    #[serde(default)]
+    tail: Option<RawLimb>,
     #[serde(default)]
     pockets: RawPockets,
     ground: Option<f32>,
@@ -105,6 +139,33 @@ struct RawLegs {
     right: Option<RawLimb>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLegChain {
+    sprite: String,
+    hip: [f32; 2],
+    knee: [f32; 2],
+    ankle: [f32; 2],
+}
+
+impl From<RawLegChain> for LegChainManifest {
+    fn from(value: RawLegChain) -> Self {
+        Self {
+            sprite: value.sprite,
+            hip: value.hip.into(),
+            knee: value.knee.into(),
+            ankle: value.ankle.into(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawLegChains {
+    far: Option<RawLegChain>,
+    near: Option<RawLegChain>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawArms {
@@ -139,9 +200,13 @@ impl FaceManifest {
         let mut legs = Vec::with_capacity(2);
         legs.extend(raw.legs.left.map(Into::into));
         legs.extend(raw.legs.right.map(Into::into));
-        let mut arms = Vec::with_capacity(2);
-        arms.extend(raw.arms.far.map(Into::into));
-        arms.extend(raw.arms.near.map(Into::into));
+        let mut leg_chains = Vec::with_capacity(2);
+        leg_chains.extend(raw.leg_chains.far.map(Into::into));
+        leg_chains.extend(raw.leg_chains.near.map(Into::into));
+        let arms = ArmManifests {
+            far: raw.arms.far.map(Into::into),
+            near: raw.arms.near.map(Into::into),
+        };
         let mut pockets = Vec::with_capacity(2);
         pockets.extend(raw.pockets.left.map(|point| (point.x, point.y)));
         pockets.extend(raw.pockets.right.map(|point| (point.x, point.y)));
@@ -155,7 +220,9 @@ impl FaceManifest {
             mouth: raw.anchors.mouth.into(),
             particle_anchors: raw.particle_anchors.into_values().collect(),
             legs,
+            leg_chains,
             arms,
+            tail: raw.tail.map(Into::into),
             pockets,
             ground: raw.ground,
         };
@@ -206,11 +273,27 @@ impl FaceManifest {
                 return Err("pocket anchor is outside source_size".to_owned());
             }
         }
-        for limb in self.legs.iter().chain(&self.arms) {
+        for limb in self
+            .legs
+            .iter()
+            .chain(self.arms.iter())
+            .chain(self.tail.iter())
+        {
             validate_asset_name(&limb.sprite)?;
             if !source_point(limb.pivot, width, height) || !source_point(limb.origin, width, height)
             {
                 return Err(format!("limb {} contains invalid geometry", limb.sprite));
+            }
+        }
+        for leg in &self.leg_chains {
+            validate_asset_name(&leg.sprite)?;
+            for joint in [leg.hip, leg.knee, leg.ankle] {
+                if !source_point(joint, width, height) {
+                    return Err("articulated leg contains invalid joint geometry".to_owned());
+                }
+            }
+            if leg.hip == leg.knee || leg.knee == leg.ankle {
+                return Err("articulated leg joints must not collapse".to_owned());
             }
         }
         if self
@@ -276,10 +359,18 @@ mod tests {
         "left": { "sprite": "leg.png", "pivot_x": 168, "pivot_y": 828,
                   "origin_x": 73, "origin_y": 815 }
       },
+      "leg_chains": {
+        "far": {
+          "sprite": "profile-leg.png",
+          "hip": [200, 700], "knee": [210, 850], "ankle": [220, 980]
+        }
+      },
       "arms": {
         "far": { "sprite": "arm.png", "pivot_x": 200, "pivot_y": 500,
                  "origin_x": 0, "origin_y": 0 }
       },
+      "tail": { "sprite": "tail.png", "pivot_x": 190, "pivot_y": 810,
+                "origin_x": 0, "origin_y": 0 },
       "pockets": { "left": { "x": 123, "y": 678 } },
       "ground": 1090
     }"#;
@@ -290,7 +381,15 @@ mod tests {
         assert_eq!(manifest.sprite, "body.png");
         assert_eq!(manifest.source_size, (625, 1105));
         assert_eq!(manifest.legs[0].sprite, "leg.png");
-        assert_eq!(manifest.arms[0].sprite, "arm.png");
+        assert_eq!(manifest.leg_chains[0].sprite, "profile-leg.png");
+        assert_eq!(
+            manifest.arms.far.as_ref().map(|arm| arm.sprite.as_str()),
+            Some("arm.png")
+        );
+        assert_eq!(
+            manifest.tail.as_ref().map(|tail| tail.sprite.as_str()),
+            Some("tail.png")
+        );
         assert_eq!(manifest.pockets, vec![(123.0, 678.0)]);
         assert_eq!(manifest.particle_anchors[0].radius, 62.0);
     }
