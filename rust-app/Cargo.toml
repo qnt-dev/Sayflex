@@ -29,6 +29,7 @@ slint = { version = "1.17.1", features = ["unstable-winit-030"] }
 slint-build = "1.17.1"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
+unicode-segmentation = "1.13.3"
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 windows = { version = "0.62.2", features = [
     "Win32_System_Com",

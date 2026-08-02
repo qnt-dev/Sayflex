@@ -37,6 +37,7 @@ use slint::{
     ComponentHandle, Image, ModelRc, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, SharedString,
     Timer, TimerMode, VecModel,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 mod flow_sphere;
 mod overlay_presenter;
@@ -388,6 +389,14 @@ impl Workers {
             .as_ref()
             .ok_or_else(|| "the Companion Orb renderer is unavailable".to_owned())?
             .send(command)
+    }
+
+    fn send_companion_if_running(&self, command: &CompanionRendererCommand) -> Result<(), String> {
+        let companion = self.companion.borrow();
+        let Some(companion) = companion.as_ref() else {
+            return Ok(());
+        };
+        companion.send(command)
     }
 
     fn recover(
@@ -1361,6 +1370,7 @@ struct AppState {
     circular_spectrum_palette: CircularSpectrumPalette,
     flow_sphere_palette: flow_sphere::FlowSpherePalette,
     writing_slate_surface: WritingSlateSurface,
+    companion_home_position: Option<(i32, i32)>,
     input_ready: bool,
     speech_ready: bool,
     indicator_session: Option<SessionId>,
@@ -1406,6 +1416,7 @@ impl AppState {
             circular_spectrum_palette: saved_settings.circular_spectrum_palette,
             flow_sphere_palette: saved_settings.flow_sphere_palette,
             writing_slate_surface: saved_settings.writing_slate_surface,
+            companion_home_position: saved_settings.companion_home_position,
             input_ready: false,
             speech_ready: false,
             indicator_session: None,
@@ -1630,7 +1641,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         &saved_settings,
     )));
     if saved_settings.visualizer_style.uses_external_renderer()
-        && let Err(error) = workers.ensure_companion()
+        && let Err(error) = workers.ensure_companion().and_then(|()| {
+            workers.send_companion(&CompanionRendererCommand::SetEnabled { enabled: true })
+        })
     {
         rust_app_core::diagnostics::log_line(&format!(
             "companion_renderer lifecycle=start_failed error={error}"
@@ -2747,11 +2760,33 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                     rust_app_core::diagnostics::log_line(
                         "companion_renderer lifecycle=ready protocol=matched",
                     );
+                    let home_position = runtime.state.borrow().companion_home_position;
+                    if let Some((x, y)) = home_position
+                        && let Err(error) = runtime
+                            .workers
+                            .send_companion(&CompanionRendererCommand::SetHomePosition { x, y })
+                    {
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "companion_renderer home_position=restore_failed error={error}"
+                        ));
+                    }
                 } else {
                     set_indicator_status(
                         &runtime.settings,
                         "Companion Orb protocol mismatch. Reinstall the complete application.",
                     );
+                }
+            }
+            CompanionRendererEvent::HomePositionChanged { x, y } => {
+                let mut state = runtime.state.borrow_mut();
+                state.companion_home_position = Some((x, y));
+                match save_settings(&state) {
+                    Ok(()) => rust_app_core::diagnostics::log_line(&format!(
+                        "companion_renderer home_position=saved x={x} y={y}"
+                    )),
+                    Err(error) => rust_app_core::diagnostics::log_line(&format!(
+                        "companion_renderer home_position=save_failed error={error}"
+                    )),
                 }
             }
             CompanionRendererEvent::Failed {
@@ -2779,6 +2814,9 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             if let Some(preview) = runtime.translation_preview.upgrade() {
                 preview.set_pinned(pinned);
             }
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_preview pin=changed pinned={pinned}"
+            ));
         }
         RuntimeEvent::ScrollTranslationPreview(delta) => {
             if let Some(preview) = runtime.translation_preview.upgrade() {
@@ -2888,10 +2926,40 @@ fn handle_worker_exit(
     // processes. Recover it independently and leave the active session intact.
     if kind == WorkerKind::Companion {
         match runtime.workers.recover(kind, instance_id, exit) {
-            Ok(WorkerRecovery::Restarted) => set_indicator_status(
-                &runtime.settings,
-                "Companion Orb restarted. Dictation continued normally.",
-            ),
+            Ok(WorkerRecovery::Restarted) => {
+                let (enabled, active) = {
+                    let state = runtime.state.borrow();
+                    let enabled = state.visualizer_style.uses_external_renderer();
+                    let active = state
+                        .active_visualizer_style
+                        .is_some_and(VisualizerStyle::uses_external_renderer)
+                        .then(|| state.indicator_session)
+                        .flatten()
+                        .and_then(|session_id| {
+                            state
+                                .targets
+                                .get(&session_id)
+                                .copied()
+                                .map(|target| (session_id, target.window_handle))
+                        });
+                    (enabled, active)
+                };
+                let _ = runtime
+                    .workers
+                    .send_companion(&CompanionRendererCommand::SetEnabled { enabled });
+                if let Some((session_id, target_window_handle)) = active {
+                    let _ = runtime
+                        .workers
+                        .send_companion(&CompanionRendererCommand::Activate {
+                            session_id,
+                            target_window_handle,
+                        });
+                }
+                set_indicator_status(
+                    &runtime.settings,
+                    "Companion Orb restarted. Dictation continued normally.",
+                );
+            }
             Ok(WorkerRecovery::Deferred | WorkerRecovery::Stopping | WorkerRecovery::Stale) => {}
             Err(error) => set_indicator_status(
                 &runtime.settings,
@@ -4837,14 +4905,20 @@ fn wire_settings(
             let Some(style) = VisualizerStyle::from_index(index) else {
                 return;
             };
-            if style.uses_external_renderer()
-                && let Err(error) = workers.ensure_companion()
-            {
-                set_indicator_status(
-                    &settings_weak,
-                    &format!("Could not start Companion Orb: {error}"),
-                );
-                return;
+            if style.uses_external_renderer() {
+                if let Err(error) = workers.ensure_companion().and_then(|()| {
+                    workers.send_companion(&CompanionRendererCommand::SetEnabled { enabled: true })
+                }) {
+                    set_indicator_status(
+                        &settings_weak,
+                        &format!("Could not start Companion Orb: {error}"),
+                    );
+                    return;
+                }
+            } else {
+                let _ = workers.send_companion_if_running(&CompanionRendererCommand::SetEnabled {
+                    enabled: false,
+                });
             }
             let session_active = state.borrow().indicator_session.is_some();
             state.borrow_mut().visualizer_style = style;
@@ -4859,7 +4933,7 @@ fn wire_settings(
             set_indicator_status(
                 &settings_weak,
                 if style.uses_external_renderer() {
-                    "Companion Orb is ready in its isolated renderer process."
+                    "Companion Orb is active on the desktop."
                 } else {
                     "Visualizer updated. The next dictation uses the selected style."
                 },
@@ -5806,9 +5880,9 @@ struct TranslationPreviewLayout {
 fn translation_preview_layout(result_text: &str) -> TranslationPreviewLayout {
     let content_characters = result_text.chars().count();
     let card_width = match content_characters {
-        0..=28 => 280.0,
-        29..=140 => 400.0,
-        _ => 560.0,
+        0..=28 => 252.0,
+        29..=140 => 352.0,
+        _ => 480.0,
     };
 
     TranslationPreviewLayout { card_width }
@@ -5817,6 +5891,11 @@ fn translation_preview_layout(result_text: &str) -> TranslationPreviewLayout {
 fn apply_translation_preview_layout(preview: &TranslationPreview, result_text: &str) {
     let layout = translation_preview_layout(result_text);
     preview.set_card_width(layout.card_width);
+    preview.set_translated_word_count(translated_word_count(result_text).to_string().into());
+}
+
+fn translated_word_count(text: &str) -> usize {
+    text.unicode_words().count()
 }
 
 fn refresh_cloaked_translation_backdrop(preview: &TranslationPreview, window_handle: u64) {
@@ -6233,6 +6312,7 @@ struct SavedSettings {
     circular_spectrum_palette: CircularSpectrumPalette,
     flow_sphere_palette: flow_sphere::FlowSpherePalette,
     writing_slate_surface: WritingSlateSurface,
+    companion_home_position: Option<(i32, i32)>,
     selected_translation_tier: Option<TranslationTier>,
     translation_enabled: bool,
     layout_enabled: bool,
@@ -6252,6 +6332,7 @@ impl Default for SavedSettings {
             circular_spectrum_palette: CircularSpectrumPalette::default(),
             flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
             writing_slate_surface: WritingSlateSurface::default(),
+            companion_home_position: None,
             selected_translation_tier: None,
             translation_enabled: false,
             layout_enabled: true,
@@ -6302,6 +6383,11 @@ fn load_settings() -> SavedSettings {
         .and_then(|value| value.get("writing_slate_surface"))
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
+    let companion_home_position = value
+        .as_ref()
+        .and_then(|value| value.get("companion_home_position"))
+        .and_then(|value| serde_json::from_value::<[i32; 2]>(value.clone()).ok())
+        .map(|[x, y]| (x, y));
     let selected_translation_tier = value
         .as_ref()
         .and_then(|value| value.get("selected_translation_tier"))
@@ -6344,6 +6430,7 @@ fn load_settings() -> SavedSettings {
         circular_spectrum_palette,
         flow_sphere_palette,
         writing_slate_surface,
+        companion_home_position,
         selected_translation_tier,
         translation_enabled,
         layout_enabled,
@@ -6367,6 +6454,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
         "circular_spectrum_palette": state.circular_spectrum_palette,
         "flow_sphere_palette": state.flow_sphere_palette,
         "writing_slate_surface": state.writing_slate_surface,
+        "companion_home_position": state.companion_home_position.map(|(x, y)| [x, y]),
         "selected_translation_tier": state.selected_translation_tier,
         "translation_enabled": state.translation_enabled,
         "layout_enabled": state.layout_enabled,
@@ -7045,7 +7133,7 @@ mod worker_lifecycle_tests {
 mod adaptive_popup_tests {
     use super::{
         TranslationPreview, adaptive_text_panel_height, backdrop_prefers_dark_text,
-        translation_preview_layout,
+        translated_word_count, translation_preview_layout,
     };
 
     fn uniform_backdrop(value: u8) -> Vec<u8> {
@@ -7080,13 +7168,19 @@ mod adaptive_popup_tests {
     #[test]
     fn short_translation_uses_the_compact_width() {
         let layout = translation_preview_layout("Привет");
-        assert_eq!(layout.card_width, 280.0);
+        assert_eq!(layout.card_width, 252.0);
+    }
+
+    #[test]
+    fn translation_word_count_handles_unicode_and_single_words() {
+        assert_eq!(translated_word_count("Привет"), 1);
+        assert_eq!(translated_word_count("Hello, мир! Ça va?"), 4);
     }
 
     #[test]
     fn long_translation_uses_the_readable_width() {
         let layout = translation_preview_layout(&"translated text ".repeat(500));
-        assert_eq!(layout.card_width, 560.0);
+        assert_eq!(layout.card_width, 480.0);
     }
 
     #[test]
@@ -7109,13 +7203,13 @@ mod adaptive_popup_tests {
     #[test]
     fn wrapped_preview_uses_intrinsic_text_height_and_exposes_scroll_range() {
         let preview = TranslationPreview::new().unwrap();
-        preview.set_card_width(560.0);
+        preview.set_card_width(480.0);
         preview.set_translated_text(
             ("Длинный переведённый текст с пропорциональным шрифтом и переносами. ".repeat(120))
                 .into(),
         );
 
-        assert_eq!(preview.get_result_panel_height(), 280.0);
+        assert_eq!(preview.get_result_panel_height(), 252.0);
         assert!(
             preview.get_result_content_height() > preview.get_result_panel_height(),
             "wrapped text must remain reachable below the capped viewport"

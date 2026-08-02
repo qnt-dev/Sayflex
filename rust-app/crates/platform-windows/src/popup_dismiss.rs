@@ -119,8 +119,18 @@ impl Drop for PopupDismissMonitor {
 }
 
 pub fn activate_popup_dismiss(window_handle: u64) {
-    POPUP_PINNED.store(false, Ordering::Release);
-    ACTIVE_POPUP.store(window_handle as usize, Ordering::Release);
+    let window_handle = window_handle as usize;
+    let previous = ACTIVE_POPUP.swap(window_handle, Ordering::AcqRel);
+    // A rendered refresh of the same popup must not silently unpin it. A new
+    // popup activation still starts unpinned, as before.
+    if activation_starts_new_popup(previous, window_handle) {
+        POPUP_PINNED.store(false, Ordering::Release);
+        PIN_CLICK_CAPTURED.store(false, Ordering::Release);
+    }
+}
+
+const fn activation_starts_new_popup(previous: usize, current: usize) -> bool {
+    previous != current
 }
 
 pub fn deactivate_popup_dismiss() {
@@ -253,5 +263,17 @@ impl Drop for MouseHookGuard {
         unsafe {
             let _ = UnhookWindowsHookEx(self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::activation_starts_new_popup;
+
+    #[test]
+    fn rendered_refresh_of_same_popup_preserves_pin_state() {
+        assert!(!activation_starts_new_popup(42, 42));
+        assert!(activation_starts_new_popup(0, 42));
+        assert!(activation_starts_new_popup(41, 42));
     }
 }

@@ -13,6 +13,7 @@ rust-protocol = { version = "0.5.12", path = "../../crates/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 slint.workspace = true
+unicode-segmentation.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true

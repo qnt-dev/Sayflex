@@ -4,14 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-build = "build.rs"
 
 [dependencies]
+pet_orb = { path = "../../../desktop-pet/crates/pet_orb" }
+pet_particles = { path = "../../../desktop-pet/crates/pet_particles" }
+pet_platform = { path = "../../../desktop-pet/crates/pet_platform" }
+pet_render = { path = "../../../desktop-pet/crates/pet_render" }
 rust-app-core = { version = "0.5.12", path = "../../crates/app-core" }
-rust-platform-windows = { version = "0.5.12", path = "../../crates/platform-windows" }
 rust-protocol = { version = "0.5.12", path = "../../crates/protocol" }
 serde_json.workspace = true
-slint.workspace = true
-
-[build-dependencies]
-slint-build.workspace = true

@@ -3844,6 +3844,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pet_orb"
+version = "0.1.0"
+dependencies = [
+ "pet_particles",
+ "pet_render",
+]
+
+[[package]]
+name = "pet_particles"
+version = "0.1.0"
+
+[[package]]
+name = "pet_platform"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "pet_render"
+version = "0.1.0"
+dependencies = [
+ "image",
+]
+
+[[package]]
 name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4764,12 +4790,13 @@ dependencies = [
 name = "sayflex-companion-renderer"
 version = "0.5.19"
 dependencies = [
+ "pet_orb",
+ "pet_particles",
+ "pet_platform",
+ "pet_render",
  "rust-app-core",
- "rust-platform-windows",
  "rust-protocol",
  "serde_json",
- "slint",
- "slint-build",
 ]
 
 [[package]]
@@ -4783,6 +4810,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "unicode-segmentation",
 ]
 
 [[package]]

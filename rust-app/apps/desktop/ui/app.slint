@@ -836,7 +836,7 @@ export component SettingsWindow inherits Window {
                             }
                             VisualizerChoice {
                                 label: "Companion Orb";
-                                detail: "Isolated animated companion";
+                                detail: "Persistent orb companion";
                                 selected: root.selected-visualizer == 7;
                                 clicked => { root.select-visualizer(7); }
                             }
@@ -2195,7 +2195,9 @@ export component TranslationPreview inherits Window {
     // no title or chrome is rendered to the user.
     title: "Translation preview";
     width: root.card-width * 1px;
-    height: 24px + root.result-panel-height * 1px;
+    // The header owns the count, pin and drag surface. Keeping it separate
+    // lets the translation use the full readable width below it.
+    height: 50px + root.result-panel-height * 1px;
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -2204,17 +2206,18 @@ export component TranslationPreview inherits Window {
     in-out property <string> request-id;
     in-out property <bool> prepared: false;
     in-out property <string> translated-text;
+    in-out property <string> translated-word-count: "0";
     in-out property <bool> pinned: false;
     in-out property <bool> live-glass: false;
     in-out property <bool> dark-text: false;
-    in-out property <float> card-width: 320;
+    in-out property <float> card-width: 252;
     in property <image> glass-backdrop;
     // Text owns its real height-for-width measurement. The extra four pixels
     // are bottom breathing room for descenders and the last rendered line.
     out property <float> result-content-height:
         max(20px, result-text.preferred-height + 4px) / 1px;
     out property <float> result-panel-height:
-        min(280px, root.result-content-height * 1px) / 1px;
+        min(252px, root.result-content-height * 1px) / 1px;
     out property <bool> result-scrollable:
         root.result-content-height > root.result-panel-height + 0.5;
     out property <float> result-scroll-offset: -result-scroll.viewport-y / 1px;
@@ -2276,13 +2279,25 @@ export component TranslationPreview inherits Window {
             opacity: 0.07;
         }
 
+        word-count-text := Text {
+            x: 14px;
+            y: 10px;
+            width: self.preferred-width;
+            height: 20px;
+            text: root.translated-word-count;
+            color: Theme.red;
+            font-size: 10px;
+            font-weight: 700;
+            vertical-alignment: top;
+        }
+
         result-scroll := Flickable {
             x: 14px;
-            y: 12px;
-            // Always reserve the pin area. Changing the width when the
+            y: 38px;
+            // Always reserve the scrollbar gutter. Changing the width when the
             // scrollbar appears would reflow the text and create a
             // height/scroll feedback loop while a streamed result grows.
-            width: parent.width - 66px;
+            width: parent.width - self.x - 20px;
             height: root.result-panel-height * 1px;
             viewport-width: self.width;
             viewport-height: root.result-content-height * 1px;
@@ -2301,7 +2316,7 @@ export component TranslationPreview inherits Window {
 
         if root.result-scrollable: Rectangle {
             x: parent.width - 8px;
-            y: 12px;
+            y: 38px;
             width: 2px;
             height: root.result-panel-height * 1px;
             border-radius: 1px;
@@ -2315,19 +2330,19 @@ export component TranslationPreview inherits Window {
                 y: (-result-scroll.viewport-y / (result-scroll.viewport-height - result-scroll.height))
                     * (parent.height - self.height);
                 border-radius: 1px;
-                background: Theme.orange;
+                background: Theme.red;
                 opacity: 0.7;
             }
         }
 
-        // Keep the drag surface above the text/flickable so the first press is
-        // never consumed by the content layer. The pin remains outside this
-        // exact hit area and wheel scrolling is handled by the popup monitor.
+        // The header is also the drag handle. It sits above the text so the
+        // first press is never consumed by the content layer; the pin remains
+        // outside this exact hit area.
         drag-area := TouchArea {
             x: 0;
             y: 0;
             width: parent.width - 54px;
-            height: 32px;
+            height: 36px;
             pointer-event(event) => {
                 if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
                     root.begin-drag();
@@ -2343,12 +2358,12 @@ export component TranslationPreview inherits Window {
             border-radius: 6px;
             border-width: 1px;
             border-color: root.pinned
-                ? Theme.orange
+                ? Theme.red
                 : root.dark-text ? #10182070 : #d7d3cc48;
             background: root.pinned
-                ? Theme.orange
+                ? Theme.red
                 : pin-touch.has-hover
-                    ? #f0a45d20
+                    ? Theme.red-soft
                     : root.dark-text ? #ffffff42 : #0c0f1450;
 
             Text {

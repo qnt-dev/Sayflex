@@ -186,6 +186,14 @@ name = "pet_motion"
 version = "0.1.0"
 
 [[package]]
+name = "pet_orb"
+version = "0.1.0"
+dependencies = [
+ "pet_particles",
+ "pet_render",
+]
+
+[[package]]
 name = "pet_particles"
 version = "0.1.0"
 

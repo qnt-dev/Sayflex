@@ -1,0 +1,10 @@
+[package]
+name = "pet_orb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pet_particles = { path = "../pet_particles" }
+pet_render = { path = "../pet_render" }

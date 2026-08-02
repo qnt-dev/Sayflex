@@ -36,6 +36,10 @@ try {
     if (-not $process.Start()) {
         throw 'The Companion Orb renderer did not start.'
     }
+    Send-CompanionCommand @{
+        type = 'set_enabled'
+        payload = @{ enabled = $true }
+    }
     if ($IdleSeconds -gt 0) {
         Start-Sleep -Seconds $IdleSeconds
     }

@@ -56,12 +56,18 @@ pub enum Mode {
     Dead,
     /// Кружит вокруг владельца.
     Orbit,
+    /// Штатный орбитальный квадрат, временно вплетённый в хвост переноса.
+    DragTether,
+    /// Плавно возвращается из хвоста на свою прежнюю орбиту.
+    OrbitReturn,
     /// Отстаёт и гаснет — метеоритный хвост.
     Trail,
     /// Разлетается после взрыва.
     Burst,
     /// Летит к назначенной точке и там гасит скорость.
     Reassemble,
+    /// Свободно движется внутри сжимающейся области и сталкивается с соседями.
+    Tension,
 }
 
 /// Палитра. Цвет отделён от поведения, чтобы состояние персонажа могло
@@ -158,6 +164,14 @@ pub struct Particles {
     /// Остаток пути, не покрытый эмиссией на прошлом кадре.
     emit_debt: f32,
     last_origin: Option<Vec2>,
+    helix_phase: f32,
+    drag_path: Vec<Vec2>,
+    drag_catchup_debt: f32,
+    drag_spacing: f32,
+    drag_tangent: Vec2,
+    tension_center: Vec2,
+    tension_radius: f32,
+    tension_pressure: f32,
 }
 
 impl Particles {
@@ -187,6 +201,14 @@ impl Particles {
             anchor_offset: Vec2::default(),
             emit_debt: 0.0,
             last_origin: None,
+            helix_phase: 0.0,
+            drag_path: Vec::with_capacity(64),
+            drag_catchup_debt: 0.0,
+            drag_spacing: 6.5,
+            drag_tangent: Vec2::new(1.0, 0.0),
+            tension_center: Vec2::default(),
+            tension_radius: 0.0,
+            tension_pressure: 0.0,
         }
     }
 
@@ -215,28 +237,49 @@ impl Particles {
     /// спокойного состояния и как исходное состояние шарика.
     pub fn seed_orbit(&mut self, center: Vec2, inner: f32, outer: f32, count: usize) {
         for _ in 0..count {
-            let Some(index) = self.allocate() else { return };
-            let angle = self.rng.range(0.0, std::f32::consts::TAU);
-            let radius = self.rng.range(inner, outer);
-            self.position[index] = center;
-            self.velocity[index] = Vec2::default();
-            self.size[index] = self.rng.range(8.0, 24.0) * self.size_scale;
-            self.life[index] = 0.0;
-            self.life_span[index] = f32::INFINITY;
-            self.phase[index] = angle;
-            self.radius[index] = radius;
-            // Каждая частица получает собственную плоскость орбиты, своё
-            // направление и свою скорость. Без этого облако читается как одно
-            // жёсткое кольцо, вращающееся целиком.
-            let direction = if self.rng.unit() < 0.5 { -1.0 } else { 1.0 };
-            self.spin[index] = direction * self.rng.range(0.18, 0.85);
-            self.tilt[index] = self.rng.range(-1.35, 1.35);
-            self.plane[index] = self.rng.range(0.0, std::f32::consts::TAU);
-            self.depth[index] = 0.0;
-            self.home[index] = center;
-            self.color[index] = PALETTE[(self.rng.unit() * 4.0) as usize & 3];
-            self.mode[index] = Mode::Orbit;
+            if !self.spawn_orbit(center, inner, outer) {
+                return;
+            }
         }
+    }
+
+    /// Adds one satellite to an existing orbit. Hosts use this to make the
+    /// calm squares hatch around a newly rebuilt sphere one by one.
+    pub fn spawn_orbit(&mut self, center: Vec2, inner: f32, outer: f32) -> bool {
+        let Some(index) = self.allocate() else {
+            return false;
+        };
+        let angle = self.rng.range(0.0, std::f32::consts::TAU);
+        let radius = self.rng.range(inner, outer);
+        self.position[index] = center;
+        self.velocity[index] = Vec2::default();
+        self.size[index] = self.rng.range(8.0, 24.0) * self.size_scale;
+        self.life[index] = 0.0;
+        self.life_span[index] = f32::INFINITY;
+        self.phase[index] = angle;
+        self.radius[index] = radius;
+        let direction = if self.rng.unit() < 0.5 { -1.0 } else { 1.0 };
+        self.spin[index] = direction * self.rng.range(0.18, 0.85);
+        self.tilt[index] = self.rng.range(-1.35, 1.35);
+        self.plane[index] = self.rng.range(0.0, std::f32::consts::TAU);
+        self.depth[index] = 0.0;
+        self.home[index] = center;
+        self.color[index] = PALETTE[(self.rng.unit() * 4.0) as usize & 3];
+        self.mode[index] = Mode::Orbit;
+        true
+    }
+
+    /// Releases every slot without reallocating the particle pool.
+    pub fn clear(&mut self) {
+        for index in 0..self.capacity() {
+            self.release(index);
+        }
+        self.tension_pressure = 0.0;
+        self.tension_radius = 0.0;
+        self.emit_debt = 0.0;
+        self.last_origin = None;
+        self.drag_path.clear();
+        self.drag_catchup_debt = 0.0;
     }
 
     /// Куда сместилось тело относительно позы покоя. Применяется только к
@@ -285,9 +328,168 @@ impl Particles {
             self.size[index] = self.rng.range(7.0, 18.0) * self.size_scale;
             self.life[index] = 0.0;
             self.life_span[index] = self.rng.range(0.5, 1.1);
+            self.phase[index] = 0.0;
+            self.radius[index] = 0.0;
+            self.spin[index] = 0.0;
+            self.tilt[index] = 0.0;
+            self.plane[index] = 0.0;
+            self.depth[index] = 0.0;
+            self.home[index] = origin;
             self.color[index] = PALETTE[(self.rng.unit() * 4.0) as usize & 3];
             self.mode[index] = Mode::Burst.min_placeholder(Mode::Trail);
         }
+    }
+
+    /// Переводит именно штатные орбитальные квадраты в режим хвоста.
+    /// Новые частицы не создаются: пользователь видит, как знакомое облако
+    /// отстаёт от сферы, а не как поверх него включается второй эффект.
+    pub fn begin_drag_tail(&mut self, center: Vec2) {
+        self.drag_path.clear();
+        self.drag_path.push(center);
+        self.emit_debt = 0.0;
+        self.drag_catchup_debt = 0.0;
+        for index in 0..self.capacity() {
+            if matches!(self.mode[index], Mode::Orbit | Mode::OrbitReturn) {
+                self.mode[index] = Mode::DragTether;
+                self.target[index] = self.position[index];
+                self.velocity[index] = Vec2::default();
+                self.life[index] = 0.0;
+                self.depth[index] = -0.45;
+            }
+        }
+    }
+
+    /// Продлевает две переплетённые нити вдоль реальной траектории окна.
+    /// Точки пути добавляются по расстоянию, поэтому рисунок одинаков при
+    /// любой частоте событий мыши и сохраняет окружности и резкие повороты.
+    pub fn drag_tail(&mut self, origin: Vec2, movement: Vec2, spacing: f32) {
+        let distance = movement.length();
+        if distance <= f32::EPSILON || spacing <= f32::EPSILON {
+            return;
+        }
+        let inverse = movement * -1.0;
+        for point in &mut self.drag_path {
+            *point = *point + inverse;
+        }
+        for index in 0..self.capacity() {
+            if matches!(
+                self.mode[index],
+                Mode::DragTether | Mode::Trail | Mode::Burst
+            ) {
+                self.position[index] = self.position[index] + inverse;
+                self.target[index] = self.target[index] + inverse;
+            }
+        }
+
+        let tangent = movement * (1.0 / distance);
+        self.drag_tangent = tangent;
+        self.drag_spacing = spacing;
+        let start = origin - movement;
+        self.emit_debt += distance;
+        while self.emit_debt >= spacing {
+            self.emit_debt -= spacing;
+            let travelled = distance - self.emit_debt;
+            let point = start + tangent * travelled;
+            if self.drag_path.len() == self.drag_path.capacity() {
+                self.drag_path.remove(0);
+            }
+            self.drag_path.push(point);
+            self.helix_phase =
+                (self.helix_phase + spacing * 0.095).rem_euclid(std::f32::consts::TAU);
+        }
+        let catchup_fraction = self.drag_catchup_debt / self.drag_spacing;
+        self.retarget_drag_tail(origin, tangent, catchup_fraction);
+    }
+
+    /// Advances the same pursuit while the pointer is stationary. The oldest
+    /// part of the path is consumed continuously, so the tail begins shrinking
+    /// on the first frame instead of waiting for an inactivity timeout.
+    pub fn advance_drag_tail(&mut self, origin: Vec2, dt: f32, catchup_speed: f32) -> bool {
+        if !self.mode.contains(&Mode::DragTether) {
+            return false;
+        }
+        if self.drag_path.len() <= 1 {
+            self.end_drag_tail(origin);
+            return false;
+        }
+
+        self.drag_catchup_debt += dt.max(0.0) * catchup_speed.max(0.0);
+        while self.drag_catchup_debt >= self.drag_spacing && self.drag_path.len() > 1 {
+            self.drag_catchup_debt -= self.drag_spacing;
+            self.drag_path.remove(0);
+        }
+        if self.drag_path.len() <= 1 {
+            self.end_drag_tail(origin);
+            return false;
+        }
+        let catchup_fraction = self.drag_catchup_debt / self.drag_spacing;
+        self.retarget_drag_tail(origin, self.drag_tangent, catchup_fraction);
+        true
+    }
+
+    fn retarget_drag_tail(&mut self, origin: Vec2, fallback_tangent: Vec2, catchup_fraction: f32) {
+        let count = self
+            .mode
+            .iter()
+            .filter(|mode_| **mode_ == Mode::DragTether)
+            .count();
+        if count == 0 {
+            return;
+        }
+        let pairs = count.div_ceil(2).max(1);
+        let mut ordinal = 0_usize;
+        for index in 0..self.capacity() {
+            if self.mode[index] != Mode::DragTether {
+                continue;
+            }
+            let pair = ordinal / 2;
+            let side = if ordinal.is_multiple_of(2) { -1.0 } else { 1.0 };
+            let strand_position = (pair + 1) as f32 / (pairs + 1) as f32;
+            let latest = self.drag_path.len().saturating_sub(1) as f32;
+            let path_position = (latest * (1.0 - strand_position)
+                + catchup_fraction.clamp(0.0, 1.0) * strand_position)
+                .clamp(0.0, latest);
+            let lower_index = path_position.floor() as usize;
+            let upper_index = (lower_index + 1).min(self.drag_path.len() - 1);
+            let interpolation = path_position - lower_index as f32;
+            let lower = self.drag_path.get(lower_index).copied().unwrap_or(origin);
+            let upper = self.drag_path.get(upper_index).copied().unwrap_or(lower);
+            let point = lower + (upper - lower) * interpolation;
+            let older = self
+                .drag_path
+                .get(lower_index.saturating_sub(1))
+                .copied()
+                .unwrap_or(point - fallback_tangent);
+            let segment = point - older;
+            let tangent = if segment.length() > 0.001 {
+                segment * (1.0 / segment.length())
+            } else {
+                fallback_tangent
+            };
+            let normal = Vec2::new(-tangent.y, tangent.x);
+            let phase = self.helix_phase - pair as f32 * 0.82;
+            let amplitude = (6.0 + 3.5 * pair as f32 / pairs as f32) * self.size_scale.sqrt();
+            self.target[index] = point + normal * (phase.sin() * amplitude * side);
+            // Весь узор остаётся позади сферы, а лёгкая разница глубины
+            // позволяет двум нитям визуально переплетаться между собой.
+            self.depth[index] = -0.58 + phase.cos() * side * 0.16;
+            ordinal += 1;
+        }
+    }
+
+    /// После отпускания квадраты не телепортируются, а догоняют прежние
+    /// орбиты из своих последних точек хвоста.
+    pub fn end_drag_tail(&mut self, center: Vec2) {
+        for index in 0..self.capacity() {
+            if self.mode[index] == Mode::DragTether {
+                self.mode[index] = Mode::OrbitReturn;
+                self.home[index] = center;
+                self.life[index] = 0.0;
+            }
+        }
+        self.drag_path.clear();
+        self.emit_debt = 0.0;
+        self.drag_catchup_debt = 0.0;
     }
 
     /// Переводит живые частицы в разлёт от `center`.
@@ -307,6 +509,40 @@ impl Particles {
         }
     }
 
+    /// Adds small fragments cut from the sphere before applying the normal
+    /// burst physics. The idle orbit only has twenty satellites, which is not
+    /// dense enough to describe the sphere breaking apart and rebuilding.
+    pub fn burst_with_fragments(
+        &mut self,
+        center: Vec2,
+        source_radius: f32,
+        speed: f32,
+        fragment_count: usize,
+    ) {
+        let target_count = fragment_count.min(self.capacity());
+        while self.alive() < target_count {
+            let Some(index) = self.allocate() else { break };
+            let angle = self.rng.range(0.0, std::f32::consts::TAU);
+            let direction = Vec2::new(angle.cos(), angle.sin());
+            let distance = source_radius * self.rng.unit().sqrt() * 0.92;
+            self.position[index] = center + direction * distance;
+            self.velocity[index] = Vec2::default();
+            self.size[index] = self.rng.range(6.0, 19.0) * self.size_scale;
+            self.life[index] = 0.0;
+            self.life_span[index] = f32::INFINITY;
+            self.phase[index] = angle;
+            self.radius[index] = distance;
+            self.spin[index] = 0.0;
+            self.tilt[index] = 0.0;
+            self.plane[index] = 0.0;
+            self.depth[index] = self.rng.range(-0.45, 0.65);
+            self.home[index] = center;
+            self.color[index] = PALETTE[(self.rng.unit() * 4.0) as usize & 3];
+            self.mode[index] = Mode::Burst;
+        }
+        self.burst(center, speed);
+    }
+
     /// Назначает каждой живой частице постоянную точку на окружности и
     /// включает притяжение. Точки распределяются золотым углом — это даёт
     /// равномерность без случайных сгущений.
@@ -323,6 +559,23 @@ impl Particles {
             self.target[index] = center + Vec2::new(angle.cos(), angle.sin()) * (radius * spread);
             self.mode[index] = Mode::Reassemble;
             ordinal += 1;
+        }
+    }
+
+    /// Places all live fragments in one continuously shrinking chamber.
+    ///
+    /// No particle receives an individual slot or a second destination. The
+    /// existing velocity is preserved; the wall and mutual collisions alone
+    /// make impacts more frequent as the chamber becomes smaller.
+    pub fn compress_in(&mut self, center: Vec2, radius: f32, pressure: f32) {
+        self.tension_center = center;
+        self.tension_radius = radius.max(0.0);
+        self.tension_pressure = pressure.clamp(0.0, 1.0);
+        for index in 0..self.capacity() {
+            if self.mode[index] == Mode::Dead {
+                continue;
+            }
+            self.mode[index] = Mode::Tension;
         }
     }
 
@@ -360,7 +613,10 @@ impl Particles {
             return;
         }
         for index in 0..self.capacity() {
-            if matches!(self.mode[index], Mode::Trail | Mode::Burst) {
+            if matches!(
+                self.mode[index],
+                Mode::Trail | Mode::Burst | Mode::DragTether
+            ) {
                 self.position[index] = self.position[index] + delta;
             }
         }
@@ -373,7 +629,7 @@ impl Particles {
             return;
         }
         for index in 0..self.capacity() {
-            if self.mode[index] == Mode::Orbit {
+            if matches!(self.mode[index], Mode::Orbit | Mode::OrbitReturn) {
                 self.home[index] = self.home[index] + delta;
             }
         }
@@ -407,6 +663,39 @@ impl Particles {
                         self.home[index] + self.anchor_offset + Vec2::new(screen_x, screen_y);
                     self.depth[index] = (z / radius.max(1.0)).clamp(-1.0, 1.0);
                 }
+                Mode::DragTether => {
+                    // The path defines only the centre of each link. Every
+                    // square keeps a small independent orbit around that
+                    // centre, so holding the mouse still never freezes the
+                    // companion into a dead line.
+                    let direction = if self.spin[index] < 0.0 { -1.0 } else { 1.0 };
+                    self.phase[index] += dt * direction * (1.75 + self.spin[index].abs() * 1.55);
+                    let float_radius = 1.8 + self.radius[index].rem_euclid(7.0) * 0.19;
+                    let animated_target = self.target[index]
+                        + Vec2::new(self.phase[index].cos(), self.phase[index].sin())
+                            * float_radius;
+                    let response = 1.0 - (-dt * 17.0).exp();
+                    self.position[index] =
+                        self.position[index] + (animated_target - self.position[index]) * response;
+                }
+                Mode::OrbitReturn => {
+                    self.phase[index] += dt * self.spin[index];
+                    let target = orbit_position(
+                        self.home[index] + self.anchor_offset,
+                        self.phase[index],
+                        self.radius[index],
+                        self.tilt[index],
+                        self.plane[index],
+                    );
+                    let response = 1.0 - (-dt * 10.5).exp();
+                    self.position[index] =
+                        self.position[index] + (target.0 - self.position[index]) * response;
+                    self.depth[index] += (target.1 - self.depth[index]) * response;
+                    self.life[index] += dt;
+                    if self.life[index] >= 0.48 {
+                        self.mode[index] = Mode::Orbit;
+                    }
+                }
                 Mode::Trail => {
                     self.life[index] += dt;
                     if self.life[index] >= self.life_span[index] {
@@ -434,6 +723,97 @@ impl Particles {
                     self.velocity[index] = self.velocity[index] * 0.86 + direction * (pull * dt);
                     self.position[index] = self.position[index] + self.velocity[index] * dt;
                 }
+                Mode::Tension => {
+                    let to_center = self.tension_center - self.position[index];
+                    let distance = to_center.length();
+                    let direction = if distance > 0.001 {
+                        to_center * (1.0 / distance)
+                    } else {
+                        Vec2::default()
+                    };
+                    let pressure = self.tension_pressure;
+                    let damping = (-dt * (0.7 + pressure * 0.9)).exp();
+                    let pull = 180.0 + pressure * 520.0;
+                    self.velocity[index] = self.velocity[index] * damping + direction * (pull * dt);
+                    self.position[index] = self.position[index] + self.velocity[index] * dt;
+                    self.depth[index] *= 1.0 - (dt * 4.0).min(1.0);
+                }
+            }
+        }
+        let collision_passes = 1 + (self.tension_pressure * 3.0).floor() as usize;
+        for _ in 0..collision_passes {
+            self.confine_tension_particles();
+            self.resolve_tension_collisions(dt);
+        }
+    }
+
+    fn confine_tension_particles(&mut self) {
+        let pressure = self.tension_pressure;
+        let restitution = 0.36 + pressure * 0.42;
+        for index in 0..self.capacity() {
+            if self.mode[index] != Mode::Tension {
+                continue;
+            }
+            let offset = self.position[index] - self.tension_center;
+            let distance = offset.length();
+            let particle_radius = self.size[index] * (0.50 - pressure * 0.36);
+            let limit = (self.tension_radius - particle_radius).max(0.35);
+            if distance <= limit || distance <= 0.001 {
+                continue;
+            }
+            let normal = offset * (1.0 / distance);
+            self.position[index] = self.tension_center + normal * limit;
+            let radial_speed =
+                self.velocity[index].x * normal.x + self.velocity[index].y * normal.y;
+            if radial_speed > 0.0 {
+                self.velocity[index] =
+                    self.velocity[index] - normal * (radial_speed * (1.0 + restitution));
+            }
+            // The inward-moving wall adds pressure without assigning a new
+            // target. This keeps particles bouncing inside the same chamber.
+            self.velocity[index] = self.velocity[index] - normal * (5.0 + pressure * 34.0);
+        }
+    }
+
+    fn resolve_tension_collisions(&mut self, dt: f32) {
+        let pressure = self.tension_pressure;
+        let restitution = 0.42 + pressure * 0.44;
+        let collision_scale = 1.0 - pressure * 0.76;
+        for first in 0..self.capacity() {
+            if self.mode[first] != Mode::Tension {
+                continue;
+            }
+            for second in (first + 1)..self.capacity() {
+                if self.mode[second] != Mode::Tension {
+                    continue;
+                }
+                let delta = self.position[second] - self.position[first];
+                let distance = delta.length();
+                let minimum =
+                    ((self.size[first] + self.size[second]) * 0.52 * collision_scale).max(0.45);
+                if distance >= minimum {
+                    continue;
+                }
+                let normal = if distance > 0.001 {
+                    delta * (1.0 / distance)
+                } else {
+                    let angle = (first as f32 * 12.989_8 + second as f32 * 4.141_4).sin();
+                    Vec2::new(angle.cos(), angle.sin())
+                };
+                let overlap = minimum - distance;
+                let correction = normal * (overlap * 0.5);
+                self.position[first] = self.position[first] - correction;
+                self.position[second] = self.position[second] + correction;
+                let relative = self.velocity[second] - self.velocity[first];
+                let closing_speed = relative.x * normal.x + relative.y * normal.y;
+                if closing_speed < 0.0 {
+                    let impulse = normal * (-closing_speed * (1.0 + restitution) * 0.5);
+                    self.velocity[first] = self.velocity[first] - impulse;
+                    self.velocity[second] = self.velocity[second] + impulse;
+                }
+                let pressure_impulse = normal * (overlap * (24.0 + pressure * 120.0) * dt);
+                self.velocity[first] = self.velocity[first] - pressure_impulse;
+                self.velocity[second] = self.velocity[second] + pressure_impulse;
             }
         }
     }
@@ -455,15 +835,38 @@ impl Particles {
             // Это и создаёт объём, никакой настоящей 3D-геометрии не нужно.
             let depth = self.depth[index];
             alpha *= 0.45 + (depth + 1.0) * 0.275;
+            let tension_scale = if self.mode[index] == Mode::Tension {
+                1.0 - self.tension_pressure * 0.72
+            } else {
+                1.0
+            };
             out.push(Quad {
                 position: self.position[index],
-                size: (self.size[index] * (1.0 + depth * 0.45)).max(1.0),
+                size: (self.size[index] * (1.0 + depth * 0.45) * tension_scale).max(0.7),
                 alpha: (alpha * self.brightness).clamp(0.0, 1.0),
                 color: self.color[index],
                 depth,
             });
         }
     }
+}
+
+fn orbit_position(home: Vec2, phase: f32, radius: f32, tilt: f32, plane: f32) -> (Vec2, f32) {
+    let breathe = 1.0 + (phase * 1.7).sin() * 0.05;
+    let radius = radius * breathe;
+    let (sin_theta, cos_theta) = phase.sin_cos();
+    let local_x = radius * cos_theta;
+    let local_y = radius * sin_theta;
+    let (sin_tilt, cos_tilt) = tilt.sin_cos();
+    let tilted_y = local_y * cos_tilt;
+    let z = local_y * sin_tilt;
+    let (sin_plane, cos_plane) = plane.sin_cos();
+    let screen_x = local_x * cos_plane - tilted_y * sin_plane;
+    let screen_y = local_x * sin_plane + tilted_y * cos_plane;
+    (
+        home + Vec2::new(screen_x, screen_y),
+        (z / radius.max(1.0)).clamp(-1.0, 1.0),
+    )
 }
 
 impl Mode {
@@ -493,6 +896,65 @@ mod tests {
         };
         assert_eq!(count_for(1), count_for(4));
         assert_eq!(count_for(1), 10);
+    }
+
+    #[test]
+    fn drag_tail_reuses_orbit_squares_and_returns_them_without_a_jump() {
+        let mut particles = Particles::with_capacity(64, 19, 1.0);
+        let center = Vec2::new(100.0, 50.0);
+        particles.seed_orbit(center, 20.0, 34.0, 20);
+        particles.update(1.0 / 60.0);
+        particles.begin_drag_tail(center);
+        particles.drag_tail(center, Vec2::new(120.0, 0.0), 6.5);
+        for _ in 0..30 {
+            particles.update(1.0 / 60.0);
+        }
+
+        assert_eq!(particles.alive(), 20, "хвост не создаёт новые квадраты");
+        assert_eq!(
+            particles
+                .mode
+                .iter()
+                .filter(|mode_| **mode_ == Mode::DragTether)
+                .count(),
+            20
+        );
+        let mut quads = Vec::new();
+        particles.collect(&mut quads);
+        assert!(quads.iter().all(|quad| quad.depth < 0.0));
+        assert!(quads.iter().all(|quad| quad.position.x < center.x - 2.0));
+        let path_before_catchup = particles.drag_path.len();
+        assert!(particles.advance_drag_tail(center, 1.0 / 60.0, 240.0));
+        assert!(
+            particles.drag_catchup_debt > 0.0,
+            "погоня должна начинаться на первом неподвижном кадре"
+        );
+        assert!(particles.drag_path.len() <= path_before_catchup);
+        let held_positions = quads.iter().map(|quad| quad.position).collect::<Vec<_>>();
+        for _ in 0..18 {
+            particles.update(1.0 / 60.0);
+        }
+        particles.collect(&mut quads);
+        assert!(
+            quads
+                .iter()
+                .zip(&held_positions)
+                .any(|(quad, before)| (quad.position - *before).length() > 0.7),
+            "удерживаемый хвост обязан продолжать жить без движения мыши"
+        );
+
+        particles.end_drag_tail(center);
+        for _ in 0..40 {
+            particles.update(1.0 / 60.0);
+        }
+        assert_eq!(
+            particles
+                .mode
+                .iter()
+                .filter(|mode_| **mode_ == Mode::Orbit)
+                .count(),
+            20
+        );
     }
 
     #[test]

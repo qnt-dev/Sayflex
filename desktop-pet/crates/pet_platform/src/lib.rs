@@ -12,7 +12,16 @@
 
 #![cfg(windows)]
 
-use std::{ffi::c_void, ptr, time::Duration};
+use std::{
+    ffi::c_void,
+    ptr,
+    sync::{
+        atomic::{AtomicBool, AtomicI32, Ordering},
+        mpsc,
+    },
+    thread,
+    time::Duration,
+};
 
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WAIT_FAILED, WPARAM},
@@ -20,18 +29,24 @@ use windows_sys::Win32::{
         AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
         CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC,
         GetMonitorInfoW, HBITMAP, HDC, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-        ReleaseDC, SelectObject,
+        MonitorFromWindow, ReleaseDC, SelectObject,
     },
     System::LibraryLoader::GetModuleHandleW,
-    UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-        GetSystemMetrics, HWND_TOPMOST, IsWindow, MSG, MWMO_INPUTAVAILABLE,
-        MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT,
-        RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-        SM_YVIRTUALSCREEN, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-        SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_DESTROY,
-        WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-        WS_EX_TRANSPARENT, WS_POPUP,
+    System::Threading::GetCurrentThreadId,
+    UI::{
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU},
+        WindowsAndMessaging::{
+            CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+            GetCursorPos, GetMessageW, GetSystemMetrics, HHOOK, HWND_TOPMOST, IsWindow, MSG,
+            MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_NOREMOVE,
+            PM_REMOVE, PeekMessageW, PostQuitMessage, PostThreadMessageW, QS_ALLINPUT,
+            RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+            SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, ULW_ALPHA,
+            UnhookWindowsHookEx, UpdateLayeredWindow, WH_MOUSE_LL, WM_DESTROY, WM_LBUTTONDOWN,
+            WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        },
     },
 };
 
@@ -266,6 +281,11 @@ impl Overlay {
         Ok(())
     }
 
+    #[must_use]
+    pub const fn position(&self) -> (i32, i32) {
+        self.position
+    }
+
     /// Отдаёт кадр композитору. `pixels` — premultiplied BGRA, строки сверху
     /// вниз, длина ровно `width * height * 4`.
     pub fn present(&mut self, pixels: &[u8]) -> Result<(), Error> {
@@ -380,6 +400,234 @@ impl Drop for Overlay {
     }
 }
 
+static DRAG_HIT_ENABLED: AtomicBool = AtomicBool::new(false);
+static DRAG_HIT_LEFT: AtomicI32 = AtomicI32::new(0);
+static DRAG_HIT_TOP: AtomicI32 = AtomicI32::new(0);
+static DRAG_HIT_RIGHT: AtomicI32 = AtomicI32::new(0);
+static DRAG_HIT_BOTTOM: AtomicI32 = AtomicI32::new(0);
+static DRAG_CURSOR_X: AtomicI32 = AtomicI32::new(0);
+static DRAG_CURSOR_Y: AtomicI32 = AtomicI32::new(0);
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DRAG_STARTED: AtomicBool = AtomicBool::new(false);
+static DRAG_ENDED: AtomicBool = AtomicBool::new(false);
+static DRAG_REJECTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModifierDragEvent {
+    Started { x: i32, y: i32 },
+    Moving { x: i32, y: i32 },
+    Ended { x: i32, y: i32 },
+    RejectedOutsideHitRect { x: i32, y: i32 },
+}
+
+/// A no-focus drag gesture for click-through overlays.
+///
+/// The low-level hook sleeps in `GetMessageW`; it does no polling while idle.
+/// Only Ctrl+Alt+left-click inside the current hit rectangle is swallowed.
+/// Every other mouse event keeps flowing to the application below the overlay.
+pub struct ModifierDragMonitor {
+    thread_id: u32,
+    hook_thread: Option<thread::JoinHandle<()>>,
+}
+
+impl ModifierDragMonitor {
+    pub fn start() -> Result<Self, Error> {
+        DRAG_HIT_ENABLED.store(false, Ordering::Release);
+        DRAG_ACTIVE.store(false, Ordering::Release);
+        DRAG_STARTED.store(false, Ordering::Release);
+        DRAG_ENDED.store(false, Ordering::Release);
+        DRAG_REJECTED.store(false, Ordering::Release);
+
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let hook_thread = thread::Builder::new()
+            .name("pet-modifier-drag".to_owned())
+            .spawn(move || run_modifier_drag_hook(ready_sender))
+            .map_err(|error| error.to_string())?;
+        let thread_id = match ready_receiver.recv() {
+            Ok(Ok(thread_id)) => thread_id,
+            Ok(Err(error)) => {
+                let _ = hook_thread.join();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = hook_thread.join();
+                return Err("modifier drag hook stopped during startup".to_owned());
+            }
+        };
+        Ok(Self {
+            thread_id,
+            hook_thread: Some(hook_thread),
+        })
+    }
+
+    pub fn set_hit_rect(&self, left: i32, top: i32, right: i32, bottom: i32) {
+        DRAG_HIT_ENABLED.store(false, Ordering::Release);
+        DRAG_HIT_LEFT.store(left, Ordering::Relaxed);
+        DRAG_HIT_TOP.store(top, Ordering::Relaxed);
+        DRAG_HIT_RIGHT.store(right, Ordering::Relaxed);
+        DRAG_HIT_BOTTOM.store(bottom, Ordering::Relaxed);
+        DRAG_HIT_ENABLED.store(right > left && bottom > top, Ordering::Release);
+    }
+
+    pub fn clear_hit_rect(&self) {
+        DRAG_HIT_ENABLED.store(false, Ordering::Release);
+    }
+
+    pub fn cancel_drag(&self) {
+        DRAG_HIT_ENABLED.store(false, Ordering::Release);
+        DRAG_ACTIVE.store(false, Ordering::Release);
+        DRAG_STARTED.store(false, Ordering::Release);
+        DRAG_ENDED.store(false, Ordering::Release);
+        DRAG_REJECTED.store(false, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn poll(&self) -> Option<ModifierDragEvent> {
+        let x = DRAG_CURSOR_X.load(Ordering::Acquire);
+        let y = DRAG_CURSOR_Y.load(Ordering::Acquire);
+        if DRAG_STARTED.swap(false, Ordering::AcqRel) {
+            return Some(ModifierDragEvent::Started { x, y });
+        }
+        if DRAG_ENDED.swap(false, Ordering::AcqRel) {
+            return Some(ModifierDragEvent::Ended { x, y });
+        }
+        if DRAG_REJECTED.swap(false, Ordering::AcqRel) {
+            return Some(ModifierDragEvent::RejectedOutsideHitRect { x, y });
+        }
+        DRAG_ACTIVE
+            .load(Ordering::Acquire)
+            .then_some(ModifierDragEvent::Moving { x, y })
+    }
+}
+
+impl Drop for ModifierDragMonitor {
+    fn drop(&mut self) {
+        DRAG_HIT_ENABLED.store(false, Ordering::Release);
+        DRAG_ACTIVE.store(false, Ordering::Release);
+        // SAFETY: thread_id belongs to the hook thread created in `start`.
+        unsafe {
+            let _ = PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
+        }
+        if let Some(thread) = self.hook_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn run_modifier_drag_hook(ready: mpsc::SyncSender<Result<u32, Error>>) {
+    let mut queue_probe = MSG::default();
+    // SAFETY: this only creates the hook thread's message queue.
+    unsafe {
+        let _ = PeekMessageW(&mut queue_probe, ptr::null_mut(), 0, 0, PM_NOREMOVE);
+    }
+    // SAFETY: null requests the current executable module.
+    let module = unsafe { GetModuleHandleW(ptr::null()) };
+    // SAFETY: `modifier_drag_hook` has the required ABI and static lifetime.
+    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(modifier_drag_hook), module, 0) };
+    if hook.is_null() {
+        let _ = ready.send(Err(std::io::Error::last_os_error().to_string()));
+        return;
+    }
+    let _guard = MouseHookGuard(hook);
+    // SAFETY: this is the current hook thread.
+    let thread_id = unsafe { GetCurrentThreadId() };
+    if ready.send(Ok(thread_id)).is_err() {
+        return;
+    }
+
+    let mut message = MSG::default();
+    loop {
+        // SAFETY: message is valid writable storage.
+        let result = unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) };
+        if result <= 0 {
+            break;
+        }
+        // SAFETY: message was initialized by GetMessageW.
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
+unsafe extern "system" fn modifier_drag_hook(
+    code: i32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    if code >= 0 {
+        // SAFETY: Windows supplies an MSLLHOOKSTRUCT for WH_MOUSE_LL.
+        let event = unsafe { &*(l_param as *const MSLLHOOKSTRUCT) };
+        // Synthetic input is accepted intentionally: accessibility tools and
+        // automated UI verification must have the same gesture contract as a
+        // physical mouse. This process never injects mouse input itself, so
+        // accepting it cannot create a feedback loop.
+        let message = w_param as u32;
+        let active = DRAG_ACTIVE.load(Ordering::Acquire);
+        if message == WM_LBUTTONDOWN && modifiers_are_down() {
+            store_drag_cursor(event.pt);
+            if point_is_in_drag_hit_rect(event.pt) {
+                DRAG_ENDED.store(false, Ordering::Release);
+                DRAG_ACTIVE.store(true, Ordering::Release);
+                DRAG_STARTED.store(true, Ordering::Release);
+                return 1;
+            }
+            DRAG_REJECTED.store(true, Ordering::Release);
+        }
+        if active && message == WM_MOUSEMOVE {
+            store_drag_cursor(event.pt);
+            if !modifiers_are_down() {
+                DRAG_ACTIVE.store(false, Ordering::Release);
+                DRAG_ENDED.store(true, Ordering::Release);
+            }
+            // Do not swallow mouse movement. A non-zero hook result prevents
+            // Windows from moving the system cursor at all, which makes a
+            // correctly captured drag feel physically stuck. The button-down
+            // is still swallowed, so the application below receives hover
+            // movement but never receives a click or starts its own drag.
+        }
+        if active && message == WM_LBUTTONUP {
+            store_drag_cursor(event.pt);
+            DRAG_ACTIVE.store(false, Ordering::Release);
+            DRAG_ENDED.store(true, Ordering::Release);
+            return 1;
+        }
+    }
+    // SAFETY: forwarding preserves the global mouse hook chain.
+    unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) }
+}
+
+fn modifiers_are_down() -> bool {
+    // SAFETY: GetAsyncKeyState has no pointer preconditions.
+    unsafe {
+        GetAsyncKeyState(i32::from(VK_CONTROL)) < 0 && GetAsyncKeyState(i32::from(VK_MENU)) < 0
+    }
+}
+
+fn point_is_in_drag_hit_rect(point: POINT) -> bool {
+    DRAG_HIT_ENABLED.load(Ordering::Acquire)
+        && point.x >= DRAG_HIT_LEFT.load(Ordering::Relaxed)
+        && point.x < DRAG_HIT_RIGHT.load(Ordering::Relaxed)
+        && point.y >= DRAG_HIT_TOP.load(Ordering::Relaxed)
+        && point.y < DRAG_HIT_BOTTOM.load(Ordering::Relaxed)
+}
+
+fn store_drag_cursor(point: POINT) {
+    DRAG_CURSOR_X.store(point.x, Ordering::Release);
+    DRAG_CURSOR_Y.store(point.y, Ordering::Release);
+}
+
+struct MouseHookGuard(HHOOK);
+
+impl Drop for MouseHookGuard {
+    fn drop(&mut self) {
+        // SAFETY: the hook belongs to this guard and is removed once.
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.0);
+        }
+    }
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -442,6 +690,36 @@ pub fn monitor_area_at(x: i32, y: i32) -> MonitorArea {
     // монитор; MONITORINFO имеет правильный cbSize.
     unsafe {
         let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        if monitor.is_null() || GetMonitorInfoW(monitor, &mut info) == 0 {
+            let screen = virtual_screen();
+            MonitorArea {
+                bounds: screen,
+                work: screen,
+            }
+        } else {
+            MonitorArea {
+                bounds: info.rcMonitor,
+                work: info.rcWork,
+            }
+        }
+    }
+}
+
+/// Геометрия монитора, на котором находится целевое окно. Функция только
+/// читает HWND и не активирует приложение-источник.
+#[must_use]
+pub fn monitor_area_for_window(window_handle: u64) -> MonitorArea {
+    // SAFETY: MonitorFromWindow только читает значение HWND;
+    // MONITOR_DEFAULTTONEAREST возвращает ближайший монитор даже для
+    // свёрнутого окна.
+    unsafe {
+        let monitor = MonitorFromWindow(window_handle as usize as HWND, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
             rcMonitor: RECT::default(),

@@ -572,6 +572,17 @@ pub enum SpeechWorkerEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum CompanionRendererCommand {
+    /// Selects or deselects the companion style. Selection makes the orb a
+    /// persistent desktop presence even when no dictation is active.
+    SetEnabled {
+        enabled: bool,
+    },
+    /// Restores the user's preferred top-left position for the persistent
+    /// companion surface. The renderer validates visibility before applying it.
+    SetHomePosition {
+        x: i32,
+        y: i32,
+    },
     Activate {
         session_id: SessionId,
         target_window_handle: u64,
@@ -598,6 +609,11 @@ pub enum CompanionRendererCommand {
 pub enum CompanionRendererEvent {
     Ready {
         protocol_version: u32,
+    },
+    /// Emitted only after an intentional Ctrl+Alt drag completes.
+    HomePositionChanged {
+        x: i32,
+        y: i32,
     },
     Failed {
         session_id: Option<SessionId>,
@@ -639,6 +655,20 @@ mod tests {
         let decoded = serde_json::from_str::<CompanionRendererCommand>(&json).unwrap();
 
         assert_eq!(decoded, command);
+
+        let position = CompanionRendererCommand::SetHomePosition { x: -640, y: 320 };
+        let json = serde_json::to_string(&position).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CompanionRendererCommand>(&json).unwrap(),
+            position
+        );
+
+        let changed = super::CompanionRendererEvent::HomePositionChanged { x: 120, y: 240 };
+        let json = serde_json::to_string(&changed).unwrap();
+        assert_eq!(
+            serde_json::from_str::<super::CompanionRendererEvent>(&json).unwrap(),
+            changed
+        );
     }
 
     #[test]

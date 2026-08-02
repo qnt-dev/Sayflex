@@ -535,6 +535,52 @@ impl Canvas {
             }
         }
     }
+
+    /// Draws a premultiplied sprite with one additional opacity multiplier.
+    /// All four channels are scaled together, so fading cannot create a dark
+    /// fringe around transparent artwork.
+    pub fn draw_opacity(&mut self, sprite: &Sprite, x: i32, y: i32, opacity: f32) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return;
+        }
+        if opacity >= 0.999 {
+            self.draw(sprite, x, y);
+            return;
+        }
+        let sw = sprite.width as i32;
+        let sh = sprite.height as i32;
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + sw).min(self.width as i32);
+        let y1 = (y + sh).min(self.height as i32);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let multiplier = (opacity * 255.0).round() as u32;
+        let dst_stride = self.width as usize * 4;
+        let src_stride = sprite.width as usize * 4;
+        for row in y0..y1 {
+            let src_row = (row - y) as usize * src_stride;
+            let dst_row = row as usize * dst_stride;
+            for column in x0..x1 {
+                let src_offset = src_row + (column - x) as usize * 4;
+                let scale =
+                    |channel: u8| -> u8 { ((u32::from(channel) * multiplier + 127) / 255) as u8 };
+                let src = [
+                    scale(sprite.pixels[src_offset]),
+                    scale(sprite.pixels[src_offset + 1]),
+                    scale(sprite.pixels[src_offset + 2]),
+                    scale(sprite.pixels[src_offset + 3]),
+                ];
+                if src[3] == 0 {
+                    continue;
+                }
+                let dst_offset = dst_row + column as usize * 4;
+                Self::over(&mut self.pixels[dst_offset..dst_offset + 4], src);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -639,7 +685,17 @@ impl SpriteSource {
     /// Загружает, отсекает шум прозрачности, домножает на альфу и обрезает по
     /// содержимому. Дальше остаётся только уменьшать.
     pub fn load(path: &Path, alpha_floor: u8) -> Result<Self, image::ImageError> {
-        let source = image::open(path)?.into_rgba8();
+        Self::from_rgba(image::open(path)?.into_rgba8(), alpha_floor)
+    }
+
+    /// Загружает тот же спрайт из встроенного PNG. Это позволяет нескольким
+    /// продуктовым хостам использовать один исходный арт без отдельного
+    /// runtime-файла и без изменения конвейера premultiplied alpha.
+    pub fn load_bytes(bytes: &[u8], alpha_floor: u8) -> Result<Self, image::ImageError> {
+        Self::from_rgba(image::load_from_memory(bytes)?.into_rgba8(), alpha_floor)
+    }
+
+    fn from_rgba(source: image::RgbaImage, alpha_floor: u8) -> Result<Self, image::ImageError> {
         let mut premultiplied = image::RgbaImage::new(source.width(), source.height());
         for (out, pixel) in premultiplied.pixels_mut().zip(source.pixels()) {
             let [r, g, b, a] = pixel.0;

@@ -1,338 +1,482 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
-    cell::RefCell,
     io::{BufRead, BufReader, Write},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 
+use pet_orb::OrbActor;
+use pet_particles::Vec2;
+use pet_platform::{ModifierDragEvent, ModifierDragMonitor, MonitorArea, Overlay};
+use pet_render::{Canvas, SpriteSource};
 use rust_protocol::{
     CompanionRendererCommand, CompanionRendererEvent, PROTOCOL_VERSION, SessionId,
 };
-use slint::winit_030::{
-    WinitWindowAccessor,
-    winit::raw_window_handle::{HasWindowHandle, RawWindowHandle},
-};
-use slint::{ComponentHandle, PhysicalPosition, RenderingState, Timer, TimerMode};
 
-slint::include_modules!();
-
-// Thirty animation updates per second are visually continuous at this overlay
-// size while avoiding a permanent 60 Hz wake-up/render cost during dictation.
-const FRAME_INTERVAL: Duration = Duration::from_millis(33);
-
-type CommandHandler = Box<dyn FnMut(CompanionRendererCommand)>;
-
-thread_local! {
-    static COMMAND_HANDLER: RefCell<Option<CommandHandler>> = RefCell::new(None);
-}
+// These are the accepted desktop-pet scene dimensions at its default 0.16
+// scale. The large transparent surface is intentional: the burst particles
+// need the same travel room they have beside the character.
+const CANVAS_WIDTH: u32 = 640;
+const CANVAS_HEIGHT: u32 = 560;
+const ORB_SCALE: f32 = 0.26;
+const ORB_GROW_START: f32 = 0.08;
+const ORB_GROW_FRAMES: usize = 24;
+const ORB_MOTION_RADIUS: f32 = 85.5;
+const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+const HOME_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
+const PARK_COORDINATE: i32 = -32_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Stage {
     #[default]
-    Hidden,
-    Assembling,
+    Disabled,
+    Home,
     Listening,
     Processing,
     Success,
-    Dissolving,
 }
 
-struct RendererState {
-    session_id: Option<SessionId>,
-    target_window_handle: Option<u64>,
+struct Runtime {
+    enabled: bool,
     stage: Stage,
-    stage_elapsed: f32,
-    target_level: f32,
-    display_level: f32,
-    phase: f32,
-    last_frame: Instant,
+    session_id: Option<SessionId>,
+    peak: f32,
+    display_peak: f32,
+    success_until: Option<Instant>,
+    home_position: Option<(i32, i32)>,
 }
 
-impl Default for RendererState {
+impl Default for Runtime {
     fn default() -> Self {
         Self {
+            enabled: false,
+            stage: Stage::Disabled,
             session_id: None,
-            target_window_handle: None,
-            stage: Stage::Hidden,
-            stage_elapsed: 0.0,
-            target_level: 0.0,
-            display_level: 0.0,
-            phase: 0.0,
-            last_frame: Instant::now(),
+            peak: 0.0,
+            display_peak: 0.0,
+            success_until: None,
+            home_position: None,
         }
     }
 }
 
-impl RendererState {
+impl Runtime {
     fn accepts(&self, session_id: SessionId) -> bool {
         self.session_id == Some(session_id)
     }
 
-    fn enter(&mut self, stage: Stage) {
-        self.stage = stage;
-        self.stage_elapsed = 0.0;
+    fn brightness(&self) -> f32 {
+        match self.stage {
+            Stage::Listening => 1.0 + self.display_peak * 0.5,
+            Stage::Processing => 1.18,
+            Stage::Success => 1.55,
+            Stage::Home | Stage::Disabled => 1.0,
+        }
     }
 
-    fn tick(&mut self, overlay: &CompanionOverlay, window_handle: u64) {
-        let now = Instant::now();
-        let delta = now
-            .duration_since(self.last_frame)
-            .as_secs_f32()
-            .clamp(0.0, 0.05);
-        self.last_frame = now;
-        self.stage_elapsed += delta;
-
-        let response = if self.target_level > self.display_level {
-            1.0 - 0.25_f32.powf(delta * 60.0)
+    fn settle_peak(&mut self, dt: f32) {
+        let response = if self.peak > self.display_peak {
+            13.0
         } else {
-            1.0 - 0.82_f32.powf(delta * 60.0)
+            5.0
         };
-        self.display_level += (self.target_level - self.display_level) * response;
-        self.phase = (self.phase + delta * (1.35 + self.display_level * 3.6)) % 1.0;
-
-        match self.stage {
-            Stage::Hidden => {
-                overlay.set_active(false);
-                overlay.set_visual_opacity(0.0);
-                return;
-            }
-            Stage::Assembling if self.stage_elapsed >= 0.24 => self.enter(Stage::Listening),
-            Stage::Success if self.stage_elapsed >= 0.28 => self.enter(Stage::Dissolving),
-            Stage::Dissolving if self.stage_elapsed >= 0.22 => {
-                self.enter(Stage::Hidden);
-                self.session_id = None;
-                self.target_window_handle = None;
-                overlay.set_active(false);
-                overlay.set_visual_opacity(0.0);
-                if window_handle != 0 {
-                    let _ = rust_platform_windows::conceal_overlay_window(window_handle);
-                }
-                return;
-            }
-            _ => {}
-        }
-
-        let assembly = match self.stage {
-            Stage::Assembling => (self.stage_elapsed / 0.24).clamp(0.0, 1.0),
-            Stage::Dissolving => 1.0 - (self.stage_elapsed / 0.22).clamp(0.0, 1.0),
-            _ => 1.0,
-        };
-        let opacity = match self.stage {
-            Stage::Assembling => assembly,
-            Stage::Dissolving => assembly,
-            _ => 1.0,
-        };
-        let success_burst = if self.stage == Stage::Success {
-            (self.stage_elapsed / 0.28).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let processing_pulse = if self.stage == Stage::Processing {
-            ((self.phase * std::f32::consts::TAU).sin() + 1.0) * 0.5
-        } else {
-            0.0
-        };
-
-        overlay.set_active(true);
-        overlay.set_visual_opacity(opacity);
-        overlay.set_assembly(assembly);
-        overlay.set_level(
-            (self.display_level + processing_pulse * 0.12 + success_burst * 0.22).clamp(0.0, 1.0),
-        );
-        overlay.set_phase(self.phase);
-        overlay.set_orb_scale(
-            (0.58 + assembly * 0.42 + self.display_level * 0.12 + success_burst * 0.16)
-                .clamp(0.5, 1.28),
-        );
-        overlay.set_wave_one(self.phase);
-        overlay.set_wave_two((self.phase + 0.34) % 1.0);
-        overlay.set_wave_three((self.phase + 0.67) % 1.0);
-        overlay.set_processing(self.stage == Stage::Processing);
+        self.display_peak += (self.peak - self.display_peak) * (dt * response).min(1.0);
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(error) = run() {
+        rust_app_core::diagnostics::log_line(&format!(
+            "companion_renderer lifecycle=start_failed error={error}"
+        ));
+        write_event(&CompanionRendererEvent::Failed {
+            session_id: None,
+            code: "renderer_failed".to_owned(),
+            message: error,
+        });
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
     let _ = rust_app_core::product::migrate_legacy_data_root();
     let _ = rust_app_core::diagnostics::initialize(
         &rust_app_core::product::data_root().join("logs"),
         "companion-renderer",
     );
-    rust_app_core::diagnostics::log_line("companion_renderer lifecycle=starting");
-    let overlay = CompanionOverlay::new()?;
-    let state = std::rc::Rc::new(RefCell::new(RendererState::default()));
-    let animation_timer = std::rc::Rc::new(Timer::default());
-    let window_handle = Arc::new(AtomicU64::new(0));
-    let reveal_after_frame = Arc::new(AtomicBool::new(false));
+    rust_app_core::diagnostics::log_line("companion_renderer lifecycle=starting engine=pet_orb");
 
-    {
-        let window_handle = Arc::clone(&window_handle);
-        let reveal_after_frame = Arc::clone(&reveal_after_frame);
-        overlay
-            .window()
-            .set_rendering_notifier(move |rendering_state, _| {
-                if !matches!(rendering_state, RenderingState::AfterRendering)
-                    || !reveal_after_frame.swap(false, Ordering::AcqRel)
-                {
-                    return;
+    let source =
+        SpriteSource::load_bytes(include_bytes!("../../../../desktop-pet/assets/orb.png"), 10)
+            .map_err(|error| format!("could not decode the embedded pet orb: {error}"))?;
+    // Cache the growing sphere once. Runtime frames only select a prepared
+    // sprite and never resample image data on the animation thread.
+    let growth_frames = (0..ORB_GROW_FRAMES)
+        .map(|index| {
+            let progress = index as f32 / (ORB_GROW_FRAMES - 1) as f32;
+            let scale = ORB_SCALE * (ORB_GROW_START + (1.0 - ORB_GROW_START) * progress);
+            source.scaled(scale)
+        })
+        .collect::<Vec<_>>();
+    let sprite = growth_frames
+        .last()
+        .expect("the orb growth frame count is non-zero");
+    let centre = Vec2::new(CANVAS_WIDTH as f32 / 2.0, CANVAS_HEIGHT as f32 / 2.0);
+    let body_radius = sprite.width() as f32 / 2.0;
+    let rest = centre + Vec2::new(ORB_MOTION_RADIUS, 0.0);
+    let mut actor = OrbActor::new(rest, ORB_MOTION_RADIUS, body_radius, ORB_SCALE);
+    let mut canvas = Canvas::new(CANVAS_WIDTH, CANVAS_HEIGHT);
+    let mut overlay = Overlay::new(
+        CANVAS_WIDTH,
+        CANVAS_HEIGHT,
+        PARK_COORDINATE,
+        PARK_COORDINATE,
+    )?;
+    canvas.clear();
+    overlay.present(canvas.pixels())?;
+
+    let commands = command_stream()?;
+    let drag_monitor = ModifierDragMonitor::start()
+        .map_err(|error| format!("could not start companion drag monitor: {error}"))?;
+    write_event(&CompanionRendererEvent::Ready {
+        protocol_version: PROTOCOL_VERSION,
+    });
+
+    let mut runtime = Runtime::default();
+    let mut drag_offset: Option<(i32, i32)> = None;
+    let mut last_frame = Instant::now();
+    let mut running = true;
+    while running && overlay.pump() {
+        loop {
+            match commands.try_recv() {
+                Ok(command) => {
+                    running = apply_command(command, &mut runtime, &mut overlay, &mut canvas)?;
                 }
-                let handle = window_handle.load(Ordering::Acquire);
-                if handle != 0 {
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Err(error) = rust_platform_windows::reveal_overlay_window(handle) {
-                            rust_app_core::diagnostics::log_line(&format!(
-                                "companion_renderer transition=failed stage=reveal error={error}"
-                            ));
-                        }
-                    });
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    running = false;
+                    break;
                 }
-            })
-            .map_err(|error| format!("could not install render acknowledgement: {error:?}"))?;
-    }
-
-    overlay.set_active(false);
-    overlay
-        .window()
-        .set_position(PhysicalPosition::new(-32_000, -32_000));
-    overlay.show()?;
-
-    {
-        let weak = overlay.as_weak();
-        let state = std::rc::Rc::clone(&state);
-        let window_handle = Arc::clone(&window_handle);
-        let reveal_after_frame = Arc::clone(&reveal_after_frame);
-        slint::spawn_local(async move {
-            let Some(overlay) = weak.upgrade() else {
-                return;
-            };
-            let result = match overlay.window().winit_window().await {
-                Ok(window) => native_window_handle(&window)
-                    .ok_or_else(|| "native HWND is unavailable".to_owned())
-                    .and_then(|handle| {
-                        rust_platform_windows::prepare_transparent_overlay_window(handle)?;
-                        window_handle.store(handle, Ordering::Release);
-                        if let Some(target) = state.borrow().target_window_handle {
-                            rust_platform_windows::configure_transparent_overlay_window(
-                                handle,
-                                Some(target),
-                            )?;
-                            reveal_after_frame.store(true, Ordering::Release);
-                            overlay.window().request_redraw();
-                        }
-                        Ok(())
-                    }),
-                Err(error) => Err(format!("native window creation failed: {error}")),
-            };
-            match result {
-                Ok(()) => write_event(&CompanionRendererEvent::Ready {
-                    protocol_version: PROTOCOL_VERSION,
-                }),
-                Err(error) => write_event(&CompanionRendererEvent::Failed {
-                    session_id: None,
-                    code: "overlay_initialization_failed".to_owned(),
-                    message: error,
-                }),
             }
-        })?;
+        }
+        if !running {
+            break;
+        }
+
+        if runtime.stage != Stage::Home && drag_offset.take().is_some() {
+            actor.set_motion_paused(false);
+            drag_monitor.cancel_drag();
+        }
+        update_drag_hit_rect(&drag_monitor, &runtime, &overlay, &actor);
+        if let Some(event) = drag_monitor.poll() {
+            handle_drag_event(
+                event,
+                &mut drag_offset,
+                &mut runtime,
+                &mut overlay,
+                &mut actor,
+            )?;
+        }
+
+        if runtime.stage == Stage::Disabled {
+            overlay.wait(Duration::from_millis(100))?;
+            last_frame = Instant::now();
+            continue;
+        }
+
+        let now = Instant::now();
+        if runtime.stage == Stage::Success
+            && runtime
+                .success_until
+                .is_some_and(|deadline| now >= deadline)
+        {
+            runtime.session_id = None;
+            runtime.success_until = None;
+            runtime.peak = 0.0;
+            runtime.stage = if runtime.enabled {
+                place_home(&mut overlay, runtime.home_position)?;
+                Stage::Home
+            } else {
+                park(&mut overlay, &mut canvas)?;
+                Stage::Disabled
+            };
+        }
+
+        let dt = now
+            .duration_since(last_frame)
+            .as_secs_f32()
+            .clamp(0.0, 0.05);
+        last_frame = now;
+        runtime.settle_peak(dt);
+        update_gaze(&runtime, &overlay, &mut actor);
+        actor.update(dt, centre, runtime.brightness());
+        canvas.clear();
+        actor.draw_behind(&mut canvas);
+        actor.draw_sprite(&mut canvas, &growth_frames);
+        actor.draw_front(&mut canvas);
+        actor.draw_flash(&mut canvas);
+        overlay.present(canvas.pixels())?;
+        let frame_interval = if runtime.stage == Stage::Home {
+            HOME_FRAME_INTERVAL
+        } else {
+            ACTIVE_FRAME_INTERVAL
+        };
+        overlay.wait(frame_interval.saturating_sub(now.elapsed()))?;
     }
 
-    {
-        let weak = overlay.as_weak();
-        let state = std::rc::Rc::clone(&state);
-        let window_handle = Arc::clone(&window_handle);
-        let reveal_after_frame = Arc::clone(&reveal_after_frame);
-        let animation_timer = std::rc::Rc::clone(&animation_timer);
-        COMMAND_HANDLER.with(|handler| {
-            *handler.borrow_mut() = Some(Box::new(move |command| {
-                let Some(overlay) = weak.upgrade() else {
-                    return;
+    rust_app_core::diagnostics::log_line("companion_renderer lifecycle=exiting");
+    Ok(())
+}
+
+fn apply_command(
+    command: CompanionRendererCommand,
+    runtime: &mut Runtime,
+    overlay: &mut Overlay,
+    canvas: &mut Canvas,
+) -> Result<bool, String> {
+    match command {
+        CompanionRendererCommand::SetEnabled { enabled } => {
+            runtime.enabled = enabled;
+            if runtime.session_id.is_none() {
+                runtime.stage = if enabled {
+                    place_home(overlay, runtime.home_position)?;
+                    Stage::Home
+                } else {
+                    park(overlay, canvas)?;
+                    Stage::Disabled
                 };
-                let state_owner = std::rc::Rc::clone(&state);
-                let mut state = state.borrow_mut();
-                match command {
-                    CompanionRendererCommand::Activate {
-                        session_id,
-                        target_window_handle: target,
-                    } => {
-                        state.session_id = Some(session_id);
-                        state.target_window_handle = Some(target);
-                        state.target_level = 0.0;
-                        state.display_level = 0.0;
-                        state.enter(Stage::Assembling);
-                        overlay.set_active(true);
-                        overlay.set_visual_opacity(0.0);
-                        start_animation_timer(
-                            &animation_timer,
-                            overlay.as_weak(),
-                            state_owner,
-                            Arc::clone(&window_handle),
-                        );
-                        let handle = window_handle.load(Ordering::Acquire);
-                        if handle != 0 {
-                            match rust_platform_windows::configure_transparent_overlay_window(
-                                handle,
-                                Some(target),
-                            ) {
-                                Ok(()) => {
-                                    reveal_after_frame.store(true, Ordering::Release);
-                                    overlay.window().request_redraw();
-                                }
-                                Err(error) => write_event(&CompanionRendererEvent::Failed {
-                                    session_id: Some(session_id),
-                                    code: "overlay_configuration_failed".to_owned(),
-                                    message: error,
-                                }),
-                            }
-                        }
-                    }
-                    CompanionRendererCommand::AudioLevel {
-                        session_id, peak, ..
-                    } if state.accepts(session_id) => {
-                        state.target_level = (peak.clamp(0.0, 1.0).sqrt() * 1.75).clamp(0.0, 1.0);
-                    }
-                    CompanionRendererCommand::Processing { session_id }
-                        if state.accepts(session_id) =>
-                    {
-                        state.target_level = 0.12;
-                        state.enter(Stage::Processing);
-                    }
-                    CompanionRendererCommand::Complete { session_id }
-                        if state.accepts(session_id) =>
-                    {
-                        state.target_level = 0.0;
-                        state.enter(Stage::Success);
-                    }
-                    CompanionRendererCommand::Dismiss { session_id }
-                        if session_id.is_none() || session_id == state.session_id =>
-                    {
-                        state.target_level = 0.0;
-                        if state.stage != Stage::Hidden {
-                            state.enter(Stage::Dissolving);
-                        }
-                    }
-                    CompanionRendererCommand::Shutdown => {
-                        rust_app_core::diagnostics::log_line(
-                            "companion_renderer lifecycle=shutdown_requested",
-                        );
-                        animation_timer.stop();
-                        let _ = slint::quit_event_loop();
-                    }
-                    _ => {}
-                }
-            }));
-        });
+            }
+            rust_app_core::diagnostics::log_line(&format!(
+                "companion_renderer selection enabled={enabled} stage={:?}",
+                runtime.stage
+            ));
+        }
+        CompanionRendererCommand::SetHomePosition { x, y } => {
+            let position = visible_home_position(x, y);
+            runtime.home_position = Some(position);
+            if runtime.stage == Stage::Home {
+                overlay.set_position(position.0, position.1)?;
+            }
+            rust_app_core::diagnostics::log_line(&format!(
+                "companion_renderer home_position=restored x={} y={}",
+                position.0, position.1
+            ));
+        }
+        CompanionRendererCommand::Activate {
+            session_id,
+            target_window_handle,
+        } => {
+            // A transparent frame makes relocation an intentional disappear /
+            // reappear transition instead of dragging the previous pixels.
+            canvas.clear();
+            overlay.present(canvas.pixels())?;
+            place_recording(overlay, target_window_handle)?;
+            runtime.session_id = Some(session_id);
+            runtime.stage = Stage::Listening;
+            runtime.peak = 0.0;
+            runtime.display_peak = 0.0;
+            runtime.success_until = None;
+            rust_app_core::diagnostics::log_line(&format!(
+                "companion_renderer transition=listening session={session_id}"
+            ));
+        }
+        CompanionRendererCommand::AudioLevel {
+            session_id, peak, ..
+        } if runtime.accepts(session_id) => {
+            runtime.peak = (peak.clamp(0.0, 1.0).sqrt() * 1.45).clamp(0.0, 1.0);
+        }
+        CompanionRendererCommand::Processing { session_id } if runtime.accepts(session_id) => {
+            runtime.stage = Stage::Processing;
+            runtime.peak = 0.12;
+        }
+        CompanionRendererCommand::Complete { session_id } if runtime.accepts(session_id) => {
+            runtime.stage = Stage::Success;
+            runtime.peak = 0.0;
+            runtime.success_until = Some(Instant::now() + Duration::from_millis(520));
+        }
+        CompanionRendererCommand::Dismiss { session_id }
+            if session_id.is_none() || session_id == runtime.session_id =>
+        {
+            runtime.session_id = None;
+            runtime.peak = 0.0;
+            runtime.display_peak = 0.0;
+            runtime.success_until = None;
+            runtime.stage = if runtime.enabled {
+                place_home(overlay, runtime.home_position)?;
+                Stage::Home
+            } else {
+                park(overlay, canvas)?;
+                Stage::Disabled
+            };
+        }
+        CompanionRendererCommand::Shutdown => return Ok(false),
+        _ => {}
     }
+    Ok(true)
+}
 
+fn place_home(overlay: &mut Overlay, saved: Option<(i32, i32)>) -> Result<(), String> {
+    if let Some((x, y)) = saved {
+        let (x, y) = visible_home_position(x, y);
+        return overlay.set_position(x, y);
+    }
+    let (x, y) = pet_platform::cursor_position();
+    let monitor = pet_platform::monitor_area_at(x, y);
+    // Keep the same roomy transparent scene as the pet, but align its visible
+    // orbit rather than the transparent canvas itself to the lower-right.
+    let x = monitor.work.right - CANVAS_WIDTH as i32 + 152;
+    let y = monitor.work.bottom - CANVAS_HEIGHT as i32 + 137;
+    overlay.set_position(x, y)
+}
+
+fn visible_home_position(x: i32, y: i32) -> (i32, i32) {
+    let screen = pet_platform::virtual_screen();
+    // The surface is intentionally much larger than the orb. Preserve broad
+    // multi-monitor freedom while guaranteeing that at least a usable part of
+    // the scene remains reachable after a monitor-layout change.
+    let minimum_visible = 96;
+    let min_x = screen.left - CANVAS_WIDTH as i32 + minimum_visible;
+    let max_x = screen.right - minimum_visible;
+    let min_y = screen.top - CANVAS_HEIGHT as i32 + minimum_visible;
+    let max_y = screen.bottom - minimum_visible;
+    (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+}
+
+fn update_drag_hit_rect(
+    monitor: &ModifierDragMonitor,
+    runtime: &Runtime,
+    overlay: &Overlay,
+    actor: &OrbActor,
+) {
+    if runtime.stage != Stage::Home || !actor.is_grabbable() {
+        monitor.clear_hit_rect();
+        return;
+    }
+    let (window_x, window_y) = overlay.position();
+    let position = actor.position();
+    let radius = actor.body_radius() + 14.0;
+    monitor.set_hit_rect(
+        window_x + (position.x - radius).floor() as i32,
+        window_y + (position.y - radius).floor() as i32,
+        window_x + (position.x + radius).ceil() as i32,
+        window_y + (position.y + radius).ceil() as i32,
+    );
+}
+
+fn handle_drag_event(
+    event: ModifierDragEvent,
+    drag_offset: &mut Option<(i32, i32)>,
+    runtime: &mut Runtime,
+    overlay: &mut Overlay,
+    actor: &mut OrbActor,
+) -> Result<(), String> {
+    match event {
+        ModifierDragEvent::Started { x, y } => {
+            let (window_x, window_y) = overlay.position();
+            *drag_offset = Some((x - window_x, y - window_y));
+            actor.begin_drag();
+            rust_app_core::diagnostics::log_line(
+                "companion_renderer drag=started modifier=ctrl_alt",
+            );
+        }
+        ModifierDragEvent::Moving { x, y } => {
+            if let Some((offset_x, offset_y)) = *drag_offset {
+                let position = visible_home_position(x - offset_x, y - offset_y);
+                let previous = overlay.position();
+                actor.drag_window(Vec2::new(
+                    (position.0 - previous.0) as f32,
+                    (position.1 - previous.1) as f32,
+                ));
+                overlay.set_position(position.0, position.1)?;
+                runtime.home_position = Some(position);
+            }
+        }
+        ModifierDragEvent::Ended { x, y } => {
+            if let Some((offset_x, offset_y)) = drag_offset.take() {
+                let position = visible_home_position(x - offset_x, y - offset_y);
+                let previous = overlay.position();
+                actor.drag_window(Vec2::new(
+                    (position.0 - previous.0) as f32,
+                    (position.1 - previous.1) as f32,
+                ));
+                overlay.set_position(position.0, position.1)?;
+                runtime.home_position = Some(position);
+                write_event(&CompanionRendererEvent::HomePositionChanged {
+                    x: position.0,
+                    y: position.1,
+                });
+                rust_app_core::diagnostics::log_line(&format!(
+                    "companion_renderer drag=completed x={} y={}",
+                    position.0, position.1
+                ));
+            }
+            actor.end_drag();
+        }
+        ModifierDragEvent::RejectedOutsideHitRect { x, y } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "companion_renderer drag=rejected reason=outside_hit_rect x={x} y={y}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn update_gaze(runtime: &Runtime, overlay: &Overlay, actor: &mut OrbActor) {
+    if runtime.stage != Stage::Home {
+        actor.look_towards(Vec2::new(0.0, -0.18));
+        return;
+    }
+    let (cursor_x, cursor_y) = pet_platform::cursor_position();
+    let (window_x, window_y) = overlay.position();
+    let position = actor.position();
+    let delta = Vec2::new(
+        (cursor_x as f32 - (window_x as f32 + position.x)) / 180.0,
+        (cursor_y as f32 - (window_y as f32 + position.y)) / 135.0,
+    );
+    actor.look_towards(delta);
+}
+
+fn place_recording(overlay: &mut Overlay, target_window_handle: u64) -> Result<(), String> {
+    let monitor = monitor_for_target(target_window_handle);
+    let x = monitor.work.left + (monitor.work.right - monitor.work.left - CANVAS_WIDTH as i32) / 2;
+    let y = monitor.work.bottom - CANVAS_HEIGHT as i32 - 22;
+    overlay.set_position(x, y)
+}
+
+fn monitor_for_target(target_window_handle: u64) -> MonitorArea {
+    if target_window_handle != 0 {
+        pet_platform::monitor_area_for_window(target_window_handle)
+    } else {
+        let (x, y) = pet_platform::cursor_position();
+        pet_platform::monitor_area_at(x, y)
+    }
+}
+
+fn park(overlay: &mut Overlay, canvas: &mut Canvas) -> Result<(), String> {
+    canvas.clear();
+    overlay.present(canvas.pixels())?;
+    overlay.set_position(PARK_COORDINATE, PARK_COORDINATE)
+}
+
+fn command_stream() -> Result<Receiver<CompanionRendererCommand>, String> {
+    let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("companion-renderer-commands".to_owned())
-        .spawn(|| {
+        .spawn(move || {
             for line in BufReader::new(std::io::stdin()).lines() {
-                let line = match line {
-                    Ok(line) => line,
+                let command = match line {
+                    Ok(line) => match serde_json::from_str::<CompanionRendererCommand>(&line) {
+                        Ok(command) => command,
+                        Err(error) => {
+                            write_event(&CompanionRendererEvent::Failed {
+                                session_id: None,
+                                code: "invalid_command".to_owned(),
+                                message: error.to_string(),
+                            });
+                            continue;
+                        }
+                    },
                     Err(error) => {
                         write_event(&CompanionRendererEvent::Failed {
                             session_id: None,
@@ -342,91 +486,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break;
                     }
                 };
-                match serde_json::from_str::<CompanionRendererCommand>(&line) {
-                    Ok(command) => dispatch_command(command),
-                    Err(error) => write_event(&CompanionRendererEvent::Failed {
-                        session_id: None,
-                        code: "invalid_command".to_owned(),
-                        message: error.to_string(),
-                    }),
+                if sender.send(command).is_err() {
+                    return;
                 }
             }
-            dispatch_command(CompanionRendererCommand::Shutdown);
-        })?;
-
-    slint::run_event_loop()?;
-    COMMAND_HANDLER.with(|handler| handler.borrow_mut().take());
-    rust_app_core::diagnostics::log_line("companion_renderer lifecycle=exiting");
-    Ok(())
-}
-
-fn start_animation_timer(
-    timer: &std::rc::Rc<Timer>,
-    overlay: slint::Weak<CompanionOverlay>,
-    state: std::rc::Rc<RefCell<RendererState>>,
-    window_handle: Arc<AtomicU64>,
-) {
-    let timer_weak = std::rc::Rc::downgrade(timer);
-    timer.start(TimerMode::Repeated, FRAME_INTERVAL, move || {
-        let Some(overlay) = overlay.upgrade() else {
-            return;
-        };
-        let hidden = {
-            let mut state = state.borrow_mut();
-            state.tick(&overlay, window_handle.load(Ordering::Acquire));
-            state.stage == Stage::Hidden
-        };
-        if hidden && let Some(timer) = timer_weak.upgrade() {
-            timer.stop();
-        }
-    });
-}
-
-fn dispatch_command(command: CompanionRendererCommand) {
-    if let Err(error) = slint::invoke_from_event_loop(move || {
-        COMMAND_HANDLER.with(|handler| {
-            if let Some(handler) = handler.borrow_mut().as_mut() {
-                handler(command);
-            }
-        });
-    }) {
-        rust_app_core::diagnostics::log_line(&format!(
-            "companion_renderer command_dispatch=failed error={error}"
-        ));
-    }
+            let _ = sender.send(CompanionRendererCommand::Shutdown);
+        })
+        .map_err(|error| format!("could not start the companion command reader: {error}"))?;
+    Ok(receiver)
 }
 
 fn write_event(event: &CompanionRendererEvent) {
-    let mut stdout = std::io::stdout().lock();
-    if serde_json::to_writer(&mut stdout, event).is_ok() {
-        let _ = stdout.write_all(b"\n");
+    if let Ok(json) = serde_json::to_string(event) {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{json}");
         let _ = stdout.flush();
-    }
-}
-
-fn native_window_handle(window: &slint::winit_030::winit::window::Window) -> Option<u64> {
-    match window.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as u64),
-        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RendererState, Stage};
-    use rust_protocol::SessionId;
+    use super::*;
 
     #[test]
-    fn commands_are_scoped_to_the_active_dictation() {
-        let active = SessionId::new();
-        let stale = SessionId::new();
-        let mut state = RendererState {
-            session_id: Some(active),
-            ..RendererState::default()
+    fn active_commands_remain_session_scoped() {
+        let session_id = SessionId::new();
+        let runtime = Runtime {
+            session_id: Some(session_id),
+            ..Runtime::default()
         };
-        state.enter(Stage::Listening);
-
-        assert!(state.accepts(active));
-        assert!(!state.accepts(stale));
+        assert!(runtime.accepts(session_id));
+        assert!(!runtime.accepts(SessionId::new()));
     }
 }
