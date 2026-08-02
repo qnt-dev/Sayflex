@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/companion-renderer",
     "apps/desktop",
     "apps/input-host",
     "apps/speech-worker",

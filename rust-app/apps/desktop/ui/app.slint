@@ -754,6 +754,7 @@ export component SettingsWindow inherits Window {
                     height: root.selected-visualizer == 4
                             || root.selected-visualizer == 5
                             || root.selected-visualizer == 6
+                            || root.selected-visualizer == 7
                         ? 228px
                         : 160px;
                     vertical-stretch: 0;
@@ -833,7 +834,12 @@ export component SettingsWindow inherits Window {
                                 selected: root.selected-visualizer == 6;
                                 clicked => { root.select-visualizer(6); }
                             }
-                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            VisualizerChoice {
+                                label: "Companion Orb";
+                                detail: "Isolated animated companion";
+                                selected: root.selected-visualizer == 7;
+                                clicked => { root.select-visualizer(7); }
+                            }
                         }
 
                         if root.selected-visualizer == 4 : VerticalLayout {

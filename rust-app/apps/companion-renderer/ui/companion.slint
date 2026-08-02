@@ -1,0 +1,183 @@
+export component CompanionOverlay inherits Window {
+    title: "SayFlex Companion Orb";
+    width: 176px;
+    height: 112px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+
+    in property <bool> active: false;
+    in property <float> visual-opacity: 0;
+    in property <float> orb-scale: 1;
+    in property <float> level: 0;
+    in property <float> phase: 0;
+    in property <float> assembly: 1;
+    in property <float> wave-one: 0;
+    in property <float> wave-two: 0;
+    in property <float> wave-three: 0;
+    in property <bool> processing: false;
+
+    Rectangle {
+        background: transparent;
+        opacity: root.active ? root.visual-opacity : 0;
+        clip: false;
+
+        // Voice energy travels through the whole surface. The three rings are
+        // intentionally thin, so transparent pixels remain truly transparent.
+        Rectangle {
+            width: 48px + root.wave-one * 64px;
+            height: 48px + root.wave-one * 34px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: self.height / 2;
+            border-width: 1.4px;
+            border-color: #8e57ff;
+            background: transparent;
+            opacity: (1 - root.wave-one) * (0.16 + root.level * 0.42);
+        }
+        Rectangle {
+            width: 48px + root.wave-two * 64px;
+            height: 48px + root.wave-two * 34px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: self.height / 2;
+            border-width: 1.2px;
+            border-color: #29e8ff;
+            background: transparent;
+            opacity: (1 - root.wave-two) * (0.12 + root.level * 0.34);
+        }
+        Rectangle {
+            width: 48px + root.wave-three * 64px;
+            height: 48px + root.wave-three * 34px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: self.height / 2;
+            border-width: 1px;
+            border-color: #ff35cb;
+            background: transparent;
+            opacity: (1 - root.wave-three) * (0.10 + root.level * 0.28);
+        }
+
+        // The two paths make the audio origin unambiguous: energy leaves the
+        // sphere symmetrically instead of looking like an autonomous idle loop.
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 176;
+            viewbox-height: 112;
+            fill: transparent;
+            stroke: #9e6cff;
+            stroke-width: 1.5px;
+            opacity: 0.16 + root.level * 0.48;
+            MoveTo { x: 4; y: 56; }
+            CubicTo {
+                control-1-x: 26; control-1-y: 56 - root.level * 18;
+                control-2-x: 42; control-2-y: 56 + root.level * 15;
+                x: 69; y: 56;
+            }
+            MoveTo { x: 107; y: 56; }
+            CubicTo {
+                control-1-x: 134; control-1-y: 56 - root.level * 15;
+                control-2-x: 150; control-2-y: 56 + root.level * 18;
+                x: 172; y: 56;
+            }
+        }
+
+        Rectangle {
+            width: 42px;
+            height: 42px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: transparent;
+            transform-origin: { x: self.width / 2, y: self.height / 2 };
+            transform-scale: root.orb-scale;
+
+            Rectangle {
+                width: 42px;
+                height: 42px;
+                border-radius: 21px;
+                background: #7d35ff;
+                opacity: 0.16 + root.level * 0.18;
+            }
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                x: 5px;
+                y: 5px;
+                border-radius: 16px;
+                background: @radial-gradient(circle, #402179 0%, #160d2d 58%, #080712 100%);
+                border-width: 1px;
+                border-color: #9e6cff;
+
+                Rectangle {
+                    width: 10px;
+                    height: 7px;
+                    x: 7px;
+                    y: 6px;
+                    border-radius: 5px;
+                    background: #d7c7ff;
+                    opacity: 0.28 + root.level * 0.34;
+                }
+                Rectangle {
+                    width: 5px;
+                    height: 5px;
+                    x: 21px;
+                    y: 21px;
+                    border-radius: 2.5px;
+                    background: #29e8ff;
+                    opacity: 0.48 + root.level * 0.42;
+                }
+            }
+        }
+
+        // Squares converge during assembly, then orbit with restrained motion.
+        Rectangle {
+            width: 5px; height: 5px;
+            x: 88px + (-64px + 42px * root.assembly);
+            y: 56px + (-31px + 12px * root.assembly);
+            background: #29e8ff; opacity: 0.36 + root.assembly * 0.64;
+        }
+        Rectangle {
+            width: 4px; height: 4px;
+            x: 88px + (61px - 39px * root.assembly);
+            y: 56px + (-38px + 18px * root.assembly);
+            background: #ff35cb; opacity: 0.30 + root.assembly * 0.62;
+        }
+        Rectangle {
+            width: 4px; height: 4px;
+            x: 88px + (-57px + 35px * root.assembly);
+            y: 56px + (37px - 14px * root.assembly);
+            background: #8e57ff; opacity: 0.28 + root.assembly * 0.58;
+        }
+        Rectangle {
+            width: 3px; height: 3px;
+            x: 88px + (56px - 34px * root.assembly);
+            y: 56px + (33px - 12px * root.assembly);
+            background: #29e8ff; opacity: 0.26 + root.assembly * 0.62;
+        }
+        Rectangle {
+            width: 3px; height: 3px;
+            x: 88px + (-43px + 17px * root.assembly);
+            y: 56px + (-45px + 18px * root.assembly);
+            background: #ff35cb; opacity: 0.22 + root.assembly * 0.56;
+        }
+        Rectangle {
+            width: 5px; height: 5px;
+            x: 88px + (45px - 19px * root.assembly);
+            y: 56px + (43px - 17px * root.assembly);
+            background: #8e57ff; opacity: 0.24 + root.assembly * 0.60;
+        }
+
+        if root.processing : Rectangle {
+            width: 4px;
+            height: 4px;
+            x: 86px;
+            y: 86px;
+            border-radius: 2px;
+            background: #ffd84a;
+            opacity: 0.35 + (root.phase * 0.5);
+        }
+    }
+}

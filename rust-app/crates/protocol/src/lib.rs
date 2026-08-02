@@ -564,13 +564,55 @@ pub enum SpeechWorkerEvent {
     },
 }
 
+/// Commands sent to the optional, long-lived Companion Orb renderer.
+///
+/// The renderer owns presentation only. Audio capture and session ownership
+/// remain in the speech worker and desktop process respectively, so selecting
+/// this visualizer never opens a second microphone stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum CompanionRendererCommand {
+    Activate {
+        session_id: SessionId,
+        target_window_handle: u64,
+    },
+    AudioLevel {
+        session_id: SessionId,
+        peak: f32,
+        spectrum: Vec<f32>,
+    },
+    Processing {
+        session_id: SessionId,
+    },
+    Complete {
+        session_id: SessionId,
+    },
+    Dismiss {
+        session_id: Option<SessionId>,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum CompanionRendererEvent {
+    Ready {
+        protocol_version: u32,
+    },
+    Failed {
+        session_id: Option<SessionId>,
+        code: String,
+        message: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DictationCommand, InputHostEvent, InsertionDelivery, InsertionMethod, RequestId,
-        SelectionCaptureTiming, SessionId, SpeechWorkerEvent, TargetSnapshot, TextActionIntent,
-        Transcript, TranscriptionLatency, TranslationLanguage, TranslationResult, TranslationTier,
-        TranslationWorkerEvent,
+        CompanionRendererCommand, DictationCommand, InputHostEvent, InsertionDelivery,
+        InsertionMethod, RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerEvent,
+        TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency, TranslationLanguage,
+        TranslationResult, TranslationTier, TranslationWorkerEvent,
     };
 
     #[test]
@@ -580,6 +622,21 @@ mod tests {
 
         let json = serde_json::to_string(&command).unwrap();
         let decoded: DictationCommand = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn companion_renderer_messages_preserve_session_scope() {
+        let session_id = SessionId::new();
+        let command = CompanionRendererCommand::AudioLevel {
+            session_id,
+            peak: 0.42,
+            spectrum: vec![0.1, 0.4, 0.2],
+        };
+
+        let json = serde_json::to_string(&command).unwrap();
+        let decoded = serde_json::from_str::<CompanionRendererCommand>(&json).unwrap();
 
         assert_eq!(decoded, command);
     }

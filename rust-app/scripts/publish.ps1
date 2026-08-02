@@ -48,6 +48,11 @@ try {
         Join-Path $output 'SayFlex.Translation.exe'
     )
     Copy-Item -LiteralPath (
+        Join-Path $cpuTarget "$profile\sayflex-companion-renderer.exe"
+    ) -Destination (
+        Join-Path $output 'SayFlex.Companion.exe'
+    )
+    Copy-Item -LiteralPath (
         Join-Path $rustRoot '..\LICENSE'
     ) -Destination (
         Join-Path $output 'LICENSE.txt'

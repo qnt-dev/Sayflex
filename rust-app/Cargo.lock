@@ -4761,6 +4761,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sayflex-companion-renderer"
+version = "0.5.19"
+dependencies = [
+ "rust-app-core",
+ "rust-platform-windows",
+ "rust-protocol",
+ "serde_json",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
 name = "sayflex-desktop"
 version = "0.5.19"
 dependencies = [

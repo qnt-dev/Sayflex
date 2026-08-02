@@ -13,7 +13,8 @@ $required = @(
     'SayFlex.InputHost.exe',
     'SayFlex.Speech.Cpu.exe',
     'SayFlex.Speech.Cuda.exe',
-    'SayFlex.Translation.exe'
+    'SayFlex.Translation.exe',
+    'SayFlex.Companion.exe'
 )
 
 $missing = $required | Where-Object {

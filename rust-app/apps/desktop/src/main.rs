@@ -22,11 +22,11 @@ use rust_app_core::{
     SessionRegistry, build_layout_candidates,
 };
 use rust_protocol::{
-    AUDIO_SPECTRUM_BANDS, HistoryEntry, InputHostCommand, InputHostEvent, ModelSummary,
-    PROTOCOL_VERSION, RequestId, SessionId, SpeechOutputMode, SpeechWorkerCommand,
-    SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranslationHistoryEntry,
-    TranslationModelSummary, TranslationResult, TranslationTier, TranslationWorkerCommand,
-    TranslationWorkerEvent,
+    AUDIO_SPECTRUM_BANDS, CompanionRendererCommand, CompanionRendererEvent, HistoryEntry,
+    InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId,
+    SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent,
+    Transcript, TranslationHistoryEntry, TranslationModelSummary, TranslationResult,
+    TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use slint::winit_030::{
@@ -49,11 +49,13 @@ const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 const INPUT_WORKER_EXE: &str = "SayFlex.InputHost.exe";
 const SPEECH_WORKER_EXE: &str = "SayFlex.Speech.exe";
 const TRANSLATION_WORKER_EXE: &str = "SayFlex.Translation.exe";
+const COMPANION_RENDERER_EXE: &str = "SayFlex.Companion.exe";
 const SPEECH_CPU_EXE: &str = "SayFlex.Speech.Cpu.exe";
 const SPEECH_CUDA_EXE: &str = "SayFlex.Speech.Cuda.exe";
 const DEV_INPUT_WORKER_EXE: &str = "sayflex-input-host.exe";
 const DEV_SPEECH_WORKER_EXE: &str = "sayflex-speech-worker.exe";
 const DEV_TRANSLATION_WORKER_EXE: &str = "sayflex-translation-worker.exe";
+const DEV_COMPANION_RENDERER_EXE: &str = "sayflex-companion-renderer.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INDICATOR_BAR_PROFILE: [f32; 10] = [0.25, 0.4, 0.62, 0.82, 1.0, 1.0, 0.82, 0.62, 0.4, 0.25];
@@ -65,11 +67,15 @@ enum RuntimeEvent {
     Input(InputHostEvent),
     Speech(SpeechWorkerEvent),
     Translation(TranslationWorkerEvent),
+    Companion(CompanionRendererEvent),
     DismissTranslationPreview,
     TranslationPreviewPinChanged(bool),
     ScrollTranslationPreview(i32),
     SessionEnd(rust_platform_windows::SessionEndEvent),
-    WorkerError(String),
+    WorkerError {
+        kind: WorkerKind,
+        message: String,
+    },
     WorkerExited {
         kind: WorkerKind,
         instance_id: u64,
@@ -82,6 +88,7 @@ enum WorkerKind {
     Input,
     Speech,
     Translation,
+    Companion,
 }
 
 type UiEventHandler = Box<dyn FnMut(RuntimeEvent)>;
@@ -293,6 +300,8 @@ struct Workers {
     input_child: RefCell<WorkerProcess>,
     speech_child: RefCell<WorkerProcess>,
     translation_child: RefCell<WorkerProcess>,
+    companion: RefCell<Option<JsonWriter>>,
+    companion_child: RefCell<Option<WorkerProcess>>,
     lifecycle: Cell<WorkerLifecycle>,
     restart_attempts: RefCell<HashMap<WorkerKind, Vec<RestartAttempt>>>,
     deferred_exits: RefCell<HashMap<WorkerKind, DeferredWorkerExit>>,
@@ -307,6 +316,9 @@ impl Workers {
         let _ = self.input.send(&InputHostCommand::Shutdown);
         let _ = self.speech.send(&SpeechWorkerCommand::Shutdown);
         let _ = self.translation.send(&TranslationWorkerCommand::Shutdown);
+        if let Some(companion) = self.companion.borrow().as_ref() {
+            let _ = companion.send(&CompanionRendererCommand::Shutdown);
+        }
     }
 
     fn begin_session_end(&self) {
@@ -335,7 +347,47 @@ impl Workers {
     }
 
     fn is_current_instance(&self, kind: WorkerKind, instance_id: u64) -> bool {
-        self.process(kind).borrow().instance_id == instance_id
+        match kind {
+            WorkerKind::Input => self.input_child.borrow().instance_id == instance_id,
+            WorkerKind::Speech => self.speech_child.borrow().instance_id == instance_id,
+            WorkerKind::Translation => self.translation_child.borrow().instance_id == instance_id,
+            WorkerKind::Companion => self
+                .companion_child
+                .borrow()
+                .as_ref()
+                .is_some_and(|process| process.instance_id == instance_id),
+        }
+    }
+
+    fn ensure_companion(&self) -> Result<(), String> {
+        if self.companion.borrow().is_some() {
+            return Ok(());
+        }
+        if self.lifecycle.get() != WorkerLifecycle::Running
+            || rust_platform_windows::session_is_ending()
+        {
+            return Err("the Companion Orb cannot start while the session is ending".to_owned());
+        }
+        let (child, writer) = spawn_worker(
+            &self._job,
+            WorkerKind::Companion,
+            COMPANION_RENDERER_EXE,
+            RuntimeEvent::Companion,
+        )
+        .map_err(|error| error.to_string())?;
+        *self.companion_child.borrow_mut() = Some(child);
+        *self.companion.borrow_mut() = Some(writer);
+        rust_app_core::diagnostics::log_line("companion_renderer lifecycle=spawned_lazily");
+        Ok(())
+    }
+
+    fn send_companion(&self, command: &CompanionRendererCommand) -> Result<(), String> {
+        self.ensure_companion()?;
+        self.companion
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| "the Companion Orb renderer is unavailable".to_owned())?
+            .send(command)
     }
 
     fn recover(
@@ -425,16 +477,19 @@ impl Workers {
                 self.translation.replace_with(writer);
                 replace_process(&self.translation_child, child);
             }
+            WorkerKind::Companion => {
+                let (child, writer) = spawn_worker(
+                    &self._job,
+                    WorkerKind::Companion,
+                    COMPANION_RENDERER_EXE,
+                    RuntimeEvent::Companion,
+                )
+                .map_err(|error| error.to_string())?;
+                *self.companion_child.borrow_mut() = Some(child);
+                *self.companion.borrow_mut() = Some(writer);
+            }
         }
         Ok(WorkerRecovery::Restarted)
-    }
-
-    fn process(&self, kind: WorkerKind) -> &RefCell<WorkerProcess> {
-        match kind {
-            WorkerKind::Input => &self.input_child,
-            WorkerKind::Speech => &self.speech_child,
-            WorkerKind::Translation => &self.translation_child,
-        }
     }
 }
 
@@ -490,6 +545,11 @@ impl Drop for Workers {
             if process.child.try_wait().ok().flatten().is_none() {
                 let _ = process.child.kill();
             }
+        }
+        if let Some(process) = self.companion_child.get_mut().as_mut()
+            && process.child.try_wait().ok().flatten().is_none()
+        {
+            let _ = process.child.kill();
         }
     }
 }
@@ -632,6 +692,7 @@ enum VisualizerStyle {
     FlowSphere,
     #[serde(alias = "writing_slate_preview")]
     WritingSlate,
+    CompanionOrb,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -700,6 +761,7 @@ impl VisualizerStyle {
             4 => Some(Self::CircularSpectrum),
             5 => Some(Self::FlowSphere),
             6 => Some(Self::WritingSlate),
+            7 => Some(Self::CompanionOrb),
             _ => None,
         }
     }
@@ -713,14 +775,19 @@ impl VisualizerStyle {
             Self::CircularSpectrum => 4,
             Self::FlowSphere => 5,
             Self::WritingSlate => 6,
+            Self::CompanionOrb => 7,
         }
     }
 
     const fn uses_transparent_window(self) -> bool {
         matches!(
             self,
-            Self::CircularSpectrum | Self::FlowSphere | Self::WritingSlate
+            Self::CircularSpectrum | Self::FlowSphere | Self::WritingSlate | Self::CompanionOrb
         )
+    }
+
+    const fn uses_external_renderer(self) -> bool {
+        matches!(self, Self::CompanionOrb)
     }
 }
 
@@ -1297,6 +1364,7 @@ struct AppState {
     input_ready: bool,
     speech_ready: bool,
     indicator_session: Option<SessionId>,
+    active_visualizer_style: Option<VisualizerStyle>,
     release_started: HashMap<SessionId, Instant>,
     pending_insert_last: Option<PendingInsertLast>,
     pending_selection: Option<PendingSelection>,
@@ -1341,6 +1409,7 @@ impl AppState {
             input_ready: false,
             speech_ready: false,
             indicator_session: None,
+            active_visualizer_style: None,
             release_started: HashMap::new(),
             pending_insert_last: None,
             pending_selection: None,
@@ -1538,6 +1607,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         input_child: RefCell::new(input_child),
         speech_child: RefCell::new(speech_child),
         translation_child: RefCell::new(translation_child),
+        companion: RefCell::new(None),
+        companion_child: RefCell::new(None),
         lifecycle: Cell::new(WorkerLifecycle::Running),
         restart_attempts: RefCell::new(HashMap::new()),
         deferred_exits: RefCell::new(HashMap::new()),
@@ -1558,6 +1629,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         output_mode,
         &saved_settings,
     )));
+    if saved_settings.visualizer_style.uses_external_renderer()
+        && let Err(error) = workers.ensure_companion()
+    {
+        rust_app_core::diagnostics::log_line(&format!(
+            "companion_renderer lifecycle=start_failed error={error}"
+        ));
+    }
     sync_output_mode(&settings.as_weak(), &state);
     sync_action_settings(&settings.as_weak(), &state);
 
@@ -2482,9 +2560,10 @@ where
                         dispatch_runtime_event(wrap(event));
                     }
                     Err(error) => {
-                        dispatch_runtime_event(RuntimeEvent::WorkerError(format!(
-                            "{output_name} sent invalid data: {error}"
-                        )));
+                        dispatch_runtime_event(RuntimeEvent::WorkerError {
+                            kind,
+                            message: format!("{output_name} sent invalid data: {error}"),
+                        });
                     }
                 }
             }
@@ -2559,6 +2638,7 @@ fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
     let development = match executable {
         INPUT_WORKER_EXE => Some(DEV_INPUT_WORKER_EXE),
         TRANSLATION_WORKER_EXE => Some(DEV_TRANSLATION_WORKER_EXE),
+        COMPANION_RENDERER_EXE => Some(DEV_COMPANION_RENDERER_EXE),
         _ => None,
     }
     .map(|name| parent.join(name));
@@ -2661,6 +2741,30 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 &runtime.workers,
             );
         }
+        RuntimeEvent::Companion(event) => match event {
+            CompanionRendererEvent::Ready { protocol_version } => {
+                if protocol_version == PROTOCOL_VERSION {
+                    rust_app_core::diagnostics::log_line(
+                        "companion_renderer lifecycle=ready protocol=matched",
+                    );
+                } else {
+                    set_indicator_status(
+                        &runtime.settings,
+                        "Companion Orb protocol mismatch. Reinstall the complete application.",
+                    );
+                }
+            }
+            CompanionRendererEvent::Failed {
+                session_id,
+                code,
+                message,
+            } => {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "companion_renderer result=failed session={session_id:?} code={code} message={message}"
+                ));
+                set_indicator_status(&runtime.settings, &format!("Companion Orb: {message}"));
+            }
+        },
         RuntimeEvent::DismissTranslationPreview => {
             if let Some(preview) = runtime.translation_preview.upgrade() {
                 preview.set_pinned(false);
@@ -2684,8 +2788,29 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
         RuntimeEvent::SessionEnd(event) => {
             handle_session_end(event, runtime);
         }
-        RuntimeEvent::WorkerError(message) => {
-            runtime.state.borrow_mut().indicator_session = None;
+        RuntimeEvent::WorkerError { kind, message } => {
+            if kind == WorkerKind::Companion {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "companion_renderer event_stream=invalid message={message}"
+                ));
+                set_indicator_status(&runtime.settings, &message);
+                return;
+            }
+            if runtime
+                .state
+                .borrow()
+                .active_visualizer_style
+                .is_some_and(VisualizerStyle::uses_external_renderer)
+            {
+                let _ = runtime
+                    .workers
+                    .send_companion(&CompanionRendererCommand::Dismiss { session_id: None });
+            }
+            {
+                let mut state = runtime.state.borrow_mut();
+                state.indicator_session = None;
+                state.active_visualizer_style = None;
+            }
             runtime.indicator_animation.borrow_mut().stop();
             if let Some(indicator) = runtime.indicator.upgrade() {
                 indicator.set_prepared(false);
@@ -2758,6 +2883,35 @@ fn handle_worker_exit(
         exit.uptime.as_millis()
     ));
 
+    // The companion process is presentation-only. Its failure must never
+    // cancel audio capture, transcription, or insertion owned by other
+    // processes. Recover it independently and leave the active session intact.
+    if kind == WorkerKind::Companion {
+        match runtime.workers.recover(kind, instance_id, exit) {
+            Ok(WorkerRecovery::Restarted) => set_indicator_status(
+                &runtime.settings,
+                "Companion Orb restarted. Dictation continued normally.",
+            ),
+            Ok(WorkerRecovery::Deferred | WorkerRecovery::Stopping | WorkerRecovery::Stale) => {}
+            Err(error) => set_indicator_status(
+                &runtime.settings,
+                &format!("Companion Orb is unavailable: {error}"),
+            ),
+        }
+        return;
+    }
+
+    if runtime
+        .state
+        .borrow()
+        .active_visualizer_style
+        .is_some_and(VisualizerStyle::uses_external_renderer)
+    {
+        let _ = runtime
+            .workers
+            .send_companion(&CompanionRendererCommand::Dismiss { session_id: None });
+    }
+
     let active_session = {
         let mut state = runtime.state.borrow_mut();
         match kind {
@@ -2767,8 +2921,10 @@ fn handle_worker_exit(
                 state.translation_ready = false;
                 state.pending_translations.clear();
             }
+            WorkerKind::Companion => {}
         }
         let active = state.indicator_session.take();
+        state.active_visualizer_style = None;
         if let Some(session_id) = active {
             let _ = state.registry.fail(session_id);
             state.targets.remove(&session_id);
@@ -2819,6 +2975,7 @@ fn handle_worker_exit(
                             history_enabled: state.history_enabled,
                         })
                 }
+                WorkerKind::Companion => Ok(()),
             };
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Recovering worker".into());
@@ -2912,6 +3069,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 let mut state = state.borrow_mut();
                 state.targets.insert(session_id, target);
                 state.indicator_session = Some(session_id);
+                state.active_visualizer_style = Some(state.visualizer_style);
             }
             if let Err(error) = workers.speech.send(&SpeechWorkerCommand::Begin {
                 session_id,
@@ -2921,11 +3079,30 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 let _ = state.registry.fail(session_id);
                 state.targets.remove(&session_id);
                 state.indicator_session = None;
+                state.active_visualizer_style = None;
                 set_indicator_status(settings, &format!("Could not start recording: {error}"));
                 return;
             }
+            let active_style = state.borrow().active_visualizer_style.unwrap_or_default();
+            indicator_animation.borrow_mut().set_style(active_style);
             indicator_animation.borrow_mut().begin_listening();
             if let Some(indicator) = indicator.upgrade() {
+                indicator.set_visualizer_style(active_style.index());
+            }
+            if active_style.uses_external_renderer() {
+                if let Err(error) = workers.send_companion(&CompanionRendererCommand::Activate {
+                    session_id,
+                    target_window_handle: target.window_handle,
+                }) {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "companion_renderer transition=failed stage=activate session={session_id} error={error}"
+                    ));
+                    set_indicator_status(
+                        settings,
+                        &format!("Listening; Companion Orb unavailable: {error}"),
+                    );
+                }
+            } else if let Some(indicator) = indicator.upgrade() {
                 indicator.set_processing(false);
                 indicator.set_signal_opacity(0.54);
                 indicator.set_disc_opacity(1.0);
@@ -2950,9 +3127,18 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     .send(&SpeechWorkerCommand::End { session_id })
                 {
                     let mut state = state.borrow_mut();
+                    let companion_active = state
+                        .active_visualizer_style
+                        .is_some_and(VisualizerStyle::uses_external_renderer);
                     let _ = state.registry.fail(session_id);
                     state.targets.remove(&session_id);
                     state.indicator_session = None;
+                    state.active_visualizer_style = None;
+                    if companion_active {
+                        let _ = workers.send_companion(&CompanionRendererCommand::Dismiss {
+                            session_id: Some(session_id),
+                        });
+                    }
                     indicator_animation.borrow_mut().stop();
                     if let Some(indicator) = indicator.upgrade() {
                         indicator.set_prepared(false);
@@ -2962,6 +3148,14 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     return;
                 }
                 indicator_animation.borrow_mut().begin_processing();
+                if state
+                    .borrow()
+                    .active_visualizer_style
+                    .is_some_and(VisualizerStyle::uses_external_renderer)
+                {
+                    let _ = workers
+                        .send_companion(&CompanionRendererCommand::Processing { session_id });
+                }
                 if let Some(indicator) = indicator.upgrade() {
                     indicator.set_processing(true);
                     indicator.set_signal_opacity(0.72);
@@ -3146,6 +3340,13 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             delivery,
             dispatch_duration_ms,
         } => {
+            if state
+                .borrow()
+                .active_visualizer_style
+                .is_some_and(VisualizerStyle::uses_external_renderer)
+            {
+                let _ = workers.send_companion(&CompanionRendererCommand::Complete { session_id });
+            }
             let (owns_indicator, total_after_release_ms, transcript_latency) = {
                 let mut state = state.borrow_mut();
                 state.targets.remove(&session_id);
@@ -3159,6 +3360,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                     .map(|transcript| transcript.latency);
                 let owns_indicator = if state.indicator_session == Some(session_id) {
                     state.indicator_session = None;
+                    state.active_visualizer_style = None;
                     true
                 } else {
                     false
@@ -3240,6 +3442,13 @@ speculative_reuse={} method={} delivery={}",
             code,
             message,
         } => {
+            if state
+                .borrow()
+                .active_visualizer_style
+                .is_some_and(VisualizerStyle::uses_external_renderer)
+            {
+                let _ = workers.send_companion(&CompanionRendererCommand::Dismiss { session_id });
+            }
             rust_app_core::diagnostics::log_line(&format!(
                 "input_host_action result=failed session={session_id:?} code={code} message={message}"
             ));
@@ -3247,6 +3456,7 @@ speculative_reuse={} method={} delivery={}",
                 let mut state = state.borrow_mut();
                 if session_id.is_some() && state.indicator_session == session_id {
                     state.indicator_session = None;
+                    state.active_visualizer_style = None;
                     true
                 } else {
                     false
@@ -3784,13 +3994,33 @@ fn handle_speech_event(
             spectrum,
         } => {
             if state.borrow().registry.active_session() == Some(session_id) {
-                indicator_animation
-                    .borrow_mut()
-                    .set_microphone_signal(peak, &spectrum);
+                if state
+                    .borrow()
+                    .active_visualizer_style
+                    .is_some_and(VisualizerStyle::uses_external_renderer)
+                {
+                    let _ = workers.send_companion(&CompanionRendererCommand::AudioLevel {
+                        session_id,
+                        peak,
+                        spectrum,
+                    });
+                } else {
+                    indicator_animation
+                        .borrow_mut()
+                        .set_microphone_signal(peak, &spectrum);
+                }
             }
         }
-        SpeechWorkerEvent::Processing { session_id: _ } => {
+        SpeechWorkerEvent::Processing { session_id } => {
             indicator_animation.borrow_mut().begin_processing();
+            if state
+                .borrow()
+                .active_visualizer_style
+                .is_some_and(VisualizerStyle::uses_external_renderer)
+            {
+                let _ =
+                    workers.send_companion(&CompanionRendererCommand::Processing { session_id });
+            }
             if let Some(indicator) = indicator.upgrade() {
                 indicator.set_processing(true);
             }
@@ -3863,6 +4093,15 @@ delivery={} target_pid={}",
                     transcript.text.chars().count(),
                 ));
                 state.borrow_mut().indicator_session = None;
+                if state
+                    .borrow()
+                    .active_visualizer_style
+                    .is_some_and(VisualizerStyle::uses_external_renderer)
+                {
+                    let _ =
+                        workers.send_companion(&CompanionRendererCommand::Complete { session_id });
+                }
+                state.borrow_mut().active_visualizer_style = None;
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
                     indicator.set_prepared(false);
@@ -3890,6 +4129,16 @@ delivery={} target_pid={}",
                 }
             };
             if owns_indicator {
+                if state
+                    .borrow()
+                    .active_visualizer_style
+                    .is_some_and(VisualizerStyle::uses_external_renderer)
+                {
+                    let _ = workers.send_companion(&CompanionRendererCommand::Dismiss {
+                        session_id: Some(session_id),
+                    });
+                }
+                state.borrow_mut().active_visualizer_style = None;
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
                     indicator.set_prepared(false);
@@ -3978,6 +4227,15 @@ retryable={retryable} message={message}"
                 state.release_started.remove(&session_id);
             }
             if owns_indicator {
+                if state
+                    .borrow()
+                    .active_visualizer_style
+                    .is_some_and(VisualizerStyle::uses_external_renderer)
+                {
+                    let _ =
+                        workers.send_companion(&CompanionRendererCommand::Dismiss { session_id });
+                }
+                state.borrow_mut().active_visualizer_style = None;
                 indicator_animation.borrow_mut().stop();
                 if let Some(indicator) = indicator.upgrade() {
                     indicator.set_prepared(false);
@@ -4574,20 +4832,37 @@ fn wire_settings(
         let state = Rc::clone(state);
         let indicator = indicator.as_weak();
         let indicator_animation = Rc::clone(indicator_animation);
+        let workers = Rc::clone(workers);
         settings.on_select_visualizer(move |index| {
             let Some(style) = VisualizerStyle::from_index(index) else {
                 return;
             };
+            if style.uses_external_renderer()
+                && let Err(error) = workers.ensure_companion()
+            {
+                set_indicator_status(
+                    &settings_weak,
+                    &format!("Could not start Companion Orb: {error}"),
+                );
+                return;
+            }
+            let session_active = state.borrow().indicator_session.is_some();
             state.borrow_mut().visualizer_style = style;
-            indicator_animation.borrow_mut().set_style(style);
-            if let Some(indicator) = indicator.upgrade() {
-                indicator.set_visualizer_style(style.index());
+            if !session_active {
+                indicator_animation.borrow_mut().set_style(style);
+                if let Some(indicator) = indicator.upgrade() {
+                    indicator.set_visualizer_style(style.index());
+                }
             }
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
             set_indicator_status(
                 &settings_weak,
-                "Visualizer updated. The next dictation uses the selected style.",
+                if style.uses_external_renderer() {
+                    "Companion Orb is ready in its isolated renderer process."
+                } else {
+                    "Visualizer updated. The next dictation uses the selected style."
+                },
             );
         });
     }
@@ -6217,6 +6492,10 @@ mod indicator_animation_tests {
         assert_eq!(
             VisualizerStyle::from_index(6),
             Some(VisualizerStyle::WritingSlate)
+        );
+        assert_eq!(
+            VisualizerStyle::from_index(7),
+            Some(VisualizerStyle::CompanionOrb)
         );
         assert_eq!(
             serde_json::to_string(&VisualizerStyle::FlowSphere).unwrap(),
