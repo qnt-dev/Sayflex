@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.5.20',
+    [string]$Version = '0.5.21',
     [switch]$SkipPublish
 )
 

@@ -101,8 +101,7 @@ thread_local! {
 #[derive(Clone)]
 struct RuntimeUi {
     settings: slint::Weak<SettingsWindow>,
-    indicator: slint::Weak<RecordingIndicator>,
-    indicator_presenter: OverlayPresenter,
+    recording_overlays: RecordingOverlays,
     chooser: slint::Weak<SelectionChooser>,
     chooser_presenter: OverlayPresenter,
     action_palette: slint::Weak<ActionPalette>,
@@ -113,6 +112,71 @@ struct RuntimeUi {
     state: Rc<RefCell<AppState>>,
     workers: Rc<Workers>,
     indicator_animation: Rc<RefCell<IndicatorAnimation>>,
+}
+
+/// The recording HUD deliberately owns two native windows. A Winit/DWM
+/// surface's alpha mode is chosen when that window is created, so a single
+/// HWND must never be recycled between the legacy panel visualizers and the
+/// per-pixel-transparent visualizers. Doing so is what made Circular, Flow
+/// Sphere and Writing Slate sometimes inherit a dark rectangle.
+#[derive(Clone)]
+struct RecordingOverlay {
+    indicator: Rc<RecordingIndicator>,
+    presenter: OverlayPresenter,
+    /// Fixed when the HWND is created. Never change a Winit/DWM surface from
+    /// panel composition to per-pixel transparency (or back) at runtime.
+    transparent: bool,
+}
+
+#[derive(Clone)]
+struct RecordingOverlays {
+    panel: RecordingOverlay,
+    transparent: RecordingOverlay,
+}
+
+impl RecordingOverlays {
+    fn for_style(&self, style: VisualizerStyle) -> &RecordingOverlay {
+        match style.recording_surface() {
+            RecordingSurface::Panel => &self.panel,
+            RecordingSurface::Transparent => &self.transparent,
+        }
+    }
+
+    fn set_style(&self, style: VisualizerStyle) {
+        for overlay in [&self.panel, &self.transparent] {
+            overlay.indicator.set_visualizer_style(style.index());
+        }
+    }
+
+    fn set_circular_palette(&self, palette: CircularSpectrumPalette) {
+        for overlay in [&self.panel, &self.transparent] {
+            overlay.indicator.set_circular_palette(palette.index());
+        }
+    }
+
+    fn set_writing_slate_surface(&self, surface: WritingSlateSurface) {
+        for overlay in [&self.panel, &self.transparent] {
+            overlay.indicator.set_writing_slate_surface(surface.index());
+        }
+    }
+
+    fn retire_all(&self, reason: &str) {
+        for overlay in [&self.panel, &self.transparent] {
+            overlay.indicator.set_prepared(false);
+            overlay.presenter.retire(overlay.indicator.window(), reason);
+        }
+    }
+
+    fn retire_inactive_surface(&self, style: VisualizerStyle) {
+        let inactive = match style.recording_surface() {
+            RecordingSurface::Panel => &self.transparent,
+            RecordingSurface::Transparent => &self.panel,
+        };
+        inactive.indicator.set_prepared(false);
+        inactive
+            .presenter
+            .retire(inactive.indicator.window(), "visualizer_surface_switch");
+    }
 }
 
 struct JsonWriter {
@@ -704,6 +768,14 @@ enum VisualizerStyle {
     CompanionOrb,
 }
 
+/// Native composition is an HWND-creation-time contract, not a property to
+/// toggle while a recording indicator is already alive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordingSurface {
+    Panel,
+    Transparent,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CircularSpectrumPalette {
@@ -788,11 +860,19 @@ impl VisualizerStyle {
         }
     }
 
+    const fn recording_surface(self) -> RecordingSurface {
+        match self {
+            Self::CircularSpectrum | Self::FlowSphere | Self::WritingSlate | Self::CompanionOrb => {
+                RecordingSurface::Transparent
+            }
+            Self::VoiceOrb | Self::SymmetricSpectrum | Self::FluidRibbon | Self::BroadcastMic => {
+                RecordingSurface::Panel
+            }
+        }
+    }
+
     const fn uses_transparent_window(self) -> bool {
-        matches!(
-            self,
-            Self::CircularSpectrum | Self::FlowSphere | Self::WritingSlate | Self::CompanionOrb
-        )
+        matches!(self.recording_surface(), RecordingSurface::Transparent)
     }
 
     const fn uses_external_renderer(self) -> bool {
@@ -1167,7 +1247,7 @@ impl IndicatorAnimation {
         self.flow_voice_impulse = 0.0;
     }
 
-    fn tick(&mut self, indicator: &slint::Weak<RecordingIndicator>) {
+    fn tick(&mut self, indicators: &[&RecordingIndicator]) {
         if self.mode == IndicatorMode::Hidden
             || self.last_frame.elapsed() < INDICATOR_FRAME_INTERVAL
         {
@@ -1190,7 +1270,7 @@ impl IndicatorAnimation {
             ));
         }
 
-        if let Some(indicator) = indicator.upgrade() {
+        for indicator in indicators {
             indicator.set_visualizer_style(self.style.index());
             indicator.set_processing(self.mode == IndicatorMode::Processing);
             indicator.set_signal_opacity(frame.signal_opacity);
@@ -1541,23 +1621,42 @@ fn main() -> Result<(), Box<dyn Error>> {
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
     let saved_settings = load_settings();
-    let (indicator, indicator_animation) = new_indicator()?;
-    let indicator_presenter = OverlayPresenter::install(
-        indicator.window(),
-        "recording_overlay",
+    let (panel_indicator, transparent_indicator, indicator_animation) = new_recording_indicators()?;
+    let panel_indicator_presenter = OverlayPresenter::install(
+        panel_indicator.window(),
+        "recording_panel_overlay",
         OverlayContract::ClickThrough,
         None,
     )
     .map_err(|error| format!("recording overlay initialization failed: {error}"))?;
+    let transparent_indicator_presenter = OverlayPresenter::install(
+        transparent_indicator.window(),
+        "recording_transparent_overlay",
+        OverlayContract::ClickThrough,
+        None,
+    )
+    .map_err(|error| format!("transparent recording overlay initialization failed: {error}"))?;
+    let recording_overlays = RecordingOverlays {
+        panel: RecordingOverlay {
+            indicator: Rc::new(panel_indicator),
+            presenter: panel_indicator_presenter,
+            transparent: false,
+        },
+        transparent: RecordingOverlay {
+            indicator: Rc::new(transparent_indicator),
+            presenter: transparent_indicator_presenter,
+            transparent: true,
+        },
+    };
     indicator_animation
         .borrow_mut()
         .set_style(saved_settings.visualizer_style);
     indicator_animation
         .borrow_mut()
         .set_flow_sphere_palette(saved_settings.flow_sphere_palette);
-    indicator.set_visualizer_style(saved_settings.visualizer_style.index());
-    indicator.set_circular_palette(saved_settings.circular_spectrum_palette.index());
-    indicator.set_writing_slate_surface(saved_settings.writing_slate_surface.index());
+    recording_overlays.set_style(saved_settings.visualizer_style);
+    recording_overlays.set_circular_palette(saved_settings.circular_spectrum_palette);
+    recording_overlays.set_writing_slate_surface(saved_settings.writing_slate_surface);
     let chooser = SelectionChooser::new()?;
     let action_palette = ActionPalette::new()?;
     let translation_preview = TranslationPreview::new()?;
@@ -1584,7 +1683,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     .map_err(|error| format!("translation preview initialization failed: {error}"))?;
     let translator = TranslatorWindow::new()?;
     let tray = AppTray::new()?;
-    precreate_indicator(&indicator, &indicator_presenter);
+    precreate_indicator(
+        &recording_overlays.panel.indicator,
+        &recording_overlays.panel.presenter,
+        recording_overlays.panel.transparent,
+    );
+    precreate_indicator(
+        &recording_overlays.transparent.indicator,
+        &recording_overlays.transparent.presenter,
+        recording_overlays.transparent.transparent,
+    );
     precreate_action_windows(
         &chooser,
         &chooser_presenter,
@@ -1671,7 +1779,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &translator,
         &state,
         &workers,
-        &indicator,
+        &recording_overlays,
         &indicator_animation,
     );
     wire_tray(&tray, &settings, &translator, &state, &workers);
@@ -1691,8 +1799,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     wire_translator(&translator, &state, &workers);
     install_runtime_handler(RuntimeUi {
         settings: settings.as_weak(),
-        indicator: indicator.as_weak(),
-        indicator_presenter: indicator_presenter.clone(),
+        recording_overlays: recording_overlays.clone(),
         chooser: chooser.as_weak(),
         chooser_presenter: chooser_presenter.clone(),
         action_palette: action_palette.as_weak(),
@@ -1722,7 +1829,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             None
         }
     };
-    let animation_timer = start_indicator_animation(&indicator, &indicator_animation);
+    let animation_timer = start_indicator_animation(
+        vec![
+            recording_overlays.panel.indicator.as_weak(),
+            recording_overlays.transparent.indicator.as_weak(),
+        ],
+        &indicator_animation,
+    );
 
     if !env::args().any(|argument| argument == "--background") {
         settings.show()?;
@@ -1745,23 +1858,60 @@ fn configure_ui_backend() -> Result<(), slint::PlatformError> {
         .select()
 }
 
+#[derive(Clone)]
+struct IndicatorModels {
+    bars: Rc<VecModel<f32>>,
+    spectrum: Rc<VecModel<f32>>,
+    slate_lines: Rc<VecModel<SlateLine>>,
+}
+
+fn new_indicator_models() -> IndicatorModels {
+    IndicatorModels {
+        bars: Rc::new(VecModel::from(vec![
+            4.0, 6.0, 9.0, 12.0, 15.0, 15.0, 12.0, 9.0, 6.0, 4.0,
+        ])),
+        spectrum: Rc::new(VecModel::from(vec![2.8; AUDIO_SPECTRUM_BANDS])),
+        slate_lines: Rc::new(VecModel::from(Vec::<SlateLine>::new())),
+    }
+}
+
+fn build_indicator(models: &IndicatorModels) -> Result<RecordingIndicator, slint::PlatformError> {
+    let indicator = RecordingIndicator::new()?;
+    indicator.set_bar_heights(ModelRc::from(Rc::clone(&models.bars)));
+    indicator.set_spectrum_heights(ModelRc::from(Rc::clone(&models.spectrum)));
+    indicator.set_slate_lines(ModelRc::from(Rc::clone(&models.slate_lines)));
+    Ok(indicator)
+}
+
 fn new_indicator()
 -> Result<(RecordingIndicator, Rc<RefCell<IndicatorAnimation>>), slint::PlatformError> {
-    let indicator = RecordingIndicator::new()?;
-    let indicator_bars = Rc::new(VecModel::from(vec![
-        4.0, 6.0, 9.0, 12.0, 15.0, 15.0, 12.0, 9.0, 6.0, 4.0,
-    ]));
-    let spectrum_bands = Rc::new(VecModel::from(vec![2.8; AUDIO_SPECTRUM_BANDS]));
-    let slate_lines = Rc::new(VecModel::from(Vec::<SlateLine>::new()));
-    indicator.set_bar_heights(ModelRc::from(Rc::clone(&indicator_bars)));
-    indicator.set_spectrum_heights(ModelRc::from(Rc::clone(&spectrum_bands)));
-    indicator.set_slate_lines(ModelRc::from(Rc::clone(&slate_lines)));
+    let models = new_indicator_models();
+    let indicator = build_indicator(&models)?;
     let animation = Rc::new(RefCell::new(IndicatorAnimation::new(
-        indicator_bars,
-        spectrum_bands,
-        slate_lines,
+        models.bars,
+        models.spectrum,
+        models.slate_lines,
     )));
     Ok((indicator, animation))
+}
+
+fn new_recording_indicators() -> Result<
+    (
+        RecordingIndicator,
+        RecordingIndicator,
+        Rc<RefCell<IndicatorAnimation>>,
+    ),
+    slint::PlatformError,
+> {
+    let models = new_indicator_models();
+    let panel = build_indicator(&models)?;
+    let transparent = build_indicator(&models)?;
+    let animation = Rc::new(RefCell::new(IndicatorAnimation::new(
+        models.bars,
+        models.spectrum,
+        models.slate_lines,
+    )));
+    Ok((panel, transparent, animation))
 }
 
 fn indicator_preview_style() -> Option<VisualizerStyle> {
@@ -2099,7 +2249,9 @@ fn run_indicator_preview(
                     .set_microphone_signal(simulated_level, &simulated_spectrum);
             }
         }
-        animation_for_timer.borrow_mut().tick(&indicator);
+        if let Some(indicator) = indicator.upgrade() {
+            animation_for_timer.borrow_mut().tick(&[&indicator]);
+        }
     });
     slint::run_event_loop()?;
     timer.stop();
@@ -2133,9 +2285,9 @@ fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
         animation.set_style(VisualizerStyle::WritingSlate);
         animation.begin_listening();
     }
-    precreate_indicator(&indicator, &presenter);
+    precreate_indicator(&indicator, &presenter, true);
 
-    let animation_timer = start_indicator_animation(&indicator, &animation);
+    let animation_timer = start_indicator_animation(vec![indicator.as_weak()], &animation);
     let cycle_timer = Timer::default();
     let step = Rc::new(Cell::new(0_u32));
     let step_for_timer = Rc::clone(&step);
@@ -2162,7 +2314,7 @@ fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
         if current.is_multiple_of(2) {
             animation_for_timer.borrow_mut().begin_listening();
             if let Some(indicator) = indicator_weak.upgrade() {
-                show_indicator(&indicator, &presenter_for_timer, None);
+                show_indicator(&indicator, &presenter_for_timer, true, None);
             }
         } else {
             animation_for_timer.borrow_mut().stop();
@@ -2715,14 +2867,18 @@ fn install_runtime_handler(runtime: RuntimeUi) {
 }
 
 fn start_indicator_animation(
-    indicator: &RecordingIndicator,
+    indicators: Vec<slint::Weak<RecordingIndicator>>,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
 ) -> Timer {
     let timer = Timer::default();
-    let indicator = indicator.as_weak();
     let indicator_animation = Rc::clone(indicator_animation);
     timer.start(TimerMode::Repeated, INDICATOR_FRAME_INTERVAL, move || {
-        indicator_animation.borrow_mut().tick(&indicator);
+        let live_indicators = indicators
+            .iter()
+            .filter_map(slint::Weak::upgrade)
+            .collect::<Vec<_>>();
+        let references = live_indicators.iter().collect::<Vec<_>>();
+        indicator_animation.borrow_mut().tick(&references);
     });
     timer
 }
@@ -2736,8 +2892,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             handle_speech_event(
                 event,
                 &runtime.settings,
-                &runtime.indicator,
-                &runtime.indicator_presenter,
+                &runtime.recording_overlays,
                 &runtime.state,
                 &runtime.workers,
                 &runtime.indicator_animation,
@@ -2850,12 +3005,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 state.active_visualizer_style = None;
             }
             runtime.indicator_animation.borrow_mut().stop();
-            if let Some(indicator) = runtime.indicator.upgrade() {
-                indicator.set_prepared(false);
-                runtime
-                    .indicator_presenter
-                    .retire(indicator.window(), "worker_error");
-            }
+            runtime.recording_overlays.retire_all("worker_error");
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Worker error".into());
                 settings.set_indicator_status(message.into());
@@ -3009,12 +3159,7 @@ fn handle_worker_exit(
             .send(&SpeechWorkerCommand::Cancel { session_id });
     }
     runtime.indicator_animation.borrow_mut().stop();
-    if let Some(indicator) = runtime.indicator.upgrade() {
-        indicator.set_prepared(false);
-        runtime
-            .indicator_presenter
-            .retire(indicator.window(), "worker_exit");
-    }
+    runtime.recording_overlays.retire_all("worker_exit");
 
     match runtime.workers.recover(kind, instance_id, exit) {
         Ok(WorkerRecovery::Restarted) => {
@@ -3076,7 +3221,7 @@ fn handle_worker_exit(
 
 fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
     let settings = &runtime.settings;
-    let indicator = &runtime.indicator;
+    let recording_overlays = &runtime.recording_overlays;
     let chooser = &runtime.chooser;
     let chooser_presenter = &runtime.chooser_presenter;
     let action_palette = &runtime.action_palette;
@@ -3086,7 +3231,6 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
     let state = &runtime.state;
     let workers = &runtime.workers;
     let indicator_animation = &runtime.indicator_animation;
-    let indicator_presenter = &runtime.indicator_presenter;
 
     match event {
         InputHostEvent::Ready { protocol_version } => {
@@ -3154,9 +3298,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             let active_style = state.borrow().active_visualizer_style.unwrap_or_default();
             indicator_animation.borrow_mut().set_style(active_style);
             indicator_animation.borrow_mut().begin_listening();
-            if let Some(indicator) = indicator.upgrade() {
-                indicator.set_visualizer_style(active_style.index());
-            }
+            recording_overlays.set_style(active_style);
             if active_style.uses_external_renderer() {
                 if let Err(error) = workers.send_companion(&CompanionRendererCommand::Activate {
                     session_id,
@@ -3170,11 +3312,18 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                         &format!("Listening; Companion Orb unavailable: {error}"),
                     );
                 }
-            } else if let Some(indicator) = indicator.upgrade() {
-                indicator.set_processing(false);
-                indicator.set_signal_opacity(0.54);
-                indicator.set_disc_opacity(1.0);
-                show_indicator(&indicator, indicator_presenter, Some(target.window_handle));
+            } else {
+                recording_overlays.retire_inactive_surface(active_style);
+                let overlay = recording_overlays.for_style(active_style);
+                overlay.indicator.set_processing(false);
+                overlay.indicator.set_signal_opacity(0.54);
+                overlay.indicator.set_disc_opacity(1.0);
+                show_indicator(
+                    &overlay.indicator,
+                    &overlay.presenter,
+                    overlay.transparent,
+                    Some(target.window_handle),
+                );
             }
             set_indicator_status(settings, "Listening…");
         }
@@ -3208,10 +3357,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                         });
                     }
                     indicator_animation.borrow_mut().stop();
-                    if let Some(indicator) = indicator.upgrade() {
-                        indicator.set_prepared(false);
-                        indicator_presenter.retire(indicator.window(), "speech_end_send_failed");
-                    }
+                    recording_overlays.retire_all("speech_end_send_failed");
                     set_indicator_status(settings, &format!("Could not finish recording: {error}"));
                     return;
                 }
@@ -3224,7 +3370,10 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     let _ = workers
                         .send_companion(&CompanionRendererCommand::Processing { session_id });
                 }
-                if let Some(indicator) = indicator.upgrade() {
+                if let Some(active_style) = state.borrow().active_visualizer_style
+                    && !active_style.uses_external_renderer()
+                {
+                    let indicator = &recording_overlays.for_style(active_style).indicator;
                     indicator.set_processing(true);
                     indicator.set_signal_opacity(0.72);
                     indicator.set_disc_opacity(0.82);
@@ -3437,10 +3586,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             };
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
-                if let Some(indicator) = indicator.upgrade() {
-                    indicator.set_prepared(false);
-                    indicator_presenter.retire(indicator.window(), "insertion_completed");
-                }
+                recording_overlays.retire_all("insertion_completed");
             }
             let method_name = match method {
                 rust_protocol::InsertionMethod::ClipboardPaste => "clipboard",
@@ -3532,10 +3678,7 @@ speculative_reuse={} method={} delivery={}",
             };
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
-                if let Some(indicator) = indicator.upgrade() {
-                    indicator.set_prepared(false);
-                    indicator_presenter.retire(indicator.window(), "insertion_failed");
-                }
+                recording_overlays.retire_all("insertion_failed");
             }
             set_indicator_status(settings, &format!("{code}: {message}"));
         }
@@ -3956,8 +4099,7 @@ error={error}"
 fn handle_speech_event(
     event: SpeechWorkerEvent,
     settings: &slint::Weak<SettingsWindow>,
-    indicator: &slint::Weak<RecordingIndicator>,
-    indicator_presenter: &OverlayPresenter,
+    recording_overlays: &RecordingOverlays,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
@@ -4089,8 +4231,13 @@ fn handle_speech_event(
                 let _ =
                     workers.send_companion(&CompanionRendererCommand::Processing { session_id });
             }
-            if let Some(indicator) = indicator.upgrade() {
-                indicator.set_processing(true);
+            if let Some(active_style) = state.borrow().active_visualizer_style
+                && !active_style.uses_external_renderer()
+            {
+                recording_overlays
+                    .for_style(active_style)
+                    .indicator
+                    .set_processing(true);
             }
         }
         SpeechWorkerEvent::Completed {
@@ -4171,10 +4318,7 @@ delivery={} target_pid={}",
                 }
                 state.borrow_mut().active_visualizer_style = None;
                 indicator_animation.borrow_mut().stop();
-                if let Some(indicator) = indicator.upgrade() {
-                    indicator.set_prepared(false);
-                    indicator_presenter.retire(indicator.window(), "target_lost");
-                }
+                recording_overlays.retire_all("target_lost");
                 set_indicator_status(settings, "Transcript saved to history; target was lost.");
             }
         }
@@ -4208,10 +4352,7 @@ delivery={} target_pid={}",
                 }
                 state.borrow_mut().active_visualizer_style = None;
                 indicator_animation.borrow_mut().stop();
-                if let Some(indicator) = indicator.upgrade() {
-                    indicator.set_prepared(false);
-                    indicator_presenter.retire(indicator.window(), "transcription_cancelled");
-                }
+                recording_overlays.retire_all("transcription_cancelled");
             }
             if insert_was_waiting {
                 set_indicator_status(
@@ -4305,10 +4446,7 @@ retryable={retryable} message={message}"
                 }
                 state.borrow_mut().active_visualizer_style = None;
                 indicator_animation.borrow_mut().stop();
-                if let Some(indicator) = indicator.upgrade() {
-                    indicator.set_prepared(false);
-                    indicator_presenter.retire(indicator.window(), "transcription_failed");
-                }
+                recording_overlays.retire_all("transcription_failed");
             }
             if insert_was_waiting {
                 set_indicator_status(
@@ -4818,7 +4956,7 @@ fn wire_settings(
     translator: &TranslatorWindow,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
-    indicator: &RecordingIndicator,
+    recording_overlays: &RecordingOverlays,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
 ) {
     {
@@ -4898,7 +5036,7 @@ fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
-        let indicator = indicator.as_weak();
+        let recording_overlays = recording_overlays.clone();
         let indicator_animation = Rc::clone(indicator_animation);
         let workers = Rc::clone(workers);
         settings.on_select_visualizer(move |index| {
@@ -4924,9 +5062,7 @@ fn wire_settings(
             state.borrow_mut().visualizer_style = style;
             if !session_active {
                 indicator_animation.borrow_mut().set_style(style);
-                if let Some(indicator) = indicator.upgrade() {
-                    indicator.set_visualizer_style(style.index());
-                }
+                recording_overlays.set_style(style);
             }
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
@@ -4942,16 +5078,14 @@ fn wire_settings(
     }
     {
         let settings_weak = settings.as_weak();
-        let indicator = indicator.as_weak();
+        let recording_overlays = recording_overlays.clone();
         let state = Rc::clone(state);
         settings.on_select_circular_palette(move |index| {
             let Some(palette) = CircularSpectrumPalette::from_index(index) else {
                 return;
             };
             state.borrow_mut().circular_spectrum_palette = palette;
-            if let Some(indicator) = indicator.upgrade() {
-                indicator.set_circular_palette(palette.index());
-            }
+            recording_overlays.set_circular_palette(palette);
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
             set_indicator_status(
@@ -4982,16 +5116,14 @@ fn wire_settings(
     }
     {
         let settings_weak = settings.as_weak();
-        let indicator = indicator.as_weak();
+        let recording_overlays = recording_overlays.clone();
         let state = Rc::clone(state);
         settings.on_select_writing_slate_surface(move |index| {
             let Some(surface) = WritingSlateSurface::from_index(index) else {
                 return;
             };
             state.borrow_mut().writing_slate_surface = surface;
-            if let Some(indicator) = indicator.upgrade() {
-                indicator.set_writing_slate_surface(surface.index());
-            }
+            recording_overlays.set_writing_slate_surface(surface);
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
             set_indicator_status(
@@ -6111,7 +6243,11 @@ fn precreate_action_windows(
     }
 }
 
-fn precreate_indicator(indicator: &RecordingIndicator, indicator_presenter: &OverlayPresenter) {
+fn precreate_indicator(
+    indicator: &RecordingIndicator,
+    indicator_presenter: &OverlayPresenter,
+    transparent: bool,
+) {
     indicator.set_prepared(false);
     // Slint owns creation of the native HWND, but the presenter exclusively
     // owns its native visibility after this one lifetime-establishing show.
@@ -6129,7 +6265,7 @@ fn precreate_indicator(indicator: &RecordingIndicator, indicator_presenter: &Ove
                     Ok(window) => native_window_handle(&window)
                         .ok_or_else(|| "native HWND is unavailable".to_owned())
                         .and_then(|handle| {
-                            prepare_indicator_native_window(&indicator, handle)?;
+                            prepare_indicator_native_window(handle, transparent)?;
                             indicator_presenter.attach(handle)
                         }),
                     Err(error) => Err(format!("native window creation failed: {error}")),
@@ -6155,17 +6291,8 @@ fn precreate_indicator(indicator: &RecordingIndicator, indicator_presenter: &Ove
     }
 }
 
-fn prepare_indicator_native_window(
-    indicator: &RecordingIndicator,
-    window_handle: u64,
-) -> Result<(), String> {
-    let style = VisualizerStyle::from_index(indicator.get_visualizer_style());
-    let blue_glass = style == Some(VisualizerStyle::WritingSlate)
-        && WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
-            == Some(WritingSlateSurface::BlueGlass);
-    if blue_glass {
-        rust_platform_windows::prepare_blue_glass_overlay_window(window_handle)
-    } else if style.is_some_and(VisualizerStyle::uses_transparent_window) {
+fn prepare_indicator_native_window(window_handle: u64, transparent: bool) -> Result<(), String> {
+    if transparent {
         rust_platform_windows::prepare_transparent_overlay_window(window_handle)
     } else {
         rust_platform_windows::prepare_overlay_window(window_handle)
@@ -6175,6 +6302,7 @@ fn prepare_indicator_native_window(
 fn show_indicator(
     indicator: &RecordingIndicator,
     indicator_presenter: &OverlayPresenter,
+    transparent: bool,
     target_window_handle: Option<u64>,
 ) {
     indicator.set_prepared(false);
@@ -6187,7 +6315,7 @@ fn show_indicator(
             return;
         }
     };
-    if let Err(error) = configure_indicator_window(indicator, target_window_handle) {
+    if let Err(error) = configure_indicator_window(indicator, transparent, target_window_handle) {
         indicator.set_prepared(false);
         indicator_presenter.abort_prepare(indicator.window(), ticket, "configure", &error);
         return;
@@ -6207,20 +6335,29 @@ fn show_indicator(
 
 fn configure_indicator_window(
     indicator: &RecordingIndicator,
+    transparent: bool,
     target_window_handle: Option<u64>,
 ) -> Result<(), String> {
     let handle = slint_window_handle(indicator.window())
         .ok_or_else(|| "native HWND is unavailable".to_owned())?;
-    let style = VisualizerStyle::from_index(indicator.get_visualizer_style());
-    let blue_glass = style == Some(VisualizerStyle::WritingSlate)
+    let style = VisualizerStyle::from_index(indicator.get_visualizer_style())
+        .ok_or_else(|| "recording indicator has an unknown visualizer style".to_owned())?;
+    if style.uses_transparent_window() != transparent {
+        return Err(format!(
+            "recording surface mismatch style={style:?} expected_transparent={} actual_transparent={transparent}",
+            style.uses_transparent_window(),
+        ));
+    }
+    let blue_glass = style == VisualizerStyle::WritingSlate
         && WritingSlateSurface::from_index(indicator.get_writing_slate_surface())
             == Some(WritingSlateSurface::BlueGlass);
+    if !transparent {
+        return rust_platform_windows::configure_overlay_window(handle, target_window_handle);
+    }
     if blue_glass {
         rust_platform_windows::configure_blue_glass_overlay_window(handle, target_window_handle)
-    } else if style.is_some_and(VisualizerStyle::uses_transparent_window) {
-        rust_platform_windows::configure_transparent_overlay_window(handle, target_window_handle)
     } else {
-        rust_platform_windows::configure_overlay_window(handle, target_window_handle)
+        rust_platform_windows::configure_transparent_overlay_window(handle, target_window_handle)
     }
 }
 
@@ -6493,8 +6630,8 @@ mod indicator_animation_tests {
     use slint::VecModel;
 
     use super::{
-        CircularSpectrumPalette, IndicatorAnimation, IndicatorMode, SlateLine, VisualizerStyle,
-        WritingSlateAnimation, WritingSlateSurface, flow_sphere,
+        CircularSpectrumPalette, IndicatorAnimation, IndicatorMode, RecordingSurface, SlateLine,
+        VisualizerStyle, WritingSlateAnimation, WritingSlateSurface, flow_sphere,
         indicator_preview_slate_surface_for_argument, indicator_preview_style_for_argument,
     };
 
@@ -6504,6 +6641,28 @@ mod indicator_animation_tests {
             Rc::new(VecModel::from(vec![0.0; AUDIO_SPECTRUM_BANDS])),
             Rc::new(VecModel::from(Vec::<SlateLine>::new())),
         )
+    }
+
+    #[test]
+    fn visualizer_styles_are_partitioned_by_immutable_native_surface() {
+        for style in [
+            VisualizerStyle::VoiceOrb,
+            VisualizerStyle::SymmetricSpectrum,
+            VisualizerStyle::FluidRibbon,
+            VisualizerStyle::BroadcastMic,
+        ] {
+            assert_eq!(style.recording_surface(), RecordingSurface::Panel);
+            assert!(!style.uses_transparent_window());
+        }
+        for style in [
+            VisualizerStyle::CircularSpectrum,
+            VisualizerStyle::FlowSphere,
+            VisualizerStyle::WritingSlate,
+            VisualizerStyle::CompanionOrb,
+        ] {
+            assert_eq!(style.recording_surface(), RecordingSurface::Transparent);
+            assert!(style.uses_transparent_window());
+        }
     }
 
     #[test]
