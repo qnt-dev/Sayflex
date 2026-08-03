@@ -176,6 +176,35 @@ impl OrbActor {
         self.motion_paused = paused;
     }
 
+    /// Puts the orb into the fixed recording pose. The desktop companion's
+    /// free-flight orbit is intentionally not reused here: recording has a
+    /// stable visual anchor and the host draws its audio-reactive satellites
+    /// separately.
+    pub fn enter_recording_pose(&mut self, position: Vec2) {
+        self.position = position;
+        self.motion_paused = true;
+        self.dragging = false;
+        self.drag_tail_active = false;
+        self.particles.clear();
+        self.life.reset_whole();
+        self.expression.set_gaze(Vec2::default());
+    }
+
+    /// Restores the normal desktop-pet pose after recording ends.
+    pub fn resume_home_pose(&mut self, position: Vec2) {
+        self.position = position;
+        self.motion_paused = false;
+        self.dragging = false;
+        self.drag_tail_active = false;
+        self.particles.reseed_orbit(
+            position,
+            self.body_radius * 1.05,
+            self.body_radius * 1.8,
+            ORBIT_PARTICLE_COUNT,
+        );
+        self.life.reset_whole();
+    }
+
     /// Updates the direction the face is interested in. Components are
     /// normalized screen-space offsets in the range -1..1.
     pub fn look_towards(&mut self, direction: Vec2) {
@@ -458,6 +487,12 @@ impl OrbLife {
         }
     }
 
+    fn reset_whole(&mut self) {
+        self.phase = OrbPhase::Whole;
+        self.timer = 9.0;
+        self.solidity = 1.0;
+    }
+
     fn update(&mut self, dt: f32, cloud: &mut Particles, centre: Vec2, radius: f32) {
         match self.phase {
             OrbPhase::Whole => {
@@ -612,6 +647,24 @@ mod tests {
     #[test]
     fn actor_starts_as_the_same_whole_orb_with_orbit_particles() {
         let actor = OrbActor::new(Vec2::new(100.0, 80.0), 20.0, 30.0, 0.45);
+        assert_eq!(actor.alive_particles(), ORBIT_PARTICLE_COUNT);
+        assert_eq!(actor.life.opacity(), 1.0);
+    }
+
+    #[test]
+    fn recording_pose_is_fixed_and_restores_the_home_orbit() {
+        let home = Vec2::new(100.0, 80.0);
+        let recording = Vec2::new(320.0, 440.0);
+        let mut actor = OrbActor::new(home, 20.0, 30.0, 0.45);
+
+        actor.enter_recording_pose(recording);
+        actor.update(1.0 / 30.0, home, 1.0);
+        assert_eq!(actor.position(), recording);
+        assert_eq!(actor.alive_particles(), 0);
+        assert!(actor.is_grabbable());
+
+        actor.resume_home_pose(home);
+        assert_eq!(actor.position(), home);
         assert_eq!(actor.alive_particles(), ORBIT_PARTICLE_COUNT);
         assert_eq!(actor.life.opacity(), 1.0);
     }
