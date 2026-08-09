@@ -344,6 +344,9 @@ pub enum InsertionMethod {
 pub enum InsertionDelivery {
     /// A target-specific adapter accepted the operation and returned success.
     AdapterAcknowledged,
+    /// The target process requested the leased clipboard payload and released
+    /// the clipboard before the previous contents were restored.
+    ClipboardReadAcknowledged,
     /// Windows accepted synthetic input, but the target application cannot be
     /// observed safely enough to claim that it consumed the text.
     Unverified,

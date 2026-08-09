@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     io,
-    sync::mpsc::{self, RecvTimeoutError, Sender},
+    sync::mpsc::{self, Sender},
     thread,
     time::{Duration, Instant},
 };
@@ -10,15 +10,11 @@ use rust_protocol::{
     InputHostEvent, InsertionDelivery, InsertionMethod, RequestId, SessionId, TargetSnapshot,
     Transcript,
 };
+use sha2::{Digest, Sha256};
 
 use crate::{clipboard, hotkeys, inject, target, wezterm};
 
 const INJECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
-// Some modern editors resolve Ctrl+V asynchronously. Keeping our replacement
-// on the clipboard for this guarded window prevents them from reading the
-// restored previous value. Sequence-number validation still guarantees that a
-// newer clipboard change made by the user is never overwritten.
-const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(750);
 
 enum InsertionCommand {
     Insert {
@@ -53,38 +49,26 @@ impl InsertionService {
             .name("input-insertion-worker".to_owned())
             .spawn(move || {
                 let apartment = match clipboard::ClipboardApartment::initialize() {
-                    Ok(apartment) => {
-                        let _ = startup.send(Ok(()));
-                        apartment
-                    }
+                    Ok(apartment) => apartment,
                     Err(error) => {
                         let _ = startup.send(Err(error.to_string()));
                         return;
                     }
                 };
                 let _apartment = apartment;
-                let mut pending_restore: Option<ScheduledClipboardRestore> = None;
+                let mut clipboard_host = match clipboard::ClipboardPasteHost::create() {
+                    Ok(host) => host,
+                    Err(error) => {
+                        let _ = startup.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let _ = startup.send(Ok(()));
                 loop {
-                    let command = if let Some(pending) = pending_restore.as_ref() {
-                        let remaining = pending.deadline.saturating_duration_since(Instant::now());
-                        match receiver.recv_timeout(remaining) {
-                            Ok(command) => Some(command),
-                            Err(RecvTimeoutError::Timeout) => {
-                                settle_clipboard_restore(&events, pending_restore.take());
-                                continue;
-                            }
-                            Err(RecvTimeoutError::Disconnected) => None,
-                        }
-                    } else {
-                        receiver.recv().ok()
-                    };
+                    let command = receiver.recv().ok();
                     let Some(command) = command else {
-                        settle_clipboard_restore(&events, pending_restore.take());
                         break;
                     };
-                    // A new operation must observe the user's original clipboard, not
-                    // the temporary payload from a preceding paste.
-                    settle_clipboard_restore(&events, pending_restore.take());
                     match command {
                         InsertionCommand::Insert {
                             transcript,
@@ -92,13 +76,14 @@ impl InsertionService {
                             add_trailing_space,
                         } => {
                             match insert_transcript(
+                                &mut clipboard_host,
                                 &events,
                                 transcript.session_id,
                                 target,
                                 &transcript.text,
                                 add_trailing_space,
                             ) {
-                                Ok(restore) => pending_restore = restore,
+                                Ok(()) => {}
                                 Err(error) => {
                                     crate::diagnostic_line(&format!(
                                         "insertion action=insert result=failed session={} target_pid={} error={error}",
@@ -146,8 +131,14 @@ impl InsertionService {
                             request_id,
                             target,
                             text,
-                        } => match replace_selection(&events, request_id, target, &text) {
-                            Ok(restore) => pending_restore = restore,
+                        } => match replace_selection(
+                            &mut clipboard_host,
+                            &events,
+                            request_id,
+                            target,
+                            &text,
+                        ) {
+                            Ok(()) => {}
                             Err(error) => {
                                 let _ = events.send(InputHostEvent::Failed {
                                     session_id: None,
@@ -157,7 +148,6 @@ impl InsertionService {
                             }
                         },
                         InsertionCommand::Shutdown => {
-                            settle_clipboard_restore(&events, pending_restore.take());
                             break;
                         }
                     }
@@ -203,12 +193,6 @@ impl InsertionService {
     }
 }
 
-struct ScheduledClipboardRestore {
-    pending: clipboard::PendingClipboardRestore,
-    deadline: Instant,
-    session_id: Option<SessionId>,
-}
-
 #[derive(Clone, Copy)]
 struct InsertionTiming {
     started: Instant,
@@ -216,37 +200,14 @@ struct InsertionTiming {
     release_wait_ms: u64,
 }
 
-impl ScheduledClipboardRestore {
-    fn new(pending: clipboard::PendingClipboardRestore, session_id: Option<SessionId>) -> Self {
-        Self {
-            pending,
-            deadline: Instant::now() + CLIPBOARD_RESTORE_DELAY,
-            session_id,
-        }
-    }
-}
-
-fn settle_clipboard_restore(
-    events: &Sender<InputHostEvent>,
-    scheduled: Option<ScheduledClipboardRestore>,
-) {
-    let Some(scheduled) = scheduled else {
-        return;
-    };
-    if let Err(error) = scheduled.pending.restore() {
-        crate::diagnostic_line(&format!("clipboard_restore result=failed error={error}"));
-    } else if let Some(session_id) = scheduled.session_id {
-        let _ = events.send(InputHostEvent::ClipboardRestored { session_id });
-    }
-}
-
 fn insert_transcript(
+    clipboard_host: &mut clipboard::ClipboardPasteHost,
     events: &Sender<InputHostEvent>,
     session_id: SessionId,
     target_snapshot: TargetSnapshot,
     text: &str,
     add_trailing_space: bool,
-) -> Result<Option<ScheduledClipboardRestore>, String> {
+) -> Result<(), String> {
     let started = Instant::now();
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err(
@@ -275,7 +236,7 @@ fn insert_transcript(
                     payload.chars().count(),
                     timing,
                 );
-                return Ok(None);
+                return Ok(());
             }
             Err(error) => {
                 crate::diagnostic_line(&format!(
@@ -302,32 +263,47 @@ target_pid={} error={error}",
                     payload.chars().count(),
                     timing,
                 );
-                return Ok(None);
+                return Ok(());
             }
         }
     }
     let paste_shortcut = target::paste_shortcut(target_snapshot);
+    crate::diagnostic_line(&format!(
+        "clipboard_lease action=prepare session={session_id} target_pid={} target_hwnd={} foreground_hwnd={}",
+        target_snapshot.process_id,
+        target_snapshot.window_handle,
+        inject::foreground_window_handle(),
+    ));
 
     match clipboard::dispatch_paste(
+        clipboard_host,
         || inject::is_foreground(target_snapshot),
         || inject::paste_shortcut(paste_shortcut).map_err(|_| clipboard::ClipboardError::Paste),
+        target_snapshot.process_id,
         text,
         add_trailing_space,
     ) {
-        Ok(pending_restore) => {
+        Ok(receipt) => {
+            log_clipboard_lease(Some(session_id), None, &payload, target_snapshot, receipt);
+            let delivery = match receipt.disposition {
+                clipboard::ClipboardLeaseDisposition::RestoredAfterTargetRead => {
+                    let _ = events.send(InputHostEvent::ClipboardRestored { session_id });
+                    InsertionDelivery::ClipboardReadAcknowledged
+                }
+                clipboard::ClipboardLeaseDisposition::PreservedUnverified => {
+                    InsertionDelivery::Unverified
+                }
+            };
             send_dispatched(
                 events,
                 session_id,
                 InsertionMethod::ClipboardPaste,
-                InsertionDelivery::Unverified,
+                delivery,
                 target_snapshot,
                 text.chars().count(),
                 timing,
             );
-            Ok(Some(ScheduledClipboardRestore::new(
-                pending_restore,
-                Some(session_id),
-            )))
+            Ok(())
         }
         Err(clipboard_error) if inject::is_foreground(target_snapshot) => {
             inject::insert_text(target_snapshot, text, add_trailing_space).map_err(
@@ -344,37 +320,41 @@ target_pid={} error={error}",
                 text.chars().count(),
                 timing,
             );
-            Ok(None)
+            Ok(())
         }
         Err(error) => Err(error.to_string()),
     }
 }
 
 fn replace_selection(
+    clipboard_host: &mut clipboard::ClipboardPasteHost,
     events: &Sender<InputHostEvent>,
     request_id: RequestId,
     target_snapshot: TargetSnapshot,
     text: &str,
-) -> Result<Option<ScheduledClipboardRestore>, String> {
+) -> Result<(), String> {
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err("physical modifier keys did not become idle".to_owned());
     }
     let paste_shortcut = target::paste_shortcut(target_snapshot);
 
     match clipboard::dispatch_paste(
+        clipboard_host,
         || inject::is_foreground(target_snapshot),
         || inject::paste_shortcut(paste_shortcut).map_err(|_| clipboard::ClipboardError::Paste),
+        target_snapshot.process_id,
         text,
         false,
     ) {
-        Ok(pending_restore) => {
+        Ok(receipt) => {
+            log_clipboard_lease(None, Some(request_id), text, target_snapshot, receipt);
             crate::diagnostic_line(&format!(
                 "insertion action=replace_selection result=sent_unverified request={request_id} \
 target_pid={} method=clipboard",
                 target_snapshot.process_id
             ));
             let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
-            Ok(Some(ScheduledClipboardRestore::new(pending_restore, None)))
+            Ok(())
         }
         Err(clipboard_error) if inject::is_foreground(target_snapshot) => {
             inject::replace_selection(target_snapshot, text).map_err(|injection_error| {
@@ -386,10 +366,42 @@ target_pid={} method=unicode",
                 target_snapshot.process_id
             ));
             let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
-            Ok(None)
+            Ok(())
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn log_clipboard_lease(
+    session_id: Option<SessionId>,
+    request_id: Option<RequestId>,
+    payload: &str,
+    target: TargetSnapshot,
+    receipt: clipboard::ClipboardPasteReceipt,
+) {
+    let owner = session_id
+        .map(|id| format!("session={id}"))
+        .or_else(|| request_id.map(|id| format!("request={id}")))
+        .unwrap_or_else(|| "owner=unknown".to_owned());
+    crate::diagnostic_line(&format!(
+        "clipboard_lease action=settle result={:?} {owner} target_pid={} chars={} \
+payload_sha256={} original_sequence={} replacement_sequence={} settled_sequence={}",
+        receipt.disposition,
+        target.process_id,
+        payload.chars().count(),
+        payload_fingerprint(payload),
+        receipt.original_sequence,
+        receipt.replacement_sequence,
+        receipt.settled_sequence,
+    ));
+}
+
+fn payload_fingerprint(payload: &str) -> String {
+    let digest = Sha256::digest(payload.as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn send_dispatched(
@@ -418,4 +430,26 @@ target_pid={} chars={chars} release_wait_ms={} method_ms={method_ms} total_ms={t
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::payload_fingerprint;
+
+    #[test]
+    fn clipboard_payload_fingerprint_is_stable_and_non_plaintext() {
+        let fingerprint = payload_fingerprint("SayFlex");
+
+        assert_eq!(fingerprint, "cbb691b3059acace");
+        assert_eq!(fingerprint.len(), 16);
+        assert!(!fingerprint.contains("SayFlex"));
+    }
+
+    #[test]
+    fn clipboard_payload_fingerprint_covers_trailing_space() {
+        assert_ne!(
+            payload_fingerprint("dictation"),
+            payload_fingerprint("dictation ")
+        );
+    }
 }

@@ -133,13 +133,17 @@ pub fn is_foreground(target: TargetSnapshot) -> bool {
     if target.window_handle == 0 || target.process_id == 0 {
         return false;
     }
+    foreground_window_handle() == target.window_handle
+}
+
+pub fn foreground_window_handle() -> u64 {
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.is_null() {
-        return false;
+        return 0;
     }
     let root = unsafe { GetAncestor(foreground, GA_ROOT) };
     let actual = if root.is_null() { foreground } else { root };
-    actual as usize as u64 == target.window_handle
+    actual as usize as u64
 }
 
 fn unicode_input(unit: u16, key_up: bool) -> INPUT {

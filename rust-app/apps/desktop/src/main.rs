@@ -3595,6 +3595,9 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             };
             let delivery_name = match delivery {
                 rust_protocol::InsertionDelivery::AdapterAcknowledged => "adapter_acknowledged",
+                rust_protocol::InsertionDelivery::ClipboardReadAcknowledged => {
+                    "clipboard_read_acknowledged"
+                }
                 rust_protocol::InsertionDelivery::Unverified => "unverified",
             };
             if let Some(total) = total_after_release_ms {
@@ -3620,6 +3623,13 @@ speculative_reuse={} method={} delivery={}",
                 rust_protocol::InsertionDelivery::AdapterAcknowledged => {
                     format!(
                         "Inserted {} through the target adapter in {} ms",
+                        short_id(session_id),
+                        elapsed
+                    )
+                }
+                rust_protocol::InsertionDelivery::ClipboardReadAcknowledged => {
+                    format!(
+                        "Inserted {} after the target read the clipboard in {} ms",
                         short_id(session_id),
                         elapsed
                     )
