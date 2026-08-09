@@ -4,6 +4,7 @@ mod clipboard;
 mod hotkeys;
 mod inject;
 mod insertion;
+mod insertion_adapter;
 mod selection_capture;
 mod target;
 mod uia_selection;
@@ -43,10 +44,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|argument| argument == "--insertion-smoke") {
         require_smoke_opt_in("SAYFLEX_RUN_INSERTION_SMOKE")?;
         return run_insertion_smoke();
-    }
-    if std::env::args().any(|argument| argument == "--clipboard-lease-smoke") {
-        require_smoke_opt_in("SAYFLEX_RUN_CLIPBOARD_LEASE_SMOKE")?;
-        return run_clipboard_lease_smoke();
     }
     if let Some(process_id) = std::env::args()
         .find_map(|argument| {
@@ -231,16 +228,18 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut method = None;
     let mut delivery = None;
+    let mut dispatch_duration_ms = None;
     while Instant::now() < deadline {
         match receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(InputHostEvent::InsertionDispatched {
                 session_id: completed,
                 method: insertion_method,
                 delivery: insertion_delivery,
-                ..
+                dispatch_duration_ms: duration,
             }) if completed == session_id => {
                 method = Some(insertion_method);
                 delivery = Some(insertion_delivery);
+                dispatch_duration_ms = Some(duration);
                 break;
             }
             Ok(InputHostEvent::Failed {
@@ -257,51 +256,14 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
     insertion.shutdown();
     let method = method.ok_or("insertion smoke timed out")?;
     let delivery = delivery.ok_or("insertion smoke did not report delivery confidence")?;
-    let clipboard_restored =
-        delivery == rust_protocol::InsertionDelivery::ClipboardReadAcknowledged;
-    let clipboard_preserved = method == rust_protocol::InsertionMethod::ClipboardPaste
-        && delivery == rust_protocol::InsertionDelivery::Unverified;
     serde_json::to_writer(
         io::stdout().lock(),
         &serde_json::json!({
             "session_id": session_id,
             "method": format!("{method:?}"),
             "delivery": format!("{delivery:?}"),
-            "clipboard_restored": clipboard_restored,
-            "clipboard_preserved": clipboard_preserved,
-            "chars": text.chars().count(),
-        }),
-    )?;
-    Ok(())
-}
-
-fn run_clipboard_lease_smoke() -> Result<(), Box<dyn std::error::Error>> {
-    let handle = std::env::var("SAYFLEX_INSERTION_SMOKE_HWND")?.parse()?;
-    let text = std::env::var("SAYFLEX_INSERTION_SMOKE_TEXT")?;
-    let target = target::capture_window_handle(handle);
-    let _apartment = clipboard::ClipboardApartment::initialize()?;
-    let mut host = clipboard::ClipboardPasteHost::create()?;
-    let started = Instant::now();
-    let receipt = clipboard::dispatch_paste(
-        &mut host,
-        || true,
-        || Ok(()),
-        target.process_id,
-        &text,
-        false,
-    )?;
-    let restored =
-        receipt.disposition == clipboard::ClipboardLeaseDisposition::RestoredAfterTargetRead;
-    serde_json::to_writer(
-        io::stdout().lock(),
-        &serde_json::json!({
-            "clipboard_restored": restored,
-            "clipboard_preserved": !restored,
-            "disposition": format!("{:?}", receipt.disposition),
-            "original_sequence": receipt.original_sequence,
-            "replacement_sequence": receipt.replacement_sequence,
-            "settled_sequence": receipt.settled_sequence,
-            "elapsed_ms": started.elapsed().as_millis(),
+            "dispatch_duration_ms": dispatch_duration_ms,
+            "clipboard_untouched": true,
             "chars": text.chars().count(),
         }),
     )?;

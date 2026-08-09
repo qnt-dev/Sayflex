@@ -3,10 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 10 distinguishes an adapter acknowledgement from an unverified
-// synthetic-input dispatch and adds the deterministic WezTerm CLI method.
+// Version 11 removes automatic clipboard-paste delivery and distinguishes a
+// target-adapter acknowledgement from acceptance by the Windows input stream.
 // All packaged processes must agree on this schema before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -311,9 +311,6 @@ pub enum InputHostEvent {
         delivery: InsertionDelivery,
         dispatch_duration_ms: u64,
     },
-    ClipboardRestored {
-        session_id: SessionId,
-    },
     Recovered {
         session_id: SessionId,
     },
@@ -334,7 +331,8 @@ pub enum InputHostEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InsertionMethod {
-    ClipboardPaste,
+    /// Synchronous EM_REPLACESEL delivery to a standard Win32 edit control.
+    NativeEditMessage,
     UnicodeInput,
     WezTermCli,
 }
@@ -344,12 +342,10 @@ pub enum InsertionMethod {
 pub enum InsertionDelivery {
     /// A target-specific adapter accepted the operation and returned success.
     AdapterAcknowledged,
-    /// The target process requested the leased clipboard payload and released
-    /// the clipboard before the previous contents were restored.
-    ClipboardReadAcknowledged,
-    /// Windows accepted synthetic input, but the target application cannot be
-    /// observed safely enough to claim that it consumed the text.
-    Unverified,
+    /// Windows accepted the complete synthetic Unicode input stream. This is
+    /// not a claim that an arbitrary target exposed its resulting document,
+    /// but the user's clipboard was never changed.
+    InputStreamAccepted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

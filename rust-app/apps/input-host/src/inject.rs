@@ -8,16 +8,17 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
             KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput,
-            VK_C, VK_CONTROL, VK_INSERT, VK_LCONTROL, VK_LMENU, VK_SHIFT, VK_V,
+            VK_C, VK_CONTROL, VK_INSERT, VK_LCONTROL, VK_LMENU, VK_SHIFT,
         },
         WindowsAndMessaging::{
-            GA_ROOT, GUITHREADINFO, GetAncestor, GetForegroundWindow, GetGUIThreadInfo,
+            ES_PASSWORD, GA_ROOT, GUITHREADINFO, GWL_STYLE, GetAncestor, GetClassNameW,
+            GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW, GetWindowThreadProcessId,
             SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_COPY,
         },
     },
 };
 
-use crate::target::{PasteShortcut, SelectionCopyShortcut};
+use crate::target::SelectionCopyShortcut;
 
 pub const SYNTHETIC_MARKER: usize = 0x5255_5354_564f_4943;
 pub const E2E_HOTKEY_MARKER: usize = 0x514e_5446_4c45_5845;
@@ -36,6 +37,8 @@ pub enum InjectionError {
     },
 }
 
+const EM_REPLACESEL: u32 = 0x00c2;
+
 pub fn insert_text(
     target: TargetSnapshot,
     text: &str,
@@ -51,7 +54,10 @@ pub fn insert_text(
         text.to_owned()
     };
     let units = complete.encode_utf16().collect::<Vec<_>>();
-    for chunk in units.chunks(128) {
+    // A single large input batch prevents target queues from imposing a
+    // round-trip at every 128 UTF-16 units. Bound the batch so exceptionally
+    // long transcripts still revalidate focus and physical modifier state.
+    for chunk in units.chunks(2_048) {
         ensure_injection_safe()?;
         if !is_foreground(target) {
             return Err(InjectionError::TargetChanged);
@@ -66,8 +72,87 @@ pub fn insert_text(
     Ok(())
 }
 
-pub fn replace_selection(target: TargetSnapshot, text: &str) -> Result<(), InjectionError> {
-    insert_text(target, text, false)
+/// Inserts text through the synchronous Win32 edit-control contract without
+/// touching the system clipboard. Returns `Ok(false)` when the focused target
+/// is not a standard Edit/RichEdit control and another adapter should be used.
+pub fn insert_native_edit(
+    target: TargetSnapshot,
+    text: &str,
+    add_trailing_space: bool,
+) -> Result<bool, InjectionError> {
+    ensure_injection_safe()?;
+    if !is_foreground(target) {
+        return Err(InjectionError::TargetChanged);
+    }
+    let mut information = GUITHREADINFO {
+        cbSize: mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetGUIThreadInfo(target.thread_id, &mut information) } == 0
+        || information.hwndFocus.is_null()
+    {
+        return Ok(false);
+    }
+    let mut focused_process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(information.hwndFocus, &mut focused_process_id);
+    }
+    if focused_process_id != target.process_id {
+        return Ok(false);
+    }
+    let mut class_name = [0_u16; 128];
+    let copied = unsafe {
+        GetClassNameW(
+            information.hwndFocus,
+            class_name.as_mut_ptr(),
+            class_name.len() as i32,
+        )
+    };
+    if copied <= 0
+        || !is_native_edit_class(&String::from_utf16_lossy(&class_name[..copied as usize]))
+    {
+        return Ok(false);
+    }
+    let style = unsafe { GetWindowLongPtrW(information.hwndFocus, GWL_STYLE) };
+    if style & ES_PASSWORD as isize != 0 {
+        return Ok(false);
+    }
+    let complete = if add_trailing_space {
+        format!("{text} ")
+    } else {
+        text.to_owned()
+    };
+    let wide = complete.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let mut ignored = 0_usize;
+    // EM_REPLACESEL is a system-defined message below WM_USER, so Windows
+    // marshals its UTF-16 pointer across the process boundary. The call returns
+    // only after the edit control has processed the replacement.
+    let delivered = unsafe {
+        SendMessageTimeoutW(
+            information.hwndFocus,
+            EM_REPLACESEL,
+            1,
+            wide.as_ptr() as isize,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            250,
+            &mut ignored,
+        )
+    };
+    if delivered == 0 {
+        return Err(InjectionError::Partial {
+            sent: 0,
+            expected: 1,
+            win32: unsafe { GetLastError() },
+        });
+    }
+    Ok(true)
+}
+
+fn is_native_edit_class(class_name: &str) -> bool {
+    let normalized = class_name.to_ascii_lowercase();
+    normalized == "edit"
+        || normalized.contains("richedit")
+        || normalized.starts_with("windowsforms10.edit.")
 }
 
 pub fn copy_shortcut(shortcut: SelectionCopyShortcut) -> Result<(), InjectionError> {
@@ -118,14 +203,6 @@ pub fn copy_message(target: TargetSnapshot) -> Result<(), InjectionError> {
         })
     } else {
         Ok(())
-    }
-}
-
-pub fn paste_shortcut(shortcut: PasteShortcut) -> Result<(), InjectionError> {
-    match shortcut {
-        PasteShortcut::ControlV => send_control_shortcut(VK_V, false),
-        PasteShortcut::ControlShiftV => send_control_shortcut(VK_V, true),
-        PasteShortcut::ShiftInsert => send_shift_shortcut(VK_INSERT),
     }
 }
 
@@ -241,31 +318,6 @@ fn send_control_shortcut(key: u16, with_shift: bool) -> Result<(), InjectionErro
     }
 }
 
-fn send_shift_shortcut(key: u16) -> Result<(), InjectionError> {
-    ensure_injection_safe()?;
-    let inputs = [
-        scan_code_key(VK_SHIFT, false),
-        scan_code_key(key, false),
-        scan_code_key(key, true),
-        scan_code_key(VK_SHIFT, true),
-    ];
-    match send(&inputs) {
-        Ok(()) => Ok(()),
-        Err(error @ InjectionError::Partial { sent, .. }) => {
-            if (1..inputs.len() as u32).contains(&sent) {
-                let mut owned_key_ups = Vec::with_capacity(2);
-                if (2..3).contains(&sent) {
-                    owned_key_ups.push(scan_code_key(key, true));
-                }
-                owned_key_ups.push(scan_code_key(VK_SHIFT, true));
-                release_owned_keys_best_effort(&owned_key_ups);
-            }
-            Err(error)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 fn release_owned_keys_best_effort(inputs: &[INPUT]) {
     if inputs.is_empty() {
         return;
@@ -305,5 +357,22 @@ fn send(inputs: &[INPUT]) -> Result<(), InjectionError> {
             expected: inputs.len() as u32,
             win32: unsafe { GetLastError() },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_native_edit_class;
+
+    #[test]
+    fn recognizes_native_edit_control_classes() {
+        assert!(is_native_edit_class("Edit"));
+        assert!(is_native_edit_class("RichEditD2DPT"));
+        assert!(is_native_edit_class("RICHEDIT50W"));
+        assert!(is_native_edit_class(
+            "WindowsForms10.EDIT.app.0.141b42a_r8_ad1"
+        ));
+        assert!(!is_native_edit_class("Chrome_RenderWidgetHostHWND"));
+        assert!(!is_native_edit_class("CASCADIA_HOSTING_WINDOW_CLASS"));
     }
 }

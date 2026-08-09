@@ -3589,16 +3589,13 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 recording_overlays.retire_all("insertion_completed");
             }
             let method_name = match method {
-                rust_protocol::InsertionMethod::ClipboardPaste => "clipboard",
+                rust_protocol::InsertionMethod::NativeEditMessage => "native_edit_message",
                 rust_protocol::InsertionMethod::UnicodeInput => "unicode",
                 rust_protocol::InsertionMethod::WezTermCli => "wezterm_cli",
             };
             let delivery_name = match delivery {
                 rust_protocol::InsertionDelivery::AdapterAcknowledged => "adapter_acknowledged",
-                rust_protocol::InsertionDelivery::ClipboardReadAcknowledged => {
-                    "clipboard_read_acknowledged"
-                }
-                rust_protocol::InsertionDelivery::Unverified => "unverified",
+                rust_protocol::InsertionDelivery::InputStreamAccepted => "input_stream_accepted",
             };
             if let Some(total) = total_after_release_ms {
                 let latency = transcript_latency.unwrap_or_default();
@@ -3627,16 +3624,9 @@ speculative_reuse={} method={} delivery={}",
                         elapsed
                     )
                 }
-                rust_protocol::InsertionDelivery::ClipboardReadAcknowledged => {
+                rust_protocol::InsertionDelivery::InputStreamAccepted => {
                     format!(
-                        "Inserted {} after the target read the clipboard in {} ms",
-                        short_id(session_id),
-                        elapsed
-                    )
-                }
-                rust_protocol::InsertionDelivery::Unverified => {
-                    format!(
-                        "Sent {} to the target in {} ms",
+                        "Sent {} through Windows input without changing the clipboard in {} ms",
                         short_id(session_id),
                         elapsed
                     )
@@ -3644,7 +3634,6 @@ speculative_reuse={} method={} delivery={}",
             };
             set_indicator_status(settings, &status);
         }
-        InputHostEvent::ClipboardRestored { session_id: _ } => {}
         InputHostEvent::Recovered { session_id } => {
             set_indicator_status(
                 settings,

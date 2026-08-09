@@ -35,14 +35,15 @@ $editor = [System.Windows.Forms.TextBox]::new()
 $editor.Multiline = $true
 $editor.Dock = [System.Windows.Forms.DockStyle]::Fill
 $editor.Font = [System.Drawing.Font]::new('Segoe UI', 14)
-$editor.Add_KeyDown({
+$script:inputDelayApplied = $false
+$editor.Add_KeyPress({
     param($sender, $eventArgs)
     if (
-        $eventArgs.Control -and
-        $eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::V -and
-        $env:SAYFLEX_INSERTION_SMOKE_KEYDOWN_DELAY_MS
+        -not $script:inputDelayApplied -and
+        $env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS
     ) {
-        Start-Sleep -Milliseconds ([int]$env:SAYFLEX_INSERTION_SMOKE_KEYDOWN_DELAY_MS)
+        $script:inputDelayApplied = $true
+        Start-Sleep -Milliseconds ([int]$env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS)
     }
 })
 $form.Controls.Add($editor)
@@ -50,8 +51,7 @@ $form.Controls.Add($editor)
 $form.Add_Shown({
     $editor.Focus()
     if (
-        $env:SAYFLEX_RUN_INSERTION_SMOKE -ne '1' -and
-        $env:SAYFLEX_RUN_CLIPBOARD_LEASE_SMOKE -ne '1'
+        $env:SAYFLEX_RUN_INSERTION_SMOKE -ne '1'
     ) {
         return
     }
@@ -69,20 +69,15 @@ $form.Add_Shown({
     $script:insertionOutputPath = $outputPath
     $script:insertionResultPath = $resultPath
     $script:insertionErrorPath = $errorPath
-    $script:leaseMode = $env:SAYFLEX_RUN_CLIPBOARD_LEASE_SMOKE -eq '1'
-    $script:leaseInitialSequence = [FixtureForeground]::GetClipboardSequenceNumber()
-    $script:leaseDetectedAt = $null
     [System.IO.File]::WriteAllText($outputPath, '')
     [System.IO.File]::WriteAllText($errorPath, '')
     [System.IO.File]::WriteAllText($resultPath, '')
     $handle = $form.Handle.ToInt64()
     $text = $env:SAYFLEX_INSERTION_SMOKE_TEXT
-    $smokeArgument = if ($script:leaseMode) { '--clipboard-lease-smoke' } else { '--insertion-smoke' }
+    $smokeArgument = '--insertion-smoke'
     $env:SAYFLEX_INSERTION_SMOKE_HWND = [string]$handle
     $env:SAYFLEX_INSERTION_SMOKE_TEXT = $text
-    if (-not $script:leaseMode) {
-        $env:SAYFLEX_INSERTION_SMOKE_DELAY_MS = '600'
-    }
+    $env:SAYFLEX_INSERTION_SMOKE_DELAY_MS = '600'
     [FixtureForeground]::Focus($form.Handle)
     $script:insertionProcess = Start-Process `
         -FilePath $hostPath `
@@ -91,27 +86,19 @@ $form.Add_Shown({
         -RedirectStandardError $errorPath `
         -WindowStyle Hidden `
         -PassThru
+    $script:insertionDeadline = [DateTime]::UtcNow.AddSeconds(20)
 
     $script:insertionTimer = [System.Windows.Forms.Timer]::new()
     $script:insertionTimer.Interval = 25
     $script:insertionTimer.Add_Tick({
-        if ($script:leaseMode) {
-            $sequence = [FixtureForeground]::GetClipboardSequenceNumber()
-            if ($sequence -ne $script:leaseInitialSequence -and $null -eq $script:leaseDetectedAt) {
-                $script:leaseDetectedAt = [DateTime]::UtcNow
-            }
-            $delay = if ($env:SAYFLEX_INSERTION_SMOKE_KEYDOWN_DELAY_MS) {
-                [int]$env:SAYFLEX_INSERTION_SMOKE_KEYDOWN_DELAY_MS
-            } else {
-                0
-            }
-            if (
-                $null -ne $script:leaseDetectedAt -and
-                [string]::IsNullOrEmpty($editor.Text) -and
-                ([DateTime]::UtcNow - $script:leaseDetectedAt).TotalMilliseconds -ge $delay
-            ) {
-                $editor.Text = [System.Windows.Forms.Clipboard]::GetText()
-            }
+        if ([DateTime]::UtcNow -ge $script:insertionDeadline) {
+            $script:insertionFailure = "timed out waiting for exact text; received: $($editor.Text)"
+            $script:insertionTimer.Stop()
+            $form.Close()
+            return
+        }
+        if ($env:SAYFLEX_INSERTION_SMOKE_OBSERVE_CLIPBOARD -eq '1') {
+            [void][System.Windows.Forms.Clipboard]::GetText()
         }
         [FixtureForeground]::Focus($form.Handle)
         $form.Activate()
@@ -127,7 +114,7 @@ $form.Add_Shown({
             }
             return
         }
-        if (-not $script:leaseMode -or -not [string]::IsNullOrEmpty($editor.Text)) {
+        if ($editor.Text -eq $env:SAYFLEX_INSERTION_SMOKE_TEXT) {
             $script:insertionTimer.Stop()
             [System.IO.File]::WriteAllText($script:insertionResultPath, $editor.Text)
             $form.Close()

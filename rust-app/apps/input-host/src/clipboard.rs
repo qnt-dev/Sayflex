@@ -7,24 +7,16 @@ use std::{
 use thiserror::Error;
 use windows_sys::{
     Win32::{
-        Foundation::{GlobalFree, HWND, LPARAM, LRESULT, WPARAM},
+        Foundation::{GlobalFree, HWND},
         System::{
             DataExchange::{
-                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner,
-                GetClipboardSequenceNumber, GetOpenClipboardWindow, IsClipboardFormatAvailable,
+                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
                 OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
             },
-            LibraryLoader::GetModuleHandleW,
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
             Ole::{
                 CF_UNICODETEXT, OleGetClipboard, OleInitialize, OleSetClipboard, OleUninitialize,
             },
-        },
-        UI::WindowsAndMessaging::{
-            CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-            GWLP_USERDATA, GetWindowLongPtrW, GetWindowThreadProcessId, HWND_MESSAGE, MSG,
-            PM_REMOVE, PeekMessageW, RegisterClassW, SetWindowLongPtrW, TranslateMessage,
-            WM_NCCREATE, WM_RENDERFORMAT, WNDCLASSW,
         },
     },
     core::IUnknown_Vtbl,
@@ -44,8 +36,6 @@ pub enum ClipboardError {
     InvalidData,
     #[error("the target application changed before paste")]
     TargetChanged,
-    #[error("paste injection failed")]
-    Paste,
     #[error("OLE clipboard operation failed with HRESULT {0:#010x}")]
     Ole(i32),
 }
@@ -64,246 +54,6 @@ pub struct ClipboardCapture {
 
 pub struct ClipboardApartment {
     initialized: bool,
-}
-
-const PASTE_READ_ACK_TIMEOUT: Duration = Duration::from_millis(250);
-const PASTE_READ_POLL_INTERVAL: Duration = Duration::from_millis(2);
-const RENDER_WINDOW_CLASS: &[u16] = &[
-    b'S' as u16,
-    b'a' as u16,
-    b'y' as u16,
-    b'F' as u16,
-    b'l' as u16,
-    b'e' as u16,
-    b'x' as u16,
-    b'.' as u16,
-    b'C' as u16,
-    b'l' as u16,
-    b'i' as u16,
-    b'p' as u16,
-    b'b' as u16,
-    b'o' as u16,
-    b'a' as u16,
-    b'r' as u16,
-    b'd' as u16,
-    b'L' as u16,
-    b'e' as u16,
-    b'a' as u16,
-    b's' as u16,
-    b'e' as u16,
-    0,
-];
-
-#[derive(Default)]
-struct ClipboardRenderState {
-    payload: String,
-    target_process_id: u32,
-    rendered: bool,
-    target_requested: bool,
-    render_failed: bool,
-}
-
-pub struct ClipboardPasteHost {
-    hwnd: HWND,
-    state: Box<ClipboardRenderState>,
-}
-
-impl ClipboardPasteHost {
-    pub fn create() -> Result<Self, ClipboardError> {
-        let instance = unsafe { GetModuleHandleW(ptr::null()) };
-        if instance.is_null() {
-            return Err(ClipboardError::Allocation);
-        }
-        let class = WNDCLASSW {
-            lpfnWndProc: Some(clipboard_render_window_proc),
-            hInstance: instance,
-            lpszClassName: RENDER_WINDOW_CLASS.as_ptr(),
-            ..Default::default()
-        };
-        let atom = unsafe { RegisterClassW(&raw const class) };
-        if atom == 0 {
-            // The insertion host creates exactly one render window. A previous
-            // class registration in this process is harmless and CreateWindow
-            // remains the authoritative check below.
-        }
-
-        let mut state = Box::<ClipboardRenderState>::default();
-        let state_pointer = (&mut *state as *mut ClipboardRenderState).cast::<c_void>();
-        let hwnd = unsafe {
-            CreateWindowExW(
-                0,
-                RENDER_WINDOW_CLASS.as_ptr(),
-                RENDER_WINDOW_CLASS.as_ptr(),
-                0,
-                0,
-                0,
-                0,
-                0,
-                HWND_MESSAGE,
-                ptr::null_mut(),
-                instance,
-                state_pointer,
-            )
-        };
-        if hwnd.is_null() {
-            return Err(ClipboardError::Allocation);
-        }
-        Ok(Self { hwnd, state })
-    }
-
-    fn publish(&mut self, payload: &str, target_process_id: u32) -> Result<u32, ClipboardError> {
-        self.state.payload.clear();
-        self.state.payload.push_str(payload);
-        self.state.target_process_id = target_process_id;
-        self.state.rendered = false;
-        self.state.target_requested = false;
-        self.state.render_failed = false;
-
-        let mut private_payloads = private_format_payloads()?;
-        with_open_clipboard_owner(self.hwnd, || {
-            if unsafe { EmptyClipboard() } == 0 {
-                return Err(ClipboardError::Busy);
-            }
-            // A null handle advertises delayed rendering. Windows will send
-            // WM_RENDERFORMAT to our message-only owner when a consumer really
-            // requests Unicode text.
-            unsafe {
-                let _ = SetClipboardData(u32::from(CF_UNICODETEXT), ptr::null_mut());
-            }
-            for (format, payload) in &mut private_payloads {
-                let accepted = unsafe { SetClipboardData(*format, payload.handle) };
-                if accepted.is_null() {
-                    let _ = unsafe { EmptyClipboard() };
-                    return Err(ClipboardError::Allocation);
-                }
-                payload.release_to_clipboard();
-            }
-            Ok(())
-        })?;
-        if unsafe { IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) } == 0 {
-            return Err(ClipboardError::Allocation);
-        }
-        Ok(unsafe { GetClipboardSequenceNumber() })
-    }
-
-    fn await_target_read(&mut self) -> Result<ClipboardReadOutcome, ClipboardError> {
-        let deadline = Instant::now() + PASTE_READ_ACK_TIMEOUT;
-        while Instant::now() < deadline {
-            self.pump_messages();
-            if self.state.render_failed {
-                return Err(ClipboardError::Allocation);
-            }
-            if self.state.rendered {
-                if self.state.target_requested && self.wait_until_clipboard_released(deadline) {
-                    return Ok(ClipboardReadOutcome::TargetConsumed);
-                }
-                return Ok(ClipboardReadOutcome::UnverifiedConsumer);
-            }
-            thread::sleep(PASTE_READ_POLL_INTERVAL);
-        }
-        Ok(ClipboardReadOutcome::NoConsumerObserved)
-    }
-
-    fn materialize_if_owned(&mut self) -> Result<(), ClipboardError> {
-        if unsafe { GetClipboardOwner() } != self.hwnd || self.state.rendered {
-            return Ok(());
-        }
-        with_open_clipboard_owner(self.hwnd, || render_payload(&mut self.state))
-    }
-
-    fn owns_clipboard(&self) -> bool {
-        (unsafe { GetClipboardOwner() }) == self.hwnd
-    }
-
-    fn wait_until_clipboard_released(&mut self, deadline: Instant) -> bool {
-        while Instant::now() < deadline {
-            if unsafe { OpenClipboard(self.hwnd) } != 0 {
-                unsafe {
-                    let _ = CloseClipboard();
-                }
-                return true;
-            }
-            self.pump_messages();
-            thread::sleep(PASTE_READ_POLL_INTERVAL);
-        }
-        false
-    }
-
-    fn pump_messages(&mut self) {
-        let mut message = MSG::default();
-        while unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
-            unsafe {
-                let _ = TranslateMessage(&raw const message);
-                DispatchMessageW(&raw const message);
-            }
-        }
-    }
-}
-
-impl Drop for ClipboardPasteHost {
-    fn drop(&mut self) {
-        let _ = self.materialize_if_owned();
-        unsafe {
-            let _ = DestroyWindow(self.hwnd);
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClipboardReadOutcome {
-    TargetConsumed,
-    UnverifiedConsumer,
-    NoConsumerObserved,
-}
-
-unsafe extern "system" fn clipboard_render_window_proc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if message == WM_NCCREATE {
-        let create = lparam as *const CREATESTRUCTW;
-        if !create.is_null() {
-            let state = unsafe { (*create).lpCreateParams } as isize;
-            unsafe {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state);
-            }
-        }
-    }
-    let state = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ClipboardRenderState;
-    if message == WM_RENDERFORMAT && wparam as u32 == u32::from(CF_UNICODETEXT) && !state.is_null()
-    {
-        let requester = unsafe { GetOpenClipboardWindow() };
-        let mut requester_process_id = 0;
-        if !requester.is_null() {
-            unsafe {
-                GetWindowThreadProcessId(requester, &mut requester_process_id);
-            }
-        }
-        let state = unsafe { &mut *state };
-        state.target_requested =
-            requester_process_id != 0 && requester_process_id == state.target_process_id;
-        if render_payload(state).is_err() {
-            state.render_failed = true;
-        }
-        return 0;
-    }
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-}
-
-fn render_payload(state: &mut ClipboardRenderState) -> Result<(), ClipboardError> {
-    if state.rendered {
-        return Ok(());
-    }
-    let mut payload = GlobalAllocation::from_utf16(&state.payload)?;
-    let accepted = unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), payload.handle) };
-    if accepted.is_null() {
-        return Err(ClipboardError::Allocation);
-    }
-    payload.release_to_clipboard();
-    state.rendered = true;
-    Ok(())
 }
 
 impl ClipboardApartment {
@@ -648,92 +398,12 @@ fn restore_if_current(
     Ok(())
 }
 
-pub fn dispatch_paste(
-    host: &mut ClipboardPasteHost,
-    target_still_focused: impl Fn() -> bool,
-    send_paste: impl FnOnce() -> Result<(), ClipboardError>,
-    target_process_id: u32,
-    text: &str,
-    add_trailing_space: bool,
-) -> Result<ClipboardPasteReceipt, ClipboardError> {
-    if !target_still_focused() {
-        return Err(ClipboardError::TargetChanged);
-    }
-    let (mut snapshot, original_sequence) = ClipboardSnapshot::capture_consistent()?;
-    let complete = if add_trailing_space {
-        format!("{text} ")
-    } else {
-        text.to_owned()
-    };
-    let replacement_sequence = host.publish(&complete, target_process_id)?;
-    if !target_still_focused() {
-        if host.owns_clipboard() {
-            snapshot.restore()?;
-        }
-        return Err(ClipboardError::TargetChanged);
-    }
-    if let Err(error) = send_paste() {
-        if host.owns_clipboard() {
-            snapshot.restore()?;
-        }
-        return Err(error);
-    }
-    let disposition = match host.await_target_read()? {
-        ClipboardReadOutcome::TargetConsumed if host.owns_clipboard() => {
-            snapshot.restore()?;
-            ClipboardLeaseDisposition::RestoredAfterTargetRead
-        }
-        ClipboardReadOutcome::TargetConsumed
-        | ClipboardReadOutcome::UnverifiedConsumer
-        | ClipboardReadOutcome::NoConsumerObserved => {
-            // Without a target-owned read acknowledgement the only safe state
-            // is to keep the new payload current. Restoring the snapshot here
-            // would recreate the stale-paste race this lease exists to prevent.
-            host.materialize_if_owned()?;
-            drop(snapshot);
-            ClipboardLeaseDisposition::PreservedUnverified
-        }
-    };
-    Ok(ClipboardPasteReceipt {
-        original_sequence,
-        replacement_sequence,
-        settled_sequence: unsafe { GetClipboardSequenceNumber() },
-        disposition,
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClipboardLeaseDisposition {
-    RestoredAfterTargetRead,
-    PreservedUnverified,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ClipboardPasteReceipt {
-    pub original_sequence: u32,
-    pub replacement_sequence: u32,
-    pub settled_sequence: u32,
-    pub disposition: ClipboardLeaseDisposition,
-}
-
 struct ClipboardSnapshot {
     data_object: *mut c_void,
     fallback_text: Option<String>,
 }
 
 impl ClipboardSnapshot {
-    fn capture_consistent() -> Result<(Self, u32), ClipboardError> {
-        for _ in 0..4 {
-            let before = unsafe { GetClipboardSequenceNumber() };
-            let snapshot = Self::capture()?;
-            let after = unsafe { GetClipboardSequenceNumber() };
-            if before == after {
-                return Ok((snapshot, before));
-            }
-        }
-        Err(ClipboardError::Busy)
-    }
-
     fn capture() -> Result<Self, ClipboardError> {
         let fallback_text = get_text().ok();
         let mut last_error = 0;

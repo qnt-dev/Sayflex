@@ -1,13 +1,16 @@
 [CmdletBinding()]
 param(
-    [string]$InputHost = (
-        Join-Path $PSScriptRoot '..\target\debug\sayflex-input-host.exe'
-    ),
+    [string]$InputHost,
     [switch]$InsertionOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$InputHost = if ([string]::IsNullOrWhiteSpace($InputHost)) {
+    Join-Path $rustRoot 'target\debug\sayflex-input-host.exe'
+} else {
+    $InputHost
+}
 $inputHostPath = [System.IO.Path]::GetFullPath($InputHost)
 if (-not (Test-Path -LiteralPath $inputHostPath)) {
     throw "Input host was not found: $inputHostPath"
@@ -57,7 +60,7 @@ function Invoke-SelectionFixture {
         Method = $result.method
         Characters = $result.text.Length
         Milliseconds = $result.elapsed_ms
-        ClipboardRestored = $true
+        ClipboardDisposition = 'Restored'
     }
 }
 
@@ -65,28 +68,34 @@ function Invoke-InsertionFixture {
     param(
         [Parameter(Mandatory)][string]$Text,
         [Parameter(Mandatory)][string]$ClipboardMarker,
-        [int]$KeyDownDelayMs = 0,
-        [switch]$RequirePreserved
+        [int]$InputDelayMs = 0,
+        [switch]$ForceUnicode,
+        [switch]$ObserveClipboard
     )
 
     Set-Clipboard -Value $ClipboardMarker
-    $env:SAYFLEX_RUN_CLIPBOARD_LEASE_SMOKE = '1'
+    $env:SAYFLEX_RUN_INSERTION_SMOKE = '1'
     $env:SAYFLEX_INSERTION_SMOKE_HOST_PATH = $inputHostPath
     $env:SAYFLEX_INSERTION_SMOKE_TEXT = $Text
-    if ($KeyDownDelayMs -gt 0) {
-        $env:SAYFLEX_INSERTION_SMOKE_KEYDOWN_DELAY_MS = [string]$KeyDownDelayMs
+    if ($InputDelayMs -gt 0) {
+        $env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS = [string]$InputDelayMs
     } else {
-        Remove-Item Env:SAYFLEX_INSERTION_SMOKE_KEYDOWN_DELAY_MS -ErrorAction SilentlyContinue
+        Remove-Item Env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS -ErrorAction SilentlyContinue
     }
+    if ($ForceUnicode) { $env:SAYFLEX_INSERTION_SMOKE_FORCE_UNICODE = '1' }
+    else { Remove-Item Env:SAYFLEX_INSERTION_SMOKE_FORCE_UNICODE -ErrorAction SilentlyContinue }
+    if ($ObserveClipboard) { $env:SAYFLEX_INSERTION_SMOKE_OBSERVE_CLIPBOARD = '1' }
+    else { Remove-Item Env:SAYFLEX_INSERTION_SMOKE_OBSERVE_CLIPBOARD -ErrorAction SilentlyContinue }
     & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File (
         Join-Path $rustRoot 'tests\fixtures\insertion-fixture.ps1'
     )
     if ($LASTEXITCODE -ne 0) {
         throw "insertion fixture exited with code $LASTEXITCODE"
     }
-    $inserted = Get-Content -LiteralPath (
-        Join-Path $rustRoot 'target\insertion-smoke.txt'
-    ) -Raw
+    $inserted = [System.IO.File]::ReadAllText(
+        (Join-Path $rustRoot 'target\insertion-smoke.txt'),
+        [Text.Encoding]::UTF8
+    )
     if ($inserted -ne $Text) {
         throw "insertion fixture received unexpected text: $inserted"
     }
@@ -95,24 +104,28 @@ function Invoke-InsertionFixture {
             Join-Path $rustRoot 'target\insertion-smoke.out'
         ) -Raw
     ) | ConvertFrom-Json
-    if ($event.clipboard_restored -eq $event.clipboard_preserved) {
-        throw 'insertion service reported an invalid clipboard lease disposition'
+    if (-not $event.clipboard_untouched) {
+        throw 'automatic insertion reported that it borrowed the clipboard'
     }
-    if ($RequirePreserved -and -not $event.clipboard_preserved) {
-        throw 'delayed insertion restored the old clipboard without a target read acknowledgement'
-    }
-    $expectedClipboard = if ($event.clipboard_restored) { $ClipboardMarker } else { $Text }
-    if ((Get-Clipboard -Raw) -ne $expectedClipboard) {
-        throw 'clipboard contents do not match the reported lease disposition'
+    if ((Get-Clipboard -Raw) -ne $ClipboardMarker) {
+        throw 'automatic insertion changed the user clipboard'
     }
     [pscustomobject]@{
-        Fixture = if ($KeyDownDelayMs -gt 0) { 'insertion-delayed-read' } else { 'insertion-immediate' }
-        Method = 'ClipboardLease'
+        Fixture = if ($InputDelayMs -gt 0) { 'insertion-delayed-target' } else { 'insertion-immediate' }
+        Method = $event.method
         Characters = $inserted.Length
-        Milliseconds = '-'
-        ClipboardDisposition = if ($event.clipboard_restored) { 'RestoredAfterTargetRead' } else { 'PreservedUnverified' }
+        Milliseconds = $event.dispatch_duration_ms
+        ClipboardDisposition = 'Untouched'
     }
 }
+
+$regressionClipboardMarker = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String('0JfQsNC60LDQtyA20JEtMDE3Njk4ODMx0L7RgiAyOS4wNy4yMDI2')
+)
+$multilingualInsertionText = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String('U0FZRkxFWF9JTlNFUlRfTEFTVF9TTU9LRQ0K0J/RgNGP0LzQsNGPINCy0YHRgtCw0LLQutCw')
+)
+$longUnicodeInsertionText = ('SayFlex long Unicode input 0123456789. ' * 26).TrimEnd()
 
 try {
     $results = @()
@@ -137,13 +150,20 @@ try {
                 -ClipboardMarker 'SAYFLEX_SHORTCUT_CLIPBOARD_SENTINEL'
     }
     $results += Invoke-InsertionFixture `
-        -Text 'SAYFLEX_INSERT_LAST_SMOKE' `
-        -ClipboardMarker 'SAYFLEX_IMMEDIATE_CLIPBOARD_SENTINEL'
+        -Text $multilingualInsertionText `
+        -ClipboardMarker $regressionClipboardMarker `
+        -ObserveClipboard
     $results += Invoke-InsertionFixture `
-        -Text 'SAYFLEX_DELAYED_PASTE_SMOKE' `
+        -Text 'SAYFLEX_DELAYED_UNICODE_INPUT' `
         -ClipboardMarker 'SAYFLEX_DELAYED_CLIPBOARD_SENTINEL' `
-        -KeyDownDelayMs 1200 `
-        -RequirePreserved
+        -InputDelayMs 1200 `
+        -ForceUnicode `
+        -ObserveClipboard
+    $results += Invoke-InsertionFixture `
+        -Text $longUnicodeInsertionText `
+        -ClipboardMarker 'SAYFLEX_LONG_INPUT_CLIPBOARD_SENTINEL' `
+        -ForceUnicode `
+        -ObserveClipboard
     $results | Format-Table -AutoSize
     Write-Host 'Windows selected-text integration validation passed.'
 }
@@ -155,8 +175,9 @@ finally {
     Remove-Item Env:SAYFLEX_SELECTION_SMOKE_HOST_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_RUN_INSERTION_SMOKE -ErrorAction SilentlyContinue
-    Remove-Item Env:SAYFLEX_RUN_CLIPBOARD_LEASE_SMOKE -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_HOST_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_TEXT -ErrorAction SilentlyContinue
-    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_KEYDOWN_DELAY_MS -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_FORCE_UNICODE -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_OBSERVE_CLIPBOARD -ErrorAction SilentlyContinue
 }

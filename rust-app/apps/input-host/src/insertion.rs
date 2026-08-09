@@ -1,18 +1,15 @@
 use std::{
-    borrow::Cow,
     io,
     sync::mpsc::{self, Sender},
     thread,
     time::{Duration, Instant},
 };
 
+use crate::{clipboard, hotkeys, insertion_adapter};
 use rust_protocol::{
     InputHostEvent, InsertionDelivery, InsertionMethod, RequestId, SessionId, TargetSnapshot,
     Transcript,
 };
-use sha2::{Digest, Sha256};
-
-use crate::{clipboard, hotkeys, inject, target, wezterm};
 
 const INJECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -44,25 +41,10 @@ pub struct InsertionService {
 impl InsertionService {
     pub fn start(events: Sender<InputHostEvent>) -> std::io::Result<Self> {
         let (commands, receiver) = mpsc::channel();
-        let (startup, startup_result) = mpsc::sync_channel(1);
+        let (startup, startup_result) = mpsc::sync_channel::<Result<(), String>>(1);
         thread::Builder::new()
             .name("input-insertion-worker".to_owned())
             .spawn(move || {
-                let apartment = match clipboard::ClipboardApartment::initialize() {
-                    Ok(apartment) => apartment,
-                    Err(error) => {
-                        let _ = startup.send(Err(error.to_string()));
-                        return;
-                    }
-                };
-                let _apartment = apartment;
-                let mut clipboard_host = match clipboard::ClipboardPasteHost::create() {
-                    Ok(host) => host,
-                    Err(error) => {
-                        let _ = startup.send(Err(error.to_string()));
-                        return;
-                    }
-                };
                 let _ = startup.send(Ok(()));
                 loop {
                     let command = receiver.recv().ok();
@@ -76,7 +58,6 @@ impl InsertionService {
                             add_trailing_space,
                         } => {
                             match insert_transcript(
-                                &mut clipboard_host,
                                 &events,
                                 transcript.session_id,
                                 target,
@@ -132,7 +113,6 @@ impl InsertionService {
                             target,
                             text,
                         } => match replace_selection(
-                            &mut clipboard_host,
                             &events,
                             request_id,
                             target,
@@ -201,7 +181,6 @@ struct InsertionTiming {
 }
 
 fn insert_transcript(
-    clipboard_host: &mut clipboard::ClipboardPasteHost,
     events: &Sender<InputHostEvent>,
     session_id: SessionId,
     target_snapshot: TargetSnapshot,
@@ -219,115 +198,21 @@ fn insert_transcript(
         method_started: Instant::now(),
         release_wait_ms: elapsed_ms(started),
     };
-    let payload = if add_trailing_space {
-        Cow::Owned(format!("{text} "))
-    } else {
-        Cow::Borrowed(text)
-    };
-    if target::is_wezterm_target(target_snapshot) {
-        match wezterm::send_text(target_snapshot, &payload) {
-            Ok(()) => {
-                send_dispatched(
-                    events,
-                    session_id,
-                    InsertionMethod::WezTermCli,
-                    InsertionDelivery::AdapterAcknowledged,
-                    target_snapshot,
-                    payload.chars().count(),
-                    timing,
-                );
-                return Ok(());
-            }
-            Err(error) => {
-                crate::diagnostic_line(&format!(
-                    "insertion action=wezterm_adapter result=unicode_fallback session={session_id} \
-target_pid={} error={error}",
-                    target_snapshot.process_id
-                ));
-                if !inject::is_foreground(target_snapshot) {
-                    return Err(format!(
-                        "{error}; target changed before the Unicode fallback"
-                    ));
-                }
-                inject::insert_text(target_snapshot, text, add_trailing_space).map_err(
-                    |injection_error| {
-                        format!("{error}; deterministic Unicode fallback failed: {injection_error}")
-                    },
-                )?;
-                send_dispatched(
-                    events,
-                    session_id,
-                    InsertionMethod::UnicodeInput,
-                    InsertionDelivery::Unverified,
-                    target_snapshot,
-                    payload.chars().count(),
-                    timing,
-                );
-                return Ok(());
-            }
-        }
-    }
-    let paste_shortcut = target::paste_shortcut(target_snapshot);
-    crate::diagnostic_line(&format!(
-        "clipboard_lease action=prepare session={session_id} target_pid={} target_hwnd={} foreground_hwnd={}",
-        target_snapshot.process_id,
-        target_snapshot.window_handle,
-        inject::foreground_window_handle(),
-    ));
-
-    match clipboard::dispatch_paste(
-        clipboard_host,
-        || inject::is_foreground(target_snapshot),
-        || inject::paste_shortcut(paste_shortcut).map_err(|_| clipboard::ClipboardError::Paste),
-        target_snapshot.process_id,
-        text,
-        add_trailing_space,
-    ) {
-        Ok(receipt) => {
-            log_clipboard_lease(Some(session_id), None, &payload, target_snapshot, receipt);
-            let delivery = match receipt.disposition {
-                clipboard::ClipboardLeaseDisposition::RestoredAfterTargetRead => {
-                    let _ = events.send(InputHostEvent::ClipboardRestored { session_id });
-                    InsertionDelivery::ClipboardReadAcknowledged
-                }
-                clipboard::ClipboardLeaseDisposition::PreservedUnverified => {
-                    InsertionDelivery::Unverified
-                }
-            };
-            send_dispatched(
-                events,
-                session_id,
-                InsertionMethod::ClipboardPaste,
-                delivery,
-                target_snapshot,
-                text.chars().count(),
-                timing,
-            );
-            Ok(())
-        }
-        Err(clipboard_error) if inject::is_foreground(target_snapshot) => {
-            inject::insert_text(target_snapshot, text, add_trailing_space).map_err(
-                |injection_error| {
-                    format!("{clipboard_error}; Unicode fallback failed: {injection_error}")
-                },
-            )?;
-            send_dispatched(
-                events,
-                session_id,
-                InsertionMethod::UnicodeInput,
-                InsertionDelivery::Unverified,
-                target_snapshot,
-                text.chars().count(),
-                timing,
-            );
-            Ok(())
-        }
-        Err(error) => Err(error.to_string()),
-    }
+    let receipt = insertion_adapter::deliver(target_snapshot, text, add_trailing_space)?;
+    let chars = text.chars().count() + usize::from(add_trailing_space);
+    send_dispatched(
+        events,
+        session_id,
+        receipt.method,
+        receipt.delivery,
+        target_snapshot,
+        chars,
+        timing,
+    );
+    Ok(())
 }
 
 fn replace_selection(
-    clipboard_host: &mut clipboard::ClipboardPasteHost,
     events: &Sender<InputHostEvent>,
     request_id: RequestId,
     target_snapshot: TargetSnapshot,
@@ -336,72 +221,14 @@ fn replace_selection(
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err("physical modifier keys did not become idle".to_owned());
     }
-    let paste_shortcut = target::paste_shortcut(target_snapshot);
-
-    match clipboard::dispatch_paste(
-        clipboard_host,
-        || inject::is_foreground(target_snapshot),
-        || inject::paste_shortcut(paste_shortcut).map_err(|_| clipboard::ClipboardError::Paste),
-        target_snapshot.process_id,
-        text,
-        false,
-    ) {
-        Ok(receipt) => {
-            log_clipboard_lease(None, Some(request_id), text, target_snapshot, receipt);
-            crate::diagnostic_line(&format!(
-                "insertion action=replace_selection result=sent_unverified request={request_id} \
-target_pid={} method=clipboard",
-                target_snapshot.process_id
-            ));
-            let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
-            Ok(())
-        }
-        Err(clipboard_error) if inject::is_foreground(target_snapshot) => {
-            inject::replace_selection(target_snapshot, text).map_err(|injection_error| {
-                format!("{clipboard_error}; Unicode fallback failed: {injection_error}")
-            })?;
-            crate::diagnostic_line(&format!(
-                "insertion action=replace_selection result=sent_unverified request={request_id} \
-target_pid={} method=unicode",
-                target_snapshot.process_id
-            ));
-            let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
-            Ok(())
-        }
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn log_clipboard_lease(
-    session_id: Option<SessionId>,
-    request_id: Option<RequestId>,
-    payload: &str,
-    target: TargetSnapshot,
-    receipt: clipboard::ClipboardPasteReceipt,
-) {
-    let owner = session_id
-        .map(|id| format!("session={id}"))
-        .or_else(|| request_id.map(|id| format!("request={id}")))
-        .unwrap_or_else(|| "owner=unknown".to_owned());
+    let receipt = insertion_adapter::deliver(target_snapshot, text, false)?;
     crate::diagnostic_line(&format!(
-        "clipboard_lease action=settle result={:?} {owner} target_pid={} chars={} \
-payload_sha256={} original_sequence={} replacement_sequence={} settled_sequence={}",
-        receipt.disposition,
-        target.process_id,
-        payload.chars().count(),
-        payload_fingerprint(payload),
-        receipt.original_sequence,
-        receipt.replacement_sequence,
-        receipt.settled_sequence,
+        "insertion action=replace_selection result={:?} request={request_id} \
+target_pid={} method={:?} clipboard=untouched",
+        receipt.delivery, target_snapshot.process_id, receipt.method,
     ));
-}
-
-fn payload_fingerprint(payload: &str) -> String {
-    let digest = Sha256::digest(payload.as_bytes());
-    digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
+    let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
+    Ok(())
 }
 
 fn send_dispatched(
@@ -430,26 +257,4 @@ target_pid={} chars={chars} release_wait_ms={} method_ms={method_ms} total_ms={t
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::payload_fingerprint;
-
-    #[test]
-    fn clipboard_payload_fingerprint_is_stable_and_non_plaintext() {
-        let fingerprint = payload_fingerprint("SayFlex");
-
-        assert_eq!(fingerprint, "cbb691b3059acace");
-        assert_eq!(fingerprint.len(), 16);
-        assert!(!fingerprint.contains("SayFlex"));
-    }
-
-    #[test]
-    fn clipboard_payload_fingerprint_covers_trailing_space() {
-        assert_ne!(
-            payload_fingerprint("dictation"),
-            payload_fingerprint("dictation ")
-        );
-    }
 }
