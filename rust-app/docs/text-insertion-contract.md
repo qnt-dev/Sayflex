@@ -1,32 +1,54 @@
 # SayFlex text insertion contract
 
-Automatic insertion has four non-negotiable invariants:
+Automatic insertion has five non-negotiable invariants:
 
-1. The payload sent to the target is the transcript owned by that session.
-2. Automatic insertion never changes the user's system clipboard.
-3. A delivery result describes only the guarantee made by its transport.
-4. An ambiguous specialized-adapter failure is never followed by another
-   transport, because that could duplicate text.
+1. One immutable payload belongs to one dictation session.
+2. A route is attempted at most once; ambiguous delivery is never followed by
+   another transport because that can duplicate text.
+3. `SendInput` acceptance is never reported as text delivery.
+4. A compatibility clipboard transaction restores the captured OLE
+   `IDataObject` only while SayFlex still owns the clipboard. A newer user Copy
+   always wins and is never overwritten.
+5. The result names the strongest observation actually made: `committed`,
+   `payload_read`, `verified`, `not_delivered`, `superseded`, or `ambiguous`.
 
 ## Capability routes
 
-| Route | Eligibility | Delivery guarantee | Clipboard |
+| Route | Eligibility | Delivery observation | Clipboard |
 | --- | --- | --- | --- |
-| Native Edit | Focused `Edit`, `RichEdit`, or WinForms Edit control | Synchronous `EM_REPLACESEL` processed by the control | Untouched |
-| WezTerm | Exact `wezterm-gui.exe` target with adjacent CLI | `wezterm cli send-text` returned success for the focused pane | Untouched |
-| Unicode input | Any remaining foreground text target | Windows accepted the complete `SendInput` stream | Untouched |
+| Native Edit | Focused `Edit`, `RichEdit`, or WinForms Edit control | Synchronous `EM_REPLACESEL` completed | Untouched |
+| WezTerm | Exact `wezterm-gui.exe` target with adjacent CLI and `gui-sock-{pid}` | `wezterm cli send-text` returned success for that GUI's focused pane | Untouched |
+| Clipboard transaction | Foreground target without an acknowledged adapter | Exact target requested delayed payload, or UI Automation observed one new exact payload occurrence | Previous OLE object restored if SayFlex still owns the clipboard |
 
-Clipboard APIs remain available only for explicit user actions such as Copy and
-for selection capture, where the original clipboard is restored as part of the
-capture transaction. They are not an automatic insertion transport.
+The compatibility route publishes only `CF_UNICODETEXT` plus the Windows
+privacy formats `ExcludeClipboardContentFromMonitorProcessing`,
+`CanIncludeInClipboardHistory=0`, and `CanUploadToCloudClipboard=0`. A
+long-lived serialized insertion worker owns the delayed-render window and the
+OLE apartment. There is no Unicode keystroke fallback.
+
+Clipboard synchronizers such as Remote Desktop may request delayed data before
+the target. Such a read is not treated as delivery. The compatibility route is
+eligible only when the focused target text can be observed before dispatch;
+SayFlex then waits for one new exact payload occurrence. Targets that cannot be
+observed are rejected before the clipboard is borrowed, and the transcript
+remains in history.
+
+## WezTerm instance binding
+
+InputHost is normally started by SayFlex and therefore does not inherit
+`WEZTERM_UNIX_SOCKET`. The adapter derives the socket filename from the
+captured `wezterm-gui.exe` process id, verifies that it exists, injects it into
+both `list-clients` and `send-text`, and then selects the client entry with the
+same process id. This prevents both silent failure and cross-instance delivery.
 
 ## Release evidence
 
 The Windows insertion fixture must cover:
 
-- exact multilingual and multiline delivery to a native edit control;
-- exact delivery while the target delays input processing;
-- a long Unicode payload;
-- a concurrent clipboard observer;
-- unchanged pre-existing clipboard content, including the regression payload
-  `Заказ 6Б-017698831от 29.07.2026`.
+- exact multilingual and multiline native-edit delivery;
+- a target that delays paste processing longer than one second;
+- a long compatibility payload delivered in one operation;
+- unchanged final clipboard contents, including the regression payload
+  `Заказ 6Б-017698831от 29.07.2026`;
+- a read-only probe of the live WezTerm instance through its exact socket;
+- validation against the installed release binaries, not only debug output.

@@ -19,7 +19,8 @@ use windows::{
         UI::Accessibility::{
             CUIAutomation8, IUIAutomation2, IUIAutomationElement, IUIAutomationTextEditPattern,
             IUIAutomationTextPattern, IUIAutomationTextPattern2, IUIAutomationTreeWalker,
-            UIA_TextEditPatternId, UIA_TextPattern2Id, UIA_TextPatternId,
+            IUIAutomationValuePattern, UIA_TextEditPatternId, UIA_TextPattern2Id,
+            UIA_TextPatternId, UIA_ValuePatternId,
         },
     },
     core::{BSTR, Interface},
@@ -35,9 +36,17 @@ const TRANSACTION_TIMEOUT_MS: u32 = 220;
 const ACTOR_RESPONSE_TIMEOUT: Duration = Duration::from_millis(450);
 
 static ACTOR: OnceLock<Result<UiAutomationActor, String>> = OnceLock::new();
+static TEXT_ACTOR: OnceLock<Result<TextAutomationActor, String>> = OnceLock::new();
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SelectionOutcome {
+    Text(String),
+    Unavailable,
+    Protected,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FocusedTextOutcome {
     Text(String),
     Unavailable,
     Protected,
@@ -67,6 +76,17 @@ pub fn begin_selected_text(target: TargetSnapshot) -> Result<PendingSelection, S
     let actor = ACTOR.get_or_init(UiAutomationActor::start);
     match actor {
         Ok(actor) => actor.begin_selected_text(target),
+        Err(error) => Err(SelectionError::ActorUnavailable(error.clone())),
+    }
+}
+
+/// Reads the focused editable element through UI Automation without changing
+/// focus or selection. It is used only as an observation channel for delivery
+/// verification; it never performs insertion itself.
+pub fn focused_text(target: TargetSnapshot) -> Result<FocusedTextOutcome, SelectionError> {
+    let actor = TEXT_ACTOR.get_or_init(TextAutomationActor::start);
+    match actor {
+        Ok(actor) => actor.focused_text(target),
         Err(error) => Err(SelectionError::ActorUnavailable(error.clone())),
     }
 }
@@ -124,6 +144,84 @@ struct SelectionRequest {
 struct TimedSelectionResponse {
     result: Result<SelectionOutcome, SelectionError>,
     elapsed_ms: u64,
+}
+
+struct TextAutomationActor {
+    requests: Sender<TextRequest>,
+}
+
+struct TextRequest {
+    target: TargetSnapshot,
+    response: Sender<Result<FocusedTextOutcome, SelectionError>>,
+}
+
+impl TextAutomationActor {
+    fn start() -> Result<Self, String> {
+        let (requests, receiver) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("uia-insertion-observer-mta".to_owned())
+            .spawn(move || run_text_actor(receiver, ready_tx))
+            .map_err(|error| error.to_string())?;
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| format!("UI Automation text actor did not initialize: {error}"))??;
+        Ok(Self { requests })
+    }
+
+    fn focused_text(&self, target: TargetSnapshot) -> Result<FocusedTextOutcome, SelectionError> {
+        let (response, receiver) = mpsc::channel();
+        self.requests
+            .send(TextRequest { target, response })
+            .map_err(|error| SelectionError::ActorUnavailable(error.to_string()))?;
+        receiver
+            .recv_timeout(ACTOR_RESPONSE_TIMEOUT)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => SelectionError::Timeout,
+                mpsc::RecvTimeoutError::Disconnected => {
+                    SelectionError::ActorUnavailable("UI Automation text actor stopped".to_owned())
+                }
+            })?
+    }
+}
+
+fn run_text_actor(receiver: Receiver<TextRequest>, ready: mpsc::SyncSender<Result<(), String>>) {
+    let apartment = match ComApartment::initialize() {
+        Ok(apartment) => apartment,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
+    let mut client = match UiAutomationClient::new() {
+        Ok(client) => {
+            let _ = ready.send(Ok(()));
+            Some(client)
+        }
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
+
+    for request in receiver {
+        let current = match client.as_ref() {
+            Some(client) => client.focused_text(request.target),
+            None => match UiAutomationClient::new() {
+                Ok(new_client) => {
+                    let result = new_client.focused_text(request.target);
+                    client = Some(new_client);
+                    result
+                }
+                Err(error) => Err(error),
+            },
+        };
+        if current.is_err() {
+            client = None;
+        }
+        let _ = request.response.send(current);
+    }
+    drop(apartment);
 }
 
 impl UiAutomationActor {
@@ -278,6 +376,34 @@ impl UiAutomationClient {
         }
         Ok(SelectionOutcome::Unavailable)
     }
+
+    fn focused_text(&self, target: TargetSnapshot) -> Result<FocusedTextOutcome, SelectionError> {
+        if !inject::is_foreground(target) {
+            return Ok(FocusedTextOutcome::Unavailable);
+        }
+
+        for focused in focused_elements(&self.automation, target) {
+            if unsafe { focused.CurrentIsPassword() }.is_ok_and(|value| value.as_bool()) {
+                return Ok(FocusedTextOutcome::Protected);
+            }
+
+            let mut current = Some(focused);
+            for _ in 0..MAX_PARENT_DEPTH {
+                let Some(element) = current.take() else {
+                    break;
+                };
+                if let Some(text) = full_text_from_element(&element)? {
+                    return if inject::is_foreground(target) {
+                        Ok(FocusedTextOutcome::Text(text))
+                    } else {
+                        Ok(FocusedTextOutcome::Unavailable)
+                    };
+                }
+                current = unsafe { self.walker.GetParentElement(&element) }.ok();
+            }
+        }
+        Ok(FocusedTextOutcome::Unavailable)
+    }
 }
 
 fn focused_elements(
@@ -352,6 +478,42 @@ fn text_from_element(element: &IUIAutomationElement) -> Result<Option<String>, S
     } else {
         Ok(Some(selections.join("\n")))
     }
+}
+
+fn full_text_from_element(
+    element: &IUIAutomationElement,
+) -> Result<Option<String>, SelectionError> {
+    if let Ok(pattern) = unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }
+        .and_then(|pattern| pattern.cast::<IUIAutomationValuePattern>())
+    {
+        let value: BSTR = unsafe { pattern.CurrentValue() }
+            .map_err(|error| automation_error("ValuePattern.CurrentValue", error))?;
+        return Ok(Some(String::from_utf16_lossy(&value)));
+    }
+
+    let pattern = unsafe { element.GetCurrentPattern(UIA_TextPatternId) }
+        .and_then(|pattern| pattern.cast::<IUIAutomationTextPattern>())
+        .or_else(|_| unsafe {
+            element
+                .GetCurrentPattern(UIA_TextPattern2Id)?
+                .cast::<IUIAutomationTextPattern2>()?
+                .cast::<IUIAutomationTextPattern>()
+        })
+        .or_else(|_| unsafe {
+            element
+                .GetCurrentPattern(UIA_TextEditPatternId)?
+                .cast::<IUIAutomationTextEditPattern>()?
+                .cast::<IUIAutomationTextPattern>()
+        });
+    let pattern = match pattern {
+        Ok(pattern) => pattern,
+        Err(_) => return Ok(None),
+    };
+    let range = unsafe { pattern.DocumentRange() }
+        .map_err(|error| automation_error("TextPattern.DocumentRange", error))?;
+    let value: BSTR = unsafe { range.GetText(MAX_SELECTION_CHARACTERS) }
+        .map_err(|error| automation_error("DocumentRange.GetText", error))?;
+    Ok(Some(String::from_utf16_lossy(&value)))
 }
 
 fn automation_error(operation: &'static str, error: windows::core::Error) -> SelectionError {

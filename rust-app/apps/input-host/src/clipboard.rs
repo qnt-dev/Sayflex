@@ -7,16 +7,24 @@ use std::{
 use thiserror::Error;
 use windows_sys::{
     Win32::{
-        Foundation::{GlobalFree, HWND},
+        Foundation::{GlobalFree, HWND, LPARAM, LRESULT, WPARAM},
         System::{
             DataExchange::{
-                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
+                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner,
+                GetClipboardSequenceNumber, GetOpenClipboardWindow, IsClipboardFormatAvailable,
                 OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
             },
+            LibraryLoader::GetModuleHandleW,
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
             Ole::{
                 CF_UNICODETEXT, OleGetClipboard, OleInitialize, OleSetClipboard, OleUninitialize,
             },
+        },
+        UI::WindowsAndMessaging::{
+            CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+            GA_ROOT, GWLP_USERDATA, GetAncestor, GetForegroundWindow, GetWindowLongPtrW,
+            GetWindowThreadProcessId, HWND_MESSAGE, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
+            SetWindowLongPtrW, TranslateMessage, WM_NCCREATE, WM_RENDERFORMAT, WNDCLASSW,
         },
     },
     core::IUnknown_Vtbl,
@@ -36,6 +44,14 @@ pub enum ClipboardError {
     InvalidData,
     #[error("the target application changed before paste")]
     TargetChanged,
+    #[error("paste shortcut injection failed")]
+    Paste,
+    #[error("the target did not request the insertion payload")]
+    NotDelivered,
+    #[error("the clipboard was superseded before the target requested the insertion payload")]
+    Superseded,
+    #[error("the insertion payload was requested by an unverified clipboard consumer")]
+    Ambiguous,
     #[error("OLE clipboard operation failed with HRESULT {0:#010x}")]
     Ole(i32),
 }
@@ -54,6 +70,312 @@ pub struct ClipboardCapture {
 
 pub struct ClipboardApartment {
     initialized: bool,
+}
+
+const PASTE_READ_ACK_TIMEOUT: Duration = Duration::from_millis(2_500);
+const PASTE_READ_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const RENDER_WINDOW_CLASS: &[u16] = &[
+    b'S' as u16,
+    b'a' as u16,
+    b'y' as u16,
+    b'F' as u16,
+    b'l' as u16,
+    b'e' as u16,
+    b'x' as u16,
+    b'.' as u16,
+    b'C' as u16,
+    b'l' as u16,
+    b'i' as u16,
+    b'p' as u16,
+    b'b' as u16,
+    b'o' as u16,
+    b'a' as u16,
+    b'r' as u16,
+    b'd' as u16,
+    b'T' as u16,
+    b'r' as u16,
+    b'a' as u16,
+    b'n' as u16,
+    b's' as u16,
+    b'a' as u16,
+    b'c' as u16,
+    b't' as u16,
+    b'i' as u16,
+    b'o' as u16,
+    b'n' as u16,
+    0,
+];
+
+#[derive(Default)]
+struct ClipboardRenderState {
+    payload: String,
+    target_process_id: u32,
+    target_window_handle: u64,
+    rendered: bool,
+    target_requested: bool,
+    render_failed: bool,
+}
+
+/// Long-lived delayed-rendering owner for automatic insertion. The payload is
+/// not materialized until a consumer asks for CF_UNICODETEXT, which lets the
+/// insertion worker distinguish a target read from mere SendInput acceptance.
+pub struct ClipboardPasteHost {
+    hwnd: HWND,
+    state: Box<ClipboardRenderState>,
+}
+
+impl ClipboardPasteHost {
+    pub fn create() -> Result<Self, ClipboardError> {
+        let instance = unsafe { GetModuleHandleW(ptr::null()) };
+        if instance.is_null() {
+            return Err(ClipboardError::Allocation);
+        }
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(clipboard_render_window_proc),
+            hInstance: instance,
+            lpszClassName: RENDER_WINDOW_CLASS.as_ptr(),
+            ..Default::default()
+        };
+        unsafe {
+            // RegisterClassW can legitimately report an existing class when a
+            // smoke fixture starts a second host in the same process. Window
+            // creation below remains the authoritative success check.
+            let _ = RegisterClassW(&raw const class);
+        }
+
+        let mut state = Box::<ClipboardRenderState>::default();
+        let state_pointer = (&mut *state as *mut ClipboardRenderState).cast::<c_void>();
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                RENDER_WINDOW_CLASS.as_ptr(),
+                RENDER_WINDOW_CLASS.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                ptr::null_mut(),
+                instance,
+                state_pointer,
+            )
+        };
+        if hwnd.is_null() {
+            return Err(ClipboardError::Allocation);
+        }
+        Ok(Self { hwnd, state })
+    }
+
+    fn publish(
+        &mut self,
+        payload: &str,
+        target_process_id: u32,
+        target_window_handle: u64,
+    ) -> Result<u32, ClipboardError> {
+        self.state.payload.clear();
+        self.state.payload.push_str(payload);
+        self.state.target_process_id = target_process_id;
+        self.state.target_window_handle = target_window_handle;
+        self.state.rendered = false;
+        self.state.target_requested = false;
+        self.state.render_failed = false;
+
+        let mut private_payloads = private_format_payloads()?;
+        with_open_clipboard_owner(self.hwnd, || {
+            if unsafe { EmptyClipboard() } == 0 {
+                return Err(ClipboardError::Busy);
+            }
+            // A null handle advertises delayed rendering. Windows sends
+            // WM_RENDERFORMAT only when a consumer actually requests text.
+            unsafe {
+                let _ = SetClipboardData(u32::from(CF_UNICODETEXT), ptr::null_mut());
+            }
+            for (format, payload) in &mut private_payloads {
+                let accepted = unsafe { SetClipboardData(*format, payload.handle) };
+                if accepted.is_null() {
+                    unsafe {
+                        let _ = EmptyClipboard();
+                    }
+                    return Err(ClipboardError::Allocation);
+                }
+                payload.release_to_clipboard();
+            }
+            Ok(())
+        })?;
+        if unsafe { IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) } == 0 {
+            return Err(ClipboardError::Allocation);
+        }
+        Ok(unsafe { GetClipboardSequenceNumber() })
+    }
+
+    fn await_target_read(
+        &mut self,
+        target_still_focused: impl Fn() -> bool,
+        mut target_contains_payload: impl FnMut() -> bool,
+    ) -> Result<ClipboardReadOutcome, ClipboardError> {
+        let deadline = Instant::now() + PASTE_READ_ACK_TIMEOUT;
+        let mut foreign_read_observed = false;
+        loop {
+            self.pump_messages();
+            if self.state.render_failed {
+                return Err(ClipboardError::Allocation);
+            }
+            if target_contains_payload() {
+                return Ok(ClipboardReadOutcome::TargetVerified);
+            }
+            if self.state.rendered {
+                if self.state.target_requested {
+                    self.wait_until_clipboard_released(deadline);
+                    return Ok(ClipboardReadOutcome::TargetRead);
+                }
+                // Clipboard synchronizers can force delayed rendering before
+                // the target processes Ctrl+V. Keep the transaction alive and
+                // rely on direct target observation instead of mistaking that
+                // infrastructure read for delivery.
+                foreign_read_observed = true;
+            }
+            if !self.owns_clipboard() {
+                return Ok(ClipboardReadOutcome::Superseded);
+            }
+            if !target_still_focused() {
+                return Ok(ClipboardReadOutcome::TargetChanged);
+            }
+            if Instant::now() >= deadline {
+                return Ok(if foreign_read_observed {
+                    ClipboardReadOutcome::ForeignRead
+                } else {
+                    ClipboardReadOutcome::TimedOut
+                });
+            }
+            thread::sleep(PASTE_READ_POLL_INTERVAL);
+        }
+    }
+
+    fn materialize_if_owned(&mut self) -> Result<(), ClipboardError> {
+        if !self.owns_clipboard() || self.state.rendered {
+            return Ok(());
+        }
+        with_open_clipboard_owner(self.hwnd, || render_payload(&mut self.state))
+    }
+
+    fn owns_clipboard(&self) -> bool {
+        (unsafe { GetClipboardOwner() }) == self.hwnd
+    }
+
+    fn wait_until_clipboard_released(&mut self, deadline: Instant) {
+        while Instant::now() < deadline {
+            if unsafe { OpenClipboard(self.hwnd) } != 0 {
+                unsafe {
+                    let _ = CloseClipboard();
+                }
+                return;
+            }
+            self.pump_messages();
+            thread::sleep(PASTE_READ_POLL_INTERVAL);
+        }
+    }
+
+    fn pump_messages(&mut self) {
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            unsafe {
+                let _ = TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
+            }
+        }
+    }
+}
+
+impl Drop for ClipboardPasteHost {
+    fn drop(&mut self) {
+        let _ = self.materialize_if_owned();
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardReadOutcome {
+    TargetVerified,
+    TargetRead,
+    ForeignRead,
+    Superseded,
+    TargetChanged,
+    TimedOut,
+}
+
+unsafe extern "system" fn clipboard_render_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_NCCREATE {
+        let create = lparam as *const CREATESTRUCTW;
+        if !create.is_null() {
+            let state = unsafe { (*create).lpCreateParams } as isize;
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state);
+            }
+        }
+    }
+    let state = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ClipboardRenderState;
+    if message == WM_RENDERFORMAT && wparam as u32 == u32::from(CF_UNICODETEXT) && !state.is_null()
+    {
+        let requester = unsafe { GetOpenClipboardWindow() };
+        let mut requester_process_id = 0;
+        if !requester.is_null() {
+            unsafe {
+                GetWindowThreadProcessId(requester, &mut requester_process_id);
+            }
+        }
+        let state = unsafe { &mut *state };
+        let foreground = unsafe { GetForegroundWindow() };
+        let foreground_root = if foreground.is_null() {
+            foreground
+        } else {
+            let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+            if root.is_null() { foreground } else { root }
+        };
+        let foreground_is_target = foreground_root as usize as u64 == state.target_window_handle;
+        state.target_requested = if requester_process_id != 0 {
+            requester_process_id == state.target_process_id
+        } else {
+            // Standard controls may call OpenClipboard(NULL), in which case
+            // Windows exposes no requester HWND. The exact captured foreground
+            // root is the conservative fallback; focus changes are rejected by
+            // the transaction loop.
+            foreground_is_target
+        };
+        crate::diagnostic_line(&format!(
+            "clipboard_transaction action=render requester_pid={requester_process_id} target_pid={} foreground_hwnd={} target_hwnd={} target_match={}",
+            state.target_process_id,
+            foreground_root as usize as u64,
+            state.target_window_handle,
+            state.target_requested,
+        ));
+        if render_payload(state).is_err() {
+            state.render_failed = true;
+        }
+        return 0;
+    }
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+fn render_payload(state: &mut ClipboardRenderState) -> Result<(), ClipboardError> {
+    if state.rendered {
+        return Ok(());
+    }
+    let mut payload = GlobalAllocation::from_utf16(&state.payload)?;
+    let accepted = unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), payload.handle) };
+    if accepted.is_null() {
+        return Err(ClipboardError::Allocation);
+    }
+    payload.release_to_clipboard();
+    state.rendered = true;
+    Ok(())
 }
 
 impl ClipboardApartment {
@@ -398,12 +720,143 @@ fn restore_if_current(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardPasteDisposition {
+    /// The focused target's observable text changed by the exact payload and
+    /// the previous IDataObject was restored.
+    VerifiedAndRestored,
+    /// The target was verified, then a newer clipboard owner took over.
+    VerifiedAndSuperseded,
+    /// The target process requested the exact delayed-rendered payload and the
+    /// previous IDataObject was restored without overwriting a newer Copy.
+    PayloadReadAndRestored,
+    /// The target requested the payload, then another clipboard owner took
+    /// over. Its newer contents are preserved and must never be overwritten.
+    PayloadReadAndSuperseded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClipboardPasteReceipt {
+    pub original_sequence: u32,
+    pub replacement_sequence: u32,
+    pub settled_sequence: u32,
+    pub disposition: ClipboardPasteDisposition,
+}
+
+/// Executes one serialized compatibility transaction for targets that expose
+/// no acknowledged native adapter. The previous OLE IDataObject is captured
+/// before the private delayed-rendered payload is published. Restoration is
+/// attempted only while this host is still the clipboard owner; a concurrent
+/// user Copy always wins.
+pub fn dispatch_paste(
+    host: &mut ClipboardPasteHost,
+    target_still_focused: impl Fn() -> bool,
+    target_contains_payload: impl FnMut() -> bool,
+    send_paste: impl FnOnce() -> Result<(), ClipboardError>,
+    target_process_id: u32,
+    payload: &str,
+) -> Result<ClipboardPasteReceipt, ClipboardError> {
+    if !target_still_focused() {
+        return Err(ClipboardError::TargetChanged);
+    }
+    let (mut snapshot, original_sequence) = ClipboardSnapshot::capture_consistent()?;
+    let target_window_handle = crate::inject::foreground_window_handle();
+    let replacement_sequence = match host.publish(payload, target_process_id, target_window_handle)
+    {
+        Ok(sequence) => sequence,
+        Err(error) => {
+            if host.owns_clipboard() {
+                snapshot.restore()?;
+            }
+            return Err(error);
+        }
+    };
+
+    if !target_still_focused() {
+        if host.owns_clipboard() {
+            snapshot.restore()?;
+        }
+        return Err(ClipboardError::TargetChanged);
+    }
+    if let Err(error) = send_paste() {
+        if host.owns_clipboard() {
+            snapshot.restore()?;
+        }
+        return Err(error);
+    }
+
+    let outcome = match host.await_target_read(target_still_focused, target_contains_payload) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if host.owns_clipboard() {
+                snapshot.restore()?;
+            }
+            return Err(error);
+        }
+    };
+    let disposition = match outcome {
+        ClipboardReadOutcome::TargetVerified if host.owns_clipboard() => {
+            snapshot.restore()?;
+            ClipboardPasteDisposition::VerifiedAndRestored
+        }
+        ClipboardReadOutcome::TargetVerified => ClipboardPasteDisposition::VerifiedAndSuperseded,
+        ClipboardReadOutcome::TargetRead if host.owns_clipboard() => {
+            snapshot.restore()?;
+            ClipboardPasteDisposition::PayloadReadAndRestored
+        }
+        ClipboardReadOutcome::TargetRead => {
+            // A newer clipboard owner is user/external state. Never overwrite
+            // it merely to reconstruct our earlier snapshot.
+            ClipboardPasteDisposition::PayloadReadAndSuperseded
+        }
+        ClipboardReadOutcome::TargetChanged => {
+            if host.owns_clipboard() {
+                snapshot.restore()?;
+            }
+            return Err(ClipboardError::TargetChanged);
+        }
+        ClipboardReadOutcome::TimedOut => {
+            if host.owns_clipboard() {
+                snapshot.restore()?;
+                return Err(ClipboardError::NotDelivered);
+            }
+            return Err(ClipboardError::Superseded);
+        }
+        ClipboardReadOutcome::Superseded => return Err(ClipboardError::Superseded),
+        ClipboardReadOutcome::ForeignRead => {
+            if host.owns_clipboard() {
+                snapshot.restore()?;
+            }
+            return Err(ClipboardError::Ambiguous);
+        }
+    };
+
+    Ok(ClipboardPasteReceipt {
+        original_sequence,
+        replacement_sequence,
+        settled_sequence: unsafe { GetClipboardSequenceNumber() },
+        disposition,
+    })
+}
+
 struct ClipboardSnapshot {
     data_object: *mut c_void,
     fallback_text: Option<String>,
 }
 
 impl ClipboardSnapshot {
+    fn capture_consistent() -> Result<(Self, u32), ClipboardError> {
+        for _ in 0..4 {
+            let before = unsafe { GetClipboardSequenceNumber() };
+            let snapshot = Self::capture()?;
+            let after = unsafe { GetClipboardSequenceNumber() };
+            if before == after {
+                return Ok((snapshot, before));
+            }
+        }
+        Err(ClipboardError::Busy)
+    }
+
     fn capture() -> Result<Self, ClipboardError> {
         let fallback_text = get_text().ok();
         let mut last_error = 0;

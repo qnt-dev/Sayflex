@@ -3551,7 +3551,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             drop(app);
             set_indicator_status(settings, &format!("Selection: {message}"));
         }
-        InputHostEvent::InsertionDispatched {
+        InputHostEvent::InsertionCompleted {
             session_id,
             method,
             delivery,
@@ -3590,12 +3590,13 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             }
             let method_name = match method {
                 rust_protocol::InsertionMethod::NativeEditMessage => "native_edit_message",
-                rust_protocol::InsertionMethod::UnicodeInput => "unicode",
+                rust_protocol::InsertionMethod::ClipboardTransaction => "clipboard_transaction",
                 rust_protocol::InsertionMethod::WezTermCli => "wezterm_cli",
             };
             let delivery_name = match delivery {
-                rust_protocol::InsertionDelivery::AdapterAcknowledged => "adapter_acknowledged",
-                rust_protocol::InsertionDelivery::InputStreamAccepted => "input_stream_accepted",
+                rust_protocol::InsertionDelivery::Committed => "committed",
+                rust_protocol::InsertionDelivery::PayloadRead => "payload_read",
+                rust_protocol::InsertionDelivery::Verified => "verified",
             };
             if let Some(total) = total_after_release_ms {
                 let latency = transcript_latency.unwrap_or_default();
@@ -3617,16 +3618,23 @@ speculative_reuse={} method={} delivery={}",
             }
             let elapsed = total_after_release_ms.unwrap_or(dispatch_duration_ms);
             let status = match delivery {
-                rust_protocol::InsertionDelivery::AdapterAcknowledged => {
+                rust_protocol::InsertionDelivery::Committed => {
                     format!(
                         "Inserted {} through the target adapter in {} ms",
                         short_id(session_id),
                         elapsed
                     )
                 }
-                rust_protocol::InsertionDelivery::InputStreamAccepted => {
+                rust_protocol::InsertionDelivery::PayloadRead => {
                     format!(
-                        "Sent {} through Windows input without changing the clipboard in {} ms",
+                        "Inserted {} after the target read the private transaction in {} ms",
+                        short_id(session_id),
+                        elapsed
+                    )
+                }
+                rust_protocol::InsertionDelivery::Verified => {
+                    format!(
+                        "Verified insertion {} in {} ms",
                         short_id(session_id),
                         elapsed
                     )

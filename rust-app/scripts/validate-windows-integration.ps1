@@ -19,6 +19,7 @@ if (-not (Test-Path -LiteralPath $inputHostPath)) {
 $originalClipboard = Get-Clipboard -Raw -ErrorAction SilentlyContinue
 $env:SAYFLEX_RUN_SELECTION_SMOKE = '1'
 $env:SAYFLEX_SELECTION_SMOKE_HOST_PATH = $inputHostPath
+$env:SAYFLEX_SELECTION_SMOKE_STABLE_FOCUS_MS = '150'
 
 function Invoke-SelectionFixture {
     param(
@@ -68,24 +69,27 @@ function Invoke-InsertionFixture {
     param(
         [Parameter(Mandatory)][string]$Text,
         [Parameter(Mandatory)][string]$ClipboardMarker,
+        [Parameter(Mandatory)][string]$ExpectedMethod,
+        [Parameter(Mandatory)][string]$ExpectedDelivery,
         [int]$InputDelayMs = 0,
-        [switch]$ForceUnicode,
-        [switch]$ObserveClipboard
+        [switch]$ForceClipboardTransaction
     )
 
     Set-Clipboard -Value $ClipboardMarker
     $env:SAYFLEX_RUN_INSERTION_SMOKE = '1'
     $env:SAYFLEX_INSERTION_SMOKE_HOST_PATH = $inputHostPath
     $env:SAYFLEX_INSERTION_SMOKE_TEXT = $Text
+    $env:SAYFLEX_INSERTION_SMOKE_STABLE_FOCUS_MS = '150'
     if ($InputDelayMs -gt 0) {
         $env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS = [string]$InputDelayMs
     } else {
         Remove-Item Env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS -ErrorAction SilentlyContinue
     }
-    if ($ForceUnicode) { $env:SAYFLEX_INSERTION_SMOKE_FORCE_UNICODE = '1' }
-    else { Remove-Item Env:SAYFLEX_INSERTION_SMOKE_FORCE_UNICODE -ErrorAction SilentlyContinue }
-    if ($ObserveClipboard) { $env:SAYFLEX_INSERTION_SMOKE_OBSERVE_CLIPBOARD = '1' }
-    else { Remove-Item Env:SAYFLEX_INSERTION_SMOKE_OBSERVE_CLIPBOARD -ErrorAction SilentlyContinue }
+    if ($ForceClipboardTransaction) {
+        $env:SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION = '1'
+    } else {
+        Remove-Item Env:SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION -ErrorAction SilentlyContinue
+    }
     & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File (
         Join-Path $rustRoot 'tests\fixtures\insertion-fixture.ps1'
     )
@@ -104,8 +108,11 @@ function Invoke-InsertionFixture {
             Join-Path $rustRoot 'target\insertion-smoke.out'
         ) -Raw
     ) | ConvertFrom-Json
-    if (-not $event.clipboard_untouched) {
-        throw 'automatic insertion reported that it borrowed the clipboard'
+    if ($event.method -ne $ExpectedMethod) {
+        throw "automatic insertion used $($event.method), expected $ExpectedMethod"
+    }
+    if ($event.delivery -ne $ExpectedDelivery) {
+        throw "automatic insertion reported $($event.delivery), expected $ExpectedDelivery"
     }
     if ((Get-Clipboard -Raw) -ne $ClipboardMarker) {
         throw 'automatic insertion changed the user clipboard'
@@ -115,7 +122,7 @@ function Invoke-InsertionFixture {
         Method = $event.method
         Characters = $inserted.Length
         Milliseconds = $event.dispatch_duration_ms
-        ClipboardDisposition = 'Untouched'
+        ClipboardDisposition = $event.clipboard_policy
     }
 }
 
@@ -152,18 +159,21 @@ try {
     $results += Invoke-InsertionFixture `
         -Text $multilingualInsertionText `
         -ClipboardMarker $regressionClipboardMarker `
-        -ObserveClipboard
+        -ExpectedMethod 'NativeEditMessage' `
+        -ExpectedDelivery 'Committed'
     $results += Invoke-InsertionFixture `
-        -Text 'SAYFLEX_DELAYED_UNICODE_INPUT' `
+        -Text 'SAYFLEX_DELAYED_CLIPBOARD_TRANSACTION' `
         -ClipboardMarker 'SAYFLEX_DELAYED_CLIPBOARD_SENTINEL' `
         -InputDelayMs 1200 `
-        -ForceUnicode `
-        -ObserveClipboard
+        -ExpectedMethod 'ClipboardTransaction' `
+        -ExpectedDelivery 'Verified' `
+        -ForceClipboardTransaction
     $results += Invoke-InsertionFixture `
         -Text $longUnicodeInsertionText `
         -ClipboardMarker 'SAYFLEX_LONG_INPUT_CLIPBOARD_SENTINEL' `
-        -ForceUnicode `
-        -ObserveClipboard
+        -ExpectedMethod 'ClipboardTransaction' `
+        -ExpectedDelivery 'Verified' `
+        -ForceClipboardTransaction
     $results | Format-Table -AutoSize
     Write-Host 'Windows selected-text integration validation passed.'
 }
@@ -174,10 +184,12 @@ finally {
     Remove-Item Env:SAYFLEX_RUN_SELECTION_SMOKE -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_SELECTION_SMOKE_HOST_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_SELECTION_SMOKE_CLIPBOARD_MARKER -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_SELECTION_SMOKE_STABLE_FOCUS_MS -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_RUN_INSERTION_SMOKE -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_HOST_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_TEXT -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS -ErrorAction SilentlyContinue
-    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_FORCE_UNICODE -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_STABLE_FOCUS_MS -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_OBSERVE_CLIPBOARD -ErrorAction SilentlyContinue
 }

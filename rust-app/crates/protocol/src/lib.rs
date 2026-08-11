@@ -6,7 +6,7 @@ use uuid::Uuid;
 // Version 11 removes automatic clipboard-paste delivery and distinguishes a
 // target-adapter acknowledgement from acceptance by the Windows input stream.
 // All packaged processes must agree on this schema before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -305,7 +305,7 @@ pub enum InputHostEvent {
         request_id: RequestId,
         message: String,
     },
-    InsertionDispatched {
+    InsertionCompleted {
         session_id: SessionId,
         method: InsertionMethod,
         delivery: InsertionDelivery,
@@ -333,19 +333,22 @@ pub enum InputHostEvent {
 pub enum InsertionMethod {
     /// Synchronous EM_REPLACESEL delivery to a standard Win32 edit control.
     NativeEditMessage,
-    UnicodeInput,
+    /// Delayed-rendered, privacy-marked clipboard transaction for targets
+    /// without a synchronous native adapter.
+    ClipboardTransaction,
     WezTermCli,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InsertionDelivery {
-    /// A target-specific adapter accepted the operation and returned success.
-    AdapterAcknowledged,
-    /// Windows accepted the complete synthetic Unicode input stream. This is
-    /// not a claim that an arbitrary target exposed its resulting document,
-    /// but the user's clipboard was never changed.
-    InputStreamAccepted,
+    /// A target-specific adapter processed the operation and returned success.
+    Committed,
+    /// The captured target process requested the exact delayed-render payload.
+    /// This does not claim that arbitrary document contents can be read back.
+    PayloadRead,
+    /// The observable focused text changed by the exact immutable payload.
+    Verified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,10 +691,10 @@ mod tests {
             input
         );
 
-        let insertion = InputHostEvent::InsertionDispatched {
+        let insertion = InputHostEvent::InsertionCompleted {
             session_id,
             method: InsertionMethod::WezTermCli,
-            delivery: InsertionDelivery::AdapterAcknowledged,
+            delivery: InsertionDelivery::Committed,
             dispatch_duration_ms: 9,
         };
         let insertion_json = serde_json::to_string(&insertion).unwrap();

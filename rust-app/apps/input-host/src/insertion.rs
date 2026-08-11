@@ -10,6 +10,7 @@ use rust_protocol::{
     InputHostEvent, InsertionDelivery, InsertionMethod, RequestId, SessionId, TargetSnapshot,
     Transcript,
 };
+use sha2::{Digest, Sha256};
 
 const INJECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -45,6 +46,21 @@ impl InsertionService {
         thread::Builder::new()
             .name("input-insertion-worker".to_owned())
             .spawn(move || {
+                let apartment = match clipboard::ClipboardApartment::initialize() {
+                    Ok(apartment) => apartment,
+                    Err(error) => {
+                        let _ = startup.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let _apartment = apartment;
+                let mut clipboard_host = match clipboard::ClipboardPasteHost::create() {
+                    Ok(host) => host,
+                    Err(error) => {
+                        let _ = startup.send(Err(error.to_string()));
+                        return;
+                    }
+                };
                 let _ = startup.send(Ok(()));
                 loop {
                     let command = receiver.recv().ok();
@@ -58,6 +74,7 @@ impl InsertionService {
                             add_trailing_space,
                         } => {
                             match insert_transcript(
+                                &mut clipboard_host,
                                 &events,
                                 transcript.session_id,
                                 target,
@@ -113,6 +130,7 @@ impl InsertionService {
                             target,
                             text,
                         } => match replace_selection(
+                            &mut clipboard_host,
                             &events,
                             request_id,
                             target,
@@ -180,7 +198,37 @@ struct InsertionTiming {
     release_wait_ms: u64,
 }
 
+struct InsertionSession {
+    session_id: SessionId,
+    target: TargetSnapshot,
+    payload: String,
+    chars: usize,
+}
+
+impl InsertionSession {
+    fn new(
+        session_id: SessionId,
+        target: TargetSnapshot,
+        text: &str,
+        add_trailing_space: bool,
+    ) -> Self {
+        let payload = if add_trailing_space {
+            format!("{text} ")
+        } else {
+            text.to_owned()
+        };
+        let chars = payload.chars().count();
+        Self {
+            session_id,
+            target,
+            payload,
+            chars,
+        }
+    }
+}
+
 fn insert_transcript(
+    clipboard_host: &mut clipboard::ClipboardPasteHost,
     events: &Sender<InputHostEvent>,
     session_id: SessionId,
     target_snapshot: TargetSnapshot,
@@ -188,6 +236,14 @@ fn insert_transcript(
     add_trailing_space: bool,
 ) -> Result<(), String> {
     let started = Instant::now();
+    let session = InsertionSession::new(session_id, target_snapshot, text, add_trailing_space);
+    crate::diagnostic_line(&format!(
+        "insertion action=insert state=prepared session={} target_pid={} chars={} payload_sha256={}",
+        session.session_id,
+        session.target.process_id,
+        session.chars,
+        payload_fingerprint(&session.payload),
+    ));
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err(
             "physical modifier keys did not become idle; transcript remains in history".to_owned(),
@@ -198,21 +254,47 @@ fn insert_transcript(
         method_started: Instant::now(),
         release_wait_ms: elapsed_ms(started),
     };
-    let receipt = insertion_adapter::deliver(target_snapshot, text, add_trailing_space)?;
-    let chars = text.chars().count() + usize::from(add_trailing_space);
-    send_dispatched(
+    let receipt = match insertion_adapter::deliver(clipboard_host, session.target, &session.payload)
+    {
+        Ok(receipt) => receipt,
+        Err(failure) => {
+            crate::diagnostic_line(&format!(
+                "insertion action=insert state={:?} session={} method={:?} target_pid={} chars={} payload_sha256={} error={}",
+                failure.state,
+                session.session_id,
+                failure.method,
+                session.target.process_id,
+                session.chars,
+                payload_fingerprint(&session.payload),
+                failure.message,
+            ));
+            return Err(format!("{:?}: {}", failure.state, failure.message));
+        }
+    };
+    if let Some(clipboard_receipt) = receipt.clipboard_receipt {
+        crate::diagnostic_line(&format!(
+            "clipboard_transaction action=settle session={} result={:?} original_sequence={} replacement_sequence={} settled_sequence={}",
+            session.session_id,
+            clipboard_receipt.disposition,
+            clipboard_receipt.original_sequence,
+            clipboard_receipt.replacement_sequence,
+            clipboard_receipt.settled_sequence,
+        ));
+    }
+    send_completed(
         events,
-        session_id,
+        session.session_id,
         receipt.method,
         receipt.delivery,
-        target_snapshot,
-        chars,
+        session.target,
+        session.chars,
         timing,
     );
     Ok(())
 }
 
 fn replace_selection(
+    clipboard_host: &mut clipboard::ClipboardPasteHost,
     events: &Sender<InputHostEvent>,
     request_id: RequestId,
     target_snapshot: TargetSnapshot,
@@ -221,17 +303,34 @@ fn replace_selection(
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err("physical modifier keys did not become idle".to_owned());
     }
-    let receipt = insertion_adapter::deliver(target_snapshot, text, false)?;
+    let receipt = insertion_adapter::deliver(clipboard_host, target_snapshot, text).map_err(
+        |failure| {
+            crate::diagnostic_line(&format!(
+                "insertion action=replace_selection state={:?} request={request_id} target_pid={} method={:?} error={}",
+                failure.state, target_snapshot.process_id, failure.method, failure.message,
+            ));
+            format!("{:?}: {}", failure.state, failure.message)
+        },
+    )?;
+    if let Some(clipboard_receipt) = receipt.clipboard_receipt {
+        crate::diagnostic_line(&format!(
+            "clipboard_transaction action=settle request={request_id} result={:?} original_sequence={} replacement_sequence={} settled_sequence={}",
+            clipboard_receipt.disposition,
+            clipboard_receipt.original_sequence,
+            clipboard_receipt.replacement_sequence,
+            clipboard_receipt.settled_sequence,
+        ));
+    }
     crate::diagnostic_line(&format!(
-        "insertion action=replace_selection result={:?} request={request_id} \
-target_pid={} method={:?} clipboard=untouched",
+        "insertion action=replace_selection state={:?} request={request_id} \
+target_pid={} method={:?}",
         receipt.delivery, target_snapshot.process_id, receipt.method,
     ));
     let _ = events.send(InputHostEvent::SelectionReplaced { request_id });
     Ok(())
 }
 
-fn send_dispatched(
+fn send_completed(
     events: &Sender<InputHostEvent>,
     session_id: SessionId,
     method: InsertionMethod,
@@ -247,7 +346,7 @@ fn send_dispatched(
 target_pid={} chars={chars} release_wait_ms={} method_ms={method_ms} total_ms={total_ms}",
         target.process_id, timing.release_wait_ms,
     ));
-    let _ = events.send(InputHostEvent::InsertionDispatched {
+    let _ = events.send(InputHostEvent::InsertionCompleted {
         session_id,
         method,
         delivery,
@@ -255,6 +354,35 @@ target_pid={} chars={chars} release_wait_ms={} method_ms={method_ms} total_ms={t
     });
 }
 
+fn payload_fingerprint(payload: &str) -> String {
+    let digest = Sha256::digest(payload.as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::payload_fingerprint;
+
+    #[test]
+    fn payload_fingerprint_is_stable_and_does_not_log_plaintext() {
+        let fingerprint = payload_fingerprint("SayFlex");
+        assert_eq!(fingerprint, "cbb691b3059acace");
+        assert_eq!(fingerprint.len(), 16);
+        assert!(!fingerprint.contains("SayFlex"));
+    }
+
+    #[test]
+    fn trailing_space_has_a_distinct_session_payload_identity() {
+        assert_ne!(
+            payload_fingerprint("dictation"),
+            payload_fingerprint("dictation ")
+        );
+    }
 }

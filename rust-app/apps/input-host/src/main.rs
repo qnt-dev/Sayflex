@@ -55,13 +55,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
     {
         require_smoke_opt_in("SAYFLEX_RUN_WEZTERM_PROBE")?;
-        let (pane_id, cli_path) = wezterm::probe(process_id)?;
+        let (pane_id, cli_path, socket_path) = wezterm::probe(process_id)?;
         serde_json::to_writer(
             io::stdout().lock(),
             &serde_json::json!({
                 "process_id": process_id,
                 "pane_id": pane_id,
                 "cli_path": cli_path,
+                "socket_path": socket_path,
                 "result": "adapter_ready",
             }),
         )?;
@@ -231,7 +232,7 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let mut dispatch_duration_ms = None;
     while Instant::now() < deadline {
         match receiver.recv_timeout(Duration::from_millis(250)) {
-            Ok(InputHostEvent::InsertionDispatched {
+            Ok(InputHostEvent::InsertionCompleted {
                 session_id: completed,
                 method: insertion_method,
                 delivery: insertion_delivery,
@@ -263,7 +264,11 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
             "method": format!("{method:?}"),
             "delivery": format!("{delivery:?}"),
             "dispatch_duration_ms": dispatch_duration_ms,
-            "clipboard_untouched": true,
+            "clipboard_policy": match method {
+                rust_protocol::InsertionMethod::ClipboardTransaction => "transaction_restored",
+                rust_protocol::InsertionMethod::NativeEditMessage
+                | rust_protocol::InsertionMethod::WezTermCli => "untouched",
+            },
             "chars": text.chars().count(),
         }),
     )?;
