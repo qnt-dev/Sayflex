@@ -3597,6 +3597,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 rust_protocol::InsertionDelivery::Committed => "committed",
                 rust_protocol::InsertionDelivery::PayloadRead => "payload_read",
                 rust_protocol::InsertionDelivery::Verified => "verified",
+                rust_protocol::InsertionDelivery::Dispatched => "dispatched",
             };
             if let Some(total) = total_after_release_ms {
                 let latency = transcript_latency.unwrap_or_default();
@@ -3635,6 +3636,13 @@ speculative_reuse={} method={} delivery={}",
                 rust_protocol::InsertionDelivery::Verified => {
                     format!(
                         "Verified insertion {} in {} ms",
+                        short_id(session_id),
+                        elapsed
+                    )
+                }
+                rust_protocol::InsertionDelivery::Dispatched => {
+                    format!(
+                        "Paste dispatched {} without target verification in {} ms",
                         short_id(session_id),
                         elapsed
                     )

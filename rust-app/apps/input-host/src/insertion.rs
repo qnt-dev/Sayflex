@@ -1,6 +1,10 @@
 use std::{
+    collections::HashSet,
     io,
-    sync::mpsc::{self, Sender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Sender},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -37,11 +41,31 @@ enum InsertionCommand {
 
 pub struct InsertionService {
     commands: Sender<InsertionCommand>,
+    pending_inserts: Arc<Mutex<HashSet<InsertionKey>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct InsertionKey {
+    session_id: SessionId,
+    target_process_id: u32,
+    target_window_handle: u64,
+}
+
+impl InsertionKey {
+    fn new(transcript: &Transcript, target: TargetSnapshot) -> Self {
+        Self {
+            session_id: transcript.session_id,
+            target_process_id: target.process_id,
+            target_window_handle: target.window_handle,
+        }
+    }
 }
 
 impl InsertionService {
     pub fn start(events: Sender<InputHostEvent>) -> std::io::Result<Self> {
         let (commands, receiver) = mpsc::channel();
+        let pending_inserts = Arc::new(Mutex::new(HashSet::new()));
+        let worker_pending_inserts = Arc::clone(&pending_inserts);
         let (startup, startup_result) = mpsc::sync_channel::<Result<(), String>>(1);
         thread::Builder::new()
             .name("input-insertion-worker".to_owned())
@@ -73,6 +97,7 @@ impl InsertionService {
                             target,
                             add_trailing_space,
                         } => {
+                            let key = InsertionKey::new(&transcript, target);
                             match insert_transcript(
                                 &mut clipboard_host,
                                 &events,
@@ -94,6 +119,10 @@ impl InsertionService {
                                     });
                                 }
                             }
+                            worker_pending_inserts
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .remove(&key);
                         }
                         InsertionCommand::Copy { transcript } => {
                             match clipboard::set_text(&transcript.text) {
@@ -152,7 +181,10 @@ impl InsertionService {
                 }
             })?;
         match startup_result.recv() {
-            Ok(Ok(())) => Ok(Self { commands }),
+            Ok(Ok(())) => Ok(Self {
+                commands,
+                pending_inserts,
+            }),
             Ok(Err(message)) => Err(io::Error::other(message)),
             Err(error) => Err(io::Error::other(format!(
                 "insertion worker startup channel closed: {error}"
@@ -161,11 +193,33 @@ impl InsertionService {
     }
 
     pub fn insert(&self, transcript: Transcript, target: TargetSnapshot, add_trailing_space: bool) {
-        let _ = self.commands.send(InsertionCommand::Insert {
-            transcript,
-            target,
-            add_trailing_space,
-        });
+        let key = InsertionKey::new(&transcript, target);
+        let inserted = self
+            .pending_inserts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key);
+        if !inserted {
+            crate::diagnostic_line(&format!(
+                "insertion action=insert state=coalesced session={} target_pid={} target_hwnd={} trailing_space={}",
+                transcript.session_id, target.process_id, target.window_handle, add_trailing_space,
+            ));
+            return;
+        }
+        if self
+            .commands
+            .send(InsertionCommand::Insert {
+                transcript,
+                target,
+                add_trailing_space,
+            })
+            .is_err()
+        {
+            self.pending_inserts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&key);
+        }
     }
 
     pub fn copy(&self, transcript: Transcript) {
@@ -368,7 +422,20 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::payload_fingerprint;
+    use super::{InsertionKey, payload_fingerprint};
+    use rust_protocol::{SessionId, TargetSnapshot, Transcript, TranscriptionLatency};
+    use std::collections::HashSet;
+
+    fn transcript(session_id: SessionId) -> Transcript {
+        Transcript {
+            session_id,
+            text: "payload".to_owned(),
+            language: "ru".to_owned(),
+            audio_duration_ms: 0,
+            processing_duration_ms: 0,
+            latency: TranscriptionLatency::default(),
+        }
+    }
 
     #[test]
     fn payload_fingerprint_is_stable_and_does_not_log_plaintext() {
@@ -383,6 +450,38 @@ mod tests {
         assert_ne!(
             payload_fingerprint("dictation"),
             payload_fingerprint("dictation ")
+        );
+    }
+
+    #[test]
+    fn duplicate_insert_last_is_coalesced_only_while_the_same_delivery_is_pending() {
+        let session_id = SessionId::new();
+        let transcript = transcript(session_id);
+        let target = TargetSnapshot {
+            window_handle: 42,
+            process_id: 7,
+            ..TargetSnapshot::default()
+        };
+        let key = InsertionKey::new(&transcript, target);
+        let mut pending = HashSet::new();
+        assert!(pending.insert(key));
+        assert!(!pending.insert(key));
+        assert!(pending.remove(&key));
+        assert!(pending.insert(key));
+    }
+
+    #[test]
+    fn automatic_and_explicit_requests_for_one_session_are_coalesced_while_pending() {
+        let session_id = SessionId::new();
+        let transcript = transcript(session_id);
+        let target = TargetSnapshot {
+            window_handle: 42,
+            process_id: 7,
+            ..TargetSnapshot::default()
+        };
+        assert_eq!(
+            InsertionKey::new(&transcript, target),
+            InsertionKey::new(&transcript, target),
         );
     }
 }

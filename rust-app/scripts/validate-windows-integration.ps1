@@ -72,7 +72,8 @@ function Invoke-InsertionFixture {
         [Parameter(Mandatory)][string]$ExpectedMethod,
         [Parameter(Mandatory)][string]$ExpectedDelivery,
         [int]$InputDelayMs = 0,
-        [switch]$ForceClipboardTransaction
+        [switch]$ForceClipboardTransaction,
+        [switch]$DisableUiaVerification
     )
 
     Set-Clipboard -Value $ClipboardMarker
@@ -89,6 +90,11 @@ function Invoke-InsertionFixture {
         $env:SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION = '1'
     } else {
         Remove-Item Env:SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION -ErrorAction SilentlyContinue
+    }
+    if ($DisableUiaVerification) {
+        $env:SAYFLEX_INSERTION_SMOKE_DISABLE_UIA_VERIFY = '1'
+    } else {
+        Remove-Item Env:SAYFLEX_INSERTION_SMOKE_DISABLE_UIA_VERIFY -ErrorAction SilentlyContinue
     }
     & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File (
         Join-Path $rustRoot 'tests\fixtures\insertion-fixture.ps1'
@@ -174,6 +180,13 @@ try {
         -ExpectedMethod 'ClipboardTransaction' `
         -ExpectedDelivery 'Verified' `
         -ForceClipboardTransaction
+    $results += Invoke-InsertionFixture `
+        -Text 'SAYFLEX_UIA_UNAVAILABLE_COMPATIBILITY_ROUTE' `
+        -ClipboardMarker 'SAYFLEX_UIA_UNAVAILABLE_CLIPBOARD_SENTINEL' `
+        -ExpectedMethod 'ClipboardTransaction' `
+        -ExpectedDelivery 'Dispatched' `
+        -ForceClipboardTransaction `
+        -DisableUiaVerification
     $results | Format-Table -AutoSize
     Write-Host 'Windows selected-text integration validation passed.'
 }
@@ -190,6 +203,7 @@ finally {
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_TEXT -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_INPUT_DELAY_MS -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION -ErrorAction SilentlyContinue
+    Remove-Item Env:SAYFLEX_INSERTION_SMOKE_DISABLE_UIA_VERIFY -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_STABLE_FOCUS_MS -ErrorAction SilentlyContinue
     Remove-Item Env:SAYFLEX_INSERTION_SMOKE_OBSERVE_CLIPBOARD -ErrorAction SilentlyContinue
 }

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.5.24"
+  #define AppVersion "0.5.25"
 #endif
 
 #define AppName "SayFlex"

@@ -3,10 +3,9 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 11 removes automatic clipboard-paste delivery and distinguishes a
-// target-adapter acknowledgement from acceptance by the Windows input stream.
+// Version 13 adds an explicit dispatched-but-unverified compatibility result.
 // All packaged processes must agree on this schema before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -349,6 +348,10 @@ pub enum InsertionDelivery {
     PayloadRead,
     /// The observable focused text changed by the exact immutable payload.
     Verified,
+    /// The compatibility paste command was dispatched and its private payload
+    /// remained available for a bounded lease, but no target-specific
+    /// acknowledgement channel was available. This is not proof of delivery.
+    Dispatched,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
