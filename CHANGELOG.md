@@ -29,6 +29,57 @@ covered by `cargo fmt`, `cargo clippy -D warnings` and `cargo test --workspace`.
   owns the pipe. A worker that stops reading can no longer block the UI thread,
   which previously had no timeout at all.
 
+**Corrections after review**
+
+The first version of the transcription work had defects that would have shipped
+wrong behaviour; they are fixed here.
+
+- Routing was two decisions that disagreed. A fast-path flag said "use the
+  local engine" both when the user had put it first and when nothing at all was
+  available, so switching the local engine off still produced local
+  transcription. The same flag folded in the failure ledger, so one rate-limited
+  service made every later recording bypass the router, and nothing recomputed
+  it when the cooldown expired — a service that hit a limit once was gone until
+  the settings changed or the application restarted. The flag now answers a
+  question about the configuration only; everything else is the router's.
+- Providers are no longer treated as interchangeable. A capability model knows
+  that Azure's short-audio endpoint stops at sixty seconds, needs to be told the
+  language and cannot translate; that only the OpenAI-compatible route has a
+  translation endpoint, and that it needs the full model rather than turbo; that
+  Groq caps an upload at 25 MB. A provider that cannot serve a recording is
+  stepped over untried and without penalty.
+- The language reaches the services. Azure was being told en-US for every
+  dictation and Deepgram was never asked to detect one, so Russian speech came
+  back as English nonsense.
+- Translate-to-English is honoured on the network path instead of silently
+  transcribing.
+- Silence is a failed dictation, not an empty success, matching the local
+  engine.
+- The deadline belongs to the recording rather than to each provider, and a
+  cancelled dictation stops the walk instead of arriving late.
+- The interface no longer claims audio stays on the device while a service is
+  enabled, and no longer reports a key as stored before the worker has written
+  it. The key store writes before it adopts, so a failed write cannot leave a
+  key that works until the next restart.
+- A custom endpoint must be HTTPS; response bodies are read with a limit; a key
+  echoed back inside an error body is removed from diagnostics; a 403 is only a
+  key problem when the service says so; Retry-After is capped; the provider list
+  is deduplicated and bounded.
+- A cancellation arriving while an install request was still queued no longer
+  vanishes.
+
+### Repository
+
+- The desktop monolith is being split. `apps/desktop/src/main.rs` went from
+  9,300 lines to 3,620 by moving — not rewriting — the visualizer, the worker
+  supervisor, the preview modes, the translation preview, the provider list and
+  all window wiring into modules of their own. Behaviour and tests are
+  unchanged.
+- `platform-api` is removed. It defined capability traits nothing implemented
+  and nothing called, promising a portability the code did not have.
+- The speech worker gains a hardware-free diagnostic mode so the protocol can
+  be tested against the executable the product actually ships.
+
 **Transcription through API services**
 
 - Dictation can go to a network service instead of the local engine: Groq,
