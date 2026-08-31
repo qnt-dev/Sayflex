@@ -2,6 +2,10 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -16,11 +20,37 @@ use reqwest::{
 const MAX_ATTEMPTS: u32 = 4;
 const BUFFER_BYTES: usize = 1024 * 1024;
 
+/// Stops an installation that is already running.
+///
+/// A download of several gigabytes owns its thread for minutes. Without this
+/// the only ways out were waiting for it or killing the process, and a command
+/// asking it to stop could not even be read.
+#[derive(Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Clears the flag before starting new work. A token that stays set would
+    /// cancel the next installation as well.
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// Streams a verified artifact over HTTPS, resuming a partial file when the
 /// server supports ranges.
 pub struct HttpFetcher {
     client: Client,
     user_agent: String,
+    cancellation: CancelToken,
 }
 
 impl HttpFetcher {
@@ -35,7 +65,14 @@ impl HttpFetcher {
         Ok(Self {
             client,
             user_agent: format!("{} {component}", rust_app_core::product::USER_AGENT_PRODUCT),
+            cancellation: CancelToken::default(),
         })
+    }
+
+    /// Handle used by another thread to stop an installation in flight.
+    #[must_use]
+    pub fn cancellation(&self) -> CancelToken {
+        self.cancellation.clone()
     }
 }
 
@@ -49,6 +86,9 @@ impl ArtifactFetcher for HttpFetcher {
     ) -> Result<(), ModelInstallError> {
         let mut last_error = String::new();
         for attempt in 0..MAX_ATTEMPTS {
+            if self.cancellation.is_cancelled() {
+                return Err(ModelInstallError::Cancelled);
+            }
             match self.fetch_attempt(url, destination, expected_bytes, progress) {
                 Ok(()) => return Ok(()),
                 Err(ModelInstallError::Download(error)) => last_error = error,
@@ -121,6 +161,12 @@ impl HttpFetcher {
                 break;
             }
             file.write_all(&buffer[..count])?;
+            if self.cancellation.is_cancelled() {
+                // The partial file stays on disk: a later attempt resumes from
+                // exactly here instead of starting the download again.
+                file.flush()?;
+                return Err(ModelInstallError::Cancelled);
+            }
             received = received.saturating_add(count as u64);
             if received > expected_bytes {
                 return Err(ModelInstallError::SizeMismatch {

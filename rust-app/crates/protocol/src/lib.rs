@@ -3,9 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 13 adds an explicit dispatched-but-unverified compatibility result.
+// Version 14 adds cancellation for model and runtime installation, which used
+// to run to completion inside each worker's command loop.
 // All packaged processes must agree on this schema before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -391,6 +392,8 @@ pub enum TranslationWorkerCommand {
     EnsureModel {
         tier: TranslationTier,
     },
+    /// Stops a pack or runtime installation in flight, keeping partial files.
+    CancelModelInstall,
     SelectTier {
         tier: TranslationTier,
         keep_warm: bool,
@@ -497,6 +500,9 @@ pub enum SpeechWorkerCommand {
     SelectModel {
         catalog_id: String,
     },
+    /// Stops an installation in flight. The partial download is kept, so a
+    /// later attempt resumes instead of starting again.
+    CancelModelInstall,
     SetOutputMode {
         output_mode: SpeechOutputMode,
     },

@@ -556,6 +556,12 @@ impl Workers {
             return;
         }
         rust_app_core::diagnostics::log_line("desktop lifecycle=stopping workers");
+        // Stop any installation first: it holds its worker's installer thread,
+        // and a partial download is resumed rather than lost.
+        let _ = self.speech.send(&SpeechWorkerCommand::CancelModelInstall);
+        let _ = self
+            .translation
+            .send(&TranslationWorkerCommand::CancelModelInstall);
         let _ = self.input.send(&InputHostCommand::Shutdown);
         let _ = self.speech.send(&SpeechWorkerCommand::Shutdown);
         let _ = self.translation.send(&TranslationWorkerCommand::Shutdown);

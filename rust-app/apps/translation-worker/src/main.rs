@@ -18,7 +18,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use history::TranslationHistory;
 use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
-use rust_model_manager::{BundleInstaller, HttpFetcher};
+use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
 use rust_protocol::{
     PROTOCOL_VERSION, RequestId, TranslationHistoryEntry, TranslationLanguage,
     TranslationModelSummary, TranslationResult, TranslationTier, TranslationWorkerCommand,
@@ -158,6 +158,86 @@ impl TranslationCoordinator {
     }
 }
 
+/// Installation commands, run on their own thread.
+///
+/// Installing a pack downloads the llama.cpp runtime and several gigabytes of
+/// weights. Doing that inside the loop that reads standard input stopped the
+/// worker from reading anything else for the duration, so neither a
+/// cancellation nor a shutdown could reach it.
+enum InstallCommand {
+    Initialize {
+        selected_tier: Option<TranslationTier>,
+        keep_warm: bool,
+        history_enabled: bool,
+    },
+    EnsureModel {
+        tier: TranslationTier,
+    },
+    SelectTier {
+        tier: TranslationTier,
+        keep_warm: bool,
+    },
+    Shutdown,
+}
+
+struct InstallActor {
+    commands: Sender<InstallCommand>,
+    cancellation: CancelToken,
+}
+
+impl InstallActor {
+    fn start(
+        state: Arc<Mutex<WorkerState>>,
+        writer: EventWriter,
+        cancellation: CancelToken,
+    ) -> Result<(Self, JoinHandle<()>)> {
+        let (commands, requests) = mpsc::channel::<InstallCommand>();
+        let worker_cancellation = cancellation.clone();
+        let thread = thread::Builder::new()
+            .name("translation-model-installer".to_owned())
+            .spawn(move || {
+                for command in requests {
+                    if matches!(command, InstallCommand::Shutdown) {
+                        break;
+                    }
+                    // A cancellation raised while nothing was installing must
+                    // not cancel this operation.
+                    worker_cancellation.reset();
+                    if let Err(error) = run_install(command, &state, &writer) {
+                        let cancelled = error
+                            .downcast_ref::<ModelInstallError>()
+                            .is_some_and(|error| matches!(error, ModelInstallError::Cancelled));
+                        let _ = writer.send(&TranslationWorkerEvent::Failed {
+                            request_id: None,
+                            code: if cancelled {
+                                "model_install_cancelled".to_owned()
+                            } else {
+                                "translation_worker".to_owned()
+                            },
+                            message: format!("{error:#}"),
+                            retryable: true,
+                        });
+                    }
+                }
+            })?;
+        Ok((
+            Self {
+                commands,
+                cancellation,
+            },
+            thread,
+        ))
+    }
+
+    fn send(&self, command: InstallCommand) {
+        let _ = self.commands.send(command);
+    }
+
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+}
+
 struct WorkerState {
     catalog: TranslationCatalog,
     installer: BundleInstaller,
@@ -278,8 +358,13 @@ impl WorkerState {
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
     let state = Arc::new(Mutex::new(WorkerState::new()?));
+    // Taken before any installation can hold the lock: cancelling must not
+    // have to wait for the operation it is cancelling.
+    let cancellation = recover_lock(&state).fetcher.cancellation();
     let stdin = io::stdin();
     let (writer, output_thread) = EventWriter::start()?;
+    let (installs, install_thread) =
+        InstallActor::start(Arc::clone(&state), writer.clone(), cancellation)?;
     let mut coordinator = TranslationCoordinator::new();
     for line in BufReader::new(stdin.lock()).lines() {
         let line = line?;
@@ -302,7 +387,13 @@ fn main() -> Result<()> {
             break;
         }
         coordinator.reap();
-        if let Err(error) = handle_command(command, Arc::clone(&state), &writer, &mut coordinator) {
+        if let Err(error) = handle_command(
+            command,
+            Arc::clone(&state),
+            &writer,
+            &mut coordinator,
+            &installs,
+        ) {
             writer.send(&TranslationWorkerEvent::Failed {
                 request_id: None,
                 code: "translation_worker".to_owned(),
@@ -312,6 +403,10 @@ fn main() -> Result<()> {
         }
     }
     coordinator.shutdown();
+    installs.cancel();
+    installs.send(InstallCommand::Shutdown);
+    drop(installs);
+    let _ = install_thread.join();
     drop(writer);
     let _ = output_thread.join();
     Ok(())
@@ -322,6 +417,7 @@ fn handle_command(
     state: Arc<Mutex<WorkerState>>,
     writer: &EventWriter,
     coordinator: &mut TranslationCoordinator,
+    installs: &InstallActor,
 ) -> Result<()> {
     match command {
         TranslationWorkerCommand::Initialize {
@@ -330,7 +426,78 @@ fn handle_command(
             history_enabled,
         } => {
             coordinator.cancel_all();
+            installs.send(InstallCommand::Initialize {
+                selected_tier,
+                keep_warm,
+                history_enabled,
+            });
+        }
+        TranslationWorkerCommand::EnsureModel { tier } => {
+            coordinator.cancel_all();
+            installs.send(InstallCommand::EnsureModel { tier });
+        }
+        TranslationWorkerCommand::CancelModelInstall => installs.cancel(),
+        TranslationWorkerCommand::SelectTier { tier, keep_warm } => {
+            coordinator.cancel_all();
+            // Choosing another tier abandons an installation still running for
+            // the previous one.
+            installs.cancel();
+            installs.send(InstallCommand::SelectTier { tier, keep_warm });
+        }
+        TranslationWorkerCommand::Translate {
+            request_id,
+            text,
+            source_language,
+            target_language,
+        } => {
+            coordinator.submit(
+                state,
+                writer.clone(),
+                request_id,
+                text,
+                source_language,
+                target_language,
+            )?;
+        }
+        TranslationWorkerCommand::Cancel { request_id } => {
+            coordinator.cancel(request_id);
+        }
+        TranslationWorkerCommand::GetHistory { limit } => {
+            let state = recover_lock(&state);
+            writer.send(&TranslationWorkerEvent::History {
+                entries: state.history.recent(limit),
+            })?;
+        }
+        TranslationWorkerCommand::SetHistoryEnabled { enabled } => {
             let mut state = recover_lock(&state);
+            state.history_enabled = enabled;
+        }
+        TranslationWorkerCommand::ClearHistory => {
+            let mut state = recover_lock(&state);
+            state.history.clear();
+            writer.send(&TranslationWorkerEvent::History {
+                entries: Vec::new(),
+            })?;
+        }
+        TranslationWorkerCommand::Shutdown => {}
+    }
+    Ok(())
+}
+
+/// Runs one installation command. Called only from the installer thread, which
+/// is why it may hold the worker lock for minutes.
+fn run_install(
+    command: InstallCommand,
+    state: &Arc<Mutex<WorkerState>>,
+    writer: &EventWriter,
+) -> Result<()> {
+    match command {
+        InstallCommand::Initialize {
+            selected_tier,
+            keep_warm,
+            history_enabled,
+        } => {
+            let mut state = recover_lock(state);
             state.keep_warm = keep_warm;
             state.history_enabled = history_enabled;
             state.selected_tier = state.initial_tier(selected_tier);
@@ -350,9 +517,8 @@ fn handle_command(
                 })?;
             }
         }
-        TranslationWorkerCommand::EnsureModel { tier } => {
-            coordinator.cancel_all();
-            let mut state = recover_lock(&state);
+        InstallCommand::EnsureModel { tier } => {
+            let mut state = recover_lock(state);
             let pack = state.pack(tier)?.clone();
             let bundle = pack.as_bundle();
             let runtime_download = if state.runtime.is_installed() {
@@ -393,9 +559,8 @@ fn handle_command(
                 load_duration_ms,
             })?;
         }
-        TranslationWorkerCommand::SelectTier { tier, keep_warm } => {
-            coordinator.cancel_all();
-            let mut state = recover_lock(&state);
+        InstallCommand::SelectTier { tier, keep_warm } => {
+            let mut state = recover_lock(state);
             if !state.model_installed(tier) {
                 return Err(anyhow!("translation model is not installed"));
             }
@@ -411,42 +576,7 @@ fn handle_command(
                 load_duration_ms,
             })?;
         }
-        TranslationWorkerCommand::Translate {
-            request_id,
-            text,
-            source_language,
-            target_language,
-        } => {
-            coordinator.submit(
-                state,
-                writer.clone(),
-                request_id,
-                text,
-                source_language,
-                target_language,
-            )?;
-        }
-        TranslationWorkerCommand::Cancel { request_id } => {
-            coordinator.cancel(request_id);
-        }
-        TranslationWorkerCommand::GetHistory { limit } => {
-            let state = recover_lock(&state);
-            writer.send(&TranslationWorkerEvent::History {
-                entries: state.history.recent(limit),
-            })?;
-        }
-        TranslationWorkerCommand::SetHistoryEnabled { enabled } => {
-            let mut state = recover_lock(&state);
-            state.history_enabled = enabled;
-        }
-        TranslationWorkerCommand::ClearHistory => {
-            let mut state = recover_lock(&state);
-            state.history.clear();
-            writer.send(&TranslationWorkerEvent::History {
-                entries: Vec::new(),
-            })?;
-        }
-        TranslationWorkerCommand::Shutdown => {}
+        InstallCommand::Shutdown => {}
     }
     Ok(())
 }

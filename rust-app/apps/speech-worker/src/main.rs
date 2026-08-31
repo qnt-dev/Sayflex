@@ -3,6 +3,7 @@ mod engine;
 mod history;
 mod history_actor;
 mod inference;
+mod model_actor;
 mod speculation;
 
 use std::{
@@ -19,10 +20,8 @@ use audio::AudioRecorder;
 use engine::WhisperEngine;
 use history_actor::HistoryCommand;
 use inference::InferenceHandle;
-use rust_model_manager::{
-    BuiltInCatalog, HttpFetcher, InstallPhase, ModelCatalog, ModelDescriptor, ModelInstaller,
-    ModelTier,
-};
+use model_actor::ModelCommand;
+use rust_model_manager::{BuiltInCatalog, HttpFetcher, ModelCatalog, ModelInstaller, ModelTier};
 use rust_protocol::{
     ModelSummary, PROTOCOL_VERSION, SessionId, SpeechOutputMode, SpeechWorkerCommand,
     SpeechWorkerEvent, Transcript, TranscriptionLatency,
@@ -138,6 +137,13 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
     let history = history_actor::start(history_path, events.clone())?;
     let recorder = AudioRecorder::open(events.clone())?;
     let inference = InferenceHandle::start(events.clone(), history.clone())?;
+    let models = model_actor::start(
+        catalog.clone(),
+        installer.clone(),
+        fetcher,
+        events.clone(),
+        inference.clone(),
+    )?;
     let speculation = SpeculationScheduler::start(recorder.snapshot_source(), inference.clone())?;
     let mut output_mode = SpeechOutputMode::OriginalLanguage;
     let mut fast_release_previews = true;
@@ -183,19 +189,10 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
                     selected_model_id: selected_model_id.clone(),
                     models: model_summaries(&catalog, &installer, &selected_model_id),
                 });
-                match ensure_model(&catalog, &installer, &fetcher, &selected_model_id, &events) {
-                    Ok(path) => {
-                        inference.load_model(selected_model_id.clone(), path, false);
-                    }
-                    Err(error) => {
-                        let _ = events.send(SpeechWorkerEvent::Failed {
-                            session_id: None,
-                            code: "model_install".to_owned(),
-                            message: format!("{error:#}"),
-                            retryable: true,
-                        });
-                    }
-                }
+                models.send(ModelCommand::Ensure {
+                    catalog_id: selected_model_id,
+                    announce_selection: false,
+                });
             }
             SpeechWorkerCommand::Begin {
                 session_id,
@@ -247,31 +244,20 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
                 }
             }
             SpeechWorkerCommand::EnsureModel { catalog_id } => {
-                if let Err(error) =
-                    ensure_model(&catalog, &installer, &fetcher, &catalog_id, &events)
-                {
-                    let _ = events.send(SpeechWorkerEvent::Failed {
-                        session_id: None,
-                        code: "model_install".to_owned(),
-                        message: format!("{error:#}"),
-                        retryable: true,
-                    });
-                }
+                models.send(ModelCommand::Ensure {
+                    catalog_id,
+                    announce_selection: false,
+                });
             }
+            SpeechWorkerCommand::CancelModelInstall => models.cancel(),
             SpeechWorkerCommand::SelectModel { catalog_id } => {
-                match ensure_model(&catalog, &installer, &fetcher, &catalog_id, &events) {
-                    Ok(path) => {
-                        inference.load_model(catalog_id, path, true);
-                    }
-                    Err(error) => {
-                        let _ = events.send(SpeechWorkerEvent::Failed {
-                            session_id: None,
-                            code: "model_select".to_owned(),
-                            message: format!("{error:#}"),
-                            retryable: true,
-                        });
-                    }
-                }
+                // Choosing another model abandons an installation that is
+                // still running for the previous one.
+                models.cancel();
+                models.send(ModelCommand::Ensure {
+                    catalog_id,
+                    announce_selection: true,
+                });
             }
             SpeechWorkerCommand::SetOutputMode {
                 output_mode: requested,
@@ -294,37 +280,12 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
         }
     }
 
+    models.cancel();
+    models.send(ModelCommand::Shutdown);
     speculation.shutdown();
     inference.shutdown();
     let _ = history.send(HistoryCommand::Shutdown);
     Ok(())
-}
-
-fn ensure_model(
-    catalog: &ModelCatalog,
-    installer: &ModelInstaller,
-    fetcher: &HttpFetcher,
-    catalog_id: &str,
-    events: &Sender<SpeechWorkerEvent>,
-) -> Result<PathBuf> {
-    let model = catalog
-        .find(catalog_id)
-        .with_context(|| format!("unknown model: {catalog_id}"))?;
-    try_adopt_existing_windows_model(installer, model);
-    let path = installer.ensure_installed(model, fetcher, |progress| {
-        if progress.phase != InstallPhase::Ready {
-            let _ = events.send(SpeechWorkerEvent::ModelDownloadProgress {
-                catalog_id: catalog_id.to_owned(),
-                downloaded_bytes: progress.bytes_received,
-                total_bytes: progress.total_bytes,
-            });
-        }
-    })?;
-    let _ = events.send(SpeechWorkerEvent::ModelInstalled {
-        catalog_id: catalog_id.to_owned(),
-        path: path.display().to_string(),
-    });
-    Ok(path)
 }
 
 fn model_summaries(
@@ -346,31 +307,6 @@ fn model_summaries(
             supports_speech_translation: model.supports_speech_translation,
         })
         .collect()
-}
-
-fn try_adopt_existing_windows_model(installer: &ModelInstaller, model: &ModelDescriptor) {
-    let destination = installer.model_path(model);
-    if destination.exists() {
-        return;
-    }
-    let Some(local) = env::var_os("LOCALAPPDATA") else {
-        return;
-    };
-    let existing = Path::new(&local)
-        .join("Keyboop")
-        .join("models")
-        .join(&model.artifact.file_name);
-    if fs::metadata(&existing).is_ok_and(|metadata| metadata.len() == model.artifact.bytes) {
-        if let Some(parent) = destination.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Err(error) = fs::hard_link(&existing, &destination) {
-            eprintln!(
-                "could not adopt existing model {}: {error}",
-                existing.display()
-            );
-        }
-    }
 }
 
 fn application_data_root() -> PathBuf {

@@ -130,10 +130,15 @@ impl ModelInstaller {
             Ok(final_path)
         })();
 
+        // A cancelled or interrupted download keeps its partial file so the
+        // next attempt resumes; a verification failure does not, because those
+        // bytes are known to be wrong.
         if result.as_ref().is_err_and(|error| {
             !matches!(
                 error,
-                ModelInstallError::Download(_) | ModelInstallError::Io(_)
+                ModelInstallError::Download(_)
+                    | ModelInstallError::Io(_)
+                    | ModelInstallError::Cancelled
             )
         }) && temporary_path.exists()
         {
@@ -271,6 +276,8 @@ pub enum ModelInstallError {
     ChecksumMismatch { expected: String, actual: String },
     #[error("model download failed: {0}")]
     Download(String),
+    #[error("model installation was cancelled")]
+    Cancelled,
     #[error("model verification timestamp is invalid: {0}")]
     VerificationTime(String),
     #[error("model verification receipt is invalid: {0}")]
