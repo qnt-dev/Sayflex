@@ -5055,7 +5055,25 @@ delivery={} target_pid={}",
                 statuses.len(),
                 statuses.iter().filter(|status| status.available).count()
             ));
-            state.borrow_mut().transcription_providers = statuses;
+            {
+                let mut state = state.borrow_mut();
+                if state.transcription_chain.is_empty() {
+                    // Never arranged: adopt the worker's own order so the list
+                    // has something to show and the first change persists.
+                    state.transcription_chain = statuses
+                        .iter()
+                        .map(|status| TranscriptionProviderEntry {
+                            id: status.id.clone(),
+                            enabled: status.enabled,
+                            endpoint: None,
+                            model: None,
+                            account: None,
+                        })
+                        .collect();
+                }
+                state.transcription_providers = statuses;
+            }
+            sync_providers(settings, state);
         }
         SpeechWorkerEvent::TranscribedRemotely {
             session_id,
@@ -6000,6 +6018,124 @@ fn wire_settings(
         });
     }
     {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_move_provider(move |from, to| {
+            {
+                let mut state = state.borrow_mut();
+                let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
+                    return;
+                };
+                if from >= state.transcription_chain.len() {
+                    return;
+                }
+                let to = to.min(state.transcription_chain.len() - 1);
+                let entry = state.transcription_chain.remove(from);
+                state.transcription_chain.insert(to, entry);
+            }
+            apply_provider_chain(&settings_weak, &state, &workers);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_drag_provider(move |index, travel| {
+            // The handle reports how far the pointer moved; turning that into
+            // rows belongs here, where the row height is defined.
+            let moved_rows = (travel / PROVIDER_ROW_HEIGHT).round() as i32;
+            if moved_rows == 0 {
+                return;
+            }
+            {
+                let mut state = state.borrow_mut();
+                let Ok(from) = usize::try_from(index) else {
+                    return;
+                };
+                if from >= state.transcription_chain.len() {
+                    return;
+                }
+                let last = state.transcription_chain.len() - 1;
+                let to = (index + moved_rows).clamp(0, last as i32) as usize;
+                if to == from {
+                    return;
+                }
+                let entry = state.transcription_chain.remove(from);
+                state.transcription_chain.insert(to, entry);
+            }
+            apply_provider_chain(&settings_weak, &state, &workers);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_toggle_provider(move |index| {
+            {
+                let mut state = state.borrow_mut();
+                let Some(entry) = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| state.transcription_chain.get_mut(index))
+                else {
+                    return;
+                };
+                entry.enabled = !entry.enabled;
+            }
+            apply_provider_chain(&settings_weak, &state, &workers);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_set_provider_key(move |provider_id, secret| {
+            let secret = secret.trim().to_owned();
+            // The key goes to the worker, which owns the encrypted store. It
+            // is never written to settings and never read back for display.
+            let sent = workers
+                .speech
+                .send(&SpeechWorkerCommand::SetProviderCredential {
+                    provider_id: provider_id.to_string(),
+                    secret: (!secret.is_empty()).then_some(secret.clone()),
+                });
+            match sent {
+                Ok(()) => set_indicator_status(
+                    &settings_weak,
+                    &if secret.is_empty() {
+                        format!("Key removed for {}.", provider_display_name(&provider_id))
+                    } else {
+                        format!("Key stored for {}.", provider_display_name(&provider_id))
+                    },
+                ),
+                Err(error) => set_indicator_status(
+                    &settings_weak,
+                    &format!("The key could not be stored: {error}"),
+                ),
+            }
+            sync_providers(&settings_weak, &state);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_set_provider_field(move |provider_id, value| {
+            {
+                let mut state = state.borrow_mut();
+                let Some(entry) = state
+                    .transcription_chain
+                    .iter_mut()
+                    .find(|entry| entry.id == provider_id.as_str())
+                else {
+                    return;
+                };
+                set_provider_field_value(entry, value.to_string());
+            }
+            apply_provider_chain(&settings_weak, &state, &workers);
+        });
+    }
+    {
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         settings.on_copy_history(move |index| {
@@ -6901,6 +7037,117 @@ fn sync_translation_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<Re
         })
         .collect::<Vec<_>>();
     settings.set_translation_model_rows(ModelRc::new(VecModel::from(rows)));
+}
+
+/// Height of one row in the transcription list, in logical pixels.
+///
+/// The drag handle reports how far the pointer travelled rather than a target
+/// index, so this number lives here instead of being repeated in the interface
+/// and in the code that reads it.
+const PROVIDER_ROW_HEIGHT: f32 = 96.0;
+
+fn provider_display_name(id: &str) -> String {
+    match id {
+        "local" => "This computer".to_owned(),
+        "groq" => "Groq".to_owned(),
+        "cloudflare" => "Cloudflare Workers AI".to_owned(),
+        "azure" => "Microsoft Azure Speech".to_owned(),
+        "deepgram" => "Deepgram".to_owned(),
+        "custom" => "Custom endpoint".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// The one extra field a service needs beyond its key, if any.
+const fn provider_field_label(id: &str) -> &'static str {
+    match id.as_bytes() {
+        b"cloudflare" => "Account",
+        b"azure" => "Region",
+        b"custom" => "Endpoint",
+        _ => "",
+    }
+}
+
+fn provider_field_value(entry: &TranscriptionProviderEntry) -> String {
+    match entry.id.as_str() {
+        "custom" => entry.endpoint.clone().unwrap_or_default(),
+        "cloudflare" | "azure" => entry.account.clone().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn set_provider_field_value(entry: &mut TranscriptionProviderEntry, value: String) {
+    let value = value.trim().to_owned();
+    let value = (!value.is_empty()).then_some(value);
+    match entry.id.as_str() {
+        "custom" => entry.endpoint = value,
+        "cloudflare" | "azure" => entry.account = value,
+        _ => {}
+    }
+}
+
+fn sync_providers(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCell<AppState>>) {
+    let Some(settings) = settings.upgrade() else {
+        return;
+    };
+    let state = state.borrow();
+    let rows: Vec<ProviderRow> = state
+        .transcription_chain
+        .iter()
+        .map(|entry| {
+            let status = state
+                .transcription_providers
+                .iter()
+                .find(|status| status.id == entry.id);
+            ProviderRow {
+                id: entry.id.clone().into(),
+                title: provider_display_name(&entry.id).into(),
+                detail: status
+                    .map(|status| {
+                        if status.detail.is_empty() {
+                            "Ready".to_owned()
+                        } else {
+                            status.detail.clone()
+                        }
+                    })
+                    .unwrap_or_default()
+                    .into(),
+                enabled: entry.enabled,
+                available: status.is_some_and(|status| status.available),
+                needs_key: entry.id != "local",
+                // Only ever a masked tail; the key itself never comes back
+                // from the worker.
+                key_hint: status
+                    .and_then(|status| status.credential_hint.clone())
+                    .unwrap_or_default()
+                    .into(),
+                field_label: provider_field_label(&entry.id).into(),
+                field_value: provider_field_value(entry).into(),
+            }
+        })
+        .collect();
+    settings.set_provider_rows(ModelRc::new(VecModel::from(rows)));
+}
+
+/// Sends the arranged list to the worker and writes it to settings.
+fn apply_provider_chain(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Workers,
+) {
+    let providers = state.borrow().transcription_chain.clone();
+    if let Err(error) = workers
+        .speech
+        .send(&SpeechWorkerCommand::SetTranscriptionProviders { providers })
+    {
+        set_indicator_status(
+            settings,
+            &format!("The transcription order could not be applied: {error}"),
+        );
+        return;
+    }
+    let _ = save_settings(&state.borrow());
+    sync_providers(settings, state);
 }
 
 fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCell<AppState>>) {
@@ -8944,5 +9191,77 @@ mod audio_level_coalescing_tests {
         // Once consumed, the next frame queues its own wake-up again.
         assert!(record_audio_level(frame(0.4)).is_some());
         assert!(take_audio_level().is_some_and(|frame| (frame.peak - 0.4).abs() < f32::EPSILON));
+    }
+}
+
+#[cfg(test)]
+mod transcription_provider_tests {
+    use rust_protocol::TranscriptionProviderEntry;
+
+    use super::{
+        PROVIDER_ROW_HEIGHT, provider_display_name, provider_field_label, provider_field_value,
+        set_provider_field_value,
+    };
+
+    fn entry(id: &str) -> TranscriptionProviderEntry {
+        TranscriptionProviderEntry {
+            id: id.to_owned(),
+            enabled: true,
+            endpoint: None,
+            model: None,
+            account: None,
+        }
+    }
+
+    #[test]
+    fn each_service_asks_for_the_one_extra_thing_it_needs() {
+        assert_eq!(provider_field_label("cloudflare"), "Account");
+        assert_eq!(provider_field_label("azure"), "Region");
+        assert_eq!(provider_field_label("custom"), "Endpoint");
+        assert_eq!(provider_field_label("groq"), "");
+        assert_eq!(provider_field_label("local"), "");
+    }
+
+    #[test]
+    fn the_extra_field_is_written_to_the_place_that_service_reads() {
+        let mut cloudflare = entry("cloudflare");
+        set_provider_field_value(&mut cloudflare, " abc123 ".to_owned());
+        assert_eq!(cloudflare.account.as_deref(), Some("abc123"));
+        assert_eq!(provider_field_value(&cloudflare), "abc123");
+
+        let mut custom = entry("custom");
+        set_provider_field_value(&mut custom, "https://speech.example.test/v1".to_owned());
+        assert_eq!(
+            custom.endpoint.as_deref(),
+            Some("https://speech.example.test/v1")
+        );
+        assert!(custom.account.is_none(), "a custom endpoint has no account");
+    }
+
+    #[test]
+    fn clearing_the_field_removes_it_rather_than_storing_an_empty_string() {
+        let mut azure = entry("azure");
+        set_provider_field_value(&mut azure, "westeurope".to_owned());
+        set_provider_field_value(&mut azure, "   ".to_owned());
+
+        assert_eq!(azure.account, None);
+        assert_eq!(provider_field_value(&azure), "");
+    }
+
+    #[test]
+    fn a_service_this_build_does_not_know_still_shows_its_identifier() {
+        assert_eq!(provider_display_name("local"), "This computer");
+        assert_eq!(provider_display_name("groq"), "Groq");
+        assert_eq!(
+            provider_display_name("a-service-from-the-future"),
+            "a-service-from-the-future"
+        );
+    }
+
+    #[test]
+    fn the_drag_distance_matches_the_row_height_in_the_interface() {
+        // A drag of one row must move the entry exactly one place; the value
+        // is duplicated in app.slint and the two must agree.
+        assert!((PROVIDER_ROW_HEIGHT - 96.0).abs() < f32::EPSILON);
     }
 }

@@ -23,7 +23,7 @@ use std::{
 use anyhow::Result;
 use rust_app_core::credentials::CredentialStore;
 use rust_cloud_speech::{
-    Chain, HttpExecutor, ProviderEntry, ProviderId, RouteOutcome, Router,
+    Chain, HttpExecutor, ProviderEntry, ProviderId, RouteOutcome, Router, Unavailable,
     audio::{UPLOAD_SAMPLE_RATE_HZ, encode_wav},
     http::DEFAULT_TIMEOUT,
 };
@@ -303,6 +303,7 @@ impl State {
             .into_iter()
             .map(|status| TranscriptionProviderStatus {
                 detail: describe(&status.unavailable),
+                enabled: !matches!(status.unavailable, Some(Unavailable::Disabled)),
                 available: status.is_available(),
                 has_credential: self.credentials.has(status.id.as_str()),
                 credential_hint: self.credentials.hint(status.id.as_str()),

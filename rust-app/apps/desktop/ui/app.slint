@@ -21,6 +21,18 @@ export struct SlateLine {
     color-index: int,
 }
 
+export struct ProviderRow {
+    id: string,
+    title: string,
+    detail: string,
+    enabled: bool,
+    available: bool,
+    needs-key: bool,
+    key-hint: string,
+    field-label: string,
+    field-value: string,
+}
+
 export struct TranslationPair {
     source: string,
     translation: string,
@@ -444,6 +456,7 @@ export component SettingsWindow inherits Window {
     in property <[ModelRow]> model-rows;
     in property <[ModelRow]> translation-model-rows;
     in property <[HistoryRow]> history-rows;
+    in property <[ProviderRow]> provider-rows;
     in-out property <string> translation-enabled-label: "Translation: disabled";
     in-out property <string> layout-enabled-label: "Layout correction: enabled";
     in-out property <string> text-action-mode-label: "Ctrl+Alt+F: adaptive";
@@ -474,6 +487,11 @@ export component SettingsWindow inherits Window {
     callback open-translator();
     callback toggle-history-enabled();
     callback clear-history();
+    callback move-provider(int, int);
+    callback drag-provider(int, length);
+    callback toggle-provider(int);
+    callback set-provider-key(string, string);
+    callback set-provider-field(string, string);
     callback quit-requested();
 
     HorizontalLayout {
@@ -1199,6 +1217,193 @@ export component SettingsWindow inherits Window {
                             label: root.release-optimization-label;
                             accent: root.release-optimization-label == "Release optimization: fastest";
                             clicked => { root.toggle-release-optimization(); }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 34px;
+                    vertical-stretch: 0;
+                    SectionTitle { text: "Transcription order"; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: "Top first. The next one is used only when the one above runs out.";
+                        color: Theme.text-faint;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    background: Theme.panel;
+
+                    ListView {
+                        for row[index] in root.provider-rows : Rectangle {
+                            height: 96px;
+                            border-radius: 7px;
+                            border-width: 1px;
+                            border-color: row.enabled && row.available ? Theme.orange : Theme.line;
+                            background: row.enabled ? Theme.orange-soft : Theme.ink;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 10px;
+                                padding-top: 8px;
+                                padding-bottom: 8px;
+                                spacing: 10px;
+
+                                Rectangle {
+                                    width: 22px;
+                                    border-radius: 5px;
+                                    background: grip.pressed ? Theme.panel-raised : transparent;
+
+                                    Text {
+                                        text: "☰";
+                                        color: Theme.text-faint;
+                                        font-size: 14px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+
+                                    grip := TouchArea {
+                                        property <length> pressed-at: 0px;
+                                        mouse-cursor: grab;
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.down) {
+                                                self.pressed-at = self.mouse-y;
+                                            }
+                                            if (event.kind == PointerEventKind.up) {
+                                                root.drag-provider(index, self.mouse-y - self.pressed-at);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: (index + 1) + ".";
+                                            color: Theme.text-faint;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: row.title;
+                                            color: Theme.text;
+                                            font-size: 13px;
+                                            font-weight: 650;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Text {
+                                            text: row.detail;
+                                            color: row.available ? Theme.text-muted : Theme.text-faint;
+                                            font-size: 10px;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        height: 30px;
+
+                                        if row.needs-key : Rectangle {
+                                            horizontal-stretch: 1;
+                                            border-radius: 5px;
+                                            border-width: 1px;
+                                            border-color: Theme.line;
+                                            background: Theme.ink;
+
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 6px;
+                                                Text {
+                                                    text: row.key-hint == "" ? "Key" : row.key-hint;
+                                                    color: Theme.text-faint;
+                                                    font-size: 10px;
+                                                    vertical-alignment: center;
+                                                }
+                                                key-input := TextInput {
+                                                    horizontal-stretch: 1;
+                                                    input-type: password;
+                                                    single-line: true;
+                                                    color: Theme.text;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                    accepted => {
+                                                        root.set-provider-key(row.id, self.text);
+                                                        self.text = "";
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if row.field-label != "" : Rectangle {
+                                            width: 190px;
+                                            border-radius: 5px;
+                                            border-width: 1px;
+                                            border-color: Theme.line;
+                                            background: Theme.ink;
+
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 6px;
+                                                Text {
+                                                    text: row.field-label;
+                                                    color: Theme.text-faint;
+                                                    font-size: 10px;
+                                                    vertical-alignment: center;
+                                                }
+                                                field-input := TextInput {
+                                                    horizontal-stretch: 1;
+                                                    single-line: true;
+                                                    text: row.field-value;
+                                                    color: Theme.text;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                    accepted => {
+                                                        root.set-provider-field(row.id, self.text);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        ActionButton {
+                                            width: 34px;
+                                            height: 30px;
+                                            label: "^";
+                                            enabled: index > 0;
+                                            clicked => { root.move-provider(index, index - 1); }
+                                        }
+                                        ActionButton {
+                                            width: 34px;
+                                            height: 30px;
+                                            label: "v";
+                                            enabled: index < root.provider-rows.length - 1;
+                                            clicked => { root.move-provider(index, index + 1); }
+                                        }
+                                        ActionButton {
+                                            width: 76px;
+                                            height: 30px;
+                                            label: row.enabled ? "ON" : "OFF";
+                                            accent: row.enabled;
+                                            clicked => { root.toggle-provider(index); }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

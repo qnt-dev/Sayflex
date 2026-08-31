@@ -175,6 +175,8 @@ pub struct TranscriptionProviderEntry {
 pub struct TranscriptionProviderStatus {
     pub id: String,
     pub position: usize,
+    /// The row's own switch, independent of whether it can run right now.
+    pub enabled: bool,
     pub available: bool,
     /// Why it is unavailable, in words meant for the user. Empty when it is.
     pub detail: String,
