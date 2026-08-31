@@ -29,6 +29,29 @@ covered by `cargo fmt`, `cargo clippy -D warnings` and `cargo test --workspace`.
   owns the pipe. A worker that stops reading can no longer block the UI thread,
   which previously had no timeout at all.
 
+**Transcription through API services**
+
+- Dictation can go to a network service instead of the local engine: Groq,
+  Cloudflare Workers AI, Azure Speech, Deepgram, or any OpenAI-compatible
+  endpoint. Each has a free allowance; the point of the list is to use the next
+  one when the one before it runs out.
+- The order is the user's, arranged by dragging rows in Settings. The local
+  engine is a row like the others and can be moved or switched off. A row can
+  be switched off without losing its place or its settings.
+- Failing over is decided by what the service answered, not by a local counter:
+  a refused key takes a row out until it is replaced, a spent allowance holds it
+  until the allowance resets, throttling honours Retry-After, and a request the
+  service rejected as malformed stops the walk instead of spending every other
+  quota on audio nobody will accept.
+- Keys are encrypted with DPAPI in user scope and kept in their own file, never
+  in settings.json. Settings shows a masked tail and never the value.
+- The local path is unchanged. While no service is ahead of the local engine —
+  a fresh installation, or one with no keys — a finished recording goes
+  straight to inference as before: no audio encoded, no thread crossed.
+- The worker reports which service produced a transcript. Audio leaving the
+  machine is not something to infer from a settings screen.
+- Protocol version 15 carries the list, the keys and each row's availability.
+
 **Model installation**
 
 - Installation runs on each worker's own installer thread. Both workers used to
