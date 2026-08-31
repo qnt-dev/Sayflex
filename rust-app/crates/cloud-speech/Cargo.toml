@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "multipart", "rustls-tls"] }
+rust-app-core = { version = "0.5.27", path = "../app-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

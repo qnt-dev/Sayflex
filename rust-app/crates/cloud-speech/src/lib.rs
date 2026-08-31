@@ -8,10 +8,14 @@
 pub mod audio;
 pub mod chain;
 pub mod failure;
+pub mod http;
 pub mod provider;
 pub mod request;
+pub mod router;
 
 pub use chain::{Chain, Ledger, ProviderStatus, Unavailable};
 pub use failure::{ProviderFailure, classify_response};
+pub use http::{DEFAULT_TIMEOUT, HttpExecutor};
 pub use provider::{ProviderEntry, ProviderId};
 pub use request::{PlanError, RequestBody, RequestPlan, plan_request, read_transcript};
+pub use router::{Attempt, RequestExecutor, RouteOutcome, Router};
