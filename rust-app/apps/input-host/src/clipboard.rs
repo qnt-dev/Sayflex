@@ -227,11 +227,9 @@ impl ClipboardPasteHost {
             if target_contains_payload() {
                 return Ok(ClipboardReadOutcome::TargetVerified);
             }
-            if self.state.rendered {
-                if self.state.target_requested {
-                    self.wait_until_clipboard_released(deadline);
-                    return Ok(ClipboardReadOutcome::TargetRead);
-                }
+            if self.state.rendered && self.state.target_requested {
+                self.wait_until_clipboard_released(deadline);
+                return Ok(ClipboardReadOutcome::TargetRead);
             }
             if !self.owns_clipboard() {
                 return Ok(ClipboardReadOutcome::Superseded);

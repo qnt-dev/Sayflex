@@ -205,20 +205,20 @@ unsafe extern "system" fn mouse_hook(code: i32, w_param: WPARAM, l_param: LPARAM
             // SAFETY: Windows supplies an MSLLHOOKSTRUCT pointer for WH_MOUSE_LL.
             let event = unsafe { &*(l_param as *const MSLLHOOKSTRUCT) };
             let message = w_param as u32;
-            if event.flags & LLMHF_INJECTED == 0 && message == WM_LBUTTONDOWN {
-                if let Some((window_handle, pinned)) = popups
+            if event.flags & LLMHF_INJECTED == 0
+                && message == WM_LBUTTONDOWN
+                && let Some((window_handle, pinned)) = popups
                     .iter()
                     .copied()
                     .find(|(window_handle, _)| point_is_in_pin(*window_handle, event.pt))
-                {
-                    let pinned = !pinned;
-                    set_popup_pinned(window_handle as u64, pinned);
-                    PIN_CLICK_CAPTURED.store(window_handle, Ordering::Release);
-                    let _ = DISMISS_SENDER.get().map(|sender| {
-                        sender.send(DismissSignal::PinChanged(window_handle as u64, pinned))
-                    });
-                    return 1;
-                }
+            {
+                let pinned = !pinned;
+                set_popup_pinned(window_handle as u64, pinned);
+                PIN_CLICK_CAPTURED.store(window_handle, Ordering::Release);
+                let _ = DISMISS_SENDER.get().map(|sender| {
+                    sender.send(DismissSignal::PinChanged(window_handle as u64, pinned))
+                });
+                return 1;
             }
             if message == WM_LBUTTONUP && PIN_CLICK_CAPTURED.swap(0, Ordering::AcqRel) != 0 {
                 return 1;

@@ -4480,7 +4480,7 @@ fn show_selection_translation_preview(
             28.0,
         ));
         preview.set_pinned(false);
-        if let Err(error) = configure_slint_translation_resize(&preview, false) {
+        if let Err(error) = configure_slint_translation_resize(preview, false) {
             rust_app_core::diagnostics::log_line(&format!(
                 "translation_preview resize_state=failed pinned=false reason=first_show error={error}"
             ));
@@ -4490,7 +4490,7 @@ fn show_selection_translation_preview(
             let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
         }
     }
-    apply_translation_preview_layout(&preview, translated_text);
+    apply_translation_preview_layout(preview, translated_text);
     preview.set_translated_text(translated_text.into());
     preview.set_dual_pairs(ModelRc::new(VecModel::from(translation_pairs(
         source_text,
@@ -4501,7 +4501,7 @@ fn show_selection_translation_preview(
         preview.invoke_reset_scroll();
         if slot.attached.get()
             && let Err(error) = present_translation_preview(
-                &preview,
+                preview,
                 translation_preview_presenter,
                 Some(target.window_handle),
             )
@@ -4515,7 +4515,7 @@ fn show_selection_translation_preview(
         && let Some(handle) = slint_window_handle(preview.window())
         && let Ok(ticket) = translation_preview_presenter.begin_refresh()
     {
-        refresh_cloaked_translation_backdrop(&preview, handle);
+        refresh_cloaked_translation_backdrop(preview, handle);
         if let Err(error) = translation_preview_presenter.await_frame(preview.window(), ticket) {
             preview.set_prepared(false);
             translation_preview_presenter.abort_prepare(
@@ -6309,13 +6309,13 @@ fn wire_translation_preview(preview: &TranslationPreview, presenter: &OverlayPre
     {
         let preview_weak = preview.as_weak();
         preview.on_pin_state_changed(move |pinned| {
-            if let Some(preview) = preview_weak.upgrade() {
-                if let Some(window_handle) = slint_window_handle(preview.window()) {
-                    dispatch_runtime_event(RuntimeEvent::TranslationPreviewPinChanged {
-                        window_handle,
-                        pinned,
-                    });
-                }
+            if let Some(preview) = preview_weak.upgrade()
+                && let Some(window_handle) = slint_window_handle(preview.window())
+            {
+                dispatch_runtime_event(RuntimeEvent::TranslationPreviewPinChanged {
+                    window_handle,
+                    pinned,
+                });
             }
         });
     }
@@ -8753,11 +8753,13 @@ mod settings_document_tests {
 
     #[test]
     fn a_saved_document_reads_back_as_the_same_settings() {
-        let mut saved = SavedSettings::default();
-        saved.translation_enabled = true;
-        saved.companion_home_position = Some((-640, 320));
-        saved.visualizer_style = VisualizerStyle::default();
-        saved.text_action_mode = TextActionMode::default();
+        let saved = SavedSettings {
+            translation_enabled: true,
+            companion_home_position: Some((-640, 320)),
+            visualizer_style: VisualizerStyle::default(),
+            text_action_mode: TextActionMode::default(),
+            ..SavedSettings::default()
+        };
 
         let state = AppState::new(
             "whisper-large-v3-turbo".to_owned(),
