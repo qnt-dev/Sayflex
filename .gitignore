@@ -14,3 +14,19 @@ TestResults/
 /desktop-pet/frame.png
 /desktop-pet/sheet.png
 /desktop-pet/walk.png
+
+# Python bytecode from the sprite tooling
+__pycache__/
+*.pyc
+
+# The two web prototypes carry their own git history and are backed up as
+# bundles; embedding them here would create gitlinks to unreachable commits.
+/design/sayflex-open-design-prototype/
+/design/styleflex-web-prototype/
+
+# Prototype dependencies and build output
+/design/**/node_modules/
+/design/**/dist/
+/design/**/.next/
+/design/**/.vinext/
+/design/**/.wrangler/
