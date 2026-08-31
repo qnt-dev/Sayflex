@@ -6,21 +6,20 @@ use std::{
     env,
     error::Error,
     fs,
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufRead, BufReader},
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     rc::Rc,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rust_app_core::{
     BeginDisposition, EndDisposition, LayoutCandidate, LayoutDirection, SessionPhase,
-    SessionRegistry, build_layout_candidates,
+    SessionRegistry, build_layout_candidates, worker_stream::JsonWriter,
 };
 use rust_protocol::{
     AUDIO_SPECTRUM_BANDS, CompanionRendererCommand, CompanionRendererEvent, HistoryEntry,
@@ -298,77 +297,6 @@ impl RecordingOverlays {
         inactive
             .presenter
             .retire(inactive.indicator.window(), "visualizer_surface_switch");
-    }
-}
-
-/// Commands buffered for a worker before the sender is told to give up.
-///
-/// A worker that is reading its input drains this in microseconds. A worker
-/// that stopped reading — a long model download used to do exactly that —
-/// fills the few kilobytes of pipe buffer, and a blocking write on the UI
-/// thread would then never return.
-const WORKER_COMMAND_QUEUE: usize = 256;
-const WORKER_COMMAND_TIMEOUT: Duration = Duration::from_millis(100);
-const WORKER_COMMAND_RETRY: Duration = Duration::from_millis(5);
-
-/// Serializes commands on the caller's thread and hands the bytes to a writer
-/// thread that owns the pipe, so nothing on the UI thread waits on a pipe.
-struct JsonWriter {
-    commands: RefCell<mpsc::SyncSender<String>>,
-}
-
-impl JsonWriter {
-    fn start(stdin: ChildStdin, executable: &str) -> Result<Self, Box<dyn Error>> {
-        let (commands, lines) = mpsc::sync_channel::<String>(WORKER_COMMAND_QUEUE);
-        let name = executable.to_owned();
-        std::thread::Builder::new()
-            .name(format!("{executable}-commands"))
-            .spawn(move || {
-                let mut writer = BufWriter::new(stdin);
-                for line in lines {
-                    if writer.write_all(line.as_bytes()).is_err()
-                        || writer.write_all(b"\n").is_err()
-                        || writer.flush().is_err()
-                    {
-                        rust_app_core::diagnostics::log_line(&format!(
-                            "worker={name} command_stream=write_failed"
-                        ));
-                        break;
-                    }
-                }
-            })?;
-        Ok(Self {
-            commands: RefCell::new(commands),
-        })
-    }
-
-    fn send<T: Serialize>(&self, message: &T) -> Result<(), String> {
-        let mut line = serde_json::to_string(message).map_err(|error| error.to_string())?;
-        let deadline = Instant::now() + WORKER_COMMAND_TIMEOUT;
-        loop {
-            let outcome = self.commands.borrow().try_send(line);
-            match outcome {
-                Ok(()) => return Ok(()),
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    return Err("the worker command stream is closed".to_owned());
-                }
-                Err(mpsc::TrySendError::Full(returned)) => {
-                    if Instant::now() >= deadline {
-                        return Err(format!(
-                            "the worker has not read {WORKER_COMMAND_QUEUE} queued commands"
-                        ));
-                    }
-                    line = returned;
-                }
-            }
-            std::thread::sleep(WORKER_COMMAND_RETRY);
-        }
-    }
-
-    /// Points this writer at a restarted worker. Dropping the previous sender
-    /// ends the thread that owned the previous pipe.
-    fn replace_with(&self, replacement: Self) {
-        *self.commands.borrow_mut() = replacement.commands.into_inner();
     }
 }
 
@@ -726,6 +654,7 @@ impl Workers {
             .as_ref()
             .ok_or_else(|| "the Companion Orb renderer is unavailable".to_owned())?
             .send(command)
+            .map_err(|error| error.to_string())
     }
 
     fn send_companion_if_running(&self, command: &CompanionRendererCommand) -> Result<(), String> {
@@ -733,7 +662,7 @@ impl Workers {
         let Some(companion) = companion.as_ref() else {
             return Ok(());
         };
-        companion.send(command)
+        companion.send(command).map_err(|error| error.to_string())
     }
 
     fn recover(
@@ -4787,7 +4716,7 @@ fn fallback_and_initialize_speech(
         })
     };
     sync_action_settings(settings, state);
-    initialization?;
+    initialization.map_err(|error| error.to_string())?;
     Ok(backend)
 }
 
