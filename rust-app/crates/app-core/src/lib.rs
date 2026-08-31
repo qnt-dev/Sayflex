@@ -1,3 +1,4 @@
+pub mod credentials;
 pub mod diagnostics;
 pub mod dictation;
 mod layout;

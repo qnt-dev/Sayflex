@@ -8,6 +8,7 @@ pub struct BlurredBackdrop {
 }
 
 #[cfg(windows)]
+pub mod credentials;
 mod job;
 #[cfg(windows)]
 mod overlay;

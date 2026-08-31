@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+rust-app-core = { version = "0.5.27", path = "../app-core" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true

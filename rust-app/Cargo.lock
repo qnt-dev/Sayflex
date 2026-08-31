@@ -4607,6 +4607,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-cloud-speech"
+version = "0.5.27"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "rust-model-manager"
 version = "0.5.27"
 dependencies = [
@@ -4632,6 +4641,8 @@ dependencies = [
 name = "rust-platform-windows"
 version = "0.5.27"
 dependencies = [
+ "rust-app-core",
+ "tempfile",
  "windows-sys 0.61.2",
 ]
 
