@@ -11,7 +11,6 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{
-    StatusCode,
     blocking::Client,
     header::{AUTHORIZATION, CONTENT_TYPE},
 };
@@ -30,6 +29,10 @@ const MAX_SOURCE_TOKENS_PER_REQUEST: usize = 1_200;
 const MAX_UTF8_BYTES_WITHOUT_TOKENIZE: usize = 1_000;
 const _: () = assert!(MAX_UTF8_BYTES_WITHOUT_TOKENIZE < MAX_SOURCE_TOKENS_PER_REQUEST);
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(90);
+/// Attempts allowed when the server exits during startup, which is how losing
+/// the race for the drawn port presents itself. Each lost race costs seconds,
+/// not the full startup deadline.
+const SERVER_START_ATTEMPTS: u32 = 3;
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SERVER_LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -251,6 +254,20 @@ struct LlamaRuntime {
     max_output_tokens: u32,
 }
 
+/// Outcome of one attempt to bring the local server up.
+///
+/// The port is chosen by binding an ephemeral socket and releasing it, so
+/// another process can take it in the gap before the server binds. Losing that
+/// race is fast and visible — the server exits instead of serving — and is
+/// worth one more attempt on a freshly drawn port. A deadline expiry means the
+/// opposite: the server is alive but slow, and retrying only multiplies the
+/// ninety-second wait.
+enum StartAttempt {
+    Ready(Box<LlamaRuntime>),
+    Exited(String),
+    Timeout,
+}
+
 impl LlamaRuntime {
     fn start(
         runtime_root: &Path,
@@ -258,6 +275,36 @@ impl LlamaRuntime {
         context_size: u32,
         max_output_tokens: u32,
     ) -> Result<Self> {
+        let mut last_exit = None;
+        for attempt in 1..=SERVER_START_ATTEMPTS {
+            match Self::start_attempt(runtime_root, model_path, context_size, max_output_tokens)? {
+                StartAttempt::Ready(runtime) => return Ok(*runtime),
+                StartAttempt::Timeout => bail!(
+                    "llama.cpp translation runtime did not become ready in {} seconds",
+                    SERVER_START_TIMEOUT.as_secs()
+                ),
+                StartAttempt::Exited(status) => {
+                    eprintln!(
+                        "llama-server attempt {attempt}/{SERVER_START_ATTEMPTS} exited during \
+                         startup: {status}"
+                    );
+                    last_exit = Some(status);
+                }
+            }
+        }
+        bail!(
+            "llama.cpp translation runtime exited during startup on all {SERVER_START_ATTEMPTS} \
+             attempts: {}",
+            last_exit.unwrap_or_else(|| "unknown reason".to_owned())
+        )
+    }
+
+    fn start_attempt(
+        runtime_root: &Path,
+        model_path: &Path,
+        context_size: u32,
+        max_output_tokens: u32,
+    ) -> Result<StartAttempt> {
         let executable = runtime_root.join("llama-server.exe");
         if !executable.is_file() {
             bail!(
@@ -284,10 +331,15 @@ impl LlamaRuntime {
             .args(["-ngl", "all"])
             .args(["--host", "127.0.0.1"])
             .args(["--port", &port.to_string()])
-            .args(["--api-key", &api_key])
             .args(["--no-ui", "--offline"])
             .current_dir(runtime_root)
             .env("PATH", runtime_root)
+            // The key travels in the child's environment rather than on its
+            // command line. Command lines of same-user processes are readable
+            // with ordinary tools; an environment block needs PROCESS_VM_READ.
+            // A key file would need an explicit ACL and deletion on every exit
+            // path, including a crash, which is more to get wrong than this.
+            .env("LLAMA_API_KEY", &api_key)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(error_log));
@@ -316,7 +368,7 @@ impl LlamaRuntime {
             .build()
             .context("could not create the local translation async runtime")?;
         let endpoint = format!("http://127.0.0.1:{port}");
-        let mut runtime = Self {
+        let runtime = Self {
             child,
             client,
             async_client,
@@ -325,31 +377,38 @@ impl LlamaRuntime {
             authorization,
             max_output_tokens,
         };
-        runtime.wait_until_ready()?;
-        Ok(runtime)
+        runtime.wait_until_ready()
     }
 
-    fn wait_until_ready(&mut self) -> Result<()> {
+    /// Waits for the server to answer `/health`, exit, or run out of time.
+    ///
+    /// Takes ownership so a failed start cannot leave a half-live handle
+    /// behind: returning anything other than `Ready` drops the runtime here,
+    /// and its `Drop` kills the child process.
+    fn wait_until_ready(mut self) -> Result<StartAttempt> {
         let deadline = Instant::now() + SERVER_START_TIMEOUT;
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait()? {
-                bail!("llama.cpp translation runtime exited during startup: {status}");
+                return Ok(StartAttempt::Exited(status.to_string()));
             }
-            match self
+            // Bind the borrow of `self` to a statement so the handle can be
+            // moved out inside the match below.
+            let health = self
                 .client
                 .get(format!("{}/health", self.endpoint))
                 .header(AUTHORIZATION, &self.authorization)
-                .send()
-            {
-                Ok(response) if response.status().is_success() => return Ok(()),
-                Ok(response)
-                    if response.status() == StatusCode::SERVICE_UNAVAILABLE
-                        || response.status() == StatusCode::TOO_MANY_REQUESTS => {}
+                .send();
+            match health {
+                Ok(response) if response.status().is_success() => {
+                    return Ok(StartAttempt::Ready(Box::new(self)));
+                }
+                // Loading and busy are expected while the model is read from
+                // disk; anything else is retried until the deadline as well.
                 Ok(_) | Err(_) => {}
             }
             thread::sleep(SERVER_POLL_INTERVAL);
         }
-        bail!("llama.cpp translation runtime did not become ready in time")
+        Ok(StartAttempt::Timeout)
     }
 
     fn is_running(&mut self) -> bool {
