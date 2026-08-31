@@ -1,4 +1,7 @@
 **/bin/
+# ...but not Rust binary targets: src/bin is source, not build output, and the
+# rule above silently kept a committed test helper out of every fresh clone.
+!**/src/bin/
 **/obj/
 .vs/
 .idea/
