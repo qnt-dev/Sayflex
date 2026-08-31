@@ -13,6 +13,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -71,11 +72,53 @@ const WORKER_RESTART_WINDOW: Duration = Duration::from_secs(60);
 const WORKER_STARTUP_STABILITY: Duration = Duration::from_secs(2);
 static NEXT_WORKER_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
+/// The newest microphone frame, held outside the UI event queue.
+static LATEST_AUDIO_LEVEL: Mutex<Option<AudioLevelFrame>> = Mutex::new(None);
+/// Set while a wake-up for that frame is already queued for the UI thread.
+static AUDIO_LEVEL_QUEUED: AtomicBool = AtomicBool::new(false);
+
+struct AudioLevelFrame {
+    instance_id: u64,
+    session_id: SessionId,
+    peak: f32,
+    spectrum: Vec<f32>,
+}
+
+/// Keeps only the newest microphone frame and asks for at most one wake-up.
+///
+/// The worker emits about thirty-one frames a second, each carrying
+/// thirty-two spectrum bands. Queueing every one of them puts the transcript
+/// that ends a dictation behind a backlog of visualizer updates whenever the
+/// UI thread stalls, and then replays frames that are already stale. Only the
+/// newest frame can still be worth drawing.
+fn record_audio_level(frame: AudioLevelFrame) -> Option<RuntimeEvent> {
+    let instance_id = frame.instance_id;
+    *LATEST_AUDIO_LEVEL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frame);
+    (!AUDIO_LEVEL_QUEUED.swap(true, Ordering::AcqRel))
+        .then_some(RuntimeEvent::SpeechAudioLevel { instance_id })
+}
+
+fn take_audio_level() -> Option<AudioLevelFrame> {
+    // Cleared first: a frame that arrives during the take below queues its own
+    // wake-up rather than being dropped.
+    AUDIO_LEVEL_QUEUED.store(false, Ordering::Release);
+    LATEST_AUDIO_LEVEL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 enum RuntimeEvent {
     Input(InputHostEvent),
     Speech {
         instance_id: u64,
         event: SpeechWorkerEvent,
+    },
+    /// A coalesced microphone frame is waiting in `LATEST_AUDIO_LEVEL`.
+    SpeechAudioLevel {
+        instance_id: u64,
     },
     Translation(TranslationWorkerEvent),
     Companion(CompanionRendererEvent),
@@ -258,20 +301,74 @@ impl RecordingOverlays {
     }
 }
 
+/// Commands buffered for a worker before the sender is told to give up.
+///
+/// A worker that is reading its input drains this in microseconds. A worker
+/// that stopped reading — a long model download used to do exactly that —
+/// fills the few kilobytes of pipe buffer, and a blocking write on the UI
+/// thread would then never return.
+const WORKER_COMMAND_QUEUE: usize = 256;
+const WORKER_COMMAND_TIMEOUT: Duration = Duration::from_millis(100);
+const WORKER_COMMAND_RETRY: Duration = Duration::from_millis(5);
+
+/// Serializes commands on the caller's thread and hands the bytes to a writer
+/// thread that owns the pipe, so nothing on the UI thread waits on a pipe.
 struct JsonWriter {
-    stdin: RefCell<BufWriter<ChildStdin>>,
+    commands: RefCell<mpsc::SyncSender<String>>,
 }
 
 impl JsonWriter {
-    fn send<T: Serialize>(&self, message: &T) -> Result<(), String> {
-        let mut writer = self.stdin.borrow_mut();
-        serde_json::to_writer(&mut *writer, message).map_err(|error| error.to_string())?;
-        writer.write_all(b"\n").map_err(|error| error.to_string())?;
-        writer.flush().map_err(|error| error.to_string())
+    fn start(stdin: ChildStdin, executable: &str) -> Result<Self, Box<dyn Error>> {
+        let (commands, lines) = mpsc::sync_channel::<String>(WORKER_COMMAND_QUEUE);
+        let name = executable.to_owned();
+        std::thread::Builder::new()
+            .name(format!("{executable}-commands"))
+            .spawn(move || {
+                let mut writer = BufWriter::new(stdin);
+                for line in lines {
+                    if writer.write_all(line.as_bytes()).is_err()
+                        || writer.write_all(b"\n").is_err()
+                        || writer.flush().is_err()
+                    {
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "worker={name} command_stream=write_failed"
+                        ));
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            commands: RefCell::new(commands),
+        })
     }
 
+    fn send<T: Serialize>(&self, message: &T) -> Result<(), String> {
+        let mut line = serde_json::to_string(message).map_err(|error| error.to_string())?;
+        let deadline = Instant::now() + WORKER_COMMAND_TIMEOUT;
+        loop {
+            let outcome = self.commands.borrow().try_send(line);
+            match outcome {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err("the worker command stream is closed".to_owned());
+                }
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "the worker has not read {WORKER_COMMAND_QUEUE} queued commands"
+                        ));
+                    }
+                    line = returned;
+                }
+            }
+            std::thread::sleep(WORKER_COMMAND_RETRY);
+        }
+    }
+
+    /// Points this writer at a restarted worker. Dropping the previous sender
+    /// ends the thread that owned the previous pipe.
     fn replace_with(&self, replacement: Self) {
-        *self.stdin.borrow_mut() = replacement.stdin.into_inner();
+        *self.commands.borrow_mut() = replacement.commands.into_inner();
     }
 }
 
@@ -2377,9 +2474,7 @@ fn run_indicator_preview(
             .stderr
             .take()
             .ok_or("preview audio worker stderr is unavailable")?;
-        let writer = JsonWriter {
-            stdin: RefCell::new(BufWriter::new(stdin)),
-        };
+        let writer = JsonWriter::start(stdin, "preview-audio-worker")?;
         let session_id = SessionId::new();
         writer.send(&SpeechWorkerCommand::SetFastReleasePreviews { enabled: false })?;
         writer.send(&SpeechWorkerCommand::Begin {
@@ -2901,7 +2996,7 @@ where
 {
     let path = worker_path(executable)?;
     spawn_worker_at(worker_job, kind, executable, path, None, move |_, event| {
-        wrap(event)
+        Some(wrap(event))
     })
 }
 
@@ -2922,7 +3017,21 @@ fn spawn_speech_worker(
         SPEECH_WORKER_EXE,
         path,
         runtime_directory,
-        |instance_id, event| RuntimeEvent::Speech { instance_id, event },
+        |instance_id, event| match event {
+            // Visualizer frames never enter the UI queue as individual
+            // events; only the newest one is kept.
+            SpeechWorkerEvent::AudioLevel {
+                session_id,
+                peak,
+                spectrum,
+            } => record_audio_level(AudioLevelFrame {
+                instance_id,
+                session_id,
+                peak,
+                spectrum,
+            }),
+            event => Some(RuntimeEvent::Speech { instance_id, event }),
+        },
     )
 }
 
@@ -2936,7 +3045,7 @@ fn spawn_worker_at<T, F>(
 ) -> Result<(WorkerProcess, JsonWriter), Box<dyn Error>>
 where
     T: DeserializeOwned + Send + 'static,
-    F: Fn(u64, T) -> RuntimeEvent + Send + 'static,
+    F: Fn(u64, T) -> Option<RuntimeEvent> + Send + 'static,
 {
     let started_at = Instant::now();
     let instance_id = NEXT_WORKER_INSTANCE.fetch_add(1, Ordering::Relaxed);
@@ -2996,7 +3105,9 @@ where
                 };
                 match serde_json::from_str::<T>(&line) {
                     Ok(event) => {
-                        dispatch_runtime_event(wrap(instance_id, event));
+                        if let Some(event) = wrap(instance_id, event) {
+                            dispatch_runtime_event(event);
+                        }
                     }
                     Err(error) => {
                         dispatch_runtime_event(RuntimeEvent::WorkerError {
@@ -3027,9 +3138,7 @@ where
 
     Ok((
         WorkerProcess { child, instance_id },
-        JsonWriter {
-            stdin: RefCell::new(BufWriter::new(stdin)),
-        },
+        JsonWriter::start(stdin, executable)?,
     ))
 }
 
@@ -3221,6 +3330,26 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 event,
                 &runtime.settings,
                 &runtime.recording_overlays,
+                &runtime.state,
+                &runtime.workers,
+                &runtime.indicator_animation,
+            );
+        }
+        RuntimeEvent::SpeechAudioLevel { instance_id } => {
+            let Some(frame) = take_audio_level() else {
+                return;
+            };
+            if !runtime
+                .workers
+                .is_current_instance(WorkerKind::Speech, frame.instance_id)
+                || frame.instance_id != instance_id
+            {
+                return;
+            }
+            apply_audio_level(
+                frame.session_id,
+                frame.peak,
+                frame.spectrum,
                 &runtime.state,
                 &runtime.workers,
                 &runtime.indicator_animation,
@@ -4656,6 +4785,37 @@ fn fallback_and_initialize_speech(
     Ok(backend)
 }
 
+/// Draws one microphone frame, either in the in-process indicator or in the
+/// companion renderer. Frames for anything but the active session are dropped:
+/// coalescing can hand over a frame recorded just before a session ended.
+fn apply_audio_level(
+    session_id: SessionId,
+    peak: f32,
+    spectrum: Vec<f32>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Rc<Workers>,
+    indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
+) {
+    if state.borrow().registry.active_session() != Some(session_id) {
+        return;
+    }
+    if state
+        .borrow()
+        .active_visualizer_style
+        .is_some_and(VisualizerStyle::uses_external_renderer)
+    {
+        let _ = workers.send_companion(&CompanionRendererCommand::AudioLevel {
+            session_id,
+            peak,
+            spectrum,
+        });
+    } else {
+        indicator_animation
+            .borrow_mut()
+            .set_microphone_signal(peak, &spectrum);
+    }
+}
+
 fn handle_speech_event(
     event: SpeechWorkerEvent,
     settings: &slint::Weak<SettingsWindow>,
@@ -4804,23 +4964,16 @@ fn handle_speech_event(
             peak,
             spectrum,
         } => {
-            if state.borrow().registry.active_session() == Some(session_id) {
-                if state
-                    .borrow()
-                    .active_visualizer_style
-                    .is_some_and(VisualizerStyle::uses_external_renderer)
-                {
-                    let _ = workers.send_companion(&CompanionRendererCommand::AudioLevel {
-                        session_id,
-                        peak,
-                        spectrum,
-                    });
-                } else {
-                    indicator_animation
-                        .borrow_mut()
-                        .set_microphone_signal(peak, &spectrum);
-                }
-            }
+            // Normally coalesced before dispatch; handled here as well so the
+            // event stays meaningful if it ever arrives directly.
+            apply_audio_level(
+                session_id,
+                peak,
+                spectrum,
+                state,
+                workers,
+                indicator_animation,
+            );
         }
         SpeechWorkerEvent::Processing { session_id } => {
             indicator_animation.borrow_mut().begin_processing();
@@ -8770,5 +8923,39 @@ mod settings_document_tests {
         let document = serde_json::to_vec_pretty(&SavedSettings::from_state(&state)).unwrap();
 
         assert_eq!(parse_settings(&document), SavedSettings::from_state(&state));
+    }
+}
+
+#[cfg(test)]
+mod audio_level_coalescing_tests {
+    use rust_protocol::SessionId;
+
+    use super::{AudioLevelFrame, RuntimeEvent, record_audio_level, take_audio_level};
+
+    #[test]
+    fn only_the_newest_frame_survives_and_one_wake_up_covers_a_burst() {
+        let session_id = SessionId::new();
+        let frame = |peak: f32| AudioLevelFrame {
+            instance_id: 7,
+            session_id,
+            peak,
+            spectrum: vec![peak; 32],
+        };
+
+        assert!(matches!(
+            record_audio_level(frame(0.1)),
+            Some(RuntimeEvent::SpeechAudioLevel { instance_id: 7 })
+        ));
+        // The UI thread has not run yet, so these must not queue more work.
+        assert!(record_audio_level(frame(0.2)).is_none());
+        assert!(record_audio_level(frame(0.3)).is_none());
+
+        let taken = take_audio_level().expect("a frame is waiting");
+        assert!((taken.peak - 0.3).abs() < f32::EPSILON);
+        assert!(take_audio_level().is_none());
+
+        // Once consumed, the next frame queues its own wake-up again.
+        assert!(record_audio_level(frame(0.4)).is_some());
+        assert!(take_audio_level().is_some_and(|frame| (frame.peak - 0.4).abs() < f32::EPSILON));
     }
 }
