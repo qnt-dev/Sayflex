@@ -457,6 +457,10 @@ export component SettingsWindow inherits Window {
     in property <[ModelRow]> translation-model-rows;
     in property <[HistoryRow]> history-rows;
     in property <[ProviderRow]> provider-rows;
+    /// True when a network service sits in the list, enabled and usable. Every
+    /// claim about audio staying on the machine is conditional on this.
+    in property <bool> remote-transcription-enabled: false;
+    in property <string> app-version: "";
     in-out property <string> translation-enabled-label: "Translation: disabled";
     in-out property <string> layout-enabled-label: "Layout correction: enabled";
     in-out property <string> text-action-mode-label: "Ctrl+Alt+F: adaptive";
@@ -597,13 +601,17 @@ export component SettingsWindow inherits Window {
                         padding: 10px;
                         spacing: 2px;
                         Text {
-                            text: "Local by default";
-                            color: Theme.text-muted;
+                            text: root.remote-transcription-enabled
+                                ? "Sending audio to a service"
+                                : "Local by default";
+                            color: root.remote-transcription-enabled ? Theme.orange : Theme.text-muted;
                             font-size: 11px;
                             font-weight: 600;
                         }
                         Text {
-                            text: "Audio and text stay on this device.";
+                            text: root.remote-transcription-enabled
+                                ? "A transcription service is enabled, so recordings leave this device."
+                                : "Audio and text stay on this device.";
                             color: Theme.text-faint;
                             font-size: 9px;
                             wrap: word-wrap;
@@ -1227,8 +1235,10 @@ export component SettingsWindow inherits Window {
                     SectionTitle { text: "Transcription order"; }
                     Rectangle { horizontal-stretch: 1; }
                     Text {
-                        text: "Top first. The next one is used only when the one above runs out.";
-                        color: Theme.text-faint;
+                        text: root.remote-transcription-enabled
+                            ? "Top first. Recordings leave this device for the services below."
+                            : "Top first. The next one is used only when the one above runs out.";
+                        color: root.remote-transcription-enabled ? Theme.orange : Theme.text-faint;
                         font-size: 10px;
                         vertical-alignment: center;
                     }
@@ -1346,6 +1356,26 @@ export component SettingsWindow inherits Window {
                                                         self.text = "";
                                                     }
                                                 }
+                                                ActionButton {
+                                                    width: 52px;
+                                                    height: 24px;
+                                                    label: "Save";
+                                                    accent: true;
+                                                    clicked => {
+                                                        root.set-provider-key(row.id, key-input.text);
+                                                        key-input.text = "";
+                                                    }
+                                                }
+                                                ActionButton {
+                                                    width: 52px;
+                                                    height: 24px;
+                                                    label: "Clear";
+                                                    danger: true;
+                                                    clicked => {
+                                                        root.set-provider-key(row.id, "");
+                                                        key-input.text = "";
+                                                    }
+                                                }
                                             }
                                         }
 
@@ -1375,6 +1405,14 @@ export component SettingsWindow inherits Window {
                                                     vertical-alignment: center;
                                                     accepted => {
                                                         root.set-provider-field(row.id, self.text);
+                                                    }
+                                                }
+                                                ActionButton {
+                                                    width: 44px;
+                                                    height: 24px;
+                                                    label: "Set";
+                                                    clicked => {
+                                                        root.set-provider-field(row.id, field-input.text);
                                                     }
                                                 }
                                             }
@@ -1676,7 +1714,7 @@ export component SettingsWindow inherits Window {
 
                 Eyebrow {
                     height: 16px;
-                    text: "SAYFLEX  ·  0.5.23";
+                    text: "SAYFLEX  ·  " + root.app-version;
                 }
                 Text {
                     height: 34px;
@@ -1687,7 +1725,9 @@ export component SettingsWindow inherits Window {
                 }
                 Text {
                     height: 50px;
-                    text: "Dictation, selected-text actions and translation run locally after you choose and download a model.";
+                    text: root.remote-transcription-enabled
+                        ? "Selected-text actions and translation run locally. Dictation is sent to the transcription services you enabled, in the order you set."
+                        : "Dictation, selected-text actions and translation run locally after you choose and download a model.";
                     color: Theme.text-muted;
                     font-size: 12px;
                     wrap: word-wrap;

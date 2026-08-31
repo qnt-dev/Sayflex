@@ -6100,12 +6100,21 @@ fn wire_settings(
                     secret: (!secret.is_empty()).then_some(secret.clone()),
                 });
             match sent {
+                // Deliberately not "stored": the write happens in the worker,
+                // and the row below reports what is actually in the store once
+                // it answers. Claiming success here would be a guess.
                 Ok(()) => set_indicator_status(
                     &settings_weak,
                     &if secret.is_empty() {
-                        format!("Key removed for {}.", provider_display_name(&provider_id))
+                        format!(
+                            "Removing the key for {}…",
+                            provider_display_name(&provider_id)
+                        )
                     } else {
-                        format!("Key stored for {}.", provider_display_name(&provider_id))
+                        format!(
+                            "Storing the key for {}…",
+                            provider_display_name(&provider_id)
+                        )
                     },
                 ),
                 Err(error) => set_indicator_status(
@@ -7126,6 +7135,19 @@ fn sync_providers(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCell<App
             }
         })
         .collect();
+    // Every claim in the interface about audio staying on this machine is
+    // conditional on this, so it is computed from the same list the router
+    // walks rather than from a separate setting.
+    let sending_audio_out = state.transcription_chain.iter().any(|entry| {
+        entry.enabled
+            && entry.id != "local"
+            && state
+                .transcription_providers
+                .iter()
+                .any(|status| status.id == entry.id && status.has_credential)
+    });
+    settings.set_remote_transcription_enabled(sending_audio_out);
+    settings.set_app_version(env!("CARGO_PKG_VERSION").into());
     settings.set_provider_rows(ModelRc::new(VecModel::from(rows)));
 }
 

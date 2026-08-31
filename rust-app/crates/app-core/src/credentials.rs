@@ -70,16 +70,29 @@ impl<C: SecretCipher> CredentialStore<C> {
         if secret.trim().is_empty() {
             return self.remove(provider);
         }
-        self.secrets
-            .insert(provider.to_owned(), secret.trim().to_owned());
-        self.save()
+        let mut next = self.secrets.clone();
+        next.insert(provider.to_owned(), secret.trim().to_owned());
+        self.commit(next)
     }
 
     pub fn remove(&mut self, provider: &str) -> io::Result<()> {
-        if self.secrets.remove(provider).is_none() {
+        if !self.secrets.contains_key(provider) {
             return Ok(());
         }
-        self.save()
+        let mut next = self.secrets.clone();
+        next.remove(provider);
+        self.commit(next)
+    }
+
+    /// Writes first and adopts second.
+    ///
+    /// The other order produces two states nobody can explain: a key that
+    /// works until the application restarts, and a key that was deleted but
+    /// comes back after one.
+    fn commit(&mut self, next: BTreeMap<String, String>) -> io::Result<()> {
+        self.save(&next)?;
+        self.secrets = next;
+        Ok(())
     }
 
     #[must_use]
@@ -118,11 +131,11 @@ impl<C: SecretCipher> CredentialStore<C> {
         self.secrets.keys().map(String::as_str).collect()
     }
 
-    fn save(&self) -> io::Result<()> {
+    fn save(&self, secrets: &BTreeMap<String, String>) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        if self.secrets.is_empty() {
+        if secrets.is_empty() {
             // Nothing left to protect: remove the file rather than leave an
             // encrypted empty map behind.
             return match fs::remove_file(&self.path) {
@@ -130,7 +143,7 @@ impl<C: SecretCipher> CredentialStore<C> {
                 result => result,
             };
         }
-        let plaintext = serde_json::to_vec(&self.secrets).map_err(io::Error::other)?;
+        let plaintext = serde_json::to_vec(secrets).map_err(io::Error::other)?;
         let ciphertext = self.cipher.protect(&plaintext)?;
         write_atomically(&self.path, &ciphertext)
     }
@@ -244,6 +257,31 @@ mod tests {
         assert!(store.take_recovery_message().is_some());
         assert!(store.providers().is_empty());
         assert!(path.exists(), "the unreadable file is left alone");
+    }
+
+    #[test]
+    fn a_key_that_could_not_be_written_is_not_pretended_to_be_stored() {
+        struct FailingCipher;
+
+        impl SecretCipher for FailingCipher {
+            fn protect(&self, _: &[u8]) -> io::Result<Vec<u8>> {
+                Err(io::Error::other("the store is not writable"))
+            }
+
+            fn unprotect(&self, _: &[u8]) -> io::Result<Vec<u8>> {
+                Ok(b"{}".to_vec())
+            }
+        }
+
+        let directory = tempdir().unwrap();
+        let mut store = CredentialStore::open(directory.path().join("c.dat"), FailingCipher);
+
+        assert!(store.set("groq", "gsk_value_abcdef").is_err());
+        assert!(
+            !store.has("groq"),
+            "a key that survives only until the next restart is worse than none"
+        );
+        assert_eq!(store.hint("groq"), None);
     }
 
     #[test]
