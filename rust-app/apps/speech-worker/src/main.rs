@@ -1,5 +1,4 @@
 mod audio;
-mod download;
 mod engine;
 mod history;
 mod history_actor;
@@ -17,12 +16,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use audio::AudioRecorder;
-use download::HttpFetcher;
 use engine::WhisperEngine;
 use history_actor::HistoryCommand;
 use inference::InferenceHandle;
 use rust_model_manager::{
-    BuiltInCatalog, InstallPhase, ModelCatalog, ModelDescriptor, ModelInstaller, ModelTier,
+    BuiltInCatalog, HttpFetcher, InstallPhase, ModelCatalog, ModelDescriptor, ModelInstaller,
+    ModelTier,
 };
 use rust_protocol::{
     ModelSummary, PROTOCOL_VERSION, SessionId, SpeechOutputMode, SpeechWorkerCommand,
@@ -135,7 +134,7 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
     let history_path = data_root.join("history.json");
     let catalog = BuiltInCatalog::load()?;
     let installer = ModelInstaller::new(models_root);
-    let fetcher = HttpFetcher::new()?;
+    let fetcher = HttpFetcher::new("model-manager")?;
     let history = history_actor::start(history_path, events.clone())?;
     let recorder = AudioRecorder::open(events.clone())?;
     let inference = InferenceHandle::start(events.clone(), history.clone())?;

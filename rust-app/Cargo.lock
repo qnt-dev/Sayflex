@@ -4608,6 +4608,8 @@ dependencies = [
 name = "rust-model-manager"
 version = "0.5.27"
 dependencies = [
+ "reqwest",
+ "rust-app-core",
  "rust-speech-api",
  "serde",
  "serde_json",
@@ -4835,7 +4837,6 @@ dependencies = [
  "anyhow",
  "cpal",
  "hound",
- "reqwest",
  "rtrb",
  "rust-app-core",
  "rust-model-manager",
@@ -4853,7 +4854,6 @@ name = "sayflex-translation-worker"
 version = "0.5.27"
 dependencies = [
  "anyhow",
- "reqwest",
  "rust-app-core",
  "rust-model-manager",
  "rust-platform-windows",

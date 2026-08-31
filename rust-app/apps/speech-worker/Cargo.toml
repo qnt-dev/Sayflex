@@ -14,7 +14,7 @@ vulkan = ["whisper-rs/vulkan"]
 anyhow = "1.0.100"
 cpal = "0.18.1"
 hound = "3.5.1"
-reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
+
 rtrb = "0.3.4"
 rust-app-core = { version = "0.5.12", path = "../../crates/app-core" }
 rust-model-manager = { version = "0.5.12", path = "../../crates/model-manager" }

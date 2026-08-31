@@ -6,28 +6,36 @@ use std::{
     time::Duration,
 };
 
+use crate::{ArtifactFetcher, DownloadProgress, InstallPhase, ModelInstallError};
 use reqwest::{
     StatusCode,
     blocking::Client,
     header::{RANGE, USER_AGENT},
 };
-use rust_model_manager::{ArtifactFetcher, DownloadProgress, InstallPhase, ModelInstallError};
 
 const MAX_ATTEMPTS: u32 = 4;
 const BUFFER_BYTES: usize = 1024 * 1024;
 
+/// Streams a verified artifact over HTTPS, resuming a partial file when the
+/// server supports ranges.
 pub struct HttpFetcher {
     client: Client,
+    user_agent: String,
 }
 
 impl HttpFetcher {
-    pub fn new() -> Result<Self, ModelInstallError> {
+    /// `component` names the caller in the user agent, so a server log can tell
+    /// a speech model download from a translation pack download.
+    pub fn new(component: &str) -> Result<Self, ModelInstallError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(60 * 60 * 6))
             .build()
             .map_err(|error| ModelInstallError::Download(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            user_agent: format!("{} {component}", rust_app_core::product::USER_AGENT_PRODUCT),
+        })
     }
 }
 
@@ -71,13 +79,7 @@ impl HttpFetcher {
             offset = 0;
         }
 
-        let mut request = self.client.get(url).header(
-            USER_AGENT,
-            format!(
-                "{} translation-model-manager",
-                rust_app_core::product::USER_AGENT_PRODUCT
-            ),
-        );
+        let mut request = self.client.get(url).header(USER_AGENT, &self.user_agent);
         if offset > 0 {
             request = request.header(RANGE, format!("bytes={offset}-"));
         }

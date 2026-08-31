@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod download;
 mod history;
 mod runtime;
 
@@ -17,10 +16,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use download::HttpFetcher;
 use history::TranslationHistory;
 use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
-use rust_model_manager::BundleInstaller;
+use rust_model_manager::{BundleInstaller, HttpFetcher};
 use rust_protocol::{
     PROTOCOL_VERSION, RequestId, TranslationHistoryEntry, TranslationLanguage,
     TranslationModelSummary, TranslationResult, TranslationTier, TranslationWorkerCommand,
@@ -180,7 +178,7 @@ impl WorkerState {
             catalog: TranslationCatalog::load()?,
             installer: BundleInstaller::new(root.join("translation-models")),
             runtime: LlamaRuntimeManager::new(root.join("runtimes")),
-            fetcher: HttpFetcher::new()?,
+            fetcher: HttpFetcher::new("translation-model-manager")?,
             selected_tier: None,
             keep_warm: true,
             engine: None,
