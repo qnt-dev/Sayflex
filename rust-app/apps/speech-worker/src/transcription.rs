@@ -12,7 +12,7 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Sender},
     },
@@ -23,13 +23,15 @@ use std::{
 use anyhow::Result;
 use rust_app_core::credentials::CredentialStore;
 use rust_cloud_speech::{
-    Chain, HttpExecutor, ProviderEntry, ProviderId, RouteOutcome, Router, Unavailable,
+    Chain, HttpExecutor, LanguageHint, ProviderEntry, ProviderId, RouteOutcome, Router,
+    TranscriptionRequest, Unavailable,
     audio::{UPLOAD_SAMPLE_RATE_HZ, encode_wav},
     http::DEFAULT_TIMEOUT,
+    router::CancelSignal,
 };
 use rust_platform_windows::credentials::DpapiCipher;
 use rust_protocol::{
-    SpeechOutputMode, SpeechWorkerEvent, Transcript, TranscriptionLatency,
+    SessionId, SpeechOutputMode, SpeechWorkerEvent, Transcript, TranscriptionLatency,
     TranscriptionProviderEntry, TranscriptionProviderStatus,
 };
 
@@ -55,9 +57,51 @@ pub enum TranscriptionCommand {
     Shutdown,
 }
 
+/// The session a `Cancel` command named, seen by the routing thread while it
+/// is between providers.
+///
+/// The command loop cannot interrupt a request in flight, but it can stop the
+/// walk from continuing down a list nobody is waiting for, and it can stop a
+/// late answer from being delivered into a window the user has moved on from.
+#[derive(Clone, Default)]
+struct CancelledSession(Arc<Mutex<Option<SessionId>>>);
+
+impl CancelledSession {
+    fn cancel(&self, session_id: SessionId) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id);
+    }
+
+    fn watcher(&self, session_id: SessionId) -> SessionWatcher {
+        SessionWatcher {
+            cancelled: self.clone(),
+            session_id,
+        }
+    }
+}
+
+struct SessionWatcher {
+    cancelled: CancelledSession,
+    session_id: SessionId,
+}
+
+impl CancelSignal for SessionWatcher {
+    fn is_cancelled(&self) -> bool {
+        *self
+            .cancelled
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == Some(self.session_id)
+    }
+}
+
 #[derive(Clone)]
 pub struct TranscriptionActor {
     commands: Sender<TranscriptionCommand>,
+    cancelled: CancelledSession,
     /// Read on the command loop for every recording, so the local path costs
     /// nothing extra: no audio is encoded and no thread is crossed unless a
     /// service is actually ahead of the local engine.
@@ -72,6 +116,12 @@ impl TranscriptionActor {
     pub fn prefers_cloud(&self) -> bool {
         self.prefers_cloud.load(Ordering::Acquire)
     }
+
+    /// Tells the routing thread that this dictation no longer has a waiting
+    /// user. Safe to call for a session it never saw.
+    pub fn cancel(&self, session_id: SessionId) {
+        self.cancelled.cancel(session_id);
+    }
 }
 
 pub fn start(
@@ -83,6 +133,8 @@ pub fn start(
     let (commands, requests) = mpsc::channel::<TranscriptionCommand>();
     let prefers_cloud = Arc::new(AtomicBool::new(false));
     let worker_prefers_cloud = Arc::clone(&prefers_cloud);
+    let cancelled = CancelledSession::default();
+    let worker_cancelled = cancelled.clone();
     thread::Builder::new()
         .name("speech-transcription-router".to_owned())
         .spawn(move || {
@@ -94,6 +146,8 @@ pub fn start(
                 history,
                 inference,
                 prefers_cloud: worker_prefers_cloud,
+                cancelled: worker_cancelled,
+                language: system_language(),
             };
             if let Some(message) = state.credentials.take_recovery_message() {
                 let _ = state.events.send(SpeechWorkerEvent::Failed {
@@ -113,7 +167,18 @@ pub fn start(
     Ok(TranscriptionActor {
         commands,
         prefers_cloud,
+        cancelled,
     })
+}
+
+/// The language the services are told to expect.
+///
+/// Azure will not detect it and Deepgram detects only when asked, so a wrong
+/// answer here is the difference between a Russian dictation coming back in
+/// Russian and coming back as English nonsense. The user's Windows language is
+/// the best evidence available without asking them.
+fn system_language() -> Option<LanguageHint> {
+    sys_locale::get_locale().and_then(|locale| LanguageHint::new(&locale))
 }
 
 struct State {
@@ -126,16 +191,25 @@ struct State {
     history: Sender<HistoryCommand>,
     inference: InferenceHandle,
     prefers_cloud: Arc<AtomicBool>,
+    cancelled: CancelledSession,
+    language: Option<LanguageHint>,
 }
 
 impl State {
     /// Keeps the flag the command loop reads in step with the list, the stored
     /// keys and anything the ledger has learned.
     fn refresh_preference(&self) {
-        let local_first = self.router.local_is_first(Instant::now(), |id| {
-            !id.needs_credential() || self.credentials.has(id.as_str())
-        });
-        self.prefers_cloud.store(!local_first, Ordering::Release);
+        // Deliberately a question about the configuration, not about the
+        // ledger: a value that changed as cooldowns came and went would leave
+        // the command loop taking the direct local path at the exact moment a
+        // recovered service should have been tried again, with nothing to
+        // recompute it afterwards.
+        let routing_required = self
+            .router
+            .chain()
+            .routing_required(|id| !id.needs_credential() || self.credentials.has(id.as_str()));
+        self.prefers_cloud
+            .store(routing_required, Ordering::Release);
     }
 
     fn handle(&mut self, command: TranscriptionCommand) {
@@ -201,6 +275,7 @@ impl State {
             return;
         };
 
+        let session_id = recording.session_id;
         let wav = encode_wav(
             &crate::audio::resample_bandlimited(
                 &recording.samples,
@@ -209,27 +284,26 @@ impl State {
             ),
             UPLOAD_SAMPLE_RATE_HZ,
         );
-        let session_id = recording.session_id;
+        let request = TranscriptionRequest {
+            audio_duration_ms: recording.duration_ms,
+            upload_bytes: wav.len() as u64,
+            translate_to_english: output_mode == SpeechOutputMode::TranslateToEnglish,
+            language: self.language.clone(),
+        };
         let started = Instant::now();
         let credentials = &self.credentials;
+        let watcher = self.cancelled.watcher(session_id);
         let outcome = self.router.transcribe(
             &wav,
-            None,
-            Instant::now(),
+            &request,
+            started,
             &|id: &ProviderId| credentials.secret(id.as_str()).map(str::to_owned),
             executor,
+            &watcher,
         );
 
         self.refresh_preference();
-
-        for attempt in outcome_attempts(&outcome) {
-            // Standard error is the worker's diagnostics channel; standard
-            // output carries protocol messages only.
-            eprintln!(
-                "transcription provider={} result=failed reason={}",
-                attempt.provider, attempt.failure
-            );
-        }
+        self.report_attempts(&outcome);
 
         match outcome {
             RouteOutcome::Transcribed { provider, text, .. } => {
@@ -241,11 +315,13 @@ impl State {
                 let transcript = Transcript {
                     session_id,
                     text,
-                    // The services detect the language themselves and do not
-                    // all report which one they chose.
-                    language: "auto".to_owned(),
+                    language: request
+                        .language
+                        .as_ref()
+                        .map_or_else(|| "auto".to_owned(), |hint| hint.primary().to_owned()),
                     audio_duration_ms: recording.duration_ms,
                     processing_duration_ms: crate::elapsed_ms(started),
+                    provider: Some(provider.to_string()),
                     latency: TranscriptionLatency {
                         audio_finalize_ms,
                         after_release_ms: crate::elapsed_ms(release_started),
@@ -267,29 +343,53 @@ impl State {
                 self.inference
                     .finalize(recording, output_mode, audio_finalize_ms, release_started);
             }
-            RouteOutcome::Exhausted { attempts } => {
-                if attempts.is_empty() {
-                    let _ = self.events.send(SpeechWorkerEvent::Failed {
-                        session_id: Some(session_id),
-                        code: "no_transcription_provider".to_owned(),
-                        message: "Every transcription provider is switched off.".to_owned(),
-                        retryable: false,
-                    });
-                    return;
-                }
-                // Nothing in the list worked, and the local engine was not in
-                // it. The recording is not thrown away: the last word on what
-                // happened goes to the user with the reason.
+            RouteOutcome::Cancelled { .. } => {
+                let _ = self
+                    .events
+                    .send(SpeechWorkerEvent::Cancelled { session_id });
+            }
+            RouteOutcome::NoSpeech { .. } => {
+                // The same answer the local engine gives, in the same words.
                 let _ = self.events.send(SpeechWorkerEvent::Failed {
                     session_id: Some(session_id),
-                    code: "transcription_failed".to_owned(),
-                    message: attempts.last().map_or_else(
-                        || "No provider could transcribe the recording.".to_owned(),
-                        |attempt| format!("{}: {}", attempt.provider, attempt.failure),
-                    ),
+                    code: "transcription".to_owned(),
+                    message: "no speech was recognized".to_owned(),
                     retryable: true,
                 });
             }
+            RouteOutcome::Exhausted { attempts } => {
+                let message = if attempts.is_empty() {
+                    "Every transcription provider is switched off.".to_owned()
+                } else {
+                    attempts.last().map_or_else(
+                        || "No provider could transcribe the recording.".to_owned(),
+                        |attempt| format!("{}: {}", attempt.provider, attempt.reason()),
+                    )
+                };
+                let _ = self.events.send(SpeechWorkerEvent::Failed {
+                    session_id: Some(session_id),
+                    code: "transcription_failed".to_owned(),
+                    message,
+                    retryable: true,
+                });
+            }
+        }
+    }
+
+    /// Puts every step of the walk in the diagnostics, with any key the
+    /// service echoed back removed first.
+    fn report_attempts(&self, outcome: &RouteOutcome) {
+        for attempt in outcome_attempts(outcome) {
+            let mut reason = attempt.reason();
+            if let Some(secret) = self.credentials.secret(attempt.provider.as_str()) {
+                reason = rust_cloud_speech::redact_secret(&reason, secret);
+            }
+            // Standard error is the worker's diagnostics channel; standard
+            // output carries protocol messages only.
+            eprintln!(
+                "transcription provider={} result=not_used reason={reason}",
+                attempt.provider
+            );
         }
     }
 
@@ -321,6 +421,8 @@ fn outcome_attempts(outcome: &RouteOutcome) -> &[rust_cloud_speech::Attempt] {
     match outcome {
         RouteOutcome::Transcribed { attempts, .. }
         | RouteOutcome::UseLocalEngine { attempts }
+        | RouteOutcome::Cancelled { attempts }
+        | RouteOutcome::NoSpeech { attempts }
         | RouteOutcome::Exhausted { attempts } => attempts,
     }
 }
@@ -339,6 +441,7 @@ fn describe(unavailable: &Option<rust_cloud_speech::Unavailable>) -> String {
     use rust_cloud_speech::Unavailable;
     match unavailable {
         None => String::new(),
+        Some(Unavailable::Incapable(reason)) => format!("Not for this recording: {reason}"),
         Some(Unavailable::Disabled) => "Switched off".to_owned(),
         Some(Unavailable::MissingCredential) => "No key stored".to_owned(),
         Some(Unavailable::Unsupported) => "Not supported by this version".to_owned(),

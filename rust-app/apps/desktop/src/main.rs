@@ -8904,6 +8904,7 @@ mod insert_last_tests {
             language: "ru".to_owned(),
             audio_duration_ms: 500,
             processing_duration_ms: 100,
+            provider: None,
             latency: Default::default(),
         }
     }

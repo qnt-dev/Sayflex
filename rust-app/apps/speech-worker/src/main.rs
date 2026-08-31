@@ -117,6 +117,7 @@ fn transcribe_wav_diagnostic() -> Result<()> {
         language: result.language,
         audio_duration_ms: result.audio_duration_ms,
         processing_duration_ms: result.inference_ms,
+        provider: None,
         latency: TranscriptionLatency {
             preprocessing_ms: result.preprocessing_ms,
             inference_ms: result.inference_ms,
@@ -257,6 +258,10 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
             SpeechWorkerCommand::Cancel { session_id } => {
                 speculation.stop(session_id);
                 inference.cancel_session(session_id);
+                // A walk already under way stops between providers, and a
+                // late answer is not delivered into a window the user has
+                // moved on from.
+                transcription.cancel(session_id);
                 if recorder.cancel(session_id) {
                     let _ = events.send(SpeechWorkerEvent::Cancelled { session_id });
                 }

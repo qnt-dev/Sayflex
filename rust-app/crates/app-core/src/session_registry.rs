@@ -262,6 +262,7 @@ mod tests {
             language: "ru".to_owned(),
             audio_duration_ms: 800,
             processing_duration_ms: 120,
+            provider: None,
             latency: Default::default(),
         }
     }

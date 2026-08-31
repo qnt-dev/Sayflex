@@ -220,6 +220,7 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
             language: "en".to_owned(),
             audio_duration_ms: 0,
             processing_duration_ms: 0,
+            provider: None,
             latency: Default::default(),
         },
         target,

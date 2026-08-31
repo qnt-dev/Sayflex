@@ -110,6 +110,11 @@ pub struct Transcript {
     pub audio_duration_ms: u64,
     /// Kept for history/protocol compatibility. This is the actual Whisper pass only.
     pub processing_duration_ms: u64,
+    /// Which transcription provider produced this text, when it was not the
+    /// local engine. Recorded so history can say where the words came from,
+    /// and so a user can tell which dictations left the machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub latency: TranscriptionLatency,
 }
@@ -776,6 +781,7 @@ mod tests {
                 language: "en".to_owned(),
                 audio_duration_ms: 1200,
                 processing_duration_ms: 300,
+                provider: None,
                 latency: super::TranscriptionLatency {
                     inference_ms: 300,
                     after_release_ms: 340,

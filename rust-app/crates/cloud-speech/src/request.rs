@@ -7,6 +7,7 @@
 //! actually opens a socket knows none of it.
 
 use crate::{
+    capability::TranscriptionRequest,
     failure::{ProviderFailure, classify_response},
     provider::{ProviderEntry, ProviderId},
 };
@@ -78,23 +79,30 @@ pub enum PlanError {
     /// The provider needs something the user has not filled in, such as a
     /// Cloudflare account identifier or a custom endpoint.
     MissingSetting(&'static str),
+    /// A custom endpoint that is not HTTPS. The key and the audio would both
+    /// travel in the clear.
+    InsecureEndpoint,
     /// This build has no adapter for that identifier.
     Unsupported,
 }
 
 const OPENAI_DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
+/// Turbo is not trained for translation; the full model is the one that has a
+/// translation endpoint behind it.
+const OPENAI_TRANSLATION_MODEL: &str = "whisper-large-v3";
 const CLOUDFLARE_DEFAULT_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 const DEEPGRAM_DEFAULT_MODEL: &str = "nova-3";
 
 /// Builds the request for one provider.
 ///
-/// `language` is a hint, not a demand: every service here detects the language
-/// on its own, and forcing the wrong one is worse than letting it decide.
+/// The caller has already established, through [`crate::capability`], that
+/// this provider can serve this request; what is left here is saying so in the
+/// service's own dialect.
 pub fn plan_request(
     entry: &ProviderEntry,
     secret: &str,
     wav: Vec<u8>,
-    language: Option<&str>,
+    request: &TranscriptionRequest,
 ) -> Result<RequestPlan, PlanError> {
     match entry.id.as_str() {
         ProviderId::GROQ => Ok(openai_compatible(
@@ -102,23 +110,30 @@ pub fn plan_request(
                 .endpoint
                 .as_deref()
                 .unwrap_or("https://api.groq.com/openai/v1"),
-            entry.model.as_deref().unwrap_or(OPENAI_DEFAULT_MODEL),
+            entry.model.as_deref(),
             secret,
             wav,
-            language,
+            request,
         )),
         ProviderId::CUSTOM => {
             let endpoint = entry
                 .endpoint
                 .as_deref()
-                .filter(|endpoint| !endpoint.trim().is_empty())
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
                 .ok_or(PlanError::MissingSetting("endpoint"))?;
+            // The key and the audio both travel in this request. An address
+            // that is not encrypted would send them in the clear, and the user
+            // typed it expecting the application's own guarantees to hold.
+            if !endpoint.starts_with("https://") {
+                return Err(PlanError::InsecureEndpoint);
+            }
             Ok(openai_compatible(
                 endpoint,
-                entry.model.as_deref().unwrap_or(OPENAI_DEFAULT_MODEL),
+                entry.model.as_deref(),
                 secret,
                 wav,
-                language,
+                request,
             ))
         }
         ProviderId::CLOUDFLARE => {
@@ -148,12 +163,16 @@ pub fn plan_request(
                 .as_deref()
                 .filter(|region| !region.trim().is_empty())
                 .ok_or(PlanError::MissingSetting("region"))?;
-            let mut url = format!(
-                "https://{region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1"
+            // Azure will not detect the language on this endpoint, so it is
+            // only ever chosen when the language is known.
+            let language = request
+                .language
+                .as_ref()
+                .ok_or(PlanError::MissingSetting("language"))?;
+            let url = format!(
+                "https://{region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language={}",
+                language.tag()
             );
-            // Azure is the one service that will not detect the language for
-            // us on this endpoint, so the hint becomes a parameter.
-            url.push_str(&format!("?language={}", language.unwrap_or("en-US")));
             Ok(RequestPlan {
                 url,
                 headers: vec![
@@ -174,8 +193,11 @@ pub fn plan_request(
             let model = entry.model.as_deref().unwrap_or(DEEPGRAM_DEFAULT_MODEL);
             let mut url =
                 format!("https://api.deepgram.com/v1/listen?model={model}&smart_format=true");
-            if let Some(language) = language {
-                url.push_str(&format!("&language={language}"));
+            // Detection is off unless it is asked for, so an unset language
+            // would otherwise mean "assume English".
+            match request.language.as_ref() {
+                Some(language) => url.push_str(&format!("&language={}", language.tag())),
+                None => url.push_str("&detect_language=true"),
             }
             Ok(RequestPlan {
                 url,
@@ -195,20 +217,32 @@ pub fn plan_request(
 
 fn openai_compatible(
     endpoint: &str,
-    model: &str,
+    model: Option<&str>,
     secret: &str,
     wav: Vec<u8>,
-    language: Option<&str>,
+    request: &TranscriptionRequest,
 ) -> RequestPlan {
+    let model = model.unwrap_or(if request.translate_to_english {
+        OPENAI_TRANSLATION_MODEL
+    } else {
+        OPENAI_DEFAULT_MODEL
+    });
     let mut fields = vec![
         ("model".to_owned(), model.to_owned()),
         ("response_format".to_owned(), "json".to_owned()),
     ];
-    if let Some(language) = language {
-        fields.push(("language".to_owned(), language.to_owned()));
+    // Translation takes the source language, not the target; transcription
+    // takes the language to expect. Either way it is the primary subtag here.
+    if let Some(language) = request.language.as_ref() {
+        fields.push(("language".to_owned(), language.primary().to_owned()));
     }
+    let route = if request.translate_to_english {
+        "audio/translations"
+    } else {
+        "audio/transcriptions"
+    };
     RequestPlan {
-        url: format!("{}/audio/transcriptions", endpoint.trim_end_matches('/')),
+        url: format!("{}/{route}", endpoint.trim_end_matches('/')),
         headers: vec![("Authorization".to_owned(), format!("Bearer {secret}"))],
         body: RequestBody::Form {
             file_name: "dictation.wav",
@@ -250,8 +284,13 @@ pub fn read_transcript(
             let status_text = document["RecognitionStatus"].as_str().unwrap_or_default();
             match status_text {
                 "Success" => document["DisplayText"].as_str(),
-                // Azure reports "nothing was said" as a normal result.
-                "NoMatch" | "InitialSilenceTimeout" | "BabbleTimeout" => Some(""),
+                // Azure reports "nothing was said" as a normal result. The
+                // local engine treats that as a failed dictation, and so must
+                // this: a completion with no words looks, to the user, exactly
+                // like the application losing what they said.
+                "NoMatch" | "InitialSilenceTimeout" | "BabbleTimeout" => {
+                    return Err(ProviderFailure::NoSpeech);
+                }
                 other => {
                     return Err(ProviderFailure::Rejected(format!(
                         "recognition status {other}"
@@ -266,8 +305,16 @@ pub fn read_transcript(
         _ => document["text"].as_str(),
     };
 
-    text.map(str::to_owned)
-        .ok_or_else(|| ProviderFailure::Rejected("the reply carried no transcript".to_owned()))
+    let text = text
+        .map(str::to_owned)
+        .ok_or_else(|| ProviderFailure::Rejected("the reply carried no transcript".to_owned()))?;
+    // Every service can answer with an empty string for silence. The local
+    // engine refuses that, and the two paths must not disagree about what
+    // counts as a dictation.
+    if text.trim().is_empty() {
+        return Err(ProviderFailure::NoSpeech);
+    }
+    Ok(text)
 }
 
 /// Cloudflare returns its quota and authentication problems inside a 200, so
@@ -292,6 +339,7 @@ mod tests {
 
     use super::{PlanError, RequestBody, plan_request, read_transcript};
     use crate::{
+        capability::{LanguageHint, TranscriptionRequest},
         failure::ProviderFailure,
         provider::{ProviderEntry, ProviderId},
     };
@@ -300,9 +348,32 @@ mod tests {
         ProviderEntry::new(id, true)
     }
 
+    /// An ordinary Russian dictation of a few seconds.
+    fn request() -> TranscriptionRequest {
+        TranscriptionRequest {
+            audio_duration_ms: 4_000,
+            upload_bytes: 128_000,
+            translate_to_english: false,
+            language: LanguageHint::new("ru-RU"),
+        }
+    }
+
+    fn without_language() -> TranscriptionRequest {
+        TranscriptionRequest {
+            language: None,
+            ..request()
+        }
+    }
+
     #[test]
     fn groq_uploads_a_form_to_the_openai_compatible_route() {
-        let plan = plan_request(&entry(ProviderId::GROQ), "gsk_key", vec![1, 2, 3], None).unwrap();
+        let plan = plan_request(
+            &entry(ProviderId::GROQ),
+            "gsk_key",
+            vec![1, 2, 3],
+            &request(),
+        )
+        .unwrap();
 
         assert_eq!(
             plan.url,
@@ -322,14 +393,14 @@ mod tests {
     #[test]
     fn a_custom_endpoint_is_required_and_then_used_verbatim() {
         assert_eq!(
-            plan_request(&entry(ProviderId::CUSTOM), "key", vec![], None),
+            plan_request(&entry(ProviderId::CUSTOM), "key", vec![], &request()),
             Err(PlanError::MissingSetting("endpoint"))
         );
 
         let mut custom = entry(ProviderId::CUSTOM);
         custom.endpoint = Some("https://speech.example.test/v1/".to_owned());
         custom.model = Some("my-model".to_owned());
-        let plan = plan_request(&custom, "key", vec![], None).unwrap();
+        let plan = plan_request(&custom, "key", vec![], &request()).unwrap();
 
         assert_eq!(
             plan.url,
@@ -344,13 +415,13 @@ mod tests {
     #[test]
     fn cloudflare_needs_an_account_and_posts_the_audio_raw() {
         assert_eq!(
-            plan_request(&entry(ProviderId::CLOUDFLARE), "token", vec![], None),
+            plan_request(&entry(ProviderId::CLOUDFLARE), "token", vec![], &request()),
             Err(PlanError::MissingSetting("account"))
         );
 
         let mut cloudflare = entry(ProviderId::CLOUDFLARE);
         cloudflare.account = Some("abc123".to_owned());
-        let plan = plan_request(&cloudflare, "token", vec![9], None).unwrap();
+        let plan = plan_request(&cloudflare, "token", vec![9], &request()).unwrap();
 
         assert_eq!(
             plan.url,
@@ -364,7 +435,7 @@ mod tests {
         let mut azure = entry(ProviderId::AZURE);
         azure.account = Some("westeurope".to_owned());
 
-        let plan = plan_request(&azure, "subscription", vec![], Some("ru-RU")).unwrap();
+        let plan = plan_request(&azure, "subscription", vec![], &request()).unwrap();
 
         assert!(
             plan.url
@@ -378,7 +449,13 @@ mod tests {
 
     #[test]
     fn deepgram_uses_its_token_scheme() {
-        let plan = plan_request(&entry(ProviderId::DEEPGRAM), "dg_key", vec![], None).unwrap();
+        let plan = plan_request(
+            &entry(ProviderId::DEEPGRAM),
+            "dg_key",
+            vec![],
+            &without_language(),
+        )
+        .unwrap();
 
         assert!(
             plan.url
@@ -393,18 +470,19 @@ mod tests {
     #[test]
     fn the_local_engine_and_unknown_services_have_no_request() {
         assert_eq!(
-            plan_request(&entry(ProviderId::LOCAL), "", vec![], None),
+            plan_request(&entry(ProviderId::LOCAL), "", vec![], &request()),
             Err(PlanError::Unsupported)
         );
         assert_eq!(
-            plan_request(&entry("something-else"), "", vec![], None),
+            plan_request(&entry("something-else"), "", vec![], &request()),
             Err(PlanError::Unsupported)
         );
     }
 
     #[test]
     fn a_plan_never_prints_the_key_it_carries() {
-        let plan = plan_request(&entry(ProviderId::GROQ), "gsk_secret", vec![], None).unwrap();
+        let plan =
+            plan_request(&entry(ProviderId::GROQ), "gsk_secret", vec![], &request()).unwrap();
 
         let printed = format!("{plan:?}");
 
@@ -445,15 +523,82 @@ mod tests {
     }
 
     #[test]
-    fn azure_reports_silence_as_an_empty_transcript_not_a_failure() {
-        let result = read_transcript(
-            &ProviderId::new(ProviderId::AZURE),
-            200,
-            None,
+    fn silence_is_reported_as_such_and_never_as_an_empty_dictation() {
+        // The local engine refuses an empty result, and a completion with no
+        // words looks to the user exactly like the application losing what
+        // they said.
+        for body in [
             r#"{"RecognitionStatus":"NoMatch"}"#,
-        );
+            r#"{"RecognitionStatus":"InitialSilenceTimeout"}"#,
+        ] {
+            assert_eq!(
+                read_transcript(&ProviderId::new(ProviderId::AZURE), 200, None, body),
+                Err(ProviderFailure::NoSpeech)
+            );
+        }
 
-        assert_eq!(result.as_deref(), Ok(""));
+        assert_eq!(
+            read_transcript(
+                &ProviderId::new(ProviderId::GROQ),
+                200,
+                None,
+                r#"{"text":"   "}"#
+            ),
+            Err(ProviderFailure::NoSpeech),
+            "whitespace is not a transcript either"
+        );
+    }
+
+    #[test]
+    fn a_translation_uses_the_other_route_and_a_model_trained_for_it() {
+        let translating = TranscriptionRequest {
+            translate_to_english: true,
+            ..request()
+        };
+
+        let plan = plan_request(&entry(ProviderId::GROQ), "gsk_key", vec![], &translating).unwrap();
+
+        assert!(plan.url.ends_with("/audio/translations"));
+        let RequestBody::Form { fields, .. } = plan.body else {
+            panic!("the OpenAI route takes a form");
+        };
+        assert!(
+            fields.contains(&("model".to_owned(), "whisper-large-v3".to_owned())),
+            "turbo is not trained for translation"
+        );
+    }
+
+    #[test]
+    fn the_openai_route_is_given_the_bare_language_code() {
+        let plan = plan_request(&entry(ProviderId::GROQ), "gsk_key", vec![], &request()).unwrap();
+
+        let RequestBody::Form { fields, .. } = plan.body else {
+            panic!("the OpenAI route takes a form");
+        };
+        assert!(fields.contains(&("language".to_owned(), "ru".to_owned())));
+    }
+
+    #[test]
+    fn azure_is_never_planned_without_a_language() {
+        let mut azure = entry(ProviderId::AZURE);
+        azure.account = Some("westeurope".to_owned());
+
+        assert_eq!(
+            plan_request(&azure, "key", vec![], &without_language()),
+            Err(PlanError::MissingSetting("language"))
+        );
+    }
+
+    #[test]
+    fn a_custom_endpoint_must_be_encrypted() {
+        let mut custom = entry(ProviderId::CUSTOM);
+        custom.endpoint = Some("http://speech.example.test/v1".to_owned());
+
+        assert_eq!(
+            plan_request(&custom, "key", vec![], &request()),
+            Err(PlanError::InsecureEndpoint),
+            "the key and the audio both travel in this request"
+        );
     }
 
     #[test]

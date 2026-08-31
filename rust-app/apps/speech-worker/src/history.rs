@@ -216,6 +216,7 @@ mod tests {
             language: "en".into(),
             audio_duration_ms: 1,
             processing_duration_ms: 2,
+            provider: None,
             latency: Default::default(),
         };
         let second = Transcript {
@@ -224,6 +225,7 @@ mod tests {
             language: "en".into(),
             audio_duration_ms: 3,
             processing_duration_ms: 4,
+            provider: None,
             latency: Default::default(),
         };
 
@@ -248,6 +250,7 @@ mod tests {
                     language: "en".into(),
                     audio_duration_ms: 1,
                     processing_duration_ms: 2,
+                    provider: None,
                     latency: Default::default(),
                 },
                 10,
@@ -281,6 +284,7 @@ mod tests {
                     language: "en".into(),
                     audio_duration_ms: 1,
                     processing_duration_ms: 2,
+                    provider: None,
                     latency: Default::default(),
                 },
                 10,

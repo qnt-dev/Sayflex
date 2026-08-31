@@ -4877,6 +4877,7 @@ dependencies = [
  "rust-protocol",
  "serde",
  "serde_json",
+ "sys-locale",
  "tempfile",
  "thiserror 2.0.19",
  "whisper-rs",

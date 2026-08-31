@@ -1,10 +1,17 @@
 //! Why a provider could not transcribe, and what that means for the next one.
 //!
-//! Failing over on the wrong signal is worse than not failing over at all. A
-//! request the service rejected because it was malformed will be rejected by
-//! every other service too, and retrying it everywhere turns one bug into four
-//! wasted quotas. Only a failure that is about *this* provider — its key, its
-//! limits, its availability — is a reason to move down the list.
+//! Two decisions come out of a failure: whether to try the next provider, and
+//! how long to leave this one alone. Both are taken from what the service
+//! answered rather than from a local count of what it should have allowed,
+//! because a count drifts — a key used from two machines, a request that cost
+//! more than expected, an allowance the service quietly changed — while the
+//! service always knows.
+//!
+//! Requests that a service refuses are still passed down the list. Providers
+//! are not interchangeable: a clip too long for one is ordinary for the next,
+//! and stopping the walk would strand a recording that the local engine, often
+//! sitting further down, could have handled. Sending audio nobody will accept
+//! to every provider in turn is avoided earlier instead, by [`crate::capability`].
 
 use std::time::Duration;
 
@@ -22,20 +29,26 @@ pub enum ProviderFailure {
     RateLimited { retry_after: Duration },
     /// The service is down, unreachable, or timed out.
     Unavailable(String),
-    /// The service understood the request and refused it: audio too long, a
-    /// format it does not take, a model name that does not exist.
+    /// The service understood the request and refused it: a format it does not
+    /// take, a model name that does not exist, a limit this build did not know
+    /// about.
     Rejected(String),
+    /// The service heard no speech. Not a fault, and not worth asking anyone
+    /// else: the same silence would come back.
+    NoSpeech,
 }
 
 impl ProviderFailure {
     /// Whether the next provider in the list should be tried.
     ///
-    /// A rejected request is the one case where it should not: the same audio
-    /// and the same parameters would be refused again, and the user needs to
-    /// see the real reason rather than a chain of identical failures.
+    /// Silence is the only reason not to: every other service would hear the
+    /// same nothing. A rejection *does* move on, because providers differ in
+    /// what they accept — a clip too long for one is ordinary for the next —
+    /// and refusing to continue would strand the recording even when the local
+    /// engine is sitting further down the list.
     #[must_use]
     pub const fn should_fail_over(&self) -> bool {
-        !matches!(self, Self::Rejected(_))
+        !matches!(self, Self::NoSpeech)
     }
 
     /// Whether this provider should stop being offered until the user acts.
@@ -56,13 +69,17 @@ impl ProviderFailure {
                 Some(retry_after.unwrap_or(DEFAULT_QUOTA_COOLDOWN))
             }
             Self::Unavailable(_) => Some(UNAVAILABLE_COOLDOWN),
-            Self::Credential(_) | Self::Rejected(_) => None,
+            Self::Credential(_) | Self::Rejected(_) | Self::NoSpeech => None,
         }
     }
 }
 
 const DEFAULT_QUOTA_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 const UNAVAILABLE_COOLDOWN: Duration = Duration::from_secs(30);
+/// A service can ask to be left alone for a while; it cannot ask to be left
+/// alone until the process restarts, and an unbounded value would also
+/// overflow the instant it is added to.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 
 impl std::fmt::Display for ProviderFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -76,6 +93,7 @@ impl std::fmt::Display for ProviderFailure {
             ),
             Self::Unavailable(detail) => write!(formatter, "the service is unreachable: {detail}"),
             Self::Rejected(detail) => write!(formatter, "the request was refused: {detail}"),
+            Self::NoSpeech => formatter.write_str("no speech was recognized"),
         }
     }
 }
@@ -93,8 +111,18 @@ pub fn classify_response(
     body: &str,
 ) -> ProviderFailure {
     let detail = summarize(body);
+    let retry_after = retry_after.map(|delay| delay.min(MAX_RETRY_AFTER));
     match status {
-        401 | 403 => ProviderFailure::Credential(detail),
+        401 => ProviderFailure::Credential(detail),
+        // A 403 is not always a bad key: Cloudflare also uses it for account,
+        // plan and model restrictions, which replacing the key will not fix.
+        403 => {
+            if mentions_authentication(body) {
+                ProviderFailure::Credential(detail)
+            } else {
+                ProviderFailure::Rejected(detail)
+            }
+        }
         // Every service in the catalogue signals a spent allowance with 402 or
         // 429; only the wording differs, so the body decides between "slow
         // down" and "nothing left this period".
@@ -113,6 +141,18 @@ pub fn classify_response(
     }
 }
 
+fn mentions_authentication(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    [
+        "authentication",
+        "unauthorized",
+        "invalid api key",
+        "invalid token",
+    ]
+    .iter()
+    .any(|marker| body.contains(marker))
+}
+
 fn mentions_exhausted_allowance(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     [
@@ -126,6 +166,20 @@ fn mentions_exhausted_allowance(body: &str) -> bool {
     ]
     .iter()
     .any(|marker| body.contains(marker))
+}
+
+/// Removes every occurrence of a secret from a diagnostic before it is stored
+/// or printed.
+///
+/// A service is trusted to answer, not to answer safely: a custom endpoint is
+/// whatever address the user typed, and echoing the key back inside an error
+/// body would otherwise put it in the log.
+#[must_use]
+pub fn redact_secret(text: &str, secret: &str) -> String {
+    if secret.len() < 4 {
+        return text.to_owned();
+    }
+    text.replace(secret, "<redacted>")
 }
 
 /// Keeps a diagnostic short and free of anything that looks like a key.
@@ -186,11 +240,52 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_request_must_not_be_repeated_on_every_provider() {
+    fn a_refused_request_still_moves_down_the_list() {
+        // Providers differ in what they accept: a clip one refuses is
+        // ordinary for the next, and the local engine is often below them.
         let failure = classify_response(400, None, "audio too long");
 
-        assert!(!failure.should_fail_over());
+        assert!(failure.should_fail_over());
         assert!(!failure.disables_provider());
+        assert_eq!(failure.cooldown(), None, "and it is not held against them");
+    }
+
+    #[test]
+    fn silence_is_the_only_answer_that_ends_the_walk() {
+        assert!(!ProviderFailure::NoSpeech.should_fail_over());
+        assert!(!ProviderFailure::NoSpeech.disables_provider());
+    }
+
+    #[test]
+    fn a_forbidden_response_is_only_a_key_problem_when_it_says_so() {
+        let key = classify_response(403, None, "Authentication error");
+        let plan = classify_response(403, None, "This model is not available on your plan");
+
+        assert!(matches!(key, ProviderFailure::Credential(_)));
+        assert!(
+            matches!(plan, ProviderFailure::Rejected(_)),
+            "replacing the key would not fix an account restriction"
+        );
+    }
+
+    #[test]
+    fn a_service_cannot_ask_to_be_left_alone_indefinitely() {
+        let failure = classify_response(429, Some(Duration::from_secs(60 * 60 * 24)), "slow down");
+
+        assert_eq!(failure.cooldown(), Some(Duration::from_secs(60 * 60)));
+    }
+
+    #[test]
+    fn a_secret_echoed_back_by_a_service_is_removed_from_diagnostics() {
+        let leaked = "the key gsk_secret_value is not valid";
+
+        assert_eq!(
+            super::redact_secret(leaked, "gsk_secret_value"),
+            "the key <redacted> is not valid"
+        );
+        // Too short to match anything meaningful; replacing it would mangle
+        // ordinary text instead.
+        assert_eq!(super::redact_secret(leaked, "is"), leaked);
     }
 
     #[test]

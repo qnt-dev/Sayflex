@@ -353,6 +353,7 @@ fn inference_loop(
                             language: result.language,
                             audio_duration_ms: result.audio_duration_ms,
                             processing_duration_ms: result.inference_ms,
+                            provider: None,
                             latency: TranscriptionLatency {
                                 audio_finalize_ms,
                                 preprocessing_ms: result.preprocessing_ms,

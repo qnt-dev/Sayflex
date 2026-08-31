@@ -6,7 +6,7 @@
 //! know. Everything decided here is transport — timeouts, proxies, and how a
 //! network fault maps onto a provider failure.
 
-use std::time::Duration;
+use std::{io::Read, time::Duration};
 
 use reqwest::blocking::{Client, multipart};
 
@@ -17,11 +17,14 @@ use crate::{
     router::RequestExecutor,
 };
 
-/// A dictation clip is seconds long. A service that has not answered within
-/// this is not going to answer usefully: the user is waiting with their words
-/// undelivered, and the next provider in the list deserves the turn.
+/// An upper bound on any single request. The walk hands down a smaller budget
+/// whenever less of the recording's deadline is left.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// A reply larger than this is not a transcript of a few seconds of speech. A
+/// custom endpoint is whatever address the user typed, and reading an
+/// unbounded body from it would hand a stranger the worker's memory.
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 pub struct HttpExecutor {
     client: Client,
@@ -43,8 +46,13 @@ impl HttpExecutor {
 }
 
 impl RequestExecutor for HttpExecutor {
-    fn execute(&self, id: &ProviderId, plan: RequestPlan) -> Result<String, ProviderFailure> {
-        let mut request = self.client.post(&plan.url);
+    fn execute(
+        &self,
+        id: &ProviderId,
+        plan: RequestPlan,
+        budget: Duration,
+    ) -> Result<String, ProviderFailure> {
+        let mut request = self.client.post(&plan.url).timeout(budget);
         for (name, value) in &plan.headers {
             request = request.header(name, value);
         }
@@ -77,8 +85,13 @@ impl RequestExecutor for HttpExecutor {
             .and_then(parse_retry_after);
         // The body is read even for an error status: every service in the
         // catalogue explains itself there, and one of them reports failures
-        // with a success status.
-        let body = response.text().map_err(network_failure)?;
+        // with a success status. It is read with a limit, because how much a
+        // stranger sends is not the stranger's decision to make.
+        let mut body = String::new();
+        response
+            .take(MAX_RESPONSE_BYTES)
+            .read_to_string(&mut body)
+            .map_err(|error| ProviderFailure::Unavailable(error.to_string()))?;
 
         read_transcript(id, status, retry_after, &body)
     }

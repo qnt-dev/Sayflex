@@ -29,6 +29,9 @@ pub enum Unavailable {
     CredentialRefused(String),
     /// This build has no adapter for the identifier in the list.
     Unsupported,
+    /// Able to run, but not for this recording: too long, too large, or a
+    /// translation it cannot perform. Carries no penalty and no cooldown.
+    Incapable(&'static str),
     /// The provider needs a key and none is stored.
     MissingCredential,
 }
@@ -157,6 +160,30 @@ impl Chain {
         if let Some(entry) = self.entries.iter_mut().find(|entry| &entry.id == id) {
             entry.enabled = enabled;
         }
+    }
+
+    /// Whether a recording has to go through the router at all.
+    ///
+    /// False only when the local engine is enabled and no network service
+    /// could be chosen ahead of it whatever the ledger says, which is what a
+    /// fresh installation and an installation without keys both look like. The
+    /// caller then keeps its direct local path.
+    ///
+    /// Deliberately independent of the ledger: a value that changed as
+    /// cooldowns came and went would need recomputing at moments nobody
+    /// observes, and a service that recovered would never be reached again.
+    pub fn routing_required(&self, has_credential: impl Fn(&ProviderId) -> bool) -> bool {
+        let local_enabled = self
+            .entries
+            .iter()
+            .any(|entry| entry.id.is_local() && entry.enabled);
+        let remote_configured = self.entries.iter().any(|entry| {
+            entry.enabled
+                && entry.id.is_known()
+                && !entry.id.is_local()
+                && has_credential(&entry.id)
+        });
+        remote_configured || !local_enabled
     }
 
     /// Adds any provider this build knows that the stored list does not
