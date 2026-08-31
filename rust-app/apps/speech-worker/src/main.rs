@@ -5,6 +5,7 @@ mod history_actor;
 mod inference;
 mod model_actor;
 mod speculation;
+mod transcription;
 
 use std::{
     env, fs,
@@ -27,6 +28,7 @@ use rust_protocol::{
     SpeechWorkerEvent, Transcript, TranscriptionLatency,
 };
 use speculation::SpeculationScheduler;
+use transcription::TranscriptionCommand;
 
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
@@ -145,6 +147,12 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
         inference.clone(),
     )?;
     let speculation = SpeculationScheduler::start(recorder.snapshot_source(), inference.clone())?;
+    let transcription = transcription::start(
+        data_root.join("credentials.dat"),
+        events.clone(),
+        history.clone(),
+        inference.clone(),
+    )?;
     let mut output_mode = SpeechOutputMode::OriginalLanguage;
     let mut fast_release_previews = true;
 
@@ -234,7 +242,17 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
                     }
                 };
                 let audio_finalize_ms = elapsed_ms(audio_finalize_started);
-                inference.finalize(recording, output_mode, audio_finalize_ms, release_started);
+                if transcription.prefers_cloud() {
+                    transcription.send(TranscriptionCommand::Finalize {
+                        recording: Box::new(recording),
+                        output_mode,
+                        audio_finalize_ms,
+                        release_started,
+                    });
+                } else {
+                    // Unchanged local path: no encoding, no extra thread.
+                    inference.finalize(recording, output_mode, audio_finalize_ms, release_started);
+                }
             }
             SpeechWorkerCommand::Cancel { session_id } => {
                 speculation.stop(session_id);
@@ -250,6 +268,21 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
                 });
             }
             SpeechWorkerCommand::CancelModelInstall => models.cancel(),
+            SpeechWorkerCommand::SetTranscriptionProviders { providers } => {
+                transcription.send(TranscriptionCommand::SetProviders(providers));
+            }
+            SpeechWorkerCommand::SetProviderCredential {
+                provider_id,
+                secret,
+            } => {
+                transcription.send(TranscriptionCommand::SetCredential {
+                    provider_id,
+                    secret,
+                });
+            }
+            SpeechWorkerCommand::GetTranscriptionProviders => {
+                transcription.send(TranscriptionCommand::ReportStatus);
+            }
             SpeechWorkerCommand::SelectModel { catalog_id } => {
                 // Choosing another model abandons an installation that is
                 // still running for the previous one.
@@ -282,6 +315,7 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
 
     models.cancel();
     models.send(ModelCommand::Shutdown);
+    transcription.send(TranscriptionCommand::Shutdown);
     speculation.shutdown();
     inference.shutdown();
     let _ = history.send(HistoryCommand::Shutdown);

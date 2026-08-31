@@ -74,6 +74,22 @@ impl Router {
         &mut self.ledger
     }
 
+    /// Whether the first usable row is the local engine, or there is no usable
+    /// row at all.
+    ///
+    /// Lets the caller keep the local path exactly as it was: no audio is
+    /// encoded and no thread is crossed when nothing else would be tried.
+    pub fn local_is_first(
+        &self,
+        now: Instant,
+        has_credential: impl Fn(&ProviderId) -> bool,
+    ) -> bool {
+        self.chain
+            .candidates(&self.ledger, now, has_credential)
+            .first()
+            .is_none_or(ProviderId::is_local)
+    }
+
     /// Walks the list for one recording.
     ///
     /// `secret_for` hands over the key for a provider; the router keeps no

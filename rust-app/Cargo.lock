@@ -4871,6 +4871,7 @@ dependencies = [
  "hound",
  "rtrb",
  "rust-app-core",
+ "rust-cloud-speech",
  "rust-model-manager",
  "rust-platform-windows",
  "rust-protocol",

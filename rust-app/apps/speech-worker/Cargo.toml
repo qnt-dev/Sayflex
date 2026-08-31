@@ -17,6 +17,7 @@ hound = "3.5.1"
 
 rtrb = "0.3.4"
 rust-app-core = { version = "0.5.27", path = "../../crates/app-core" }
+rust-cloud-speech = { version = "0.5.27", path = "../../crates/cloud-speech" }
 rust-model-manager = { version = "0.5.27", path = "../../crates/model-manager" }
 rust-platform-windows = { version = "0.5.27", path = "../../crates/platform-windows" }
 rust-protocol = { version = "0.5.27", path = "../../crates/protocol" }

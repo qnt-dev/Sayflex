@@ -27,8 +27,9 @@ use rust_protocol::{
     AUDIO_SPECTRUM_BANDS, CompanionRendererCommand, CompanionRendererEvent, HistoryEntry,
     InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId,
     SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent,
-    Transcript, TranslationHistoryEntry, TranslationModelSummary, TranslationResult,
-    TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
+    Transcript, TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationHistoryEntry,
+    TranslationModelSummary, TranslationResult, TranslationTier, TranslationWorkerCommand,
+    TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use slint::winit_030::{
@@ -1707,6 +1708,11 @@ struct AppState {
     pending_translations: HashMap<RequestId, PendingTranslation>,
     queued_selection_translation: Option<SelectionTranslationRequest>,
     translation_history: Vec<TranslationHistoryEntry>,
+    /// The ordered transcription list as the worker reports it, for Settings.
+    transcription_providers: Vec<TranscriptionProviderStatus>,
+    /// The same list as configured and persisted, which is what is sent to the
+    /// worker and written back to settings.
+    transcription_chain: Vec<TranscriptionProviderEntry>,
 }
 
 impl AppState {
@@ -1756,6 +1762,8 @@ impl AppState {
             pending_translations: HashMap::new(),
             queued_selection_translation: None,
             translation_history: Vec::new(),
+            transcription_providers: Vec::new(),
+            transcription_chain: saved_settings.transcription_providers.clone(),
             history_enabled: saved_settings.history_enabled,
         }
     }
@@ -2020,6 +2028,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         history_enabled: saved_settings.history_enabled,
         fast_release_previews: saved_settings.fast_release_previews,
     })?;
+    // An empty list means the user has never arranged one; the worker keeps
+    // its own default of the local engine first and every service switched off.
+    if !saved_settings.transcription_providers.is_empty() {
+        workers
+            .speech
+            .send(&SpeechWorkerCommand::SetTranscriptionProviders {
+                providers: saved_settings.transcription_providers.clone(),
+            })?;
+    }
+    workers
+        .speech
+        .send(&SpeechWorkerCommand::GetTranscriptionProviders)?;
     workers
         .translation
         .send(&TranslationWorkerCommand::Initialize {
@@ -5029,6 +5049,25 @@ delivery={} target_pid={}",
                 HistoryUpdate::Unchanged => {}
             }
         }
+        SpeechWorkerEvent::TranscriptionProviders { statuses } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "transcription_providers count={} available={}",
+                statuses.len(),
+                statuses.iter().filter(|status| status.available).count()
+            ));
+            state.borrow_mut().transcription_providers = statuses;
+        }
+        SpeechWorkerEvent::TranscribedRemotely {
+            session_id,
+            provider_id,
+        } => {
+            // Where the words came from is worth stating plainly: the audio
+            // left the machine for this one.
+            rust_app_core::diagnostics::log_line(&format!(
+                "transcription session={session_id} provider={provider_id}"
+            ));
+            set_indicator_status(settings, &format!("Transcribed by {provider_id}."));
+        }
         SpeechWorkerEvent::Cancelled { session_id } => {
             rust_app_core::diagnostics::log_line(&format!(
                 "transcription result=cancelled session={session_id}"
@@ -7548,6 +7587,9 @@ struct SavedSettings {
     text_action_mode: TextActionMode,
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
+    /// The user's ordered transcription list. Empty means "never configured",
+    /// and the worker keeps its own default of the local engine first.
+    transcription_providers: Vec<TranscriptionProviderEntry>,
 }
 
 impl Default for SavedSettings {
@@ -7571,6 +7613,7 @@ impl Default for SavedSettings {
             text_action_mode: TextActionMode::default(),
             translation_delivery: TranslationDelivery::default(),
             history_enabled: true,
+            transcription_providers: Vec::new(),
         }
     }
 }
@@ -7671,6 +7714,11 @@ impl<'de> Deserialize<'de> for SavedSettings {
             &mut settings.translation_delivery,
         );
         read(&document, "history_enabled", &mut settings.history_enabled);
+        read(
+            &document,
+            "transcription_providers",
+            &mut settings.transcription_providers,
+        );
         Ok(settings)
     }
 }
@@ -7696,6 +7744,7 @@ impl SavedSettings {
             text_action_mode: state.text_action_mode,
             translation_delivery: state.translation_delivery,
             history_enabled: state.history_enabled,
+            transcription_providers: state.transcription_chain.clone(),
         }
     }
 

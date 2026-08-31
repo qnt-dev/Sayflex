@@ -3,10 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 14 adds cancellation for model and runtime installation, which used
-// to run to completion inside each worker's command loop.
+// Version 15 adds the ordered list of transcription providers: the local
+// engine and any network services the user has keys for.
 // All packaged processes must agree on this schema before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -147,6 +147,40 @@ pub struct ModelSummary {
     pub selected: bool,
     pub recommended: bool,
     pub supports_speech_translation: bool,
+}
+
+/// One row of the user's ordered transcription list, as it travels between the
+/// desktop and the speech worker.
+///
+/// The identifier is a string rather than an enum so a list built by a newer
+/// build stays readable: an unknown row keeps its place and is never selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptionProviderEntry {
+    pub id: String,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Cloudflare account identifier, or Azure region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+/// What the worker knows about one row, for Settings to display.
+///
+/// A key never travels in this direction: `credential_hint` is a masked tail,
+/// enough to recognise which key is stored and useless for anything else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptionProviderStatus {
+    pub id: String,
+    pub position: usize,
+    pub available: bool,
+    /// Why it is unavailable, in words meant for the user. Empty when it is.
+    pub detail: String,
+    pub has_credential: bool,
+    #[serde(default)]
+    pub credential_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -503,6 +537,16 @@ pub enum SpeechWorkerCommand {
     /// Stops an installation in flight. The partial download is kept, so a
     /// later attempt resumes instead of starting again.
     CancelModelInstall,
+    /// Replaces the ordered transcription list.
+    SetTranscriptionProviders {
+        providers: Vec<TranscriptionProviderEntry>,
+    },
+    /// Stores or clears the key for one provider. `None` clears it.
+    SetProviderCredential {
+        provider_id: String,
+        secret: Option<String>,
+    },
+    GetTranscriptionProviders,
     SetOutputMode {
         output_mode: SpeechOutputMode,
     },
@@ -566,6 +610,17 @@ pub enum SpeechWorkerEvent {
     },
     History {
         entries: Vec<HistoryEntry>,
+    },
+    /// The ordered list with each row's availability, after any change.
+    TranscriptionProviders {
+        statuses: Vec<TranscriptionProviderStatus>,
+    },
+    /// A recording was transcribed by a network service rather than locally.
+    /// Carried separately from the transcript so history and the interface can
+    /// show where the words came from.
+    TranscribedRemotely {
+        session_id: SessionId,
+        provider_id: String,
     },
     Failed {
         session_id: Option<SessionId>,
