@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Колибри — варианты расположения</title>
+<style>
+body{margin:0;padding:26px;background:#9c9c9c;font:400 13px/1.5 "Segoe UI",system-ui,sans-serif;color:#1a1a1a}
+h1{font:600 17px/1 inherit;margin:0 0 4px;letter-spacing:-.02em}
+.lead{color:#3d3d3d;margin:0 0 22px;max-width:70ch}
+/* minmax(0,1fr): иначе минимум колонки берётся по ширине iframe (1180px) */
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+@media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}}
+figure{margin:0}
+figcaption{margin-bottom:7px}
+figcaption b{font-weight:600;letter-spacing:-.01em}
+figcaption span{color:#3d3d3d}
+.frame{width:100%;aspect-ratio:1180/700;overflow:hidden;border-radius:10px;box-shadow:0 8px 22px rgb(0 0 0/.22)}
+iframe{width:1180px;height:700px;border:0;transform-origin:0 0;display:block}
+</style>
+</head>
+<body>
+<h1>Куда посадить колибри</h1>
+<p class="lead">Один и тот же экран, отличается только положение птицы. Смотрите на две вещи: держится ли волна одной непрерывной линией и читается ли птица как <em>зависшая</em>, а не припаркованная.</p>
+
+<div class="grid">
+  <figure><figcaption><b>A — как сейчас</b> <span>· в конце, на оси</span></figcaption>
+    <div class="frame"><iframe data-v="a" src="index.html"></iframe></div></figure>
+
+  <figure><figcaption><b>B — на стыке, низко</b> <span>· клюв в сырой волне</span></figcaption>
+    <div class="frame"><iframe data-v="b" src="index.html"></iframe></div></figure>
+
+  <figure><figcaption><b>C — парит отдельно</b> <span>· не касается волны</span></figcaption>
+    <div class="frame"><iframe data-v="c" src="index.html"></iframe></div></figure>
+
+  <figure><figcaption><b>D — над стыком</b> <span>· клюв опускается в переход</span></figcaption>
+    <div class="frame"><iframe data-v="d" src="index.html"></iframe></div></figure>
+</div>
+
+<script>
+const placements={
+  a:null,                                              // оставить как в исходнике
+  b:{left:'35%',  transform:'translateY(-88%)'},
+  c:{left:'38%',  transform:'translateY(-155%)'},
+  d:{left:'36.5%',transform:'translateY(-118%)'}
+};
+function fit(frame){
+  const box=frame.parentElement;
+  frame.style.transform=`scale(${box.clientWidth/1180})`;
+}
+function apply(frame){
+  const p=placements[frame.dataset.v];
+  const bird=frame.contentDocument&&frame.contentDocument.querySelector('.reference-bird');
+  if(p&&bird){
+    bird.style.right='auto';
+    bird.style.left=p.left;
+    bird.style.top='50%';
+    bird.style.transform=p.transform;
+  }
+  fit(frame);
+}
+document.querySelectorAll('iframe').forEach(frame=>{
+  frame.addEventListener('load',()=>apply(frame));
+  // iframe мог догрузиться до того, как навесился обработчик
+  if(frame.contentDocument&&frame.contentDocument.readyState==='complete') apply(frame);
+});
+addEventListener('resize',()=>document.querySelectorAll('iframe').forEach(fit));
+</script>
+</body>
+</html>

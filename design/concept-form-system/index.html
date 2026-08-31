@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#bfc2c6">
+  <title>SayFlex — Form System</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell" aria-label="Концепт интерфейса SayFlex">
+    <header class="topline">
+      <div class="date-lockup">
+        <strong id="weekday">Tue</strong>
+        <span class="date-rule" aria-hidden="true"></span>
+        <strong id="date">25 August</strong>
+      </div>
+      <div class="product-lockup">
+        <span>SAYFLEX</span>
+        <strong id="year">2026</strong>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <aside class="left-panel" aria-label="Разделы SayFlex">
+        <div class="eyebrow">Modes</div>
+        <div class="mode-row" aria-label="Быстрые режимы">
+          <button class="mode-glyph active" data-mode="dictation" aria-label="Диктовка"><i class="glyph cube-glyph"></i></button>
+          <button class="mode-glyph" data-mode="translation" aria-label="Перевод"><i class="glyph ring-glyph"></i></button>
+          <button class="mode-glyph" data-mode="visuals" aria-label="Визуализация"><i class="glyph prism-glyph"></i></button>
+          <button class="mode-glyph" data-mode="history" aria-label="История"><i class="glyph stack-glyph"></i></button>
+          <button class="mode-glyph more" data-mode="settings" aria-label="Настройки"><span>···</span></button>
+        </div>
+
+        <div class="eyebrow tools-label">Tools</div>
+        <nav class="tool-nav">
+          <button data-mode="overview"><i class="nav-icon overview-icon"></i><span>Overview</span></button>
+          <button class="active" data-mode="dictation"><i class="nav-icon dictate-icon"></i><span>Dictation</span></button>
+          <button data-mode="translation"><i class="nav-icon translate-icon"></i><span>Translation</span></button>
+          <button data-mode="models"><i class="nav-icon model-icon"></i><span>Models</span></button>
+          <button data-mode="visuals"><i class="nav-icon visual-icon"></i><span>Visuals</span></button>
+          <button data-mode="history"><i class="nav-icon history-icon"></i><span>History</span></button>
+        </nav>
+      </aside>
+
+      <section class="stage" aria-live="polite">
+        <div class="stage-heading">
+          <p id="section-index">02 / 06</p>
+          <h1 id="section-title">Dictation</h1>
+          <span id="section-subtitle">Local speech · ready</span>
+        </div>
+
+        <div class="object-zone" id="object-zone">
+          <div class="signal-object" id="signal-object" aria-label="Интерактивный объект состояния">
+            <div class="cube cube-back" aria-hidden="true">
+              <span class="edge edge-a"></span><span class="edge edge-b"></span><span class="edge edge-c"></span>
+              <span class="edge edge-d"></span><span class="edge edge-e"></span><span class="edge edge-f"></span>
+              <span class="inner inner-a"></span><span class="inner inner-b"></span><span class="inner inner-c"></span>
+            </div>
+            <div class="voice-trace" aria-hidden="true">
+              <i style="--h:16%"></i><i style="--h:34%"></i><i style="--h:54%"></i><i style="--h:28%"></i>
+              <i style="--h:76%"></i><i style="--h:44%"></i><i style="--h:88%"></i><i style="--h:48%"></i>
+              <i style="--h:66%"></i><i style="--h:26%"></i><i style="--h:50%"></i><i style="--h:20%"></i>
+            </div>
+          </div>
+
+          <div class="orbit-control" aria-label="Уровень входного сигнала">
+            <div class="orbit-line"></div>
+            <div class="orbit-value" id="orbit-value">35°</div>
+            <div class="orbit-label" id="orbit-label">Input angle</div>
+          </div>
+
+          <div class="axis" aria-hidden="true"><i>X</i><i>Y</i><i>Z</i></div>
+        </div>
+
+        <div class="session-readout">
+          <span id="readout-label">Ready to listen</span>
+          <strong id="readout-value">00:00</strong>
+        </div>
+      </section>
+
+      <aside class="right-panel" aria-label="Параметры выбранного режима">
+        <div class="window-actions" aria-hidden="true"><span></span><b>×</b></div>
+        <div class="eyebrow" id="panel-title">Engine</div>
+        <div class="choice-grid" id="choice-grid">
+          <button class="choice active" data-choice="Local GPU"><i class="spot-mark"></i><span>Local<br>GPU</span></button>
+          <button class="choice" data-choice="Local CPU"><i class="area-mark"></i><span>Local<br>CPU</span></button>
+          <button class="choice" data-choice="Auto"><i class="target-mark"></i><span>Auto</span></button>
+          <button class="choice" data-choice="API"><i class="sun-mark"></i><span>API</span></button>
+        </div>
+
+        <div class="sliders">
+          <label><span id="slider-one-label">Sensitivity</span><input id="sensitivity" type="range" min="0" max="100" value="62"></label>
+          <label><span id="slider-two-label">Silence threshold</span><input id="threshold" type="range" min="0" max="100" value="31"></label>
+        </div>
+
+        <button class="listen-button" id="listen-button" aria-pressed="false">
+          <span class="listen-dot"></span>
+          <span id="listen-label">Start listening</span>
+        </button>
+      </aside>
+    </section>
+
+    <footer class="footerline">
+      <button class="brand-mark" id="brand-mark" aria-label="Проверить состояние SayFlex">
+        <span>SAY</span><span>FLEX</span><i></i>
+      </button>
+      <div class="status-copy"><span>LOCAL / PRIVATE</span><strong id="status-text">SYSTEM READY</strong></div>
+      <span class="page-number" id="page-number">013</span>
+    </footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SayFlex — Concept Minimal</title>
+<style>
+:root{
+  /* самостоятельная графитовая поверхность навигации */
+  --rail-a:#252729; --rail-b:#2b2d2f; --rail-c:#303235;
+  --rail-grain:.15;
+  --rail-ink:#f3f3f1; --rail-muted:#aeb2b3;
+  /* фон рабочей области — из .dossier concept-three */
+  --content:#dfe3e5;
+  --stage:#aeb5b8;
+  --line:#c4c4c4;
+  --line-soft:rgb(23 34 41/11%);
+  --ink:#141a1c;
+  --muted:#4d5558;
+  --faint:#71787b;
+  --accent:#e3262e;
+  --green:#237d62;
+  --backdrop:#b4b4b4;
+  --stage-surface:
+    linear-gradient(145deg,rgb(255 255 255/68%),rgb(168 176 180/63%)),
+    var(--stage);
+  --r-shell:14px;
+  --r-ctl:8px;
+  --r-join:7px;
+  --ease:cubic-bezier(.2,.8,.2,1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font:400 14px/1.5 -apple-system,"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;
+  color:var(--ink);
+  background:var(--backdrop);
+  display:flex;align-items:center;justify-content:center;
+  padding:28px;
+  -webkit-font-smoothing:antialiased;
+  font-feature-settings:"tnum" 0;
+}
+.shell{
+  width:min(1120px,100%);height:min(720px,calc(100vh - 56px));
+  display:grid;grid-template-columns:232px 1fr;
+  position:relative;
+  background:var(--stage-surface);
+  border-radius:var(--r-shell);
+  box-shadow:0 24px 64px rgb(30 29 27/.2),0 0 0 .5px rgb(0 0 0/.1),inset 0 1px 0 rgb(255 255 255/60%);
+  overflow:hidden;
+}
+/* ---------- RAIL ---------- */
+.rail{
+  position:relative;z-index:1;
+  background:linear-gradient(145deg,var(--rail-a),var(--rail-b) 52%,var(--rail-c));
+  display:flex;flex-direction:column;
+  padding:18px 0 12px;
+}
+/* зерно */
+.rail::before{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  opacity:var(--rail-grain);
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+  mix-blend-mode:multiply;
+}
+/* разделительная полоска */
+.rail::after{
+  content:"";position:absolute;top:0;right:0;width:1px;height:100%;
+  z-index:1;background:rgb(255 255 255/10%);
+}
+.brand{
+  position:relative;z-index:2;
+  padding:0 18px 16px;display:flex;align-items:center;gap:9px;
+}
+.mark{width:19px;height:19px;border-radius:5px;background:#f1f2f0;position:relative;flex:none}
+.mark::after{content:"";position:absolute;left:5.5px;top:4px;width:2px;height:11px;border-radius:1px;background:#242729}
+.mark::before{content:"";position:absolute;left:9.5px;top:6.5px;width:2px;height:6px;border-radius:1px;background:var(--accent)}
+.brand b{font:600 13.5px/1 inherit;letter-spacing:-.015em;color:var(--rail-ink)}
+
+.nav{position:relative;z-index:2;display:flex;flex-direction:column;gap:1px;padding-right:0}
+.nav a{
+  display:flex;align-items:center;gap:10px;
+  margin:0 10px;padding:8px 10px;
+  border-radius:var(--r-ctl);
+  color:var(--rail-muted);text-decoration:none;
+  font-size:13.5px;font-weight:450;letter-spacing:-.005em;
+  transition:background .13s var(--ease),color .13s var(--ease);
+  position:relative;
+}
+.nav a svg{width:15px;height:15px;flex:none;opacity:.72}
+.nav a:hover:not(.on){background:rgb(255 255 255/7%);color:var(--rail-ink)}
+/* Активный пункт становится продолжением светлой рабочей поверхности. */
+.nav a.on{
+  z-index:3;
+  background:var(--stage-surface);color:var(--ink);font-weight:520;
+  background-size:var(--surface-width) var(--surface-height);
+  background-position:var(--surface-x) var(--surface-y);
+  background-repeat:no-repeat;
+  margin-left:8px;margin-right:-2px;padding-left:12px;padding-right:14px;
+  border-radius:var(--r-ctl) 0 0 var(--r-ctl);
+}
+.nav a.on::before,.nav a.on::after{
+  content:"";position:absolute;right:0;
+  width:var(--r-join);height:var(--r-join);pointer-events:none;
+  background:var(--stage-surface);
+  background-size:var(--surface-width) var(--surface-height);
+  background-repeat:no-repeat;
+}
+.nav a.on::before{
+  top:calc(-1 * var(--r-join));
+  background-position:var(--surface-x) calc(var(--surface-y) + var(--r-join));
+  -webkit-mask:radial-gradient(circle at 0 0,transparent var(--r-join),#000 calc(var(--r-join) + .5px));
+  mask:radial-gradient(circle at 0 0,transparent var(--r-join),#000 calc(var(--r-join) + .5px));
+}
+.nav a.on::after{
+  bottom:calc(-1 * var(--r-join));
+  background-position:var(--surface-x) calc(var(--surface-y) - var(--surface-item-height));
+  -webkit-mask:radial-gradient(circle at 0 100%,transparent var(--r-join),#000 calc(var(--r-join) + .5px));
+  mask:radial-gradient(circle at 0 100%,transparent var(--r-join),#000 calc(var(--r-join) + .5px));
+}
+.nav a.on svg{opacity:1;color:var(--accent)}
+
+.rail-foot{position:relative;z-index:2;margin-top:auto;padding:12px 18px 4px;border-top:1px solid rgb(255 255 255/10%)}
+.stat{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--rail-muted);padding:3px 0}
+.dot{width:5px;height:5px;border-radius:50%;background:var(--green);flex:none}
+.dot.idle{background:#9a9a9a}
+
+/* ---------- CONTENT ---------- */
+.work{position:relative;z-index:1;overflow-y:auto;padding:34px 40px 40px;display:flex;flex-direction:column}
+.work>.page.on{flex:1 0 auto}
+.work::-webkit-scrollbar{width:9px}
+.work::-webkit-scrollbar-thumb{background:rgb(23 34 41/18%);border-radius:9px;border:3px solid transparent;background-clip:padding-box}
+.head{margin-bottom:22px}
+h1{font:600 29px/1.15 inherit;letter-spacing:-.035em;margin-bottom:5px}
+.sub{color:var(--muted);font-size:13.5px;max-width:56ch}
+
+/* подвкладки */
+.tabs{display:flex;gap:22px;border-bottom:1px solid rgb(23 34 41/13%);margin-bottom:26px}
+.tabs button{
+  background:none;border:0;cursor:pointer;font:inherit;font-size:13px;font-weight:500;
+  color:var(--faint);padding:0 0 9px;position:relative;letter-spacing:-.005em;
+  transition:color .13s var(--ease);
+}
+.tabs button:hover{color:var(--muted)}
+.tabs button.on{color:var(--ink)}
+.tabs button.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1.5px;background:var(--ink);border-radius:2px}
+
+.sect{margin-bottom:30px}
+.sect h2{font:650 12px/1 inherit;text-transform:uppercase;letter-spacing:.085em;color:var(--faint);margin-bottom:2px}
+
+/* строка настройки */
+.row{display:flex;align-items:center;gap:24px;padding:14px 0;border-bottom:1px solid var(--line-soft)}
+.row:last-child{border-bottom:0}
+.row .txt{flex:1;min-width:0}
+.row .txt b{display:block;font-weight:500;font-size:13.5px;margin-bottom:1px}
+.row .txt span{color:var(--muted);font-size:12.5px}
+.row .ctl{flex:none;display:flex;align-items:center;gap:8px}
+
+.toggle{width:34px;height:20px;border-radius:20px;background:rgb(23 34 41/22%);border:0;cursor:pointer;position:relative;transition:background .15s var(--ease);flex:none}
+.toggle::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgb(0 0 0/.2);transition:transform .15s var(--ease)}
+.toggle[aria-pressed="true"]{background:var(--accent)}
+.toggle[aria-pressed="true"]::after{transform:translateX(14px)}
+
+select,.btn{
+  font:inherit;font-size:13px;color:var(--ink);
+  background:rgb(255 255 255/62%);border:1px solid rgb(255 255 255/70%);border-radius:var(--r-ctl);
+  padding:6px 10px;cursor:pointer;transition:border-color .13s var(--ease),background .13s var(--ease);
+}
+select:hover,.btn:hover{background:rgb(255 255 255/85%);border-color:#fff}
+.btn.primary{background:var(--accent);border-color:transparent;color:#fff;font-weight:550}
+.btn.primary:hover{background:#c81f26}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}
+.btn.ghost:hover{background:rgb(255 255 255/45%);color:var(--ink)}
+
+kbd{
+  font:550 11.5px/1 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  background:rgb(255 255 255/72%);border:1px solid rgb(255 255 255/80%);border-bottom-width:1.5px;
+  border-radius:5px;padding:4px 6px;color:var(--ink);
+}
+.keys{display:flex;align-items:center;gap:4px}
+.keys i{color:var(--faint);font-style:normal;font-size:11px}
+
+/* таблица моделей */
+.mrow{display:flex;align-items:center;gap:16px;padding:13px 0;border-bottom:1px solid var(--line-soft)}
+.mrow:last-child{border-bottom:0}
+.mrow .nm{flex:1;min-width:0}
+.mrow .nm b{display:block;font-weight:500;font-size:13.5px}
+.mrow .nm span{color:var(--faint);font-size:12px}
+.mrow .sz{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12.5px;width:66px;text-align:right;flex:none}
+.mrow .st{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);width:106px;flex:none}
+.mrow .ac{width:96px;text-align:right;flex:none}
+.mrow.sel{background:linear-gradient(90deg,rgb(227 38 46/5.5%),transparent 70%);margin:0 -12px;padding-left:12px;padding-right:12px;border-radius:6px}
+
+.meter{height:3px;background:rgb(23 34 41/12%);border-radius:3px;overflow:hidden;margin-top:6px}
+.meter i{display:block;height:100%;background:var(--accent);border-radius:3px}
+
+/* обзор */
+.hero{display:flex;align-items:baseline;gap:9px;margin-bottom:4px}
+.hero b{font:600 42px/1 inherit;letter-spacing:-.045em;font-variant-numeric:tabular-nums}
+.hero span{color:var(--muted);font-size:13px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-top:1px solid var(--line-soft)}
+.grid3 div{padding:15px 0;border-bottom:1px solid var(--line-soft)}
+.grid3 div+div{padding-left:22px;border-left:1px solid var(--line-soft)}
+.grid3 b{display:block;font:600 21px/1.2 inherit;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.grid3 span{color:var(--faint);font-size:11.5px;font-weight:550;text-transform:uppercase;letter-spacing:.07em}
+
+.hist{display:flex;gap:14px;padding:13px 0;border-bottom:1px solid var(--line-soft)}
+.hist:last-child{border-bottom:0}
+.hist time{color:var(--faint);font-size:11.5px;font-variant-numeric:tabular-nums;width:44px;flex:none;padding-top:2px}
+.hist p{font-size:13.5px;line-height:1.45;flex:1;min-width:0}
+.hist em{display:block;color:var(--faint);font-size:11.5px;font-style:normal;margin-top:3px;font-variant-numeric:tabular-nums}
+
+/* визуализаторы */
+.vis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.vis button{
+  aspect-ratio:4/3;border-radius:10px;border:1px solid var(--line);background:#1b1b1e;
+  cursor:pointer;position:relative;overflow:hidden;padding:0;display:grid;place-items:center;
+  transition:border-color .13s var(--ease),transform .13s var(--ease);
+}
+.vis button:hover{transform:translateY(-1px)}
+.vis button.on{border-color:var(--accent);box-shadow:0 0 0 2px rgb(227 38 46/.22)}
+.vis button small{position:absolute;left:8px;bottom:6px;color:#fff;font-size:10.5px;opacity:.8;letter-spacing:.01em}
+.bars{display:flex;align-items:center;gap:2.5px;height:34%}
+.bars i{width:2.5px;background:#7fd7c4;border-radius:2px;animation:b 1.1s var(--ease) infinite alternate}
+.bars i:nth-child(2){animation-delay:.12s}.bars i:nth-child(3){animation-delay:.24s}
+.bars i:nth-child(4){animation-delay:.36s}.bars i:nth-child(5){animation-delay:.48s}
+@keyframes b{from{height:22%}to{height:100%}}
+.orb{width:38%;aspect-ratio:1;border-radius:50%;background:radial-gradient(circle at 35% 32%,#9be6d4,#2a7d6a 62%,#123 100%)}
+.slate{width:64%;height:40%;border-radius:7px;background:linear-gradient(135deg,rgb(122 162 247/.55),rgb(122 162 247/.12));border:1px solid rgb(255 255 255/.22)}
+.ribbon{width:70%;height:2.5px;border-radius:3px;background:linear-gradient(90deg,transparent,#f2c94c,#f56c3f,transparent)}
+
+.note{font-size:12.5px;color:var(--faint);margin-top:14px;padding-left:11px;border-left:2px solid rgb(23 34 41/16%)}
+.page{display:none}.page.on{display:block;animation:in .2s var(--ease)}
+/* Обзор — только волна */
+.wave-page.on{display:grid;place-items:center;min-height:100%;overflow:hidden}
+/* Обе волны привязаны к пикселям, а не к процентам. Раньше растровая была
+   width:46%, а словесная height:250px — с ростом окна левая раздувалась,
+   правая стояла на месте, и размах расходился вдвое.
+   --junction — точка, где звук становится словами; к ней же крепится птица. */
+.signal-composition{
+  /* Рисунок с жёсткой геометрией: 292px до стыка + 285px словесной волны
+     (словесная чуть уже растровой — как в исходной пропорции 312/282).
+     Ни одного размера в процентах: иначе колонки слов перетасовываются под
+     птицей и она начинает задевать волну. В тесноте ужимается целиком —
+     множитель --fit считает fitComposition(). */
+  position:relative;width:577px;height:430px;flex:none;
+  transform:scale(var(--fit,1));
+  --wave-w:300px;    /* при пропорциях wave.png 1024×594 даёт размах ±70px */
+  --junction:292px;  /* непрозрачные пиксели волны кончаются на 298px — берём с нахлёстом */
+}
+.source-wave{
+  position:absolute;left:0;top:50%;width:var(--wave-w);height:auto;
+  transform:translateY(-43.6%);   /* центр непрозрачных пикселей ложится на ось */
+}
+.lexical-wave{position:absolute;z-index:2;left:var(--junction);right:0;top:50%;height:250px;transform:translateY(-50%)}
+.binary-groups{display:contents}
+.word-column{position:absolute;inset-block:0;left:calc(var(--x) * 1%);width:8px;transform:translateX(-50%)}
+.word-column b,.binary-group{
+  color:rgb(20 26 28 / var(--o,.62));
+  font:700 calc(var(--s,6.2) * 1px)/1 "Courier New",monospace;
+  letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;
+  writing-mode:vertical-rl;text-orientation:mixed;
+}
+.word-column b{
+  position:absolute;left:50%;margin:0;
+  transform:translateX(-50%);
+}
+.word-column .up{bottom:50%;padding-bottom:calc(var(--s,6.2) * 1px)}
+.word-column .down{top:50%;padding-top:calc(var(--s,6.2) * 1px)}
+.binary-group{
+  position:absolute;left:calc(var(--x) * 1%);top:50%;margin:0;
+  transform:translate(-50%,-50%);
+}
+/* Висит над стыком волн: клюв приходится на точку, где звук становится словами.
+   Словесная волна поднимается на 60px над осью — держим низ птицы выше этой отметки. */
+.reference-bird{
+  /* Центром (translate -50%), а не левым краем, сидит ровно на стыке волн —
+     он же середина рисунка. Привязка к --junction, а не к 50% композиции:
+     на узком окне композиция сжимается, и её центр уехал бы влево от стыка. */
+  position:absolute;z-index:3;left:var(--junction);top:50%;width:78px;height:69px;
+  display:block;overflow:visible;filter:drop-shadow(0 4px 8px rgb(9 18 22/14%));
+  /* -122%: просвет до волны 3px в самой узкой точке. Мерить надо контур к
+     контуру по каждому столбцу пикселей — крайние точки птицы и волны стоят
+     в разных местах по X, и сравнение габаритов даёт бессмысленное число. */
+  transform:translate(-50%,-122%);pointer-events:none;
+}
+.reference-bird image{filter:grayscale(1) brightness(.34) contrast(1.18)}
+.reference-bird [data-bird-float]{
+  transform-box:view-box;transform-origin:120px 106px;
+  animation:bird-hover 1.1s ease-in-out infinite alternate;
+}
+.reference-bird [data-wing-phase]{
+  transform-box:view-box;transform-origin:104px 82px;will-change:transform,opacity;
+}
+.reference-bird [data-wing-phase="near"]{animation:bird-wing-near 72ms linear infinite alternate-reverse}
+.reference-bird [data-wing-phase="far"]{animation:bird-wing-far 72ms linear infinite alternate}
+.reference-bird [data-tail-phase]{
+  transform-box:view-box;transform-origin:111px 135px;will-change:transform,opacity;
+  animation:bird-tail 144ms linear infinite alternate;
+}
+@keyframes bird-hover{from{transform:translateY(-.25px)}to{transform:translateY(.35px)}}
+@keyframes bird-wing-near{from{opacity:.08;transform:rotate(-8deg) scaleY(.94)}to{opacity:.36;transform:rotate(7deg) scaleY(1.03)}}
+@keyframes bird-wing-far{from{opacity:.28;transform:rotate(-13deg) scaleY(.9)}to{opacity:.05;transform:rotate(12deg) scaleY(1.08)}}
+@keyframes bird-tail{from{opacity:.08;transform:rotate(-1.4deg)}to{opacity:.22;transform:rotate(1.7deg)}}
+@media (prefers-reduced-motion:reduce){
+  .reference-bird [data-bird-float],.reference-bird [data-wing-phase],.reference-bird [data-tail-phase]{animation:none}
+}
+@keyframes in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <aside class="rail">
+    <div class="brand"><div class="mark"></div><b>SayFlex</b></div>
+    <nav class="nav" id="nav">
+      <a href="#" class="on" data-p="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-4H4zM14 8h6V4h-6z"/></svg>Обзор</a>
+      <a href="#" data-p="dictation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>Диктовка</a>
+      <a href="#" data-p="translation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h10M9 4v2c0 4-2.5 7-5 8M7 10c1 2.5 3 4 6 5M13 20l4-10 4 10M14.5 17h5"/></svg>Перевод</a>
+      <a href="#" data-p="hotkeys"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>Горячие клавиши</a>
+      <a href="#" data-p="models"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Модели</a>
+      <a href="#" data-p="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></svg>История</a>
+      <a href="#" data-p="appearance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17M8 5v14M16 5v14"/></svg>Внешний вид</a>
+      <a href="#" data-p="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>Настройки</a>
+    </nav>
+    <div class="rail-foot">
+      <div class="stat"><i class="dot"></i>Модель готова · CUDA</div>
+      <div class="stat"><i class="dot idle"></i>Микрофон свободен</div>
+    </div>
+  </aside>
+
+  <main class="work" id="work">
+
+    <!-- OVERVIEW -->
+    <section class="page on wave-page" data-p="overview">
+      <div class="signal-composition" aria-label="SayFlex voice signal becoming words">
+        <img class="source-wave" src="wave.png" alt="">
+        <div class="lexical-wave" aria-hidden="true">
+          <i class="word-column" style="--x:0;--s:5.7;--o:.36"><b class="up">AI</b><b class="down">IN</b></i>
+          <i class="word-column" style="--x:3.2;--s:5.8;--o:.39"><b class="up">SAY</b><b class="down">FAST</b></i>
+          <i class="word-column" style="--x:6.4;--s:5.9;--o:.43"><b class="up">VOICE</b><b class="down">TEXT</b></i>
+          <i class="word-column" style="--x:9.6;--s:6;--o:.48"><b class="up">LOCAL</b><b class="down">PRIVATE</b></i>
+          <i class="word-column" style="--x:12.8;--s:6.1;--o:.54"><b class="up">LANGUAGE</b><b class="down">RUST</b></i>
+          <i class="word-column" style="--x:16;--s:6.2;--o:.61"><b class="up">TRANSCRIBE</b><b class="down">LISTENING</b></i>
+          <i class="word-column" style="--x:19.2;--s:6.2;--o:.66"><b class="up">SPEECH</b><b class="down">TRANSLATION</b></i>
+          <i class="word-column" style="--x:22.4;--s:6.3;--o:.71"><b class="up">SAYFLEXVOICE</b><b class="down">WORDS</b></i>
+          <i class="word-column" style="--x:25.6;--s:6.2;--o:.65"><b class="up">INSERT</b><b class="down">LOCAL</b></i>
+          <i class="word-column" style="--x:28.8;--s:6.1;--o:.58"><b class="up">VOICE</b><b class="down">SECURE</b></i>
+          <i class="word-column" style="--x:32;--s:6;--o:.52"><b class="up">FAST</b><b class="down">AI</b></i>
+          <i class="word-column" style="--x:35.2;--s:6.2;--o:.61"><b class="up">TRANSLATE</b><b class="down">PRIVATE</b></i>
+          <i class="word-column" style="--x:38.4;--s:6.3;--o:.69"><b class="up">TRANSCRIPTION</b><b class="down">SPEECH</b></i>
+          <i class="word-column" style="--x:41.6;--s:6.2;--o:.64"><b class="up">LANGUAGE</b><b class="down">SAYFLEX</b></i>
+          <i class="word-column" style="--x:44.8;--s:6;--o:.55"><b class="up">WORDS</b><b class="down">LOCAL</b></i>
+          <i class="word-column" style="--x:48;--s:5.9;--o:.49"><b class="up">RUST</b><b class="down">TEXT</b></i>
+          <i class="word-column" style="--x:51.2;--s:6;--o:.53"><b class="up">VOICE</b><b class="down">INSERT</b></i>
+          <i class="word-column" style="--x:54.4;--s:6.2;--o:.63"><b class="up">LISTENING</b><b class="down">LANGUAGE</b></i>
+          <i class="word-column" style="--x:57.6;--s:6.3;--o:.71"><b class="up">LOCALVOICE</b><b class="down">TRANSCRIBE</b></i>
+          <i class="word-column" style="--x:60.8;--s:6.2;--o:.66"><b class="up">TRANSLATE</b><b class="down">PRIVATE</b></i>
+          <i class="word-column" style="--x:64;--s:6;--o:.58"><b class="up">SPEECH</b><b class="down">WORDS</b></i>
+          <i class="word-column" style="--x:67.2;--s:5.9;--o:.5"><b class="up">FAST</b><b class="down">RUST</b></i>
+          <i class="word-column" style="--x:70.4;--s:6.1;--o:.59"><b class="up">PRIVACY</b><b class="down">VOICE</b></i>
+          <i class="word-column" style="--x:73.6;--s:6.2;--o:.67"><b class="up">TRANSCRIPTION</b><b class="down">SAYFLEX</b></i>
+          <i class="word-column" style="--x:76.8;--s:6.1;--o:.61"><b class="up">LANGUAGE</b><b class="down">LISTENING</b></i>
+          <i class="word-column" style="--x:80;--s:6;--o:.54"><b class="up">WORDS</b><b class="down">LOCAL</b></i>
+          <i class="word-column" style="--x:83.2;--s:5.9;--o:.48"><b class="up">VOICE</b><b class="down">TEXT</b></i>
+          <i class="word-column" style="--x:86.4;--s:5.8;--o:.44"><b class="up">SPEECH</b><b class="down">FAST</b></i>
+          <i class="word-column" style="--x:89.6;--s:5.8;--o:.41"><b class="up">LOCAL</b><b class="down">AI</b></i>
+          <i class="word-column" style="--x:92.8;--s:5.7;--o:.38"><b class="up">SAY</b><b class="down">FLEX</b></i>
+          <i class="word-column" style="--x:96;--s:5.6;--o:.35"><b class="up">IN</b><b class="down">VOICE</b></i>
+          <i class="word-column" style="--x:99.2;--s:5.5;--o:.32"><b class="up">AI</b><b class="down">SAY</b></i>
+          <i class="word-column" style="--x:1.6;--s:5.5;--o:.34"><b class="up">GO</b><b class="down">ON</b></i>
+          <i class="word-column" style="--x:4.8;--s:5.7;--o:.41"><b class="up">HEAR</b><b class="down">TYPE</b></i>
+          <i class="word-column" style="--x:8;--s:5.8;--o:.46"><b class="up">SOUND</b><b class="down">LOCAL</b></i>
+          <i class="word-column" style="--x:11.2;--s:5.9;--o:.51"><b class="up">PRIVATE</b><b class="down">VOICE</b></i>
+          <i class="word-column" style="--x:14.4;--s:6;--o:.58"><b class="up">LISTEN</b><b class="down">LANGUAGE</b></i>
+          <i class="word-column" style="--x:17.6;--s:6.1;--o:.64"><b class="up">TRANSCRIPT</b><b class="down">SAYFLEX</b></i>
+          <i class="word-column" style="--x:20.8;--s:6.2;--o:.69"><b class="up">TRANSLATION</b><b class="down">SPEAK</b></i>
+          <i class="word-column" style="--x:24;--s:6.1;--o:.68"><b class="up">LANGUAGE</b><b class="down">LOCALVOICE</b></i>
+          <i class="word-column" style="--x:27.2;--s:6;--o:.61"><b class="up">SPEECH</b><b class="down">INSERT</b></i>
+          <i class="word-column" style="--x:30.4;--s:5.9;--o:.55"><b class="up">WORDS</b><b class="down">FAST</b></i>
+          <i class="word-column" style="--x:33.6;--s:6;--o:.56"><b class="up">SECURE</b><b class="down">VOICE</b></i>
+          <i class="word-column" style="--x:36.8;--s:6.1;--o:.65"><b class="up">TRANSCRIBE</b><b class="down">LANGUAGE</b></i>
+          <i class="word-column" style="--x:40;--s:6.2;--o:.68"><b class="up">SAYFLEXVOICE</b><b class="down">TRANSLATE</b></i>
+          <i class="word-column" style="--x:43.2;--s:6;--o:.59"><b class="up">LISTEN</b><b class="down">WORDS</b></i>
+          <i class="word-column" style="--x:46.4;--s:5.8;--o:.51"><b class="up">TEXT</b><b class="down">RUST</b></i>
+          <i class="word-column" style="--x:49.6;--s:5.8;--o:.5"><b class="up">LOCAL</b><b class="down">AI</b></i>
+          <i class="word-column" style="--x:52.8;--s:6;--o:.58"><b class="up">PRIVATE</b><b class="down">SPEECH</b></i>
+          <i class="word-column" style="--x:56;--s:6.2;--o:.67"><b class="up">LANGUAGE</b><b class="down">TRANSCRIPT</b></i>
+          <i class="word-column" style="--x:59.2;--s:6.2;--o:.69"><b class="up">TRANSLATION</b><b class="down">LOCALVOICE</b></i>
+          <i class="word-column" style="--x:62.4;--s:6;--o:.61"><b class="up">SAYFLEX</b><b class="down">LISTEN</b></i>
+          <i class="word-column" style="--x:65.6;--s:5.9;--o:.54"><b class="up">VOICE</b><b class="down">WORDS</b></i>
+          <i class="word-column" style="--x:68.8;--s:5.9;--o:.54"><b class="up">SPEAK</b><b class="down">LOCAL</b></i>
+          <i class="word-column" style="--x:72;--s:6.1;--o:.63"><b class="up">TRANSCRIBE</b><b class="down">PRIVATE</b></i>
+          <i class="word-column" style="--x:75.2;--s:6.1;--o:.64"><b class="up">LANGUAGE</b><b class="down">TRANSLATE</b></i>
+          <i class="word-column" style="--x:78.4;--s:6;--o:.57"><b class="up">LISTEN</b><b class="down">SPEECH</b></i>
+          <i class="word-column" style="--x:81.6;--s:5.9;--o:.51"><b class="up">VOICE</b><b class="down">FAST</b></i>
+          <i class="word-column" style="--x:84.8;--s:5.8;--o:.46"><b class="up">LOCAL</b><b class="down">TEXT</b></i>
+          <i class="word-column" style="--x:88;--s:5.7;--o:.42"><b class="up">SPEAK</b><b class="down">AI</b></i>
+          <i class="word-column" style="--x:91.2;--s:5.6;--o:.39"><b class="up">SAY</b><b class="down">VOICE</b></i>
+          <i class="word-column" style="--x:94.4;--s:5.5;--o:.36"><b class="up">GO</b><b class="down">FLEX</b></i>
+          <i class="word-column" style="--x:97.6;--s:5.4;--o:.33"><b class="up">AI</b><b class="down">IN</b></i>
+          <span class="binary-groups" data-message="SAYFLEX"></span>
+        </div>
+        <svg class="reference-bird" viewBox="0 0 240 210" role="img" aria-label="SayFlex hummingbird">
+          <defs>
+            <clipPath id="minimal-reference-wing"><path d="M88 0h152v143c-41 5-97-8-139-43L88 0Z"/></clipPath>
+            <clipPath id="minimal-reference-tail"><path d="M70 123h108v87H70z"/></clipPath>
+          </defs>
+          <g data-bird-float>
+            <image href="../sayflex-open-design-prototype/public/hummingbird-flight-reference.png" width="240" height="210" preserveAspectRatio="xMidYMid meet"/>
+            <g clip-path="url(#minimal-reference-wing)" data-wing-phase="far">
+              <image href="../sayflex-open-design-prototype/public/hummingbird-flight-reference.png" width="240" height="210" preserveAspectRatio="xMidYMid meet"/>
+            </g>
+            <g clip-path="url(#minimal-reference-wing)" data-wing-phase="near">
+              <image href="../sayflex-open-design-prototype/public/hummingbird-flight-reference.png" width="240" height="210" preserveAspectRatio="xMidYMid meet"/>
+            </g>
+            <g clip-path="url(#minimal-reference-tail)" data-tail-phase>
+              <image href="../sayflex-open-design-prototype/public/hummingbird-flight-reference.png" width="240" height="210" preserveAspectRatio="xMidYMid meet"/>
+            </g>
+          </g>
+        </svg>
+      </div>
+    </section>
+
+    <!-- DICTATION -->
+    <section class="page" data-p="dictation">
+      <div class="head"><h1>Диктовка</h1><p class="sub">Речь распознаётся локально и вставляется в активное поле.</p></div>
+      <div class="tabs" data-tabs><button class="on" data-t="d1">Поведение</button><button data-t="d2">Вставка</button><button data-t="d3">Язык</button></div>
+      <div data-tab="d1">
+        <div class="sect">
+          <div class="row"><div class="txt"><b>Показывать визуализатор</b><span>Индикатор записи поверх других окон</span></div><div class="ctl"><button class="toggle" aria-pressed="true"></button></div></div>
+          <div class="row"><div class="txt"><b>Ускоренная подготовка</b><span>Готовит результат во время пауз. Быстрее, но нагружает видеокарту</span></div><div class="ctl"><button class="toggle" aria-pressed="true"></button></div></div>
+          <div class="row"><div class="txt"><b>Максимальная длина записи</b><span>Запись остановится автоматически</span></div><div class="ctl"><select><option>5 минут</option><option>2 минуты</option><option>10 минут</option></select></div></div>
+        </div>
+      </div>
+      <div data-tab="d2" hidden>
+        <div class="sect">
+          <div class="row"><div class="txt"><b>Способ вставки</b><span>Через буфер обмена — быстрее и надёжнее</span></div><div class="ctl"><select><option>Автоматически</option><option>Буфер обмена</option><option>Посимвольно</option></select></div></div>
+          <div class="row"><div class="txt"><b>Пробел в конце</b><span>Добавлять после вставленного текста</span></div><div class="ctl"><button class="toggle"></button></div></div>
+          <div class="row"><div class="txt"><b>Подтверждать доставку</b><span>Проверять, что текст действительно появился в поле</span></div><div class="ctl"><button class="toggle" aria-pressed="true"></button></div></div>
+        </div>
+      </div>
+      <div data-tab="d3" hidden>
+        <div class="sect">
+          <div class="row"><div class="txt"><b>Язык распознавания</b><span>Определяется автоматически по речи</span></div><div class="ctl"><select><option>Автоматически</option><option>Русский</option><option>English</option></select></div></div>
+          <div class="row"><div class="txt"><b>Переводить речь на английский</b><span>Доступно не для всех моделей</span></div><div class="ctl"><button class="toggle"></button></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TRANSLATION -->
+    <section class="page" data-p="translation">
+      <div class="head"><h1>Перевод</h1><p class="sub">Выделите текст в любом приложении и нажмите сочетание клавиш.</p></div>
+      <div class="sect">
+        <div class="row"><div class="txt"><b>Перевод выделенного</b><span>Ctrl + Alt + T</span></div><div class="ctl"><button class="toggle" aria-pressed="true"></button></div></div>
+        <div class="row"><div class="txt"><b>Что делать с результатом</b><span>Показать окно предпросмотра, заменить или скопировать</span></div><div class="ctl"><select><option>Предпросмотр</option><option>Заменить выделение</option><option>Скопировать</option></select></div></div>
+        <div class="row"><div class="txt"><b>Держать модель прогретой</b><span>Быстрее первый перевод, около 6 ГБ памяти</span></div><div class="ctl"><button class="toggle" aria-pressed="true"></button></div></div>
+      </div>
+      <p class="note">Первый перевод после запуска занимает около 6 секунд, дальше — 0,3–0,5 секунды.</p>
+    </section>
+
+    <!-- HOTKEYS -->
+    <section class="page" data-p="hotkeys">
+      <div class="head"><h1>Горячие клавиши</h1><p class="sub">Работают в любом приложении. Правый Alt не используется, чтобы не мешать раскладкам.</p></div>
+      <div class="sect">
+        <div class="row"><div class="txt"><b>Диктовать</b><span>Удерживайте, отпустите для вставки</span></div><div class="ctl"><div class="keys"><kbd>Ctrl</kbd><i>+</i><kbd>Alt</kbd><i>+</i><kbd>Space</kbd></div></div></div>
+        <div class="row"><div class="txt"><b>Вставить последнее</b><span>Повторно вставить предыдущую диктовку</span></div><div class="ctl"><div class="keys"><kbd>Ctrl</kbd><i>+</i><kbd>Alt</kbd><i>+</i><kbd>V</kbd></div></div></div>
+        <div class="row"><div class="txt"><b>Перевести выделенное</b><span></span></div><div class="ctl"><div class="keys"><kbd>Ctrl</kbd><i>+</i><kbd>Alt</kbd><i>+</i><kbd>T</kbd></div></div></div>
+        <div class="row"><div class="txt"><b>Исправить раскладку</b><span>ghbdtn → привет</span></div><div class="ctl"><div class="keys"><kbd>Ctrl</kbd><i>+</i><kbd>Alt</kbd><i>+</i><kbd>K</kbd></div></div></div>
+      </div>
+    </section>
+
+    <!-- MODELS -->
+    <section class="page" data-p="models">
+      <div class="head"><h1>Модели</h1><p class="sub">Локальные модели работают без интернета. Провайдеры по API — быстрее, но данные уходят наружу.</p></div>
+      <div class="tabs" data-tabs><button class="on" data-t="m1">Локальные</button><button data-t="m2">По API</button></div>
+      <div data-tab="m1">
+        <div class="sect">
+          <h2>Распознавание речи</h2>
+          <div class="mrow sel"><div class="nm"><b>Whisper Large v3 Turbo</b><span>Рекомендуется · высокая точность</span></div><div class="sz">1,6 ГБ</div><div class="st"><i class="dot"></i>Выбрана</div><div class="ac"><button class="btn ghost">Удалить</button></div></div>
+          <div class="mrow"><div class="nm"><b>Whisper Medium</b><span>Для слабых компьютеров</span></div><div class="sz">1,5 ГБ</div><div class="st"><i class="dot idle"></i>Установлена</div><div class="ac"><button class="btn">Выбрать</button></div></div>
+          <div class="mrow"><div class="nm"><b>Whisper Large v3</b><span>Максимальное качество, медленнее<div class="meter"><i style="width:38%"></i></div></span></div><div class="sz">3,1 ГБ</div><div class="st"><i class="dot idle"></i>38 % · 12 мин</div><div class="ac"><button class="btn ghost">Отмена</button></div></div>
+        </div>
+        <div class="sect">
+          <h2>Перевод</h2>
+          <div class="mrow sel"><div class="nm"><b>Qwen 3.5 9B</b><span>Q4_K_M · Vulkan</span></div><div class="sz">5,4 ГБ</div><div class="st"><i class="dot"></i>Выбрана</div><div class="ac"><button class="btn ghost">Удалить</button></div></div>
+          <div class="mrow"><div class="nm"><b>Qwen 3.5 4B</b><span>Быстрее, качество ниже</span></div><div class="sz">2,4 ГБ</div><div class="st"><i class="dot idle"></i>Не установлена</div><div class="ac"><button class="btn">Скачать</button></div></div>
+        </div>
+        <div class="sect">
+          <div class="row"><div class="txt"><b>Своя модель из файла</b><span>GGUF с диска</span></div><div class="ctl"><button class="btn">Выбрать файл…</button></div></div>
+        </div>
+      </div>
+      <div data-tab="m2" hidden>
+        <div class="sect">
+          <div class="row"><div class="txt"><b>Использовать провайдеров по API</b><span>Текст будет отправляться на сторонний сервер</span></div><div class="ctl"><button class="toggle"></button></div></div>
+          <div class="mrow"><div class="nm"><b>OpenAI</b><span>Ключ не задан</span></div><div class="sz"></div><div class="st"><i class="dot idle"></i>Отключён</div><div class="ac"><button class="btn">Настроить</button></div></div>
+          <div class="mrow"><div class="nm"><b>Anthropic</b><span>Ключ не задан</span></div><div class="sz"></div><div class="st"><i class="dot idle"></i>Отключён</div><div class="ac"><button class="btn">Настроить</button></div></div>
+        </div>
+        <p class="note">Пока переключатель выключен, ни один запрос наружу не уходит.</p>
+      </div>
+    </section>
+
+    <!-- HISTORY -->
+    <section class="page" data-p="history">
+      <div class="head"><h1>История</h1><p class="sub">Хранится только на этом компьютере.</p></div>
+      <div class="tabs" data-tabs><button class="on" data-t="h1">Диктовка</button><button data-t="h2">Перевод</button></div>
+      <div data-tab="h1">
+        <div class="sect">
+          <div class="hist"><time>12:04</time><p>Проверить, что вставка подтверждается во всех терминалах, а не только в WezTerm.<em>18 с · 84 символа · 0,41 с</em></p></div>
+          <div class="hist"><time>11:52</time><p>Нужно добавить логирование причины завершения приложения.<em>9 с · 57 символов · 0,38 с</em></p></div>
+          <div class="hist"><time>11:31</time><p>Белое окно появляется перед визуализатором.<em>6 с · 41 символ · 0,33 с</em></p></div>
+        </div>
+        <div class="row"><div class="txt"><b>Хранить историю</b><span>Последние 250 записей</span></div><div class="ctl"><button class="toggle" aria-pressed="true"></button><button class="btn ghost">Очистить</button></div></div>
+      </div>
+      <div data-tab="h2" hidden>
+        <div class="sect">
+          <div class="hist"><time>12:01</time><p>Local-first speech to text for Windows.<em>EN → RU · 0,29 с</em></p></div>
+          <div class="hist"><time>10:47</time><p>The insertion is confirmed before the popup closes.<em>EN → RU · 0,34 с</em></p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- APPEARANCE -->
+    <section class="page" data-p="appearance">
+      <div class="head"><h1>Внешний вид</h1><p class="sub">Индикатор появляется во время записи и не перехватывает фокус.</p></div>
+      <div class="sect">
+        <h2>Визуализатор</h2>
+        <div class="vis" id="vis">
+          <button class="on"><span class="orb"></span><small>Voice Orb</small></button>
+          <button><span class="bars"><i></i><i></i><i></i><i></i><i></i></span><small>Spectrum</small></button>
+          <button><span class="ribbon"></span><small>Ribbon</small></button>
+          <button><span class="slate"></span><small>Writing Slate</small></button>
+        </div>
+      </div>
+      <div class="sect">
+        <div class="row"><div class="txt"><b>Положение на экране</b><span></span></div><div class="ctl"><select><option>Снизу по центру</option><option>Сверху по центру</option><option>Возле курсора</option></select></div></div>
+        <div class="row"><div class="txt"><b>Показывать на активном мониторе</b><span>Следовать за окном, в которое идёт диктовка</span></div><div class="ctl"><button class="toggle" aria-pressed="true"></button></div></div>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="page" data-p="settings">
+      <div class="head"><h1>Настройки</h1><p class="sub">Приложение работает без прав администратора.</p></div>
+      <div class="sect">
+        <h2>Запуск</h2>
+        <div class="row"><div class="txt"><b>Запускать вместе с Windows</b><span>Свернуто в область уведомлений</span></div><div class="ctl"><button class="toggle"></button></div></div>
+        <div class="row"><div class="txt"><b>Сворачивать в трей при закрытии</b><span></span></div><div class="ctl"><button class="toggle" aria-pressed="true"></button></div></div>
+      </div>
+      <div class="sect">
+        <h2>Данные</h2>
+        <div class="row"><div class="txt"><b>Папка с моделями</b><span>%LOCALAPPDATA%\SayFlex\models</span></div><div class="ctl"><button class="btn">Открыть</button></div></div>
+        <div class="row"><div class="txt"><b>Журналы диагностики</b><span>Помогают найти причину сбоя</span></div><div class="ctl"><button class="btn">Показать</button></div></div>
+      </div>
+      <div class="sect">
+        <h2>О программе</h2>
+        <div class="row"><div class="txt"><b>SayFlex 0.5.7</b><span>Rust · Slint · whisper.cpp · llama.cpp</span></div><div class="ctl"><button class="btn">Проверить обновления</button></div></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+const nav=document.getElementById('nav'),work=document.getElementById('work'),shell=document.querySelector('.shell');
+const binaryGroups=document.querySelector('.binary-groups');
+const binaryMessage=binaryGroups.dataset.message;
+const wordColumns=[...document.querySelectorAll('.word-column')].sort((a,b)=>parseFloat(a.style.getPropertyValue('--x'))-parseFloat(b.style.getPropertyValue('--x')));
+const toBinary=char=>char.codePointAt(0).toString(2).padStart(8,'0');
+const binaryStream=[...binaryMessage].map(toBinary).join('');
+const groupedStream=binaryStream.repeat(Math.ceil(wordColumns.length*3/binaryStream.length));
+const generatedBinaryGroups=wordColumns.map((column,index)=>{
+  const group=document.createElement('b');
+  group.className='binary-group';
+  group.style.cssText=`--x:${column.style.getPropertyValue('--x')};--s:${column.style.getPropertyValue('--s')};--o:${column.style.getPropertyValue('--o')}`;
+  group.textContent=groupedStream.slice(index*3,index*3+3);
+  return group;
+});
+binaryGroups.replaceChildren(...generatedBinaryGroups);
+function alignActiveNavSurface(){
+  const active=nav.querySelector('a.on'); if(!active) return;
+  const shellRect=shell.getBoundingClientRect(),activeRect=active.getBoundingClientRect();
+  active.style.setProperty('--surface-width',`${shellRect.width}px`);
+  active.style.setProperty('--surface-height',`${shellRect.height}px`);
+  active.style.setProperty('--surface-x',`${shellRect.left-activeRect.left}px`);
+  active.style.setProperty('--surface-y',`${shellRect.top-activeRect.top}px`);
+  active.style.setProperty('--surface-item-height',`${activeRect.height}px`);
+}
+nav.addEventListener('click',e=>{
+  const a=e.target.closest('a'); if(!a) return; e.preventDefault();
+  nav.querySelectorAll('a').forEach(n=>n.classList.toggle('on',n===a));
+  work.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.dataset.p===a.dataset.p));
+  work.scrollTop=0;
+  alignActiveNavSurface();
+});
+// Композиция ужимается целиком, сохраняя все внутренние расстояния.
+const composition=document.querySelector('.signal-composition');
+function fitComposition(){
+  const stage=composition.parentElement;
+  const fit=Math.min(1,stage.clientWidth/577,stage.clientHeight/430);
+  composition.style.setProperty('--fit',fit.toFixed(4));
+}
+window.addEventListener('resize',()=>{alignActiveNavSurface();fitComposition();});
+alignActiveNavSurface();
+fitComposition();
+document.querySelectorAll('[data-tabs]').forEach(bar=>{
+  bar.addEventListener('click',e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    bar.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
+    const scope=bar.parentElement;
+    scope.querySelectorAll('[data-tab]').forEach(p=>p.hidden=p.dataset.tab!==b.dataset.t);
+  });
+});
+document.addEventListener('click',e=>{
+  const t=e.target.closest('.toggle'); if(!t) return;
+  t.setAttribute('aria-pressed',t.getAttribute('aria-pressed')==='true'?'false':'true');
+});
+document.getElementById('vis').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  document.querySelectorAll('#vis button').forEach(x=>x.classList.toggle('on',x===b));
+});
+</script>
+</body>
+</html>
