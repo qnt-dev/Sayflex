@@ -34,8 +34,8 @@ use slint::winit_030::{
     winit::raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
 use slint::{
-    ComponentHandle, Image, ModelRc, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, SharedString,
-    Timer, TimerMode, VecModel,
+    ComponentHandle, Image, Model, ModelRc, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer,
+    SharedString, Timer, TimerMode, VecModel,
 };
 
 mod flow_sphere;
@@ -64,6 +64,9 @@ const DEV_COMPANION_RENDERER_EXE: &str = "sayflex-companion-renderer.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INDICATOR_BAR_PROFILE: [f32; 10] = [0.25, 0.4, 0.62, 0.82, 1.0, 1.0, 0.82, 0.62, 0.4, 0.25];
+/// Visible and in-memory history depth. The speech worker keeps the same
+/// number of entries on disk.
+const HISTORY_RETAINED_ROWS: usize = 250;
 const WORKER_RESTART_WINDOW: Duration = Duration::from_secs(60);
 const WORKER_STARTUP_STABILITY: Duration = Duration::from_secs(2);
 static NEXT_WORKER_INSTANCE: AtomicU64 = AtomicU64::new(1);
@@ -4848,13 +4851,16 @@ fn handle_speech_event(
                 .registry
                 .complete(session_id, transcript.clone())
                 .is_ok();
+            let mut history_replaced = false;
             let delivery = if stored {
                 let mut state = state.borrow_mut();
                 state.latest_history_session = Some(session_id);
                 state.transcripts.insert(session_id, transcript.clone());
+                let before = state.history.len();
                 state
                     .history
                     .retain(|entry| entry.transcript.session_id != session_id);
+                history_replaced = state.history.len() != before;
                 state.history.insert(
                     0,
                     HistoryEntry {
@@ -4862,7 +4868,7 @@ fn handle_speech_event(
                         created_unix_ms,
                     },
                 );
-                state.history.truncate(250);
+                state.history.truncate(HISTORY_RETAINED_ROWS);
                 state
                     .pending_insert_last
                     .take_if(|pending| pending.session_id == Some(session_id))
@@ -4877,7 +4883,9 @@ fn handle_speech_event(
             } else {
                 None
             };
-            sync_history(settings, state);
+            // The insertion command leaves before any list model work.
+            // docs/LATENCY_ARCHITECTURE.md keeps history persistence and
+            // presentation off the release-to-insertion path.
             if let Some((target, add_trailing_space)) = delivery {
                 rust_app_core::diagnostics::log_line(&format!(
                     "transcription result=completed session={session_id} chars={} \
@@ -4918,6 +4926,16 @@ delivery={} target_pid={}",
                 indicator_animation.borrow_mut().stop();
                 recording_overlays.retire_all("target_lost");
                 set_indicator_status(settings, "Transcript saved to history; target was lost.");
+            }
+            if stored {
+                if history_replaced {
+                    sync_history(settings, state);
+                } else {
+                    let state = state.borrow();
+                    if let Some(entry) = state.history.first() {
+                        prepend_history_row(settings, entry, HISTORY_RETAINED_ROWS);
+                    }
+                }
             }
         }
         SpeechWorkerEvent::Cancelled { session_id } => {
@@ -6841,6 +6859,72 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
     );
 }
 
+thread_local! {
+    /// The history list is owned once and mutated in place. Replacing the model
+    /// on every completion would re-allocate every row and reset the list's
+    /// scroll position.
+    static HISTORY_ROWS: RefCell<Option<Rc<VecModel<HistoryRow>>>> = const { RefCell::new(None) };
+}
+
+fn history_rows_model(settings: &SettingsWindow) -> Rc<VecModel<HistoryRow>> {
+    HISTORY_ROWS.with(|model| {
+        let mut model = model.borrow_mut();
+        if let Some(existing) = model.as_ref() {
+            return Rc::clone(existing);
+        }
+        let created = Rc::new(VecModel::<HistoryRow>::default());
+        settings.set_history_rows(ModelRc::from(Rc::clone(&created)));
+        *model = Some(Rc::clone(&created));
+        created
+    })
+}
+
+fn history_row(entry: &HistoryEntry) -> HistoryRow {
+    HistoryRow {
+        text: entry.transcript.text.clone().into(),
+        detail: if entry.transcript.latency.after_release_ms > 0 {
+            format!(
+                "{} · {:.1}s audio · {}ms release{}",
+                entry.transcript.language,
+                entry.transcript.audio_duration_ms as f64 / 1000.0,
+                entry.transcript.latency.after_release_ms,
+                if entry.transcript.latency.speculative_reuse {
+                    " · prepared"
+                } else {
+                    ""
+                }
+            )
+            .into()
+        } else {
+            format!(
+                "{} · {:.1}s audio · {}ms processing",
+                entry.transcript.language,
+                entry.transcript.audio_duration_ms as f64 / 1000.0,
+                entry.transcript.processing_duration_ms
+            )
+            .into()
+        },
+    }
+}
+
+/// Adds one completed transcript to the top of the visible history without
+/// rebuilding the other rows. Called only after the insertion command has
+/// already been dispatched.
+fn prepend_history_row(
+    settings: &slint::Weak<SettingsWindow>,
+    entry: &HistoryEntry,
+    retained: usize,
+) {
+    let Some(settings) = settings.upgrade() else {
+        return;
+    };
+    let rows = history_rows_model(&settings);
+    rows.insert(0, history_row(entry));
+    while rows.row_count() > retained {
+        rows.remove(rows.row_count() - 1);
+    }
+}
+
 fn sync_history(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCell<AppState>>) {
     let Some(settings) = settings.upgrade() else {
         return;
@@ -6849,33 +6933,9 @@ fn sync_history(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCell<AppSt
         .borrow()
         .history
         .iter()
-        .map(|entry| HistoryRow {
-            text: entry.transcript.text.clone().into(),
-            detail: if entry.transcript.latency.after_release_ms > 0 {
-                format!(
-                    "{} · {:.1}s audio · {}ms release{}",
-                    entry.transcript.language,
-                    entry.transcript.audio_duration_ms as f64 / 1000.0,
-                    entry.transcript.latency.after_release_ms,
-                    if entry.transcript.latency.speculative_reuse {
-                        " · prepared"
-                    } else {
-                        ""
-                    }
-                )
-                .into()
-            } else {
-                format!(
-                    "{} · {:.1}s audio · {}ms processing",
-                    entry.transcript.language,
-                    entry.transcript.audio_duration_ms as f64 / 1000.0,
-                    entry.transcript.processing_duration_ms
-                )
-                .into()
-            },
-        })
+        .map(history_row)
         .collect::<Vec<_>>();
-    settings.set_history_rows(ModelRc::new(VecModel::from(rows)));
+    history_rows_model(&settings).set_vec(rows);
 }
 
 fn sync_output_mode(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCell<AppState>>) {
