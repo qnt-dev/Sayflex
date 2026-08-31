@@ -4,11 +4,17 @@ on:
   push:
     paths:
       - "rust-app/**"
+      # The companion renderer builds against crates in the pet workspace, so a
+      # change there can break this one.
+      - "desktop-pet/**"
       - "rust-toolchain.toml"
       - ".github/workflows/rust.yml"
   pull_request:
     paths:
       - "rust-app/**"
+      # The companion renderer builds against crates in the pet workspace, so a
+      # change there can break this one.
+      - "desktop-pet/**"
       - "rust-toolchain.toml"
       - ".github/workflows/rust.yml"
 
