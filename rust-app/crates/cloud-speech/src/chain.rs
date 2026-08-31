@@ -116,10 +116,34 @@ pub struct Chain {
     entries: Vec<ProviderEntry>,
 }
 
+/// The most rows a list may hold.
+///
+/// The interface offers one row per known service; anything beyond that came
+/// from a hand-edited file, and a list of thousands would mean a dictation
+/// spending its whole deadline walking one.
+const MAX_ENTRIES: usize = 32;
+
 impl Chain {
+    /// Builds a list from stored entries.
+    ///
+    /// Duplicates are dropped, keeping the first position the user gave a
+    /// provider: a file listing the same service twice would otherwise send
+    /// the same recording to it twice and spend the allowance twice as fast.
     #[must_use]
     pub fn new(entries: Vec<ProviderEntry>) -> Self {
-        Self { entries }
+        let mut seen = Vec::new();
+        let mut unique = Vec::new();
+        for entry in entries {
+            if seen.contains(&entry.id) {
+                continue;
+            }
+            seen.push(entry.id.clone());
+            unique.push(entry);
+            if unique.len() == MAX_ENTRIES {
+                break;
+            }
+        }
+        Self { entries: unique }
     }
 
     /// The list a fresh installation starts with: the local engine first and
@@ -471,6 +495,31 @@ mod tests {
             chain.entries()[2..].iter().all(|entry| !entry.enabled),
             "a service the user has never seen is off"
         );
+    }
+
+    #[test]
+    fn a_list_naming_a_service_twice_uses_it_once() {
+        let chain = chain_of(&[
+            (ProviderId::GROQ, true),
+            (ProviderId::LOCAL, true),
+            (ProviderId::GROQ, true),
+        ]);
+
+        assert_eq!(chain.entries().len(), 2);
+        assert_eq!(
+            chain.entries()[0].id.as_str(),
+            ProviderId::GROQ,
+            "the first position the user gave it is the one that counts"
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_list_cannot_grow_without_limit() {
+        let entries: Vec<_> = (0..500)
+            .map(|index| ProviderEntry::new(&format!("service-{index}"), true))
+            .collect();
+
+        assert_eq!(Chain::new(entries).entries().len(), 32);
     }
 
     #[test]

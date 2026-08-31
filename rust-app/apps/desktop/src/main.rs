@@ -7279,11 +7279,20 @@ fn history_rows_model(settings: &SettingsWindow) -> Rc<VecModel<HistoryRow>> {
 }
 
 fn history_row(entry: &HistoryEntry) -> HistoryRow {
+    // A line produced by a service says so: which dictations left the machine
+    // is not something a user should have to remember.
+    let source = entry
+        .transcript
+        .provider
+        .as_deref()
+        .map_or_else(String::new, |provider| {
+            format!(" · via {}", provider_display_name(provider))
+        });
     HistoryRow {
         text: entry.transcript.text.clone().into(),
         detail: if entry.transcript.latency.after_release_ms > 0 {
             format!(
-                "{} · {:.1}s audio · {}ms release{}",
+                "{} · {:.1}s audio · {}ms release{}{source}",
                 entry.transcript.language,
                 entry.transcript.audio_duration_ms as f64 / 1000.0,
                 entry.transcript.latency.after_release_ms,
@@ -7296,7 +7305,7 @@ fn history_row(entry: &HistoryEntry) -> HistoryRow {
             .into()
         } else {
             format!(
-                "{} · {:.1}s audio · {}ms processing",
+                "{} · {:.1}s audio · {}ms processing{source}",
                 entry.transcript.language,
                 entry.transcript.audio_duration_ms as f64 / 1000.0,
                 entry.transcript.processing_duration_ms

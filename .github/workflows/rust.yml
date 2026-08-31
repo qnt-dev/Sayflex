@@ -53,3 +53,21 @@ jobs:
         run: cargo install cargo-deny --locked
       - name: Advisories, licenses, bans, and sources
         run: cargo deny check
+
+  pet-quality:
+    name: desktop-pet quality
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop-pet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-pet
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace

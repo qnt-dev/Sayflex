@@ -8,7 +8,11 @@
 
 use std::{
     path::PathBuf,
-    sync::mpsc::{self, Sender},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Sender},
+    },
     thread,
 };
 
@@ -31,20 +35,34 @@ pub enum ModelCommand {
     Shutdown,
 }
 
+/// One queued request, carrying the cancellation count it was sent under.
+///
+/// Without it, a cancel arriving while the request is still in the queue is
+/// erased by the reset the installer performs on the way in, and the download
+/// the user just stopped starts anyway.
+struct QueuedCommand {
+    command: ModelCommand,
+    cancels_at_send: u64,
+}
+
 #[derive(Clone)]
 pub struct ModelActor {
-    commands: Sender<ModelCommand>,
+    commands: Sender<QueuedCommand>,
     cancellation: CancelToken,
+    cancels: Arc<AtomicU64>,
 }
 
 impl ModelActor {
     pub fn send(&self, command: ModelCommand) {
-        let _ = self.commands.send(command);
+        let _ = self.commands.send(QueuedCommand {
+            command,
+            cancels_at_send: self.cancels.load(Ordering::Acquire),
+        });
     }
 
-    /// Asks the current installation to stop. Safe to call when nothing is
-    /// installing: the flag is cleared before each new operation.
+    /// Asks the current installation to stop, and any already queued.
     pub fn cancel(&self) {
+        self.cancels.fetch_add(1, Ordering::AcqRel);
         self.cancellation.cancel();
     }
 }
@@ -56,20 +74,26 @@ pub fn start(
     events: Sender<SpeechWorkerEvent>,
     inference: InferenceHandle,
 ) -> Result<ModelActor> {
-    let (commands, requests) = mpsc::channel::<ModelCommand>();
+    let (commands, requests) = mpsc::channel::<QueuedCommand>();
     let cancellation = fetcher.cancellation();
     let installer_cancellation = cancellation.clone();
+    let cancels = Arc::new(AtomicU64::new(0));
+    let worker_cancels = Arc::clone(&cancels);
     thread::Builder::new()
         .name("speech-model-installer".to_owned())
         .spawn(move || {
-            for command in requests {
-                match command {
+            for request in requests {
+                match request.command {
                     ModelCommand::Ensure {
                         catalog_id,
                         announce_selection,
                     } => {
-                        // A cancellation that arrived while nothing was running
-                        // must not cancel this operation.
+                        if worker_cancels.load(Ordering::Acquire) != request.cancels_at_send {
+                            // Cancelled while it was still in the queue.
+                            continue;
+                        }
+                        // A cancellation older than this request must not
+                        // cancel it; a newer one already skipped it above.
                         installer_cancellation.reset();
                         match ensure_model(&catalog, &installer, &fetcher, &catalog_id, &events) {
                             Ok(path) => {
@@ -105,6 +129,7 @@ pub fn start(
     Ok(ModelActor {
         commands,
         cancellation,
+        cancels,
     })
 }
 
