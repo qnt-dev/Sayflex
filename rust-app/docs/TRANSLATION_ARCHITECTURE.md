@@ -79,6 +79,19 @@ disables the web UI and network model lookup, and inherits the desktop worker
 Job Object. A worker or desktop failure therefore cannot leave an orphaned
 translation server.
 
+The key reaches the server through its environment rather than its command
+line, because command lines of same-user processes are readable with ordinary
+tools while an environment block requires `PROCESS_VM_READ`. The port is drawn
+by binding an ephemeral socket and releasing it, so another process can take it
+in the gap before the server binds; that shows up as an immediate exit and is
+retried on a freshly drawn port up to three times. A start that is merely slow
+is never retried, because the ninety-second readiness deadline would multiply.
+
+Installation of a pack or of the runtime runs on the worker's installer thread,
+not in its command loop. The worker keeps reading commands throughout, so a
+download of several gigabytes can be cancelled, and shutdown does not have to
+wait for it. A cancelled download keeps its partial file and resumes later.
+
 The catalog, protocol, model installer, runtime installer, and inference client
 are separate components. Additional languages, model sizes, or native
 backends can be added without changing input capture or UI delivery semantics.

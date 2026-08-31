@@ -52,6 +52,17 @@ The audio callback performs no locks, allocation, filesystem access, JSON, UI,
 or blocking IPC. The low-level keyboard hook likewise owns only physical-key
 and gesture state.
 
+Two rules keep the desktop's own event loop out of the path it is supposed to
+observe. Microphone frames, which arrive about thirty-one times a second, are
+coalesced into a single slot before they reach that loop: a stalled UI drops
+the backlog instead of replaying it, and a completed transcript never queues
+behind stale visualizer work. Commands to workers are handed to a writer thread
+that owns the pipe, so a worker that stops reading cannot block the thread that
+is trying to deliver text.
+
+On completion the insertion command is dispatched before the history list model
+is touched, and that model is mutated in place rather than rebuilt.
+
 ## Incremental, correctness-guarded preparation
 
 During a natural trailing pause the scheduler may request a cancellable
