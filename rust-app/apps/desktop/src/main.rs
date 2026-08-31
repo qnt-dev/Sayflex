@@ -931,7 +931,7 @@ struct PendingSelection {
     candidates: Vec<LayoutCandidate>,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TextActionMode {
     #[default]
@@ -939,7 +939,7 @@ enum TextActionMode {
     AlwaysPalette,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TranslationDelivery {
     #[default]
@@ -7430,7 +7430,16 @@ fn settings_path() -> PathBuf {
     data_root().join("settings.json")
 }
 
+/// Version of the on-disk settings document.
+///
+/// Bump this when a field changes meaning, not when one is added: unknown
+/// fields are ignored on read and missing fields fall back to their default,
+/// so pure additions stay compatible in both directions.
+const SETTINGS_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct SavedSettings {
+    schema_version: u32,
     selected_model_id: Option<String>,
     speech_backend_preference: SpeechBackendPreference,
     output_mode: SpeechOutputMode,
@@ -7453,6 +7462,7 @@ struct SavedSettings {
 impl Default for SavedSettings {
     fn default() -> Self {
         Self {
+            schema_version: SETTINGS_SCHEMA_VERSION,
             selected_model_id: None,
             speech_backend_preference: SpeechBackendPreference::default(),
             output_mode: SpeechOutputMode::default(),
@@ -7474,117 +7484,164 @@ impl Default for SavedSettings {
     }
 }
 
-fn normalize_translation_blur_radius(value: u64) -> u32 {
-    value.min(MAX_TRANSLATION_BLUR_RADIUS as u64) as u32
+/// Reads settings field by field so one unusable value costs only that field.
+///
+/// A derived `Deserialize` would reject the whole document over a single
+/// renamed enum variant or hand-edited value, silently resetting every other
+/// preference. Unknown fields are ignored, which is what makes a document
+/// written by a newer build readable by an older one.
+impl<'de> Deserialize<'de> for SavedSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        fn read<T: DeserializeOwned>(
+            document: &serde_json::Map<String, serde_json::Value>,
+            key: &str,
+            slot: &mut T,
+        ) {
+            if let Some(value) = document.get(key)
+                && let Ok(parsed) = T::deserialize(value.clone())
+            {
+                *slot = parsed;
+            }
+        }
+
+        let document = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let mut settings = Self::default();
+        read(&document, "schema_version", &mut settings.schema_version);
+        read(
+            &document,
+            "selected_model_id",
+            &mut settings.selected_model_id,
+        );
+        read(
+            &document,
+            "speech_backend_preference",
+            &mut settings.speech_backend_preference,
+        );
+        read(&document, "output_mode", &mut settings.output_mode);
+        read(
+            &document,
+            "fast_release_previews",
+            &mut settings.fast_release_previews,
+        );
+        read(
+            &document,
+            "visualizer_style",
+            &mut settings.visualizer_style,
+        );
+        read(
+            &document,
+            "circular_spectrum_palette",
+            &mut settings.circular_spectrum_palette,
+        );
+        read(
+            &document,
+            "flow_sphere_palette",
+            &mut settings.flow_sphere_palette,
+        );
+        read(
+            &document,
+            "writing_slate_surface",
+            &mut settings.writing_slate_surface,
+        );
+        read(
+            &document,
+            "companion_home_position",
+            &mut settings.companion_home_position,
+        );
+        read(
+            &document,
+            "selected_translation_tier",
+            &mut settings.selected_translation_tier,
+        );
+        read(
+            &document,
+            "translation_enabled",
+            &mut settings.translation_enabled,
+        );
+        read(&document, "layout_enabled", &mut settings.layout_enabled);
+        read(
+            &document,
+            "translation_keep_warm",
+            &mut settings.translation_keep_warm,
+        );
+        read(
+            &document,
+            "translation_blur_radius",
+            &mut settings.translation_blur_radius,
+        );
+        read(
+            &document,
+            "text_action_mode",
+            &mut settings.text_action_mode,
+        );
+        read(
+            &document,
+            "translation_delivery",
+            &mut settings.translation_delivery,
+        );
+        read(&document, "history_enabled", &mut settings.history_enabled);
+        Ok(settings)
+    }
+}
+
+impl SavedSettings {
+    fn from_state(state: &AppState) -> Self {
+        Self {
+            schema_version: SETTINGS_SCHEMA_VERSION,
+            selected_model_id: Some(state.selected_model_id.clone()),
+            speech_backend_preference: state.speech_backend_preference,
+            output_mode: state.output_mode,
+            fast_release_previews: state.fast_release_previews,
+            visualizer_style: state.visualizer_style,
+            circular_spectrum_palette: state.circular_spectrum_palette,
+            flow_sphere_palette: state.flow_sphere_palette,
+            writing_slate_surface: state.writing_slate_surface,
+            companion_home_position: state.companion_home_position,
+            selected_translation_tier: state.selected_translation_tier,
+            translation_enabled: state.translation_enabled,
+            layout_enabled: state.layout_enabled,
+            translation_keep_warm: state.translation_keep_warm,
+            translation_blur_radius: state.translation_blur_radius,
+            text_action_mode: state.text_action_mode,
+            translation_delivery: state.translation_delivery,
+            history_enabled: state.history_enabled,
+        }
+    }
+
+    /// Brings a document read from disk into the range the application can
+    /// apply. A value outside it comes from a hand edit or an older build, and
+    /// is not a reason to refuse to start.
+    fn sanitized(mut self) -> Self {
+        self.translation_blur_radius = self
+            .translation_blur_radius
+            .min(MAX_TRANSLATION_BLUR_RADIUS);
+        self.selected_model_id = self
+            .selected_model_id
+            .filter(|identifier| !identifier.trim().is_empty());
+        self.schema_version = SETTINGS_SCHEMA_VERSION;
+        self
+    }
+}
+
+/// Reads a settings document. Unknown fields are ignored, missing fields take
+/// their default, and an unreadable document falls back to defaults rather
+/// than blocking startup.
+fn parse_settings(bytes: &[u8]) -> SavedSettings {
+    match serde_json::from_slice::<SavedSettings>(bytes) {
+        Ok(settings) => settings.sanitized(),
+        Err(error) => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "settings result=unreadable error={error} recovery=defaults"
+            ));
+            SavedSettings::default()
+        }
+    }
 }
 
 fn load_settings() -> SavedSettings {
-    let value = fs::read(settings_path())
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-    let selected_model_id = value
-        .as_ref()
-        .and_then(|value| value.get("selected_model_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let speech_backend_preference = value
-        .as_ref()
-        .and_then(|value| value.get("speech_backend_preference"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
-    let output_mode = value
-        .as_ref()
-        .and_then(|value| value.get("output_mode"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
-    let fast_release_previews = value
-        .as_ref()
-        .and_then(|value| value.get("fast_release_previews"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    let visualizer_style = value
-        .as_ref()
-        .and_then(|value| value.get("visualizer_style"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
-    let circular_spectrum_palette = value
-        .as_ref()
-        .and_then(|value| value.get("circular_spectrum_palette"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
-    let flow_sphere_palette = value
-        .as_ref()
-        .and_then(|value| value.get("flow_sphere_palette"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
-    let writing_slate_surface = value
-        .as_ref()
-        .and_then(|value| value.get("writing_slate_surface"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
-    let companion_home_position = value
-        .as_ref()
-        .and_then(|value| value.get("companion_home_position"))
-        .and_then(|value| serde_json::from_value::<[i32; 2]>(value.clone()).ok())
-        .map(|[x, y]| (x, y));
-    let selected_translation_tier = value
-        .as_ref()
-        .and_then(|value| value.get("selected_translation_tier"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok());
-    let translation_enabled = value
-        .as_ref()
-        .and_then(|value| value.get("translation_enabled"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let layout_enabled = value
-        .as_ref()
-        .and_then(|value| value.get("layout_enabled"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    let translation_keep_warm = value
-        .as_ref()
-        .and_then(|value| value.get("translation_keep_warm"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    let translation_blur_radius = value
-        .as_ref()
-        .and_then(|value| value.get("translation_blur_radius"))
-        .and_then(serde_json::Value::as_u64)
-        .map(normalize_translation_blur_radius)
-        .unwrap_or(DEFAULT_TRANSLATION_BLUR_RADIUS);
-    let text_action_mode = value
-        .as_ref()
-        .and_then(|value| value.get("text_action_mode"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
-    let translation_delivery = value
-        .as_ref()
-        .and_then(|value| value.get("translation_delivery"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
-    let history_enabled = value
-        .as_ref()
-        .and_then(|value| value.get("history_enabled"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    SavedSettings {
-        selected_model_id,
-        speech_backend_preference,
-        output_mode,
-        fast_release_previews,
-        visualizer_style,
-        circular_spectrum_palette,
-        flow_sphere_palette,
-        writing_slate_surface,
-        companion_home_position,
-        selected_translation_tier,
-        translation_enabled,
-        layout_enabled,
-        translation_keep_warm,
-        translation_blur_radius,
-        text_action_mode,
-        translation_delivery,
-        history_enabled,
+    match fs::read(settings_path()) {
+        Ok(bytes) => parse_settings(&bytes),
+        Err(_) => SavedSettings::default(),
     }
 }
 
@@ -7593,25 +7650,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
-        "selected_model_id": &state.selected_model_id,
-        "speech_backend_preference": state.speech_backend_preference,
-        "output_mode": state.output_mode,
-        "fast_release_previews": state.fast_release_previews,
-        "visualizer_style": state.visualizer_style,
-        "circular_spectrum_palette": state.circular_spectrum_palette,
-        "flow_sphere_palette": state.flow_sphere_palette,
-        "writing_slate_surface": state.writing_slate_surface,
-        "companion_home_position": state.companion_home_position.map(|(x, y)| [x, y]),
-        "selected_translation_tier": state.selected_translation_tier,
-        "translation_enabled": state.translation_enabled,
-        "layout_enabled": state.layout_enabled,
-        "translation_keep_warm": state.translation_keep_warm,
-        "translation_blur_radius": state.translation_blur_radius,
-        "text_action_mode": state.text_action_mode,
-        "translation_delivery": state.translation_delivery,
-        "history_enabled": state.history_enabled,
-    }))?;
+    let bytes = serde_json::to_vec_pretty(&SavedSettings::from_state(state))?;
     let temporary = path.with_extension("tmp");
     let backup = path.with_extension("previous");
     fs::write(&temporary, bytes)?;
@@ -8306,8 +8345,7 @@ mod adaptive_popup_tests {
 
     use super::{
         TranslationPreview, adaptive_text_panel_height, backdrop_prefers_dark_text,
-        normalize_translation_blur_radius, translation_pairs, translation_preview_layout,
-        translation_units,
+        translation_pairs, translation_preview_layout, translation_units,
     };
 
     fn uniform_backdrop(value: u8) -> Vec<u8> {
@@ -8370,9 +8408,18 @@ mod adaptive_popup_tests {
 
     #[test]
     fn translation_blur_setting_is_bounded_to_the_supported_range() {
-        assert_eq!(normalize_translation_blur_radius(0), 0);
-        assert_eq!(normalize_translation_blur_radius(3), 3);
-        assert_eq!(normalize_translation_blur_radius(200), 8);
+        assert_eq!(
+            super::parse_settings(br#"{"translation_blur_radius": 0}"#).translation_blur_radius,
+            0
+        );
+        assert_eq!(
+            super::parse_settings(br#"{"translation_blur_radius": 3}"#).translation_blur_radius,
+            3
+        );
+        assert_eq!(
+            super::parse_settings(br#"{"translation_blur_radius": 200}"#).translation_blur_radius,
+            super::MAX_TRANSLATION_BLUR_RADIUS
+        );
     }
 
     #[test]
@@ -8594,5 +8641,132 @@ mod insert_last_tests {
                 if transcript.session_id == completed
                     && transcript.text == "последний успешный"
         ));
+    }
+}
+
+#[cfg(test)]
+mod settings_document_tests {
+    use rust_protocol::{SpeechOutputMode, TranslationTier};
+
+    use super::{
+        AppState, MAX_TRANSLATION_BLUR_RADIUS, SETTINGS_SCHEMA_VERSION, SavedSettings,
+        SpeechBackend, TextActionMode, VisualizerStyle, parse_settings,
+    };
+
+    /// Exactly what the 0.5.27 build wrote, before the document carried a
+    /// schema version.
+    const PREVIOUS_DOCUMENT: &[u8] = br#"{
+      "selected_model_id": "whisper-large-v3-turbo",
+      "speech_backend_preference": "auto",
+      "output_mode": "original_language",
+      "fast_release_previews": true,
+      "visualizer_style": "voice_orb",
+      "companion_home_position": [120, 240],
+      "selected_translation_tier": "tiny",
+      "translation_enabled": true,
+      "history_enabled": false
+    }"#;
+
+    #[test]
+    fn a_document_from_the_previous_build_keeps_its_values() {
+        let settings = parse_settings(PREVIOUS_DOCUMENT);
+
+        assert_eq!(
+            settings.selected_model_id.as_deref(),
+            Some("whisper-large-v3-turbo")
+        );
+        assert_eq!(settings.companion_home_position, Some((120, 240)));
+        assert_eq!(
+            settings.selected_translation_tier,
+            Some(TranslationTier::Tiny)
+        );
+        assert!(settings.translation_enabled);
+        assert!(!settings.history_enabled);
+    }
+
+    #[test]
+    fn fields_absent_from_an_older_document_take_their_default() {
+        let settings = parse_settings(PREVIOUS_DOCUMENT);
+        let defaults = SavedSettings::default();
+
+        // Written by neither the previous build nor this document.
+        assert_eq!(settings.layout_enabled, defaults.layout_enabled);
+        assert_eq!(
+            settings.translation_keep_warm,
+            defaults.translation_keep_warm
+        );
+        assert_eq!(
+            settings.translation_blur_radius,
+            defaults.translation_blur_radius
+        );
+        assert_eq!(settings.text_action_mode, defaults.text_action_mode);
+        assert_eq!(
+            settings.writing_slate_surface,
+            defaults.writing_slate_surface
+        );
+    }
+
+    #[test]
+    fn a_document_from_a_newer_build_is_read_without_its_unknown_fields() {
+        let settings = parse_settings(
+            br#"{"history_enabled": false, "a_setting_from_the_future": {"nested": [1, 2]}}"#,
+        );
+
+        assert!(!settings.history_enabled);
+        assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn one_unusable_value_does_not_reset_the_other_settings() {
+        // "orb" was never a variant name; a renamed enum or a hand edit looks
+        // exactly like this.
+        let settings = parse_settings(
+            br#"{"visualizer_style": "orb", "history_enabled": false, "layout_enabled": false}"#,
+        );
+
+        assert_eq!(settings.visualizer_style, VisualizerStyle::default());
+        assert!(!settings.history_enabled);
+        assert!(!settings.layout_enabled);
+    }
+
+    #[test]
+    fn an_unreadable_document_falls_back_to_defaults_instead_of_failing() {
+        assert_eq!(
+            parse_settings(b"{ this is not json"),
+            SavedSettings::default()
+        );
+        assert_eq!(parse_settings(b""), SavedSettings::default());
+    }
+
+    #[test]
+    fn values_outside_the_supported_range_are_brought_back_into_it() {
+        let settings = parse_settings(
+            br#"{"translation_blur_radius": 4294967295, "selected_model_id": "   "}"#,
+        );
+
+        assert_eq!(
+            settings.translation_blur_radius,
+            MAX_TRANSLATION_BLUR_RADIUS
+        );
+        assert_eq!(settings.selected_model_id, None);
+    }
+
+    #[test]
+    fn a_saved_document_reads_back_as_the_same_settings() {
+        let mut saved = SavedSettings::default();
+        saved.translation_enabled = true;
+        saved.companion_home_position = Some((-640, 320));
+        saved.visualizer_style = VisualizerStyle::default();
+        saved.text_action_mode = TextActionMode::default();
+
+        let state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &saved,
+        );
+        let document = serde_json::to_vec_pretty(&SavedSettings::from_state(&state)).unwrap();
+
+        assert_eq!(parse_settings(&document), SavedSettings::from_state(&state));
     }
 }
