@@ -8,7 +8,6 @@ members = [
     "crates/app-core",
     "crates/cloud-speech",
     "crates/model-manager",
-    "crates/platform-api",
     "crates/platform-windows",
     "crates/protocol",
     "crates/speech-api",

@@ -20,6 +20,13 @@ work begins. Do not use the separately licensed commercial Avalonia tooling or
 XPF runtime. The existing WPF UI can remain the Windows shell until the
 cross-platform surface is ready.
 
+There is deliberately no trait layer for this yet. One existed — a
+`platform-api` crate of capability traits — and nothing ever implemented or
+called it: every caller went straight to the Windows implementation, so the
+crate promised a portability the code did not have. It has been removed. The
+seam belongs in the commit that introduces a second platform, shaped by what
+that platform actually needs rather than by what one guesses in advance.
+
 Each operating system gets a small native platform host implementing:
 
 ```text

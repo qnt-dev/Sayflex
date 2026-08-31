@@ -4649,14 +4649,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust-platform-api"
-version = "0.5.27"
-dependencies = [
- "rust-protocol",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "rust-platform-windows"
 version = "0.5.27"
 dependencies = [

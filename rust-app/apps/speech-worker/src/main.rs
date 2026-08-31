@@ -35,6 +35,10 @@ fn main() -> Result<()> {
     if env::args().nth(1).as_deref() == Some("--transcribe-wav") {
         return transcribe_wav_diagnostic();
     }
+    let protocol_smoke = env::args().any(|argument| argument == "--protocol-smoke");
+    if protocol_smoke {
+        require_smoke_opt_in("SAYFLEX_RUN_PROTOCOL_SMOKE")?;
+    }
 
     let (event_sender, event_receiver) = mpsc::channel::<SpeechWorkerEvent>();
     thread::Builder::new()
@@ -52,7 +56,7 @@ fn main() -> Result<()> {
             }
         })?;
 
-    if let Err(error) = run(event_sender.clone()) {
+    if let Err(error) = run(event_sender.clone(), protocol_smoke) {
         let _ = event_sender.send(SpeechWorkerEvent::Failed {
             session_id: None,
             code: "worker_fatal".to_owned(),
@@ -62,6 +66,17 @@ fn main() -> Result<()> {
         return Err(error);
     }
     Ok(())
+}
+
+/// Refuses a test-only mode unless the caller asked for it explicitly.
+///
+/// These modes are reachable in a release build, so the opt-in is what keeps
+/// them out of the ordinary application lifecycle.
+fn require_smoke_opt_in(variable: &str) -> Result<()> {
+    if env::var(variable).is_ok_and(|value| value == "1") {
+        return Ok(());
+    }
+    anyhow::bail!("{variable}=1 is required for this diagnostic mode")
 }
 
 fn transcribe_wav_diagnostic() -> Result<()> {
@@ -129,7 +144,15 @@ fn transcribe_wav_diagnostic() -> Result<()> {
     Ok(())
 }
 
-fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
+/// Runs the worker.
+///
+/// `protocol_smoke` keeps everything that speaks the protocol and leaves out
+/// everything that needs hardware: no microphone is opened and no model is
+/// loaded. It exists so a test can start this exact binary and check the
+/// handshake, the version and the shape of the replies — the contract the
+/// desktop depends on — on a machine with no sound card and no gigabytes to
+/// download. Recording commands answer with a failure rather than pretending.
+fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
     let data_root = application_data_root();
     fs::create_dir_all(&data_root)?;
     let models_root = data_root.join("models");
@@ -138,6 +161,9 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
     let installer = ModelInstaller::new(models_root);
     let fetcher = HttpFetcher::new("model-manager")?;
     let history = history_actor::start(history_path, events.clone())?;
+    if protocol_smoke {
+        return run_protocol_smoke(&events, &catalog, &installer);
+    }
     let recorder = AudioRecorder::open(events.clone())?;
     let inference = InferenceHandle::start(events.clone(), history.clone())?;
     let models = model_actor::start(
@@ -324,6 +350,67 @@ fn run(events: Sender<SpeechWorkerEvent>) -> Result<()> {
     speculation.shutdown();
     inference.shutdown();
     let _ = history.send(HistoryCommand::Shutdown);
+    Ok(())
+}
+
+/// The command loop with nothing behind it but the catalogue.
+fn run_protocol_smoke(
+    events: &Sender<SpeechWorkerEvent>,
+    catalog: &ModelCatalog,
+    installer: &ModelInstaller,
+) -> Result<()> {
+    let stdin = io::stdin();
+    for line in BufReader::new(stdin.lock()).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let command = match serde_json::from_str::<SpeechWorkerCommand>(&line) {
+            Ok(command) => command,
+            Err(error) => {
+                let _ = events.send(SpeechWorkerEvent::Failed {
+                    session_id: None,
+                    code: "invalid_command".to_owned(),
+                    message: error.to_string(),
+                    retryable: false,
+                });
+                continue;
+            }
+        };
+        match command {
+            SpeechWorkerCommand::Initialize {
+                selected_model_id, ..
+            } => {
+                let selected_model_id = if catalog.find(&selected_model_id).is_some() {
+                    selected_model_id
+                } else {
+                    catalog.default_model.clone()
+                };
+                let _ = events.send(SpeechWorkerEvent::Ready {
+                    protocol_version: PROTOCOL_VERSION,
+                    selected_model_id: selected_model_id.clone(),
+                    models: model_summaries(catalog, installer, &selected_model_id),
+                });
+            }
+            SpeechWorkerCommand::Begin { session_id, .. }
+            | SpeechWorkerCommand::End { session_id }
+            | SpeechWorkerCommand::Cancel { session_id } => {
+                let _ = events.send(SpeechWorkerEvent::Failed {
+                    session_id: Some(session_id),
+                    code: "protocol_smoke".to_owned(),
+                    message: "this diagnostic mode records nothing".to_owned(),
+                    retryable: false,
+                });
+            }
+            SpeechWorkerCommand::GetHistory { .. } => {
+                let _ = events.send(SpeechWorkerEvent::History {
+                    entries: Vec::new(),
+                });
+            }
+            SpeechWorkerCommand::Shutdown => break,
+            _ => {}
+        }
+    }
     Ok(())
 }
 
