@@ -1,4 +1,5 @@
 pub mod diagnostics;
+pub mod dictation;
 mod layout;
 pub mod lifecycle;
 pub mod product;

@@ -19,7 +19,9 @@ use std::{
 
 use rust_app_core::{
     BeginDisposition, EndDisposition, LayoutCandidate, LayoutDirection, SessionPhase,
-    SessionRegistry, build_layout_candidates, worker_stream::JsonWriter,
+    SessionRegistry, build_layout_candidates,
+    dictation::{CompletionDelivery, HistoryUpdate, plan_completion},
+    worker_stream::JsonWriter,
 };
 use rust_protocol::{
     AUDIO_SPECTRUM_BANDS, CompanionRendererCommand, CompanionRendererEvent, HistoryEntry,
@@ -4939,42 +4941,43 @@ fn handle_speech_event(
                 .registry
                 .complete(session_id, transcript.clone())
                 .is_ok();
-            let mut history_replaced = false;
-            let delivery = if stored {
+            let plan = {
                 let mut state = state.borrow_mut();
-                state.latest_history_session = Some(session_id);
-                state.transcripts.insert(session_id, transcript.clone());
-                let before = state.history.len();
-                state
-                    .history
-                    .retain(|entry| entry.transcript.session_id != session_id);
-                history_replaced = state.history.len() != before;
-                state.history.insert(
-                    0,
-                    HistoryEntry {
-                        transcript: transcript.clone(),
-                        created_unix_ms,
-                    },
-                );
-                state.history.truncate(HISTORY_RETAINED_ROWS);
-                state
-                    .pending_insert_last
-                    .take_if(|pending| pending.session_id == Some(session_id))
-                    .map(|pending| (pending.target, false))
-                    .or_else(|| {
-                        state
-                            .targets
-                            .get(&session_id)
-                            .copied()
-                            .map(|target| (target, true))
-                    })
-            } else {
-                None
+                let (replaced_existing, awaiting_target, captured_target) = if stored {
+                    state.latest_history_session = Some(session_id);
+                    state.transcripts.insert(session_id, transcript.clone());
+                    let before = state.history.len();
+                    state
+                        .history
+                        .retain(|entry| entry.transcript.session_id != session_id);
+                    let replaced_existing = state.history.len() != before;
+                    state.history.insert(
+                        0,
+                        HistoryEntry {
+                            transcript: transcript.clone(),
+                            created_unix_ms,
+                        },
+                    );
+                    state.history.truncate(HISTORY_RETAINED_ROWS);
+                    let awaiting_target = state
+                        .pending_insert_last
+                        .take_if(|pending| pending.session_id == Some(session_id))
+                        .map(|pending| pending.target);
+                    let captured_target = state.targets.get(&session_id).copied();
+                    (replaced_existing, awaiting_target, captured_target)
+                } else {
+                    (false, None, None)
+                };
+                plan_completion(stored, replaced_existing, awaiting_target, captured_target)
             };
             // The insertion command leaves before any list model work.
             // docs/LATENCY_ARCHITECTURE.md keeps history persistence and
             // presentation off the release-to-insertion path.
-            if let Some((target, add_trailing_space)) = delivery {
+            if let CompletionDelivery::Insert {
+                target,
+                add_trailing_space,
+            } = plan.delivery
+            {
                 rust_app_core::diagnostics::log_line(&format!(
                     "transcription result=completed session={session_id} chars={} \
 delivery={} target_pid={}",
@@ -5015,15 +5018,15 @@ delivery={} target_pid={}",
                 recording_overlays.retire_all("target_lost");
                 set_indicator_status(settings, "Transcript saved to history; target was lost.");
             }
-            if stored {
-                if history_replaced {
-                    sync_history(settings, state);
-                } else {
+            match plan.history {
+                HistoryUpdate::Rebuild => sync_history(settings, state),
+                HistoryUpdate::PrependLatest => {
                     let state = state.borrow();
                     if let Some(entry) = state.history.first() {
                         prepend_history_row(settings, entry, HISTORY_RETAINED_ROWS);
                     }
                 }
+                HistoryUpdate::Unchanged => {}
             }
         }
         SpeechWorkerEvent::Cancelled { session_id } => {
