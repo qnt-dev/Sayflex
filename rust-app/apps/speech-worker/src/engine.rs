@@ -17,6 +17,9 @@ use whisper_rs::{
 
 use crate::audio::{RecordedAudio, resample_bandlimited};
 
+#[cfg(all(feature = "cuda", feature = "vulkan"))]
+compile_error!("the speech worker must be built for exactly one GPU backend");
+
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 const WARMUP_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize;
 
@@ -109,7 +112,7 @@ impl WhisperEngine {
             .context("model path is not valid Unicode")?;
         let mut parameters = WhisperContextParameters::default();
         parameters
-            .use_gpu(cfg!(feature = "cuda"))
+            .use_gpu(cfg!(any(feature = "cuda", feature = "vulkan")))
             .flash_attn(cfg!(feature = "cuda"));
         let context = WhisperContext::new_with_params(model, parameters)
             .context("could not load the Whisper model")?;
@@ -134,17 +137,17 @@ impl WhisperEngine {
 
         let warmup_started = Instant::now();
         let silence = vec![0.0_f32; WARMUP_SAMPLES];
-        // A failed silent decode does not invalidate a successfully loaded model. Some models
-        // intentionally report "no speech" for this buffer after all compute backends are warm.
-        if let Err(error) = self.run_whisper(
+        // Model loading alone does not prove that the selected GPU contains
+        // compatible kernels. A full silent pass is the backend capability
+        // probe; no-speech is a valid result, while a compute error is not.
+        self.run_whisper(
             &silence,
             SpeechOutputMode::OriginalLanguage,
             true,
             None,
             None,
-        ) {
-            eprintln!("speech engine warm-up completed without a transcript: {error:#}");
-        }
+        )
+        .context("speech backend warm-up probe failed")?;
 
         Ok(PreparedModel {
             load_duration_ms,
@@ -331,6 +334,8 @@ fn inference_threads() -> i32 {
 const fn backend_name() -> &'static str {
     if cfg!(feature = "cuda") {
         "cuda"
+    } else if cfg!(feature = "vulkan") {
+        "vulkan"
     } else {
         "cpu"
     }

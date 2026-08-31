@@ -305,7 +305,7 @@ fn configure_overlay_window_impl(
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
     }
-    apply_overlay_contract(hwnd, use_backdrop);
+    apply_overlay_contract(hwnd, use_backdrop)?;
 
     // SAFETY: All pointers refer to initialized buffers for the duration of
     // each Win32 call. The HWND belongs to this process and was resolved by
@@ -363,7 +363,7 @@ fn prepare_overlay_window_impl(window_handle: u64, use_backdrop: bool) -> Result
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
     }
-    apply_overlay_contract(hwnd, use_backdrop);
+    apply_overlay_contract(hwnd, use_backdrop)?;
     set_overlay_cloaked(hwnd, true)?;
     unsafe {
         let result = DwmFlush();
@@ -471,6 +471,30 @@ pub fn verify_interactive_overlay_window_contract(
     verify_overlay_window_contract_impl(window_handle, expected_cloaked, false)
 }
 
+/// Reassert the native styles that make a Slint window a click-through HUD.
+///
+/// Winit remains responsible for the HWND lifetime and can rewrite extended
+/// styles while applying a toolkit-side size or visibility change. Overlay
+/// presentation therefore treats the Win32 contract as a reconciled
+/// invariant: apply it immediately before every verify/reveal boundary rather
+/// than assuming the values written during initial attachment are permanent.
+pub fn reconcile_overlay_window_contract(window_handle: u64) -> Result<(), String> {
+    reconcile_overlay_ex_style(window_handle, true)
+}
+
+/// Reassert the native styles for an interactive, non-activating overlay.
+pub fn reconcile_interactive_overlay_window_contract(window_handle: u64) -> Result<(), String> {
+    reconcile_overlay_ex_style(window_handle, false)
+}
+
+fn reconcile_overlay_ex_style(window_handle: u64, click_through: bool) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("overlay window handle is not available".to_owned());
+    }
+    apply_overlay_ex_style(hwnd, click_through)
+}
+
 fn verify_overlay_window_contract_impl(
     window_handle: u64,
     expected_cloaked: bool,
@@ -550,22 +574,49 @@ fn overlay_window_is_app_cloaked(window_handle: u64) -> Result<bool, String> {
     Ok(flags & DWM_CLOAKED_APP != 0)
 }
 
-fn apply_overlay_contract(hwnd: HWND, use_backdrop: bool) {
+fn apply_overlay_contract(hwnd: HWND, use_backdrop: bool) -> Result<(), String> {
     // SAFETY: hwnd is a live top-level window owned by this process. The style
     // and compositor calls do not retain pointers beyond their invocation.
+    apply_overlay_ex_style(hwnd, true)?;
     unsafe {
-        let current_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let desired_style = (current_style & !(WS_EX_APPWINDOW as isize))
-            | WS_EX_NOACTIVATE as isize
-            | WS_EX_TOOLWINDOW as isize
-            | WS_EX_TRANSPARENT as isize;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_style);
         if use_backdrop {
             apply_transient_backdrop(hwnd);
         } else {
             apply_transparent_composition(hwnd);
         }
     }
+    Ok(())
+}
+
+fn apply_overlay_ex_style(hwnd: HWND, click_through: bool) -> Result<(), String> {
+    // SAFETY: hwnd is a live top-level window owned by this process. The
+    // FRAMECHANGED call makes the rewritten extended style effective before
+    // the following contract verification and does not activate the window.
+    unsafe {
+        let current_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let base_style = (current_style & !(WS_EX_APPWINDOW as isize))
+            | WS_EX_NOACTIVATE as isize
+            | WS_EX_TOOLWINDOW as isize;
+        let desired_style = if click_through {
+            base_style | WS_EX_TRANSPARENT as isize
+        } else {
+            base_style & !(WS_EX_TRANSPARENT as isize)
+        };
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_style);
+        if SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            return Err("SetWindowPos failed while reconciling overlay contract".to_owned());
+        }
+    }
+    Ok(())
 }
 
 fn apply_blue_glass_popup_style(hwnd: HWND) {

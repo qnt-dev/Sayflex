@@ -24,7 +24,7 @@ use rust_protocol::{InputHostCommand, InputHostEvent, PROTOCOL_VERSION, SessionI
 use windows_sys::Win32::{
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
     UI::{
-        Input::KeyboardAndMouse::{VK_T, VK_V},
+        Input::KeyboardAndMouse::{VK_F, VK_V},
         WindowsAndMessaging::{
             DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
             SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_HOTKEY,
@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }) {
         require_smoke_opt_in("SAYFLEX_RUN_HOTKEY_E2E")?;
         let trigger = match action.as_str() {
-            "translation" => VK_T,
+            "translation" => VK_F,
             "insert-last" => VK_V,
             _ => return Err(format!("unknown hotkey E2E action: {action}").into()),
         };

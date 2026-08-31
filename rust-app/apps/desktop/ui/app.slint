@@ -21,6 +21,11 @@ export struct SlateLine {
     color-index: int,
 }
 
+export struct TranslationPair {
+    source: string,
+    translation: string,
+}
+
 global Theme {
     out property <brush> ink: #101114;
     out property <brush> sidebar: #0c0d10;
@@ -284,6 +289,67 @@ component SettingRow inherits Rectangle {
     }
 }
 
+component BlurSettingRow inherits Rectangle {
+    in property <int> value: 3;
+    callback decrease();
+    callback increase();
+
+    height: 68px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: Theme.line-soft;
+    background: Theme.ink;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 14px;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            Text {
+                text: "Translation glass blur";
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            Text {
+                text: "Soften the background behind translation cards · 0–8";
+                color: Theme.text-faint;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        ActionButton {
+            width: 34px;
+            height: 30px;
+            label: "−";
+            enabled: root.value > 0;
+            clicked => { root.decrease(); }
+        }
+        Text {
+            width: 24px;
+            text: root.value;
+            color: Theme.red;
+            font-size: 13px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        ActionButton {
+            width: 34px;
+            height: 30px;
+            label: "+";
+            enabled: root.value < 8;
+            clicked => { root.increase(); }
+        }
+    }
+}
+
 component CircularPaletteChoice inherits Rectangle {
     in property <string> label;
     in property <color> color-a;
@@ -369,6 +435,8 @@ export component SettingsWindow inherits Window {
     in-out property <string> indicator-status: "Idle";
     in-out property <string> output-mode-label: "Output: original language";
     in-out property <string> release-optimization-label: "Release optimization: fastest";
+    in-out property <string> speech-backend-label: "Backend: Auto";
+    in-out property <string> speech-backend-detail: "Detecting the fastest compatible engine…";
     in-out property <int> selected-visualizer: 0;
     in-out property <int> selected-circular-palette: 0;
     in-out property <int> selected-flow-sphere-palette: 0;
@@ -378,9 +446,10 @@ export component SettingsWindow inherits Window {
     in property <[HistoryRow]> history-rows;
     in-out property <string> translation-enabled-label: "Translation: disabled";
     in-out property <string> layout-enabled-label: "Layout correction: enabled";
-    in-out property <string> text-action-mode-label: "Ctrl+Alt+T: adaptive";
+    in-out property <string> text-action-mode-label: "Ctrl+Alt+F: adaptive";
     in-out property <string> translation-delivery-label: "Translation result: preview";
     in-out property <string> translation-warm-label: "Warm engine: on (fastest)";
+    in-out property <int> translation-blur-radius: 3;
     in-out property <string> history-enabled-label: "History: enabled";
     in-out property <bool> translation-ready: false;
 
@@ -390,6 +459,7 @@ export component SettingsWindow inherits Window {
     callback copy-history(int);
     callback toggle-output-mode();
     callback toggle-release-optimization();
+    callback cycle-speech-backend();
     callback select-visualizer(int);
     callback select-circular-palette(int);
     callback select-flow-sphere-palette(int);
@@ -399,6 +469,8 @@ export component SettingsWindow inherits Window {
     callback cycle-text-action-mode();
     callback cycle-translation-delivery();
     callback toggle-translation-warm();
+    callback decrease-translation-blur();
+    callback increase-translation-blur();
     callback open-translator();
     callback toggle-history-enabled();
     callback clear-history();
@@ -665,7 +737,7 @@ export component SettingsWindow inherits Window {
                         font-weight: 600;
                     }
                     Text {
-                        text: "Ctrl + Alt + T   ·   translate selection";
+                        text: "Ctrl + Alt + F   ·   translate selection";
                         color: Theme.text-muted;
                         font-size: 11px;
                     }
@@ -707,7 +779,7 @@ export component SettingsWindow inherits Window {
                     SettingRow {
                         title: "Translate selected text";
                         detail: "Open the compact local translation preview immediately.";
-                        action: "Ctrl + Alt + T";
+                        action: "Ctrl + Alt + F";
                     }
                     SettingRow {
                         title: "Correct selected layout";
@@ -967,6 +1039,48 @@ export component SettingsWindow inherits Window {
                 }
 
                 Rectangle {
+                    height: 68px;
+                    vertical-stretch: 0;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    background: Theme.panel;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 10px;
+                        spacing: 12px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: "Compute backend";
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 650;
+                            }
+                            Text {
+                                text: root.speech-backend-detail;
+                                color: Theme.text-faint;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        ActionButton {
+                            width: 126px;
+                            height: 34px;
+                            label: root.speech-backend-label;
+                            accent: true;
+                            clicked => { root.cycle-speech-backend(); }
+                        }
+                    }
+                }
+
+                Rectangle {
                     vertical-stretch: 1;
                     border-radius: 9px;
                     border-width: 1px;
@@ -1171,14 +1285,14 @@ export component SettingsWindow inherits Window {
                 }
 
                 if root.active-page == 3 : VerticalLayout {
-                    height: 146px;
+                    height: 222px;
                     vertical-stretch: 0;
                     spacing: 8px;
 
                     SettingRow {
                         title: "Translation shortcut";
                         detail: "Show a compact preview, then copy or replace the original selection.";
-                        action: "Ctrl + Alt + T";
+                        action: "Ctrl + Alt + F";
                     }
                     SettingRow {
                         title: "Warm translation engine";
@@ -1186,6 +1300,11 @@ export component SettingsWindow inherits Window {
                         action: root.translation-warm-label;
                         active: root.translation-warm-label == "Warm engine: on (fastest)";
                         clicked => { root.toggle-translation-warm(); }
+                    }
+                    BlurSettingRow {
+                        value: root.translation-blur-radius;
+                        decrease => { root.decrease-translation-blur(); }
+                        increase => { root.increase-translation-blur(); }
                     }
                 }
 
@@ -1195,7 +1314,7 @@ export component SettingsWindow inherits Window {
                     SectionTitle { text: "Selected-text actions"; }
                     Rectangle { horizontal-stretch: 1; }
                     Text {
-                        text: "Ctrl + Alt + T";
+                        text: "Ctrl + Alt + F";
                         color: Theme.orange;
                         font-size: 11px;
                         font-weight: 650;
@@ -1239,7 +1358,7 @@ export component SettingsWindow inherits Window {
                         SettingRow {
                             title: "Translation preview";
                             detail: "Open the local result in a compact focus-safe window.";
-                            action: "Ctrl + Alt + T";
+                            action: "Ctrl + Alt + F";
                         }
                     }
                 }
@@ -1410,7 +1529,7 @@ export component SettingsWindow inherits Window {
                     }
                     Text { text: "Ctrl + Alt + Space   Dictate"; color: Theme.text-muted; font-size: 12px; }
                     Text { text: "Ctrl + Alt + V       Insert latest"; color: Theme.text-muted; font-size: 12px; }
-                    Text { text: "Ctrl + Alt + T       Translate selection"; color: Theme.text-muted; font-size: 12px; }
+                    Text { text: "Ctrl + Alt + F       Translate selection"; color: Theme.text-muted; font-size: 12px; }
                     Text { text: "Ctrl + Alt + K       Correct layout"; color: Theme.text-muted; font-size: 12px; }
                 }
 
@@ -2194,10 +2313,11 @@ export component TranslationPreview inherits Window {
     // Kept for diagnostics and accessibility only. The window is frameless, so
     // no title or chrome is rendered to the user.
     title: "Translation preview";
-    width: root.card-width * 1px;
-    // The header owns the count, pin and drag surface. Keeping it separate
-    // lets the translation use the full readable width below it.
-    height: 50px + root.result-panel-height * 1px;
+    preferred-width: root.card-width * 1px;
+    preferred-height: root.main-card-height * 1px
+        + (root.view-mode == 1 ? root.original-card-height * 1px + 18px : 0px);
+    min-width: 252px;
+    min-height: root.preferred-height;
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -2205,23 +2325,35 @@ export component TranslationPreview inherits Window {
 
     in-out property <string> request-id;
     in-out property <bool> prepared: false;
+    in-out property <string> source-text;
     in-out property <string> translated-text;
-    in-out property <string> translated-word-count: "0";
+    in-out property <[TranslationPair]> dual-pairs;
+    // 0 = translated result, 1 = original companion card, 2 = interleaved.
+    in-out property <int> view-mode: 0;
     in-out property <bool> pinned: false;
     in-out property <bool> live-glass: false;
     in-out property <bool> dark-text: false;
+    in-out property <int> blur-radius: 3;
     in-out property <float> card-width: 252;
     in property <image> glass-backdrop;
-    // Text owns its real height-for-width measurement. The extra four pixels
-    // are bottom breathing room for descenders and the last rendered line.
+    in-out property <float> original-card-height: 96;
+    out property <float> dual-content-height:
+        max(20px, dual-stack.preferred-height + 4px) / 1px;
     out property <float> result-content-height:
-        max(20px, result-text.preferred-height + 4px) / 1px;
+        root.view-mode == 2
+            ? root.dual-content-height
+            : max(20px, result-text.preferred-height + 4px) / 1px;
     out property <float> result-panel-height:
         min(252px, root.result-content-height * 1px) / 1px;
     out property <bool> result-scrollable:
-        root.result-content-height > root.result-panel-height + 0.5;
+        root.result-content-height * 1px > result-scroll.height + 0.5px;
     out property <float> result-scroll-offset: -result-scroll.viewport-y / 1px;
+    out property <float> result-viewport-height: result-scroll.height / 1px;
+    out property <float> main-card-height: 50 + root.result-panel-height;
     callback begin-drag();
+    callback begin-resize(int);
+    callback pin-state-changed(bool);
+    callback view-mode-changed(int);
     callback reset-scroll();
     callback scroll-by(float);
     reset-scroll => {
@@ -2236,7 +2368,76 @@ export component TranslationPreview inherits Window {
         }
     }
 
-    Rectangle {
+    if root.view-mode == 1: original-card := Rectangle {
+        x: 5px;
+        y: 6px;
+        width: parent.width - 10px;
+        height: root.original-card-height * 1px;
+        border-radius: 9px;
+        border-width: 0px;
+        clip: true;
+        opacity: root.prepared ? 1 : 0;
+        background: @linear-gradient(145deg,
+            rgba(65, 150, 196, 0.065) 0%,
+            rgba(8, 24, 39, 0.14) 48%,
+            rgba(58, 148, 195, 0.05) 100%);
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.glass-backdrop;
+            image-fit: fill;
+            opacity: root.live-glass ? 0 : 1;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: @linear-gradient(145deg,
+                rgba(65, 150, 196, 0.065) 0%,
+                rgba(8, 24, 39, 0.14) 48%,
+                rgba(58, 148, 195, 0.05) 100%);
+        }
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: @image-url("../assets/slate-blue-glass-wash.svg");
+            image-fit: fill;
+            opacity: 0.14;
+        }
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: @image-url("../assets/slate-matte-grain.svg");
+            image-fit: fill;
+            opacity: 0.06;
+        }
+        original-text := Text {
+            x: 14px;
+            y: 19px;
+            width: parent.width - 28px;
+            height: parent.height - 32px;
+            text: root.source-text;
+            color: root.dark-text ? #111820 : #f5f3ef;
+            font-size: 13px;
+            font-weight: 460;
+            wrap: word-wrap;
+            vertical-alignment: top;
+        }
+
+        TouchArea {
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                    root.begin-drag();
+                }
+            }
+        }
+    }
+
+    main-card := Rectangle {
+        x: root.view-mode == 1 ? 5px : 0px;
+        y: root.view-mode == 1 ? root.original-card-height * 1px + 18px : 0px;
+        width: parent.width - (root.view-mode == 1 ? 10px : 0px);
+        height: parent.height - self.y - (root.view-mode == 1 ? 6px : 0px);
         border-radius: 9px;
         border-width: 0px;
         background: @linear-gradient(145deg,
@@ -2279,16 +2480,72 @@ export component TranslationPreview inherits Window {
             opacity: 0.07;
         }
 
-        word-count-text := Text {
+        orig-button := Rectangle {
             x: 14px;
-            y: 10px;
-            width: self.preferred-width;
-            height: 20px;
-            text: root.translated-word-count;
-            color: Theme.red;
-            font-size: 10px;
-            font-weight: 700;
-            vertical-alignment: top;
+            y: 7px;
+            width: 44px;
+            height: 24px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: root.view-mode == 1
+                ? Theme.red
+                : root.dark-text ? #10182070 : #d7d3cc48;
+            background: root.view-mode == 1
+                ? Theme.red
+                : orig-touch.has-hover
+                    ? Theme.red-soft
+                    : root.dark-text ? #ffffff42 : #0c0f1450;
+
+            Text {
+                text: "ORIG";
+                color: root.view-mode == 1 ? #0b0e13 : root.dark-text ? #111820 : #dedad3;
+                opacity: root.view-mode == 1 ? 1 : (orig-touch.has-hover ? 0.92 : 0.62);
+                font-size: 9px;
+                font-weight: 680;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            orig-touch := TouchArea {
+                clicked => {
+                    root.view-mode = root.view-mode == 1 ? 0 : 1;
+                    root.reset-scroll();
+                    root.view-mode-changed(root.view-mode);
+                }
+            }
+        }
+
+        dual-button := Rectangle {
+            x: 64px;
+            y: 7px;
+            width: 44px;
+            height: 24px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: root.view-mode == 2
+                ? Theme.red
+                : root.dark-text ? #10182070 : #d7d3cc48;
+            background: root.view-mode == 2
+                ? Theme.red
+                : dual-touch.has-hover
+                    ? Theme.red-soft
+                    : root.dark-text ? #ffffff42 : #0c0f1450;
+
+            Text {
+                text: "DUAL";
+                color: root.view-mode == 2 ? #0b0e13 : root.dark-text ? #111820 : #dedad3;
+                opacity: root.view-mode == 2 ? 1 : (dual-touch.has-hover ? 0.92 : 0.62);
+                font-size: 9px;
+                font-weight: 680;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            dual-touch := TouchArea {
+                clicked => {
+                    root.view-mode = root.view-mode == 2 ? 0 : 2;
+                    root.reset-scroll();
+                    root.view-mode-changed(root.view-mode);
+                }
+            }
         }
 
         result-scroll := Flickable {
@@ -2298,11 +2555,12 @@ export component TranslationPreview inherits Window {
             // scrollbar appears would reflow the text and create a
             // height/scroll feedback loop while a streamed result grows.
             width: parent.width - self.x - 20px;
-            height: root.result-panel-height * 1px;
+            height: parent.height - self.y - 12px;
             viewport-width: self.width;
             viewport-height: root.result-content-height * 1px;
 
             result-text := Text {
+                visible: root.view-mode != 2;
                 width: result-scroll.width;
                 height: root.result-content-height * 1px;
                 text: root.translated-text;
@@ -2311,6 +2569,48 @@ export component TranslationPreview inherits Window {
                 font-weight: 470;
                 wrap: word-wrap;
                 vertical-alignment: top;
+            }
+
+            dual-stack := VerticalLayout {
+                visible: root.view-mode == 2;
+                width: result-scroll.width;
+                spacing: 0px;
+
+                for pair[index] in root.dual-pairs: VerticalLayout {
+                    width: parent.width;
+                    spacing: 5px;
+                    padding-bottom: index + 1 < root.dual-pairs.length ? 10px : 0px;
+
+                    Text {
+                        width: parent.width;
+                        text: pair.source;
+                        color: root.dark-text ? #111820 : #f5f3ef;
+                        font-size: 13px;
+                        font-weight: 610;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        width: parent.width;
+                        text: pair.translation;
+                        color: root.dark-text ? #27333f : #d7dbe0;
+                        font-size: 14px;
+                        font-weight: 450;
+                        wrap: word-wrap;
+                    }
+                    if index + 1 < root.dual-pairs.length: Rectangle {
+                        width: parent.width;
+                        height: 1px;
+                        background: transparent;
+
+                        Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            width: 96px;
+                            height: 1px;
+                            background: Theme.red;
+                            opacity: 0.62;
+                        }
+                    }
+                }
             }
         }
 
@@ -2339,9 +2639,9 @@ export component TranslationPreview inherits Window {
         // first press is never consumed by the content layer; the pin remains
         // outside this exact hit area.
         drag-area := TouchArea {
-            x: 0;
+            x: 114px;
             y: 0;
-            width: parent.width - 54px;
+            width: parent.width - self.x - 54px;
             height: 36px;
             pointer-event(event) => {
                 if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
@@ -2375,7 +2675,109 @@ export component TranslationPreview inherits Window {
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
-            pin-touch := TouchArea {}
+            pin-touch := TouchArea {
+                clicked => {
+                    root.pinned = !root.pinned;
+                    root.pin-state-changed(root.pinned);
+                }
+            }
+        }
+    }
+
+    if root.pinned: TouchArea {
+        x: 0;
+        y: 7px;
+        width: 7px;
+        height: parent.height - 14px;
+        mouse-cursor: ew-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.begin-resize(0);
+            }
+        }
+    }
+    if root.pinned: TouchArea {
+        x: parent.width - 7px;
+        y: 7px;
+        width: 7px;
+        height: parent.height - 14px;
+        mouse-cursor: ew-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.begin-resize(1);
+            }
+        }
+    }
+    if root.pinned: TouchArea {
+        x: 7px;
+        y: 0;
+        width: parent.width - 14px;
+        height: 7px;
+        mouse-cursor: ns-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.begin-resize(2);
+            }
+        }
+    }
+    if root.pinned: TouchArea {
+        x: 7px;
+        y: parent.height - 7px;
+        width: parent.width - 14px;
+        height: 7px;
+        mouse-cursor: ns-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.begin-resize(3);
+            }
+        }
+    }
+    if root.pinned: TouchArea {
+        x: 0;
+        y: 0;
+        width: 7px;
+        height: 7px;
+        mouse-cursor: nwse-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.begin-resize(4);
+            }
+        }
+    }
+    if root.pinned: TouchArea {
+        x: parent.width - 7px;
+        y: 0;
+        width: 7px;
+        height: 7px;
+        mouse-cursor: nesw-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.begin-resize(5);
+            }
+        }
+    }
+    if root.pinned: TouchArea {
+        x: 0;
+        y: parent.height - 7px;
+        width: 7px;
+        height: 7px;
+        mouse-cursor: nesw-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.begin-resize(6);
+            }
+        }
+    }
+    if root.pinned: TouchArea {
+        x: parent.width - 7px;
+        y: parent.height - 7px;
+        width: 7px;
+        height: 7px;
+        mouse-cursor: nwse-resize;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.begin-resize(7);
+            }
         }
     }
 }
@@ -2490,6 +2892,7 @@ export component TranslatorWindow inherits Window {
             }
         }
     }
+
 }
 
 export component AppTray inherits SystemTrayIcon {

@@ -31,12 +31,16 @@ pub use overlay::{
     configure_transparent_overlay_window, disable_translation_live_backdrop,
     enable_translation_live_backdrop, prepare_action_window, prepare_blue_glass_overlay_window,
     prepare_overlay_window, prepare_translation_window, prepare_transparent_overlay_window,
-    primary_pointer_button_is_down, restore_target_if_our_action_window_activated,
+    primary_pointer_button_is_down, reconcile_interactive_overlay_window_contract,
+    reconcile_overlay_window_contract, restore_target_if_our_action_window_activated,
     reveal_overlay_window, verify_interactive_overlay_window_contract,
     verify_overlay_window_contract,
 };
 #[cfg(windows)]
-pub use popup_dismiss::{PopupDismissMonitor, activate_popup_dismiss, deactivate_popup_dismiss};
+pub use popup_dismiss::{
+    PopupDismissMonitor, activate_popup_dismiss, deactivate_all_popup_dismiss,
+    deactivate_popup_dismiss, set_popup_pinned,
+};
 #[cfg(windows)]
 pub use process_exit::watch_process_exit;
 #[cfg(windows)]
@@ -164,6 +168,16 @@ pub fn verify_interactive_overlay_window_contract(
     _window_handle: u64,
     _expected_cloaked: bool,
 ) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn reconcile_overlay_window_contract(_window_handle: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn reconcile_interactive_overlay_window_contract(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
 
@@ -304,7 +318,13 @@ impl PopupDismissMonitor {
 pub fn activate_popup_dismiss(_window_handle: u64) {}
 
 #[cfg(not(windows))]
-pub fn deactivate_popup_dismiss() {}
+pub fn deactivate_popup_dismiss(_window_handle: u64) {}
+
+#[cfg(not(windows))]
+pub fn deactivate_all_popup_dismiss() {}
+
+#[cfg(not(windows))]
+pub fn set_popup_pinned(_window_handle: u64, _pinned: bool) {}
 
 #[cfg(all(test, windows))]
 mod tests {

@@ -13,7 +13,7 @@ The release contains four failure-isolated process roles and five executables:
 - `SayFlex.InputHost.exe` — Windows low-level keyboard hook, immutable target
   capture, Unicode insertion, clipboard recovery and selected-text capture.
 - `SayFlex.Speech.*.exe` — CPAL microphone capture, verified model
-  installation, CUDA/CPU `whisper.cpp` inference and durable history.
+  installation, CUDA/Vulkan/CPU `whisper.cpp` inference and durable history.
 - `SayFlex.Translation.exe` — verified Qwen3.5 model/runtime installation,
   lifecycle-isolated local llama.cpp inference and translation history.
 
@@ -40,7 +40,7 @@ same-user threat model, are documented in [`SECURITY.md`](SECURITY.md).
   or failed recording does not hide the newest successfully completed text.
 - `Ctrl + Alt + K` captures selected text and offers explicit RU/EN keyboard
   layout candidates. Ordinary text is never changed automatically.
-- `Ctrl + Alt + T` captures selected text once, translates it locally, and
+- `Ctrl + Alt + F` captures selected text once, translates it locally, and
   opens the compact preview immediately.
 
 Selected text is resolved through a bounded capability cascade: UI Automation
@@ -83,15 +83,18 @@ or a higher-quality 9B model; the system locale is used only to mark a
 recommendation. Translation can preview, copy or replace the selection.
 
 Translation and layout correction can be disabled independently.
-`Ctrl+Alt+T` translates the selected text immediately into a compact Acrylic
+`Ctrl+Alt+F` translates the selected text immediately into a compact Acrylic
 preview; `Ctrl+Alt+K` corrects keyboard layout. The translation worker can
 remain warm for the lowest latency or unload after every request to reduce
 memory. Voice and translation history can be disabled and cleared from
 Settings.
 
-CUDA is the preferred backend on the current RTX 3080 Ti machine. A separately
-built CPU worker is shipped as the fallback for systems without the required
-CUDA runtime.
+The universal installer ships isolated CUDA, Vulkan and CPU speech workers.
+`Auto` tries CUDA, then Vulkan, then CPU, but accepts a backend only after the
+selected Whisper model completes a real warm-up inference. CUDA carries its
+application-local runtime and kernels for RTX 30/40/50 generations; Vulkan is
+the cross-vendor GPU fallback. Settings expose `Auto`, `CUDA`, `Vulkan` and
+`CPU` and report the backend that is actually active.
 
 Release optimization defaults to **fastest** and incrementally prepares only
 new audio after each eligible natural pause. Users who prefer lower sustained
@@ -104,7 +107,7 @@ prepared segments without unloading the already warmed model.
 cd .\rust-app
 cargo test --workspace
 .\scripts\publish.ps1
-.\scripts\build-installer.ps1 -Version 0.5.17 -SkipPublish
+.\scripts\build-installer.ps1 -Version 0.5.27 -SkipPublish
 ```
 
 The measured warm-path design and benchmark gate are documented in

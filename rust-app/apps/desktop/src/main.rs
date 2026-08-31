@@ -37,12 +37,13 @@ use slint::{
     ComponentHandle, Image, ModelRc, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, SharedString,
     Timer, TimerMode, VecModel,
 };
-use unicode_segmentation::UnicodeSegmentation;
 
 mod flow_sphere;
 mod overlay_presenter;
+mod speech_backend;
 
 use overlay_presenter::{OverlayContract, OverlayPresenter};
+use speech_backend::{SpeechBackend, SpeechBackendPlan, SpeechBackendPreference};
 
 slint::include_modules!();
 
@@ -53,9 +54,12 @@ const TRANSLATION_WORKER_EXE: &str = "SayFlex.Translation.exe";
 const COMPANION_RENDERER_EXE: &str = "SayFlex.Companion.exe";
 const SPEECH_CPU_EXE: &str = "SayFlex.Speech.Cpu.exe";
 const SPEECH_CUDA_EXE: &str = "SayFlex.Speech.Cuda.exe";
+const SPEECH_VULKAN_EXE: &str = "SayFlex.Speech.Vulkan.exe";
 const DEV_INPUT_WORKER_EXE: &str = "sayflex-input-host.exe";
 const DEV_SPEECH_WORKER_EXE: &str = "sayflex-speech-worker.exe";
 const DEV_TRANSLATION_WORKER_EXE: &str = "sayflex-translation-worker.exe";
+const DEFAULT_TRANSLATION_BLUR_RADIUS: u32 = 3;
+const MAX_TRANSLATION_BLUR_RADIUS: u32 = 8;
 const DEV_COMPANION_RENDERER_EXE: &str = "sayflex-companion-renderer.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -66,15 +70,25 @@ static NEXT_WORKER_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 enum RuntimeEvent {
     Input(InputHostEvent),
-    Speech(SpeechWorkerEvent),
+    Speech {
+        instance_id: u64,
+        event: SpeechWorkerEvent,
+    },
     Translation(TranslationWorkerEvent),
     Companion(CompanionRendererEvent),
-    DismissTranslationPreview,
-    TranslationPreviewPinChanged(bool),
-    ScrollTranslationPreview(i32),
+    DismissTranslationPreview(u64),
+    TranslationPreviewPinChanged {
+        window_handle: u64,
+        pinned: bool,
+    },
+    ScrollTranslationPreview {
+        window_handle: u64,
+        delta: i32,
+    },
     SessionEnd(rust_platform_windows::SessionEndEvent),
     WorkerError {
         kind: WorkerKind,
+        instance_id: u64,
         message: String,
     },
     WorkerExited {
@@ -106,12 +120,74 @@ struct RuntimeUi {
     chooser_presenter: OverlayPresenter,
     action_palette: slint::Weak<ActionPalette>,
     action_palette_presenter: OverlayPresenter,
-    translation_preview: slint::Weak<TranslationPreview>,
-    translation_preview_presenter: OverlayPresenter,
+    translation_previews: Rc<RefCell<TranslationPreviewRegistry>>,
     translator: slint::Weak<TranslatorWindow>,
     state: Rc<RefCell<AppState>>,
     workers: Rc<Workers>,
     indicator_animation: Rc<RefCell<IndicatorAnimation>>,
+}
+
+#[derive(Clone)]
+struct TranslationPreviewSlot {
+    preview: Rc<TranslationPreview>,
+    presenter: OverlayPresenter,
+    attached: Rc<Cell<bool>>,
+}
+
+struct TranslationPreviewRegistry {
+    current: TranslationPreviewSlot,
+    current_request: Option<RequestId>,
+    pinned: Vec<TranslationPreviewSlot>,
+    blur_radius: u32,
+}
+
+impl TranslationPreviewRegistry {
+    fn current(&self) -> TranslationPreviewSlot {
+        self.current.clone()
+    }
+
+    fn slot_by_handle(&self, window_handle: u64) -> Option<TranslationPreviewSlot> {
+        std::iter::once(&self.current)
+            .chain(self.pinned.iter())
+            .find(|slot| slint_window_handle(slot.preview.window()) == Some(window_handle))
+            .cloned()
+    }
+
+    fn slot_for_request(&self, request_id: RequestId) -> Option<TranslationPreviewSlot> {
+        let request_id = request_id.to_string();
+        self.pinned
+            .iter()
+            .find(|slot| slot.preview.get_request_id().as_str() == request_id)
+            .cloned()
+            .or_else(|| {
+                self.current_request
+                    .is_some_and(|current| current.to_string() == request_id)
+                    .then(|| self.current.clone())
+            })
+    }
+
+    fn reserve_current(&mut self, request_id: RequestId) {
+        self.current_request = Some(request_id);
+    }
+
+    fn clear_current_request(&mut self, request_id: RequestId) {
+        if self.current_request == Some(request_id) {
+            self.current_request = None;
+        }
+    }
+
+    fn set_blur_radius(&mut self, radius: u32) {
+        self.blur_radius = radius;
+        for slot in std::iter::once(&self.current).chain(self.pinned.iter()) {
+            slot.preview.set_blur_radius(radius as i32);
+            if slot.preview.get_prepared()
+                && !slot.preview.get_live_glass()
+                && let Some(handle) = slint_window_handle(slot.preview.window())
+            {
+                refresh_cloaked_translation_backdrop(&slot.preview, handle);
+            }
+        }
+    }
 }
 
 /// The recording HUD deliberately owns two native windows. A Winit/DWM
@@ -207,6 +283,7 @@ struct InitialWorkers {
     input: JsonWriter,
     speech_child: WorkerProcess,
     speech: JsonWriter,
+    speech_backends: SpeechBackendPlan,
     translation_child: WorkerProcess,
     translation: JsonWriter,
 }
@@ -364,6 +441,7 @@ struct Workers {
     translation: JsonWriter,
     input_child: RefCell<WorkerProcess>,
     speech_child: RefCell<WorkerProcess>,
+    speech_backends: RefCell<SpeechBackendPlan>,
     translation_child: RefCell<WorkerProcess>,
     companion: RefCell<Option<JsonWriter>>,
     companion_child: RefCell<Option<WorkerProcess>>,
@@ -424,6 +502,95 @@ impl Workers {
         }
     }
 
+    fn active_speech_backend(&self) -> SpeechBackend {
+        self.speech_backends.borrow().active()
+    }
+
+    fn speech_backend_preference(&self) -> SpeechBackendPreference {
+        self.speech_backends.borrow().preference()
+    }
+
+    fn mark_speech_backend_ready(&self, reported: &str) -> Result<SpeechBackend, String> {
+        self.speech_backends.borrow_mut().mark_verified(reported)
+    }
+
+    fn fallback_speech_backend(&self, reason: &str) -> Result<SpeechBackend, String> {
+        loop {
+            let previous = self.active_speech_backend();
+            let next = self
+                .speech_backends
+                .borrow_mut()
+                .reject_active_and_advance()
+                .ok_or_else(|| {
+                    format!(
+                        "all installed speech backends failed; last backend was {}",
+                        previous.display_name()
+                    )
+                })?;
+            rust_app_core::diagnostics::log_line(&format!(
+                "speech_backend preference={} rejected={} selected={} reason={reason}",
+                self.speech_backend_preference().label(),
+                previous.name(),
+                next.name(),
+            ));
+            match spawn_speech_worker(&self._job, next) {
+                Ok((child, writer)) => {
+                    self.speech.replace_with(writer);
+                    replace_process(&self.speech_child, child);
+                    self.restart_attempts
+                        .borrow_mut()
+                        .remove(&WorkerKind::Speech);
+                    return Ok(next);
+                }
+                Err(error) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "speech_backend selected={} spawn=failed error={error}",
+                        next.name()
+                    ));
+                }
+            }
+        }
+    }
+
+    fn switch_speech_backend(
+        &self,
+        preference: SpeechBackendPreference,
+    ) -> Result<SpeechBackend, String> {
+        let mut plan = speech_backend_plan(preference)?;
+        loop {
+            let backend = plan.active();
+            match spawn_speech_worker(&self._job, backend) {
+                Ok((child, writer)) => {
+                    self.speech.replace_with(writer);
+                    replace_process(&self.speech_child, child);
+                    *self.speech_backends.borrow_mut() = plan;
+                    self.restart_attempts
+                        .borrow_mut()
+                        .remove(&WorkerKind::Speech);
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "speech_backend preference={} selected={} reason=user_selection",
+                        preference.label(),
+                        backend.name()
+                    ));
+                    return Ok(backend);
+                }
+                Err(error) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "speech_backend preference={} selected={} spawn=failed error={error}",
+                        preference.label(),
+                        backend.name()
+                    ));
+                    if plan.reject_active_and_advance().is_none() {
+                        return Err(format!(
+                            "no speech backend could start for the {} preference",
+                            preference.label()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     fn ensure_companion(&self) -> Result<(), String> {
         if self.companion.borrow().is_some() {
             return Ok(());
@@ -469,6 +636,36 @@ impl Workers {
         instance_id: u64,
         exit: rust_platform_windows::ProcessExit,
     ) -> Result<WorkerRecovery, String> {
+        if kind == WorkerKind::Speech {
+            let lifecycle = if rust_platform_windows::session_is_ending()
+                && self.lifecycle.get() == WorkerLifecycle::Running
+            {
+                self.lifecycle.set(WorkerLifecycle::SessionEnding);
+                WorkerLifecycle::SessionEnding
+            } else {
+                self.lifecycle.get()
+            };
+            if !self.is_current_instance(kind, instance_id) {
+                return Ok(WorkerRecovery::Stale);
+            }
+            match lifecycle {
+                WorkerLifecycle::SessionEnding => {
+                    self.deferred_exits.borrow_mut().insert(
+                        kind,
+                        DeferredWorkerExit {
+                            kind,
+                            instance_id,
+                            exit,
+                        },
+                    );
+                    return Ok(WorkerRecovery::Deferred);
+                }
+                WorkerLifecycle::Stopping => return Ok(WorkerRecovery::Stopping),
+                WorkerLifecycle::Running => {}
+            }
+            self.fallback_speech_backend("worker_exit")?;
+            return Ok(WorkerRecovery::Restarted);
+        }
         let lifecycle = if rust_platform_windows::session_is_ending()
             && self.lifecycle.get() == WorkerLifecycle::Running
         {
@@ -528,17 +725,7 @@ impl Workers {
                 self.input.replace_with(writer);
                 replace_process(&self.input_child, child);
             }
-            WorkerKind::Speech => {
-                let (child, writer) = spawn_worker(
-                    &self._job,
-                    WorkerKind::Speech,
-                    SPEECH_WORKER_EXE,
-                    RuntimeEvent::Speech,
-                )
-                .map_err(|error| error.to_string())?;
-                self.speech.replace_with(writer);
-                replace_process(&self.speech_child, child);
-            }
+            WorkerKind::Speech => unreachable!("speech recovery is handled before generic policy"),
             WorkerKind::Translation => {
                 let (child, writer) = spawn_worker(
                     &self._job,
@@ -629,6 +816,7 @@ impl Drop for Workers {
 
 fn spawn_initial_workers(
     startup_gate: &StartupSessionGate,
+    speech_preference: SpeechBackendPreference,
 ) -> Result<Option<InitialWorkers>, Box<dyn Error>> {
     if !startup_gate.wait_until_worker_start_is_allowed() {
         return Ok(None);
@@ -645,12 +833,16 @@ fn spawn_initial_workers(
     else {
         return Ok(None);
     };
-    let Some((speech_child, speech)) = spawn_initial_worker(
-        &job,
+    let speech_backends = speech_backend_plan(speech_preference)?;
+    let Some((speech_child, speech)) = guarded_initial_spawn(
         startup_gate,
-        WorkerKind::Speech,
-        SPEECH_WORKER_EXE,
-        RuntimeEvent::Speech,
+        || spawn_speech_worker(&job, speech_backends.active()),
+        rust_platform_windows::session_is_ending,
+        || {
+            rust_app_core::diagnostics::log_line(
+                "worker=SayFlex.Speech initial_spawn=retry_after_session_end_cancelled",
+            );
+        },
     )?
     else {
         return Ok(None);
@@ -674,6 +866,7 @@ fn spawn_initial_workers(
         input,
         speech_child,
         speech,
+        speech_backends,
         translation_child,
         translation,
     }))
@@ -899,6 +1092,7 @@ enum TranslationOrigin {
 
 struct PendingTranslation {
     origin: TranslationOrigin,
+    source_text: String,
     started: Instant,
     request_started_unix_ms: u64,
     first_partial_shown: bool,
@@ -1444,6 +1638,8 @@ struct AppState {
     history_loaded: bool,
     models: Vec<ModelSummary>,
     selected_model_id: String,
+    speech_backend_preference: SpeechBackendPreference,
+    speech_backend_active: Option<SpeechBackend>,
     output_mode: SpeechOutputMode,
     fast_release_previews: bool,
     visualizer_style: VisualizerStyle,
@@ -1464,6 +1660,7 @@ struct AppState {
     translation_enabled: bool,
     layout_enabled: bool,
     translation_keep_warm: bool,
+    translation_blur_radius: u32,
     text_action_mode: TextActionMode,
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
@@ -1479,6 +1676,7 @@ impl AppState {
     fn new(
         selected_model_id: String,
         output_mode: SpeechOutputMode,
+        speech_backend_active: SpeechBackend,
         saved_settings: &SavedSettings,
     ) -> Self {
         Self {
@@ -1490,6 +1688,8 @@ impl AppState {
             history_loaded: false,
             models: Vec::new(),
             selected_model_id,
+            speech_backend_preference: saved_settings.speech_backend_preference,
+            speech_backend_active: Some(speech_backend_active),
             output_mode,
             fast_release_previews: saved_settings.fast_release_previews,
             visualizer_style: saved_settings.visualizer_style,
@@ -1510,6 +1710,7 @@ impl AppState {
             translation_enabled: saved_settings.translation_enabled,
             layout_enabled: saved_settings.layout_enabled,
             translation_keep_warm: saved_settings.translation_keep_warm,
+            translation_blur_radius: saved_settings.translation_blur_radius,
             text_action_mode: saved_settings.text_action_mode,
             translation_delivery: saved_settings.translation_delivery,
             pending_text_action: None,
@@ -1659,7 +1860,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     recording_overlays.set_writing_slate_surface(saved_settings.writing_slate_surface);
     let chooser = SelectionChooser::new()?;
     let action_palette = ActionPalette::new()?;
-    let translation_preview = TranslationPreview::new()?;
+    let translation_preview = Rc::new(TranslationPreview::new()?);
+    translation_preview.set_blur_radius(saved_settings.translation_blur_radius as i32);
     let chooser_presenter = OverlayPresenter::install(
         chooser.window(),
         "selection_chooser_overlay",
@@ -1681,6 +1883,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
     )
     .map_err(|error| format!("translation preview initialization failed: {error}"))?;
+    let translation_preview_slot = TranslationPreviewSlot {
+        preview: Rc::clone(&translation_preview),
+        presenter: translation_preview_presenter.clone(),
+        attached: Rc::new(Cell::new(false)),
+    };
+    let translation_previews = Rc::new(RefCell::new(TranslationPreviewRegistry {
+        current: translation_preview_slot.clone(),
+        current_request: None,
+        pinned: Vec::new(),
+        blur_radius: saved_settings.translation_blur_radius,
+    }));
     let translator = TranslatorWindow::new()?;
     let tray = AppTray::new()?;
     precreate_indicator(
@@ -1698,11 +1911,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         &chooser_presenter,
         &action_palette,
         &action_palette_presenter,
-        &translation_preview,
-        &translation_preview_presenter,
     );
+    precreate_translation_preview(&translation_preview_slot);
 
-    let Some(initial_workers) = spawn_initial_workers(&startup_gate)? else {
+    let Some(initial_workers) =
+        spawn_initial_workers(&startup_gate, saved_settings.speech_backend_preference)?
+    else {
         rust_app_core::diagnostics::log_line(
             "desktop lifecycle=startup_aborted_session_end_confirmed",
         );
@@ -1715,6 +1929,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         input,
         speech_child,
         speech,
+        speech_backends,
         translation_child,
         translation,
     } = initial_workers;
@@ -1725,6 +1940,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         translation,
         input_child: RefCell::new(input_child),
         speech_child: RefCell::new(speech_child),
+        speech_backends: RefCell::new(speech_backends),
         translation_child: RefCell::new(translation_child),
         companion: RefCell::new(None),
         companion_child: RefCell::new(None),
@@ -1746,6 +1962,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let state = Rc::new(RefCell::new(AppState::new(
         selected_model_id.clone(),
         output_mode,
+        workers.active_speech_backend(),
         &saved_settings,
     )));
     if saved_settings.visualizer_style.uses_external_renderer()
@@ -1777,6 +1994,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     wire_settings(
         &settings,
         &translator,
+        &translation_previews,
         &state,
         &workers,
         &recording_overlays,
@@ -1787,8 +2005,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     wire_action_palette(
         &action_palette,
         &action_palette_presenter,
-        &translation_preview,
-        &translation_preview_presenter,
+        &translation_previews,
         &chooser,
         &chooser_presenter,
         &settings,
@@ -1804,8 +2021,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         chooser_presenter: chooser_presenter.clone(),
         action_palette: action_palette.as_weak(),
         action_palette_presenter: action_palette_presenter.clone(),
-        translation_preview: translation_preview.as_weak(),
-        translation_preview_presenter: translation_preview_presenter.clone(),
+        translation_previews: Rc::clone(&translation_previews),
         translator: translator.as_weak(),
         state: Rc::clone(&state),
         workers: Rc::clone(&workers),
@@ -1813,14 +2029,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     session_event_router.attach_runtime();
     let _popup_dismiss_monitor = match rust_platform_windows::PopupDismissMonitor::start(
-        || {
-            dispatch_runtime_event(RuntimeEvent::DismissTranslationPreview);
+        |window_handle| {
+            dispatch_runtime_event(RuntimeEvent::DismissTranslationPreview(window_handle));
         },
-        |pinned| {
-            dispatch_runtime_event(RuntimeEvent::TranslationPreviewPinChanged(pinned));
+        |window_handle, pinned| {
+            dispatch_runtime_event(RuntimeEvent::TranslationPreviewPinChanged {
+                window_handle,
+                pinned,
+            });
         },
-        |delta| {
-            dispatch_runtime_event(RuntimeEvent::ScrollTranslationPreview(delta));
+        |window_handle, delta| {
+            dispatch_runtime_event(RuntimeEvent::ScrollTranslationPreview {
+                window_handle,
+                delta,
+            });
         },
     ) {
         Ok(monitor) => Some(monitor),
@@ -2119,12 +2341,18 @@ fn run_indicator_preview(
     let live_audio_worker = if live_microphone {
         let worker_job = rust_platform_windows::WorkerJob::new()
             .map_err(|error| format!("could not create preview worker job: {error}"))?;
-        let path = worker_path(SPEECH_WORKER_EXE)?;
+        let backend = speech_backend_plan(SpeechBackendPreference::Auto)?.active();
+        let path = speech_worker_path(backend)?;
         let mut command = Command::new(&path);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if backend == SpeechBackend::Cuda {
+            let runtime = trusted_cuda_runtime_directory()
+                .ok_or("the CUDA preview worker is missing its verified runtime")?;
+            command.env("PATH", runtime);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -2516,10 +2744,44 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
     let translated = if long_text {
         "Длинный перевод должен оставаться удобным для чтения. Карточка сохраняет компактную форму, а результат прокручивается внутри неё. Это позволяет быстро проверить смысл, не терять выбранное место в исходном приложении и не открывать отдельное большое рабочее окно. Прокрутка появляется только тогда, когда текст действительно не помещается. ".repeat(12)
     } else {
-        "Предпросмотр должен увеличиваться вместе с содержимым, а не оставлять пустой холст."
+        "Мужчина-пассажир звонит в колокольчик проводника из купе мистера Рэтчетта. Проводник подходит к двери. Пассажир отвечает по-французски."
             .to_owned()
     };
+    let source = if long_text {
+        "A long translation should remain easy to read. The card keeps its compact shape while the result scrolls inside it. This makes it possible to verify the meaning without losing the selected place in the source application."
+    } else {
+        "A male passenger rings the conductor's bell from Mr. Ratchett's compartment. The conductor comes to the door. The passenger answers in French."
+    };
+    let dual_pairs = if long_text {
+        vec![TranslationPair {
+            source: source.into(),
+            translation: translated.clone().into(),
+        }]
+    } else {
+        vec![
+            TranslationPair {
+                source:
+                    "A male passenger rings the conductor's bell from Mr. Ratchett's compartment."
+                        .into(),
+                translation:
+                    "Мужчина-пассажир звонит в колокольчик проводника из купе мистера Рэтчетта."
+                        .into(),
+            },
+            TranslationPair {
+                source: "The conductor comes to the door.".into(),
+                translation: "Проводник подходит к двери.".into(),
+            },
+            TranslationPair {
+                source: "The passenger answers in French.".into(),
+                translation: "Пассажир отвечает по-французски.".into(),
+            },
+        ]
+    };
     apply_translation_preview_layout(&preview, &translated);
+    preview.set_card_width(480.0);
+    preview.set_source_text(source.into());
+    preview.set_original_card_height(if long_text { 124.0 } else { 96.0 });
+    preview.set_dual_pairs(ModelRc::new(VecModel::from(dual_pairs)));
     preview.set_translated_text(translated.clone().into());
     preview.set_prepared(false);
     wire_translation_preview(&preview, &presenter);
@@ -2575,33 +2837,9 @@ fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Error>> {
             }
         }
     })?;
-    let preview_for_pin = preview.as_weak();
-    let _popup_dismiss_monitor = rust_platform_windows::PopupDismissMonitor::start(
-        || {
-            let _ = slint::invoke_from_event_loop(|| {
-                let _ = slint::quit_event_loop();
-            });
-        },
-        move |pinned| {
-            let preview = preview_for_pin.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(preview) = preview.upgrade() {
-                    preview.set_pinned(pinned);
-                }
-            });
-        },
-        {
-            let preview = preview.as_weak();
-            move |delta| {
-                let preview = preview.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(preview) = preview.upgrade() {
-                        preview.invoke_scroll_by(delta as f32);
-                    }
-                });
-            }
-        },
-    )?;
+    // The design probe intentionally has no global click-away monitor. It must
+    // remain visible while the user compares ORIG and DUAL, even after clicking
+    // another window. Production keeps its normal popup lifecycle.
     slint::run_event_loop()?;
     Ok(())
 }
@@ -2659,6 +2897,44 @@ where
     T: DeserializeOwned + Send + 'static,
 {
     let path = worker_path(executable)?;
+    spawn_worker_at(worker_job, kind, executable, path, None, move |_, event| {
+        wrap(event)
+    })
+}
+
+fn spawn_speech_worker(
+    worker_job: &rust_platform_windows::WorkerJob,
+    backend: SpeechBackend,
+) -> Result<(WorkerProcess, JsonWriter), Box<dyn Error>> {
+    let path = speech_worker_path(backend)?;
+    let runtime_directory = (backend == SpeechBackend::Cuda)
+        .then(trusted_cuda_runtime_directory)
+        .flatten();
+    if backend == SpeechBackend::Cuda && runtime_directory.is_none() {
+        return Err("the CUDA worker is missing its verified runtime".into());
+    }
+    spawn_worker_at(
+        worker_job,
+        WorkerKind::Speech,
+        SPEECH_WORKER_EXE,
+        path,
+        runtime_directory,
+        |instance_id, event| RuntimeEvent::Speech { instance_id, event },
+    )
+}
+
+fn spawn_worker_at<T, F>(
+    worker_job: &rust_platform_windows::WorkerJob,
+    kind: WorkerKind,
+    executable: &str,
+    path: PathBuf,
+    runtime_directory: Option<PathBuf>,
+    wrap: F,
+) -> Result<(WorkerProcess, JsonWriter), Box<dyn Error>>
+where
+    T: DeserializeOwned + Send + 'static,
+    F: Fn(u64, T) -> RuntimeEvent + Send + 'static,
+{
     let started_at = Instant::now();
     let instance_id = NEXT_WORKER_INSTANCE.fetch_add(1, Ordering::Relaxed);
     let mut command = Command::new(&path);
@@ -2666,16 +2942,11 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if path
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(SPEECH_CUDA_EXE))
-    {
-        let cuda = trusted_cuda_runtime_directory()
-            .ok_or("the CUDA worker was selected without a trusted CUDA runtime")?;
+    if let Some(runtime_directory) = runtime_directory {
         // The CUDA executable imports cuBLAS before Rust main() can harden dynamic
-        // DLL loading. Give that child only the validated toolkit directory instead
-        // of inheriting arbitrary user-writable PATH entries.
-        command.env("PATH", cuda);
+        // DLL loading. Give that child only the validated application runtime
+        // (or a trusted system toolkit fallback) instead of inheriting PATH.
+        command.env("PATH", runtime_directory);
     }
     #[cfg(windows)]
     {
@@ -2722,11 +2993,12 @@ where
                 };
                 match serde_json::from_str::<T>(&line) {
                     Ok(event) => {
-                        dispatch_runtime_event(wrap(event));
+                        dispatch_runtime_event(wrap(instance_id, event));
                     }
                     Err(error) => {
                         dispatch_runtime_event(RuntimeEvent::WorkerError {
                             kind,
+                            instance_id,
                             message: format!("{output_name} sent invalid data: {error}"),
                         });
                     }
@@ -2782,20 +3054,6 @@ fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
     let parent = current
         .parent()
         .ok_or("desktop executable has no parent directory")?;
-    if executable == SPEECH_WORKER_EXE {
-        let cuda = parent.join(SPEECH_CUDA_EXE);
-        if cuda.exists() && trusted_cuda_runtime_directory().is_some() {
-            return Ok(cuda);
-        }
-        let cpu = parent.join(SPEECH_CPU_EXE);
-        if cpu.exists() {
-            return Ok(cpu);
-        }
-        let development = parent.join(DEV_SPEECH_WORKER_EXE);
-        if development.exists() {
-            return Ok(development);
-        }
-    }
     let sibling = parent.join(executable);
     if sibling.exists() {
         return Ok(sibling);
@@ -2818,7 +3076,63 @@ fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
     .into())
 }
 
+fn speech_worker_path(backend: SpeechBackend) -> Result<PathBuf, Box<dyn Error>> {
+    let parent = env::current_exe()?
+        .parent()
+        .ok_or("desktop executable has no parent directory")?
+        .to_owned();
+    let installed = parent.join(match backend {
+        SpeechBackend::Cuda => SPEECH_CUDA_EXE,
+        SpeechBackend::Vulkan => SPEECH_VULKAN_EXE,
+        SpeechBackend::Cpu => SPEECH_CPU_EXE,
+    });
+    if installed.is_file() {
+        return Ok(installed);
+    }
+    if backend == SpeechBackend::Cpu {
+        let development = parent.join(DEV_SPEECH_WORKER_EXE);
+        if development.is_file() {
+            return Ok(development);
+        }
+    }
+    Err(format!(
+        "the {} speech worker is not installed at {}",
+        backend.display_name(),
+        installed.display()
+    )
+    .into())
+}
+
+fn available_speech_backends() -> Vec<SpeechBackend> {
+    [
+        SpeechBackend::Cuda,
+        SpeechBackend::Vulkan,
+        SpeechBackend::Cpu,
+    ]
+    .into_iter()
+    .filter(|backend| {
+        speech_worker_path(*backend).is_ok()
+            && (*backend != SpeechBackend::Cuda || trusted_cuda_runtime_directory().is_some())
+    })
+    .collect()
+}
+
+fn speech_backend_plan(preference: SpeechBackendPreference) -> Result<SpeechBackendPlan, String> {
+    SpeechBackendPlan::new(preference, available_speech_backends())
+}
+
 fn trusted_cuda_runtime_directory() -> Option<PathBuf> {
+    let application_runtime = env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .map(|path| path.join("runtimes").join("cuda"));
+    if let Some(directory) = application_runtime
+        .filter(|directory| cuda_runtime_is_complete(directory))
+        .and_then(|directory| directory.canonicalize().ok())
+    {
+        return Some(directory);
+    }
+
     let program_files = env::var_os("ProgramFiles")
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok())?;
@@ -2852,10 +3166,12 @@ fn trusted_cuda_runtime_directory() -> Option<PathBuf> {
             return None;
         }
         let directory = trusted_root.join("bin").join("x64").canonicalize().ok()?;
-        (directory.join("cublas64_13.dll").is_file()
-            && directory.join("cublasLt64_13.dll").is_file())
-        .then_some(directory)
+        cuda_runtime_is_complete(&directory).then_some(directory)
     })
+}
+
+fn cuda_runtime_is_complete(directory: &std::path::Path) -> bool {
+    directory.join("cublas64_13.dll").is_file() && directory.join("cublasLt64_13.dll").is_file()
 }
 
 fn install_runtime_handler(runtime: RuntimeUi) {
@@ -2888,7 +3204,16 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
         RuntimeEvent::Input(event) => {
             handle_input_event(event, runtime);
         }
-        RuntimeEvent::Speech(event) => {
+        RuntimeEvent::Speech { instance_id, event } => {
+            if !runtime
+                .workers
+                .is_current_instance(WorkerKind::Speech, instance_id)
+            {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "worker kind=Speech instance={instance_id} event=stale_ignored"
+                ));
+                return;
+            }
             handle_speech_event(
                 event,
                 &runtime.settings,
@@ -2902,8 +3227,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             handle_translation_event(
                 event,
                 &runtime.settings,
-                &runtime.translation_preview,
-                &runtime.translation_preview_presenter,
+                &runtime.translation_previews,
                 &runtime.translator,
                 &runtime.state,
                 &runtime.workers,
@@ -2955,33 +3279,121 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 set_indicator_status(&runtime.settings, &format!("Companion Orb: {message}"));
             }
         },
-        RuntimeEvent::DismissTranslationPreview => {
-            if let Some(preview) = runtime.translation_preview.upgrade() {
-                preview.set_pinned(false);
-                preview.set_prepared(false);
-                runtime
-                    .translation_preview_presenter
-                    .retire(preview.window(), "click_away");
+        RuntimeEvent::DismissTranslationPreview(window_handle) => {
+            let slot = runtime
+                .translation_previews
+                .borrow()
+                .slot_by_handle(window_handle);
+            if let Some(slot) = slot {
+                retire_translation_preview(&slot, "click_away");
+                let is_current = {
+                    let previews = runtime.translation_previews.borrow();
+                    slint_window_handle(previews.current.preview.window()) == Some(window_handle)
+                };
+                if is_current {
+                    runtime.translation_previews.borrow_mut().current_request = None;
+                } else {
+                    runtime
+                        .translation_previews
+                        .borrow_mut()
+                        .pinned
+                        .retain(|candidate| {
+                            slint_window_handle(candidate.preview.window()) != Some(window_handle)
+                        });
+                }
             }
-            rust_platform_windows::deactivate_popup_dismiss();
+            rust_platform_windows::deactivate_popup_dismiss(window_handle);
         }
-        RuntimeEvent::TranslationPreviewPinChanged(pinned) => {
-            if let Some(preview) = runtime.translation_preview.upgrade() {
-                preview.set_pinned(pinned);
+        RuntimeEvent::TranslationPreviewPinChanged {
+            window_handle,
+            pinned,
+        } => {
+            rust_platform_windows::set_popup_pinned(window_handle, pinned);
+            let slot = runtime
+                .translation_previews
+                .borrow()
+                .slot_by_handle(window_handle);
+            if let Some(slot) = slot {
+                let is_current = {
+                    let previews = runtime.translation_previews.borrow();
+                    slint_window_handle(previews.current.preview.window()) == Some(window_handle)
+                };
+                if pinned && is_current {
+                    // Keep the immutable RefCell borrow out of the match
+                    // scrutinee. Rust extends a scrutinee temporary through
+                    // the whole match, which would overlap the mutable borrow
+                    // used to atomically rotate current -> pinned below.
+                    let blur_radius = runtime.translation_previews.borrow().blur_radius;
+                    match create_translation_preview_slot(blur_radius) {
+                        Ok(replacement) => {
+                            if let Err(error) = apply_translation_preview_pin_state(
+                                &slot.preview,
+                                &slot.presenter,
+                                true,
+                            ) {
+                                rust_app_core::diagnostics::log_line(&format!(
+                                    "translation_preview pin_state=failed pinned=true error={error}"
+                                ));
+                            } else {
+                                {
+                                    let mut previews = runtime.translation_previews.borrow_mut();
+                                    let old = std::mem::replace(
+                                        &mut previews.current,
+                                        replacement.clone(),
+                                    );
+                                    previews.current_request = None;
+                                    previews.pinned.push(old);
+                                }
+                                precreate_translation_preview(&replacement);
+                                rust_app_core::diagnostics::log_line(&format!(
+                                    "translation_preview pin=detached hwnd={} pinned_count={}",
+                                    window_handle,
+                                    runtime.translation_previews.borrow().pinned.len()
+                                ));
+                            }
+                        }
+                        Err(error) => rust_app_core::diagnostics::log_line(&format!(
+                            "translation_preview pin=failed stage=create_successor error={error}"
+                        )),
+                    }
+                } else if let Err(error) =
+                    apply_translation_preview_pin_state(&slot.preview, &slot.presenter, pinned)
+                {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_preview pin_state=failed pinned={pinned} error={error}"
+                    ));
+                }
             }
             rust_app_core::diagnostics::log_line(&format!(
-                "translation_preview pin=changed pinned={pinned}"
+                "translation_preview pin=changed hwnd={window_handle} pinned={pinned}"
             ));
         }
-        RuntimeEvent::ScrollTranslationPreview(delta) => {
-            if let Some(preview) = runtime.translation_preview.upgrade() {
-                preview.invoke_scroll_by(delta as f32);
+        RuntimeEvent::ScrollTranslationPreview {
+            window_handle,
+            delta,
+        } => {
+            if let Some(slot) = runtime
+                .translation_previews
+                .borrow()
+                .slot_by_handle(window_handle)
+            {
+                slot.preview.invoke_scroll_by(delta as f32);
             }
         }
         RuntimeEvent::SessionEnd(event) => {
             handle_session_end(event, runtime);
         }
-        RuntimeEvent::WorkerError { kind, message } => {
+        RuntimeEvent::WorkerError {
+            kind,
+            instance_id,
+            message,
+        } => {
+            if !runtime.workers.is_current_instance(kind, instance_id) {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "worker kind={kind:?} instance={instance_id} event_stream=stale_invalid_data_ignored"
+                ));
+                return;
+            }
             if kind == WorkerKind::Companion {
                 rust_app_core::diagnostics::log_line(&format!(
                     "companion_renderer event_stream=invalid message={message}"
@@ -3166,6 +3578,9 @@ fn handle_worker_exit(
             let initialization = match kind {
                 WorkerKind::Input => Ok(()),
                 WorkerKind::Speech => {
+                    let active = runtime.workers.active_speech_backend();
+                    runtime.state.borrow_mut().speech_backend_active = Some(active);
+                    sync_action_settings(&runtime.settings, &runtime.state);
                     let state = runtime.state.borrow();
                     runtime
                         .workers
@@ -3211,6 +3626,10 @@ fn handle_worker_exit(
         }
         Ok(WorkerRecovery::Stale) => {}
         Err(error) => {
+            if kind == WorkerKind::Speech {
+                runtime.state.borrow_mut().speech_backend_active = None;
+                sync_action_settings(&runtime.settings, &runtime.state);
+            }
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Worker unavailable".into());
                 settings.set_indicator_status(format!("{message}; {error}").into());
@@ -3226,8 +3645,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
     let chooser_presenter = &runtime.chooser_presenter;
     let action_palette = &runtime.action_palette;
     let action_palette_presenter = &runtime.action_palette_presenter;
-    let translation_preview = &runtime.translation_preview;
-    let translation_preview_presenter = &runtime.translation_preview_presenter;
+    let translation_previews = &runtime.translation_previews;
     let state = &runtime.state;
     let workers = &runtime.workers;
     let indicator_animation = &runtime.indicator_animation;
@@ -3439,13 +3857,12 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             app.selection_release_gates
                 .insert(request_id, SelectionReleaseGate::Pending);
             drop(app);
-            if intent == TextActionIntent::Translate
-                && let Some(preview) = translation_preview.upgrade()
-            {
-                preview.set_pinned(false);
-                preview.set_prepared(false);
-                translation_preview_presenter.retire(preview.window(), "new_translation");
-                rust_platform_windows::deactivate_popup_dismiss();
+            if intent == TextActionIntent::Translate {
+                let slot = translation_previews.borrow().current();
+                if !slot.preview.get_pinned() {
+                    retire_translation_preview(&slot, "new_translation");
+                    translation_previews.borrow_mut().current_request = None;
+                }
             }
             set_indicator_status(settings, "Reading selected text…");
         }
@@ -3486,8 +3903,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 chooser_presenter,
                 action_palette,
                 action_palette_presenter,
-                translation_preview,
-                translation_preview_presenter,
+                translation_previews,
                 state,
                 workers,
             );
@@ -3712,8 +4128,7 @@ fn handle_text_action(
     chooser_presenter: &OverlayPresenter,
     action_palette: &slint::Weak<ActionPalette>,
     action_palette_presenter: &OverlayPresenter,
-    translation_preview: &slint::Weak<TranslationPreview>,
-    translation_preview_presenter: &OverlayPresenter,
+    translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
 ) {
@@ -3747,8 +4162,7 @@ fn handle_text_action(
                     request_started_unix_ms,
                 },
                 settings,
-                translation_preview,
-                translation_preview_presenter,
+                translation_previews,
                 state,
                 workers,
             );
@@ -3783,8 +4197,7 @@ fn handle_text_action(
                             request_started_unix_ms,
                         },
                         settings,
-                        translation_preview,
-                        translation_preview_presenter,
+                        translation_previews,
                         state,
                         workers,
                     );
@@ -3934,8 +4347,7 @@ fn show_layout_chooser(
 fn begin_selection_translation(
     request: SelectionTranslationRequest,
     settings: &slint::Weak<SettingsWindow>,
-    _translation_preview: &slint::Weak<TranslationPreview>,
-    _translation_preview_presenter: &OverlayPresenter,
+    translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
 ) {
@@ -3995,10 +4407,17 @@ reason=translation_disabled"
         return;
     }
 
+    if delivery == TranslationDelivery::Preview {
+        translation_previews
+            .borrow_mut()
+            .reserve_current(request_id);
+    }
+
     state.borrow_mut().pending_translations.insert(
         request_id,
         PendingTranslation {
             origin: TranslationOrigin::Selection { target, delivery },
+            source_text: text.clone(),
             started: Instant::now(),
             request_started_unix_ms,
             first_partial_shown: false,
@@ -4016,6 +4435,9 @@ reason=translation_disabled"
         let mut app = state.borrow_mut();
         app.pending_translations.remove(&request_id);
         app.selection_release_gates.remove(&request_id);
+        translation_previews
+            .borrow_mut()
+            .clear_current_request(request_id);
         set_indicator_status(settings, &format!("Could not start translation: {error}"));
     } else {
         set_indicator_status(settings, "Translating locally…");
@@ -4028,70 +4450,62 @@ reason=translation_disabled"
 fn show_selection_translation_preview(
     request_id: RequestId,
     target: TargetSnapshot,
+    source_text: &str,
     translated_text: &str,
-    translation_preview: &slint::Weak<TranslationPreview>,
-    translation_preview_presenter: &OverlayPresenter,
+    translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     final_update: bool,
 ) {
-    let Some(preview) = translation_preview.upgrade() else {
+    let Some(slot) = translation_previews.borrow().slot_for_request(request_id) else {
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_preview request={request_id} update=ignored reason=superseded"
+        ));
         return;
     };
+    let preview = &slot.preview;
+    let translation_preview_presenter = &slot.presenter;
     let request_id_text = request_id.to_string();
     let first_show = preview.get_request_id().as_str() != request_id_text;
     if first_show {
         preview.set_request_id(request_id_text.into());
+        preview.set_source_text(source_text.into());
+        preview.set_original_card_height(adaptive_text_panel_height(
+            source_text,
+            48,
+            2,
+            7,
+            17.0,
+            28.0,
+        ));
         preview.set_pinned(false);
+        if let Err(error) = configure_slint_translation_resize(&preview, false) {
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_preview resize_state=failed pinned=false reason=first_show error={error}"
+            ));
+        }
+        preview.set_live_glass(false);
+        if let Some(handle) = slint_window_handle(preview.window()) {
+            let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
+        }
     }
     apply_translation_preview_layout(&preview, translated_text);
     preview.set_translated_text(translated_text.into());
+    preview.set_dual_pairs(ModelRc::new(VecModel::from(translation_pairs(
+        source_text,
+        translated_text,
+    ))));
     if first_show {
         preview.set_prepared(false);
         preview.invoke_reset_scroll();
-        let ticket = match translation_preview_presenter.begin_prepare() {
-            Ok(ticket) => ticket,
-            Err(error) => {
-                preview.set_request_id("".into());
-                rust_app_core::diagnostics::log_line(&format!(
-                    "translation_preview_overlay transition=failed stage=begin_prepare \
-error={error}"
-                ));
-                return;
-            }
-        };
-        let handle = slint_window_handle(preview.window());
-        let configured = handle
-            .ok_or_else(|| "native translation-preview HWND is unavailable".to_owned())
-            .and_then(rust_platform_windows::configure_translation_window);
-        if let Err(error) = configured {
+        if slot.attached.get()
+            && let Err(error) = present_translation_preview(
+                &preview,
+                translation_preview_presenter,
+                Some(target.window_handle),
+            )
+        {
             preview.set_request_id("".into());
-            translation_preview_presenter.abort_prepare(
-                preview.window(),
-                ticket,
-                "configure",
-                &error,
-            );
-            return;
-        }
-        if let Some(handle) = handle {
-            refresh_cloaked_translation_backdrop(&preview, handle);
-        }
-        preview.set_prepared(true);
-        if let Err(error) = translation_preview_presenter.await_frame(preview.window(), ticket) {
-            preview.set_prepared(false);
-            preview.set_request_id("".into());
-            translation_preview_presenter.abort_prepare(
-                preview.window(),
-                ticket,
-                "await_frame",
-                &error,
-            );
-            return;
-        }
-        if let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
-            target.window_handle,
-        ) {
             rust_app_core::diagnostics::log_line(&format!(
-                "translation_preview target_restore=failed error={error}"
+                "translation_preview_overlay transition=failed stage=present error={error}"
             ));
         }
     } else if final_update
@@ -4109,6 +4523,134 @@ error={error}"
             );
         }
     }
+}
+
+fn translation_pairs(source: &str, translation: &str) -> Vec<TranslationPair> {
+    let source_units = translation_units(source);
+    let translation_units = translation_units(translation);
+    if source_units.len() > 1 && source_units.len() == translation_units.len() {
+        return source_units
+            .into_iter()
+            .zip(translation_units)
+            .map(|(source, translation)| TranslationPair {
+                source: source.into(),
+                translation: translation.into(),
+            })
+            .collect();
+    }
+
+    vec![TranslationPair {
+        source: source.trim().into(),
+        translation: translation.trim().into(),
+    }]
+}
+
+fn translation_units(text: &str) -> Vec<String> {
+    let characters = text.chars().collect::<Vec<_>>();
+    let mut units = Vec::new();
+    let mut current = String::new();
+    let mut token = String::new();
+    for (index, character) in characters.iter().copied().enumerate() {
+        current.push(character);
+        if character.is_alphabetic() {
+            token.push(character);
+        }
+        let punctuation = matches!(character, '.' | '!' | '?' | '。' | '！' | '？');
+        if !punctuation {
+            if !character.is_alphabetic() && character != '\'' && character != '’' {
+                token.clear();
+            }
+            continue;
+        }
+
+        let next = characters.get(index + 1).copied();
+        let numeric_period = character == '.'
+            && index > 0
+            && characters[index - 1].is_ascii_digit()
+            && next.is_some_and(|next| next.is_ascii_digit());
+        let abbreviation = character == '.' && is_sentence_abbreviation(&token);
+        let boundary = !numeric_period
+            && !abbreviation
+            && next
+                .is_none_or(|next| next.is_whitespace() || matches!(next, '"' | '”' | ')' | ']'));
+        token.clear();
+        if boundary {
+            let unit = current.trim();
+            if !unit.is_empty() {
+                units.push(unit.to_owned());
+            }
+            current.clear();
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        units.push(tail.to_owned());
+    }
+    if units.is_empty() && !text.trim().is_empty() {
+        units.push(text.trim().to_owned());
+    }
+    units
+}
+
+fn is_sentence_abbreviation(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "mr" | "mrs" | "ms" | "dr" | "prof" | "sr" | "jr" | "st" | "vs" | "etc" | "e" | "i"
+    )
+}
+
+fn present_translation_preview(
+    preview: &TranslationPreview,
+    presenter: &OverlayPresenter,
+    target_window_handle: Option<u64>,
+) -> Result<(), String> {
+    let ticket = presenter.begin_prepare()?;
+    let handle = slint_window_handle(preview.window())
+        .ok_or_else(|| "native translation-preview HWND is unavailable".to_owned())?;
+    if let Err(error) = rust_platform_windows::configure_translation_window(handle) {
+        presenter.abort_prepare(preview.window(), ticket, "configure", &error);
+        return Err(error);
+    }
+    refresh_cloaked_translation_backdrop(preview, handle);
+    preview.set_prepared(true);
+    if let Err(error) = presenter.await_frame(preview.window(), ticket) {
+        preview.set_prepared(false);
+        presenter.abort_prepare(preview.window(), ticket, "await_frame", &error);
+        return Err(error);
+    }
+    if let Some(target_window_handle) = target_window_handle
+        && let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
+            target_window_handle,
+        )
+    {
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_preview target_restore=failed error={error}"
+        ));
+    }
+    Ok(())
+}
+
+fn fallback_and_initialize_speech(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Rc<Workers>,
+    reason: &str,
+) -> Result<SpeechBackend, String> {
+    let backend = workers.fallback_speech_backend(reason)?;
+    let initialization = {
+        let mut state = state.borrow_mut();
+        state.speech_backend_active = Some(backend);
+        state.speech_ready = false;
+        workers.speech.send(&SpeechWorkerCommand::Initialize {
+            selected_model_id: state.selected_model_id.clone(),
+            output_mode: state.output_mode,
+            history_enabled: state.history_enabled,
+            fast_release_previews: state.fast_release_previews,
+        })
+    };
+    sync_action_settings(settings, state);
+    initialization?;
+    Ok(backend)
 }
 
 fn handle_speech_event(
@@ -4178,8 +4720,44 @@ fn handle_speech_event(
             warmup_duration_ms,
             ..
         } => {
+            let active = match workers.mark_speech_backend_ready(&backend) {
+                Ok(active) => active,
+                Err(error) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "speech_backend verification=failed error={error}"
+                    ));
+                    match fallback_and_initialize_speech(
+                        settings,
+                        state,
+                        workers,
+                        "reported_backend_mismatch",
+                    ) {
+                        Ok(fallback) => {
+                            set_runtime_status(settings, "Checking fallback");
+                            set_indicator_status(
+                                settings,
+                                &format!(
+                                    "The speech backend was inconsistent; checking {} instead.",
+                                    fallback.display_name()
+                                ),
+                            );
+                        }
+                        Err(fallback_error) => {
+                            set_runtime_status(settings, "Worker error");
+                            set_indicator_status(
+                                settings,
+                                &format!(
+                                    "Speech backend verification failed: {error}; {fallback_error}"
+                                ),
+                            );
+                        }
+                    }
+                    return;
+                }
+            };
             {
                 let mut state = state.borrow_mut();
+                state.speech_backend_active = Some(active);
                 if let Some(model) = state
                     .models
                     .iter_mut()
@@ -4192,12 +4770,17 @@ fn handle_speech_event(
                 }
             }
             sync_models(settings, state);
+            sync_action_settings(settings, state);
             set_runtime_status(settings, "Ready");
             set_indicator_status(settings, "Ready · hold Ctrl + Alt + Space to speak.");
-            eprintln!(
-                "speech engine ready model={} backend={} load_ms={} warmup_ms={}",
-                catalog_id, backend, load_duration_ms, warmup_duration_ms
-            );
+            rust_app_core::diagnostics::log_line(&format!(
+                "speech_backend preference={} selected={} verification=passed model={} load_ms={} warmup_ms={}",
+                workers.speech_backend_preference().label(),
+                active.name(),
+                catalog_id,
+                load_duration_ms,
+                warmup_duration_ms
+            ));
         }
         SpeechWorkerEvent::ModelSelected { catalog_id } => {
             {
@@ -4425,6 +5008,39 @@ delivery={} target_pid={}",
             message,
             retryable,
         } => {
+            if session_id.is_none() && code == "model_prepare" {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "speech_backend selected={} verification=failed code={code} message={message}",
+                    workers.active_speech_backend().name()
+                ));
+                match fallback_and_initialize_speech(
+                    settings,
+                    state,
+                    workers,
+                    "model_prepare_failed",
+                ) {
+                    Ok(fallback) => {
+                        set_runtime_status(settings, "Checking fallback");
+                        set_indicator_status(
+                            settings,
+                            &format!(
+                                "{code} on the selected backend; checking {} automatically.",
+                                fallback.display_name()
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        state.borrow_mut().speech_backend_active = None;
+                        sync_action_settings(settings, state);
+                        set_runtime_status(settings, "Worker error");
+                        set_indicator_status(
+                            settings,
+                            &format!("No compatible speech backend is available: {error}"),
+                        );
+                    }
+                }
+                return;
+            }
             rust_app_core::diagnostics::log_line(&format!(
                 "transcription result=failed session={session_id:?} code={code} \
 retryable={retryable} message={message}"
@@ -4478,8 +5094,7 @@ retryable={retryable} message={message}"
 fn handle_translation_event(
     event: TranslationWorkerEvent,
     settings: &slint::Weak<SettingsWindow>,
-    translation_preview: &slint::Weak<TranslationPreview>,
-    translation_preview_presenter: &OverlayPresenter,
+    translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     translator: &slint::Weak<TranslatorWindow>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
@@ -4591,8 +5206,7 @@ fn handle_translation_event(
                 begin_selection_translation(
                     request,
                     settings,
-                    translation_preview,
-                    translation_preview_presenter,
+                    translation_previews,
                     state,
                     workers,
                 );
@@ -4631,11 +5245,17 @@ fn handle_translation_event(
                             pending.started.elapsed().as_millis() as u64,
                             pending.request_started_unix_ms,
                             first_partial,
+                            pending.source_text.clone(),
                         )
                     })
             };
-            let Some((origin, translation_elapsed_ms, request_started_unix_ms, first_partial)) =
-                pending
+            let Some((
+                origin,
+                translation_elapsed_ms,
+                request_started_unix_ms,
+                first_partial,
+                source_text,
+            )) = pending
             else {
                 return;
             };
@@ -4660,9 +5280,9 @@ fn handle_translation_event(
                     show_selection_translation_preview(
                         request_id,
                         target,
+                        &source_text,
                         &translated_text,
-                        translation_preview,
-                        translation_preview_presenter,
+                        translation_previews,
                         false,
                     );
                 }
@@ -4704,8 +5324,7 @@ fn handle_translation_event(
                 result,
                 pending,
                 settings,
-                translation_preview,
-                translation_preview_presenter,
+                translation_previews,
                 translator,
                 state,
                 workers,
@@ -4725,13 +5344,19 @@ fn handle_translation_event(
                 translator.set_processing(false);
                 translator.set_status_text("Translation cancelled.".into());
             }
-            if let Some(preview) = translation_preview.upgrade()
-                && preview.get_request_id().as_str() == request_id.to_string()
-                && !preview.get_pinned()
+            let request_slot = { translation_previews.borrow().slot_for_request(request_id) };
+            if let Some(slot) = request_slot
+                && !slot.preview.get_pinned()
             {
-                preview.set_prepared(false);
-                translation_preview_presenter.retire(preview.window(), "translation_cancelled");
-                rust_platform_windows::deactivate_popup_dismiss();
+                let is_current = {
+                    let previews = translation_previews.borrow();
+                    slint_window_handle(previews.current.preview.window())
+                        == slint_window_handle(slot.preview.window())
+                };
+                retire_translation_preview(&slot, "translation_cancelled");
+                if is_current {
+                    translation_previews.borrow_mut().current_request = None;
+                }
             }
             rust_app_core::diagnostics::log_line(&format!(
                 "translation_pipeline request={} stage=cancelled",
@@ -4747,6 +5372,11 @@ fn handle_translation_event(
             message,
             ..
         } => {
+            if let Some(request_id) = request_id {
+                translation_previews
+                    .borrow_mut()
+                    .clear_current_request(request_id);
+            }
             let pending = request_id.and_then(|id| {
                 let mut app = state.borrow_mut();
                 app.selection_release_gates.remove(&id);
@@ -4773,7 +5403,6 @@ fn handle_translation_event(
             ) {
                 set_translation_status(translator, &format!("{code}: {message}"));
             }
-            let _ = translation_preview;
             set_indicator_status(settings, &format!("{code}: {message}"));
         }
     }
@@ -4784,8 +5413,7 @@ fn route_translation_result(
     result: TranslationResult,
     pending: Option<PendingTranslation>,
     settings: &slint::Weak<SettingsWindow>,
-    translation_preview: &slint::Weak<TranslationPreview>,
-    translation_preview_presenter: &OverlayPresenter,
+    translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     translator: &slint::Weak<TranslatorWindow>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
@@ -4832,9 +5460,9 @@ fn route_translation_result(
                 show_selection_translation_preview(
                     result.request_id,
                     target,
+                    &result.source_text,
                     &result.translated_text,
-                    translation_preview,
-                    translation_preview_presenter,
+                    translation_previews,
                     true,
                 );
                 "Translation completed locally.".to_owned()
@@ -4969,6 +5597,7 @@ fn dispatch_or_defer_selection_replacement(
 fn wire_settings(
     settings: &SettingsWindow,
     translator: &TranslatorWindow,
+    translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
     recording_overlays: &RecordingOverlays,
@@ -4981,6 +5610,57 @@ fn wire_settings(
                 let _ = translator.show();
                 configure_standard_app_window(translator.window(), "Translator");
                 translator.window().request_redraw();
+            }
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_cycle_speech_backend(move || {
+            let preference = {
+                let state = state.borrow();
+                SpeechBackendPreference::from_index(
+                    (state.speech_backend_preference.index() + 1) % 4,
+                )
+                .unwrap_or_default()
+            };
+            match workers.switch_speech_backend(preference) {
+                Ok(active) => {
+                    let initialization = {
+                        let mut state = state.borrow_mut();
+                        state.speech_backend_preference = preference;
+                        state.speech_backend_active = Some(active);
+                        state.speech_ready = false;
+                        workers.speech.send(&SpeechWorkerCommand::Initialize {
+                            selected_model_id: state.selected_model_id.clone(),
+                            output_mode: state.output_mode,
+                            history_enabled: state.history_enabled,
+                            fast_release_previews: state.fast_release_previews,
+                        })
+                    };
+                    let _ = save_settings(&state.borrow());
+                    sync_action_settings(&settings_weak, &state);
+                    if let Err(error) = initialization {
+                        set_indicator_status(
+                            &settings_weak,
+                            &format!("Speech backend initialization failed: {error}"),
+                        );
+                    } else {
+                        set_runtime_status(&settings_weak, "Checking backend");
+                        set_indicator_status(
+                            &settings_weak,
+                            &format!(
+                                "Checking {} with the selected Whisper model…",
+                                active.display_name()
+                            ),
+                        );
+                    }
+                }
+                Err(error) => set_indicator_status(
+                    &settings_weak,
+                    &format!("Speech backend could not be changed: {error}"),
+                ),
             }
         });
     }
@@ -5361,6 +6041,37 @@ fn wire_settings(
         });
     }
     {
+        let settings_weak = settings.as_weak();
+        let translation_previews = Rc::clone(translation_previews);
+        let state = Rc::clone(state);
+        settings.on_decrease_translation_blur(move || {
+            let radius = {
+                let mut state = state.borrow_mut();
+                state.translation_blur_radius = state.translation_blur_radius.saturating_sub(1);
+                state.translation_blur_radius
+            };
+            translation_previews.borrow_mut().set_blur_radius(radius);
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let translation_previews = Rc::clone(translation_previews);
+        let state = Rc::clone(state);
+        settings.on_increase_translation_blur(move || {
+            let radius = {
+                let mut state = state.borrow_mut();
+                state.translation_blur_radius =
+                    (state.translation_blur_radius + 1).min(MAX_TRANSLATION_BLUR_RADIUS);
+                state.translation_blur_radius
+            };
+            translation_previews.borrow_mut().set_blur_radius(radius);
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+        });
+    }
+    {
         let workers = Rc::clone(workers);
         settings.on_quit_requested(move || {
             rust_app_core::diagnostics::log_line(
@@ -5485,8 +6196,7 @@ fn wire_chooser(
 fn wire_action_palette(
     palette: &ActionPalette,
     palette_presenter: &OverlayPresenter,
-    translation_preview: &TranslationPreview,
-    translation_preview_presenter: &OverlayPresenter,
+    translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     chooser: &SelectionChooser,
     chooser_presenter: &OverlayPresenter,
     settings: &SettingsWindow,
@@ -5495,12 +6205,11 @@ fn wire_action_palette(
 ) {
     {
         let palette_weak = palette.as_weak();
-        let preview = translation_preview.as_weak();
         let settings = settings.as_weak();
+        let translation_previews = Rc::clone(translation_previews);
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         let palette_presenter = palette_presenter.clone();
-        let translation_preview_presenter = translation_preview_presenter.clone();
         palette.on_translate(move || {
             let pending = state.borrow_mut().pending_text_action.take();
             if let Some(palette) = palette_weak.upgrade() {
@@ -5520,8 +6229,7 @@ fn wire_action_palette(
                     request_started_unix_ms: pending.request_started_unix_ms,
                 },
                 &settings,
-                &preview,
-                &translation_preview_presenter,
+                &translation_previews,
                 &state,
                 &workers,
             );
@@ -5582,9 +6290,63 @@ fn wire_translation_preview(preview: &TranslationPreview, presenter: &OverlayPre
     let drag_active = Arc::new(AtomicBool::new(false));
     {
         let preview_weak = preview.as_weak();
+        preview.on_pin_state_changed(move |pinned| {
+            if let Some(preview) = preview_weak.upgrade() {
+                if let Some(window_handle) = slint_window_handle(preview.window()) {
+                    dispatch_runtime_event(RuntimeEvent::TranslationPreviewPinChanged {
+                        window_handle,
+                        pinned,
+                    });
+                }
+            }
+        });
+    }
+    {
+        let preview_weak = preview.as_weak();
+        preview.on_begin_resize(move |edge| {
+            let Some(preview) = preview_weak.upgrade() else {
+                return;
+            };
+            if !preview.get_pinned() {
+                return;
+            }
+            if let Err(error) = begin_slint_window_resize(preview.window(), edge) {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_preview resize=failed stage=native_resize error={error}"
+                ));
+            }
+        });
+    }
+    {
+        let preview_weak = preview.as_weak();
+        preview.on_view_mode_changed(move |_| {
+            let Some(preview) = preview_weak.upgrade() else {
+                return;
+            };
+            if preview.get_pinned()
+                && let Err(error) = configure_slint_translation_resize(&preview, true)
+            {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_preview resize_state=failed pinned=true reason=view_mode error={error}"
+                ));
+            }
+        });
+    }
+    {
+        let preview_weak = preview.as_weak();
         let presenter = presenter.clone();
         let drag_active = Arc::clone(&drag_active);
         preview.on_begin_drag(move || {
+            if let Some(preview) = preview_weak.upgrade()
+                && preview.get_pinned()
+            {
+                if let Err(error) = begin_slint_window_drag(preview.window()) {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_preview drag=failed stage=native_drag error={error}"
+                    ));
+                }
+                return;
+            }
             if drag_active.swap(true, Ordering::AcqRel) {
                 return;
             }
@@ -5650,6 +6412,120 @@ fn wire_translation_preview(preview: &TranslationPreview, presenter: &OverlayPre
             drag_active.store(false, Ordering::Release);
         });
     }
+}
+
+fn create_translation_preview_slot(blur_radius: u32) -> Result<TranslationPreviewSlot, String> {
+    let preview = Rc::new(
+        TranslationPreview::new()
+            .map_err(|error| format!("could not create translation window: {error}"))?,
+    );
+    preview.set_blur_radius(blur_radius as i32);
+    let presenter = OverlayPresenter::install(
+        preview.window(),
+        "translation_preview_overlay",
+        OverlayContract::Interactive,
+        Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
+    )?;
+    wire_translation_preview(&preview, &presenter);
+    Ok(TranslationPreviewSlot {
+        preview,
+        presenter,
+        attached: Rc::new(Cell::new(false)),
+    })
+}
+
+fn retire_translation_preview(slot: &TranslationPreviewSlot, reason: &str) {
+    slot.preview.set_pinned(false);
+    if let Err(error) = configure_slint_translation_resize(&slot.preview, false) {
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_preview resize_state=failed pinned=false reason={reason} error={error}"
+        ));
+    }
+    slot.preview.set_live_glass(false);
+    if let Some(handle) = slint_window_handle(slot.preview.window()) {
+        let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
+        rust_platform_windows::deactivate_popup_dismiss(handle);
+    }
+    slot.preview.set_prepared(false);
+    slot.preview.set_request_id("".into());
+    slot.presenter.retire(slot.preview.window(), reason);
+}
+
+fn apply_translation_preview_pin_state(
+    preview: &TranslationPreview,
+    presenter: &OverlayPresenter,
+    pinned: bool,
+) -> Result<(), String> {
+    preview.set_pinned(pinned);
+    configure_slint_translation_resize(preview, pinned)?;
+
+    let Some(window_handle) = slint_window_handle(preview.window()) else {
+        return Err("translation window handle is not available".to_owned());
+    };
+    if pinned {
+        // A resizable surface must have one compositor owner for its entire
+        // pinned lifetime. DWM continuously recomposes this material as the
+        // HWND changes size; no captured bitmap participates in resize.
+        // The native material is explicitly dark, so its typography must not
+        // inherit a contrast decision made from the previous captured frame.
+        preview.set_dark_text(false);
+        preview.set_live_glass(true);
+        rust_platform_windows::enable_translation_live_backdrop(window_handle)?;
+        preview.window().request_redraw();
+        return Ok(());
+    }
+
+    if preview.get_prepared() && preview.get_live_glass() {
+        settle_translation_preview_backdrop(preview, presenter, window_handle)
+    } else {
+        preview.set_live_glass(false);
+        rust_platform_windows::disable_translation_live_backdrop(window_handle)
+    }
+}
+
+fn configure_slint_translation_resize(
+    preview: &TranslationPreview,
+    resizable: bool,
+) -> Result<(), String> {
+    use slint::winit_030::winit::dpi::LogicalSize;
+
+    let minimum_height = if preview.get_view_mode() == 1 {
+        f64::from(preview.get_original_card_height()) + 98.0
+    } else {
+        80.0
+    };
+    preview
+        .window()
+        .with_winit_window(|window| {
+            window.set_min_inner_size(
+                resizable.then_some(LogicalSize::new(252.0_f64, minimum_height)),
+            );
+            window.set_resizable(resizable);
+        })
+        .ok_or_else(|| "translation window is not backed by winit".to_owned())
+}
+
+fn begin_slint_window_resize(window: &slint::Window, edge: i32) -> Result<(), String> {
+    use slint::winit_030::winit::window::ResizeDirection;
+
+    let direction = match edge {
+        0 => ResizeDirection::West,
+        1 => ResizeDirection::East,
+        2 => ResizeDirection::North,
+        3 => ResizeDirection::South,
+        4 => ResizeDirection::NorthWest,
+        5 => ResizeDirection::NorthEast,
+        6 => ResizeDirection::SouthWest,
+        7 => ResizeDirection::SouthEast,
+        _ => return Err(format!("invalid translation resize edge {edge}")),
+    };
+    window
+        .with_winit_window(|window| {
+            window
+                .drag_resize_window(direction)
+                .map_err(|error| error.to_string())
+        })
+        .ok_or_else(|| "translation window is not backed by winit".to_owned())?
 }
 
 fn start_translation_drag_watcher(
@@ -5758,6 +6634,7 @@ fn wire_translator(
                 request_id,
                 PendingTranslation {
                     origin: TranslationOrigin::Translator,
+                    source_text: text.clone(),
                     started: Instant::now(),
                     request_started_unix_ms: unix_ms(),
                     first_partial_shown: false,
@@ -5883,6 +6760,24 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
         return;
     };
     let state = state.borrow();
+    settings.set_speech_backend_label(
+        format!("Backend: {}", state.speech_backend_preference.label()).into(),
+    );
+    settings.set_speech_backend_detail(
+        state
+            .speech_backend_active
+            .map_or_else(
+                || "No compatible speech backend is active".to_owned(),
+                |active| {
+                    format!(
+                        "Preference: {} · active now: {}",
+                        state.speech_backend_preference.label(),
+                        active.display_name()
+                    )
+                },
+            )
+            .into(),
+    );
     settings.set_translation_enabled_label(
         if state.translation_enabled {
             "Translation: enabled"
@@ -5901,8 +6796,8 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
     );
     settings.set_text_action_mode_label(
         match state.text_action_mode {
-            TextActionMode::Adaptive => "Ctrl+Alt+T: adaptive",
-            TextActionMode::AlwaysPalette => "Ctrl+Alt+T: always show palette",
+            TextActionMode::Adaptive => "Ctrl+Alt+F: adaptive",
+            TextActionMode::AlwaysPalette => "Ctrl+Alt+F: always show palette",
         }
         .into(),
     );
@@ -5922,6 +6817,7 @@ fn sync_action_settings(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCe
         }
         .into(),
     );
+    settings.set_translation_blur_radius(state.translation_blur_radius as i32);
     settings.set_release_optimization_label(
         if state.fast_release_previews {
             "Release optimization: fastest"
@@ -6038,15 +6934,14 @@ fn translation_preview_layout(result_text: &str) -> TranslationPreviewLayout {
 fn apply_translation_preview_layout(preview: &TranslationPreview, result_text: &str) {
     let layout = translation_preview_layout(result_text);
     preview.set_card_width(layout.card_width);
-    preview.set_translated_word_count(translated_word_count(result_text).to_string().into());
-}
-
-fn translated_word_count(text: &str) -> usize {
-    text.unicode_words().count()
 }
 
 fn refresh_cloaked_translation_backdrop(preview: &TranslationPreview, window_handle: u64) {
-    let result = rust_platform_windows::capture_blurred_cloaked_overlay_backdrop(window_handle, 2);
+    let blur_radius = preview
+        .get_blur_radius()
+        .clamp(0, MAX_TRANSLATION_BLUR_RADIUS as i32) as u32;
+    let result =
+        rust_platform_windows::capture_blurred_cloaked_overlay_backdrop(window_handle, blur_radius);
     match result.and_then(|backdrop| apply_translation_backdrop(preview, backdrop)) {
         Ok(()) => preview.set_live_glass(false),
         Err(error) => {
@@ -6164,8 +7059,6 @@ fn precreate_action_windows(
     chooser_presenter: &OverlayPresenter,
     palette: &ActionPalette,
     palette_presenter: &OverlayPresenter,
-    preview: &TranslationPreview,
-    preview_presenter: &OverlayPresenter,
 ) {
     chooser.set_prepared(false);
     chooser
@@ -6226,36 +7119,57 @@ fn precreate_action_windows(
             }
         });
     }
+}
 
-    preview.set_prepared(false);
-    preview
+fn precreate_translation_preview(slot: &TranslationPreviewSlot) {
+    slot.preview.set_prepared(false);
+    slot.preview
         .window()
         .set_position(PhysicalPosition::new(-32_000, -32_000));
-    if preview.show().is_ok() {
-        let preview = preview.as_weak();
-        let presenter = preview_presenter.clone();
-        let _ = slint::spawn_local(async move {
-            if let Some(preview) = preview.upgrade() {
-                let attached = preview
-                    .window()
-                    .winit_window()
-                    .await
-                    .ok()
-                    .as_deref()
-                    .and_then(native_window_handle)
-                    .is_some_and(|handle| {
-                        rust_platform_windows::prepare_translation_window(handle)
-                            .and_then(|()| presenter.attach(handle))
-                            .is_ok()
-                    });
-                if !attached {
-                    rust_app_core::diagnostics::log_line(
-                        "translation_preview_overlay transition=failed stage=attach",
-                    );
+    if let Err(error) = slot.preview.show() {
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_preview_overlay transition=failed stage=create error={error}"
+        ));
+        return;
+    }
+
+    let preview = slot.preview.as_weak();
+    let presenter = slot.presenter.clone();
+    let attached = Rc::clone(&slot.attached);
+    let _ = slint::spawn_local(async move {
+        let Some(preview) = preview.upgrade() else {
+            return;
+        };
+        let result = preview
+            .window()
+            .winit_window()
+            .await
+            .ok()
+            .as_deref()
+            .and_then(native_window_handle)
+            .ok_or_else(|| "native translation-preview HWND is unavailable".to_owned())
+            .and_then(|handle| {
+                rust_platform_windows::prepare_translation_window(handle)?;
+                presenter.attach(handle)?;
+                configure_slint_translation_resize(&preview, false)
+            });
+        match result {
+            Ok(()) => {
+                attached.set(true);
+                if !preview.get_request_id().is_empty()
+                    && !preview.get_prepared()
+                    && let Err(error) = present_translation_preview(&preview, &presenter, None)
+                {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_preview_overlay transition=failed stage=deferred_present error={error}"
+                    ));
                 }
             }
-        });
-    }
+            Err(error) => rust_app_core::diagnostics::log_line(&format!(
+                "translation_preview_overlay transition=failed stage=attach error={error}"
+            )),
+        }
+    });
 }
 
 fn precreate_indicator(
@@ -6458,6 +7372,7 @@ fn settings_path() -> PathBuf {
 
 struct SavedSettings {
     selected_model_id: Option<String>,
+    speech_backend_preference: SpeechBackendPreference,
     output_mode: SpeechOutputMode,
     fast_release_previews: bool,
     visualizer_style: VisualizerStyle,
@@ -6469,6 +7384,7 @@ struct SavedSettings {
     translation_enabled: bool,
     layout_enabled: bool,
     translation_keep_warm: bool,
+    translation_blur_radius: u32,
     text_action_mode: TextActionMode,
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
@@ -6478,6 +7394,7 @@ impl Default for SavedSettings {
     fn default() -> Self {
         Self {
             selected_model_id: None,
+            speech_backend_preference: SpeechBackendPreference::default(),
             output_mode: SpeechOutputMode::default(),
             fast_release_previews: true,
             visualizer_style: VisualizerStyle::default(),
@@ -6489,11 +7406,16 @@ impl Default for SavedSettings {
             translation_enabled: false,
             layout_enabled: true,
             translation_keep_warm: true,
+            translation_blur_radius: DEFAULT_TRANSLATION_BLUR_RADIUS,
             text_action_mode: TextActionMode::default(),
             translation_delivery: TranslationDelivery::default(),
             history_enabled: true,
         }
     }
+}
+
+fn normalize_translation_blur_radius(value: u64) -> u32 {
+    value.min(MAX_TRANSLATION_BLUR_RADIUS as u64) as u32
 }
 
 fn load_settings() -> SavedSettings {
@@ -6505,6 +7427,11 @@ fn load_settings() -> SavedSettings {
         .and_then(|value| value.get("selected_model_id"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
+    let speech_backend_preference = value
+        .as_ref()
+        .and_then(|value| value.get("speech_backend_preference"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
     let output_mode = value
         .as_ref()
         .and_then(|value| value.get("output_mode"))
@@ -6559,6 +7486,12 @@ fn load_settings() -> SavedSettings {
         .and_then(|value| value.get("translation_keep_warm"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
+    let translation_blur_radius = value
+        .as_ref()
+        .and_then(|value| value.get("translation_blur_radius"))
+        .and_then(serde_json::Value::as_u64)
+        .map(normalize_translation_blur_radius)
+        .unwrap_or(DEFAULT_TRANSLATION_BLUR_RADIUS);
     let text_action_mode = value
         .as_ref()
         .and_then(|value| value.get("text_action_mode"))
@@ -6576,6 +7509,7 @@ fn load_settings() -> SavedSettings {
         .unwrap_or(true);
     SavedSettings {
         selected_model_id,
+        speech_backend_preference,
         output_mode,
         fast_release_previews,
         visualizer_style,
@@ -6587,6 +7521,7 @@ fn load_settings() -> SavedSettings {
         translation_enabled,
         layout_enabled,
         translation_keep_warm,
+        translation_blur_radius,
         text_action_mode,
         translation_delivery,
         history_enabled,
@@ -6600,6 +7535,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
     }
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "selected_model_id": &state.selected_model_id,
+        "speech_backend_preference": state.speech_backend_preference,
         "output_mode": state.output_mode,
         "fast_release_previews": state.fast_release_previews,
         "visualizer_style": state.visualizer_style,
@@ -6611,6 +7547,7 @@ fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
         "translation_enabled": state.translation_enabled,
         "layout_enabled": state.layout_enabled,
         "translation_keep_warm": state.translation_keep_warm,
+        "translation_blur_radius": state.translation_blur_radius,
         "text_action_mode": state.text_action_mode,
         "translation_delivery": state.translation_delivery,
         "history_enabled": state.history_enabled,
@@ -7305,9 +8242,12 @@ mod worker_lifecycle_tests {
 
 #[cfg(test)]
 mod adaptive_popup_tests {
+    use slint::ComponentHandle;
+
     use super::{
         TranslationPreview, adaptive_text_panel_height, backdrop_prefers_dark_text,
-        translated_word_count, translation_preview_layout,
+        normalize_translation_blur_radius, translation_pairs, translation_preview_layout,
+        translation_units,
     };
 
     fn uniform_backdrop(value: u8) -> Vec<u8> {
@@ -7346,12 +8286,6 @@ mod adaptive_popup_tests {
     }
 
     #[test]
-    fn translation_word_count_handles_unicode_and_single_words() {
-        assert_eq!(translated_word_count("Привет"), 1);
-        assert_eq!(translated_word_count("Hello, мир! Ça va?"), 4);
-    }
-
-    #[test]
     fn long_translation_uses_the_readable_width() {
         let layout = translation_preview_layout(&"translated text ".repeat(500));
         assert_eq!(layout.card_width, 480.0);
@@ -7375,8 +8309,55 @@ mod adaptive_popup_tests {
     }
 
     #[test]
+    fn translation_blur_setting_is_bounded_to_the_supported_range() {
+        assert_eq!(normalize_translation_blur_radius(0), 0);
+        assert_eq!(normalize_translation_blur_radius(3), 3);
+        assert_eq!(normalize_translation_blur_radius(200), 8);
+    }
+
+    #[test]
+    fn dual_mode_pairs_matching_sentences_in_order() {
+        let pairs = translation_pairs(
+            "First sentence. Second sentence! Third sentence?",
+            "Первое предложение. Второе предложение! Третье предложение?",
+        );
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[1].source.as_str(), "Second sentence!");
+        assert_eq!(pairs[1].translation.as_str(), "Второе предложение!");
+    }
+
+    #[test]
+    fn dual_mode_keeps_an_unpunctuated_phrase_as_one_pair() {
+        let pairs = translation_pairs("order number", "номер заказа");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].source.as_str(), "order number");
+        assert_eq!(pairs[0].translation.as_str(), "номер заказа");
+    }
+
+    #[test]
+    fn dual_mode_does_not_claim_alignment_when_sentence_counts_differ() {
+        let pairs = translation_pairs(
+            "One sentence. A second sentence.",
+            "Один объединённый перевод без точки",
+        );
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].source.as_str(), "One sentence. A second sentence.");
+    }
+
+    #[test]
+    fn sentence_splitter_preserves_common_titles_and_decimal_numbers() {
+        assert_eq!(
+            translation_units("Mr. Ratchett paid 3.5 dollars. Then he left."),
+            vec!["Mr. Ratchett paid 3.5 dollars.", "Then he left."]
+        );
+    }
+
+    #[test]
     fn wrapped_preview_uses_intrinsic_text_height_and_exposes_scroll_range() {
         let preview = TranslationPreview::new().unwrap();
+        preview
+            .window()
+            .set_size(slint::LogicalSize::new(480.0, 302.0));
         preview.set_card_width(480.0);
         preview.set_translated_text(
             ("Длинный переведённый текст с пропорциональным шрифтом и переносами. ".repeat(120))
@@ -7399,8 +8380,15 @@ mod adaptive_popup_tests {
         for _ in 0..1_000 {
             preview.invoke_scroll_by(-120.0);
         }
-        let maximum = preview.get_result_content_height() - preview.get_result_panel_height();
-        assert!((preview.get_result_scroll_offset() - maximum).abs() < 0.01);
+        let maximum = preview.get_result_content_height() - preview.get_result_viewport_height();
+        assert!(
+            (preview.get_result_scroll_offset() - maximum).abs() < 0.01,
+            "offset={} maximum={} content={} viewport={}",
+            preview.get_result_scroll_offset(),
+            maximum,
+            preview.get_result_content_height(),
+            preview.get_result_viewport_height(),
+        );
 
         for _ in 0..1_000 {
             preview.invoke_scroll_by(120.0);
@@ -7440,6 +8428,7 @@ mod insert_last_tests {
         let mut state = AppState::new(
             "whisper-large-v3-turbo".to_owned(),
             SpeechOutputMode::OriginalLanguage,
+            super::SpeechBackend::Cpu,
             &super::SavedSettings::default(),
         );
         let completed = SessionId::new();
@@ -7470,6 +8459,7 @@ mod insert_last_tests {
         let mut state = AppState::new(
             "whisper-large-v3-turbo".to_owned(),
             SpeechOutputMode::OriginalLanguage,
+            super::SpeechBackend::Cpu,
             &super::SavedSettings::default(),
         );
         let session_id = SessionId::new();
@@ -7492,6 +8482,7 @@ mod insert_last_tests {
         let mut state = AppState::new(
             "whisper-large-v3-turbo".to_owned(),
             SpeechOutputMode::OriginalLanguage,
+            super::SpeechBackend::Cpu,
             &super::SavedSettings::default(),
         );
         let completed = SessionId::new();
@@ -7521,6 +8512,7 @@ mod insert_last_tests {
         let mut state = AppState::new(
             "whisper-large-v3-turbo".to_owned(),
             SpeechOutputMode::OriginalLanguage,
+            super::SpeechBackend::Cpu,
             &super::SavedSettings::default(),
         );
         let completed = SessionId::new();

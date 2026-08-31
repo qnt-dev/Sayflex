@@ -19,8 +19,8 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
-            VK_CONTROL, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
-            VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_T, VK_V,
+            VK_CONTROL, VK_F, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+            VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_V,
         },
         WindowsAndMessaging::{
             CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
@@ -38,7 +38,7 @@ const INPUT_WINDOWS: u32 = 1 << 3;
 const INPUT_SPACE: u32 = 1 << 4;
 const INPUT_K: u32 = 1 << 5;
 const INPUT_V: u32 = 1 << 6;
-const INPUT_T: u32 = 1 << 7;
+const INPUT_F: u32 = 1 << 7;
 const INJECTION_UNSAFE: u32 = INPUT_CONTROL
     | INPUT_ALT
     | INPUT_SHIFT
@@ -46,7 +46,7 @@ const INJECTION_UNSAFE: u32 = INPUT_CONTROL
     | INPUT_SPACE
     | INPUT_K
     | INPUT_V
-    | INPUT_T;
+    | INPUT_F;
 const INPUT_RELEASE_STABILITY: Duration = Duration::from_millis(30);
 const ASYNC_RECONCILIATION_DELAY: Duration = Duration::from_millis(75);
 const COMMAND_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -293,7 +293,7 @@ impl RegisteredHotkeys {
                 INPUT_V,
                 "insert_last",
             ),
-            (HOTKEY_ID_TRANSLATE, u32::from(VK_T), INPUT_T, "translate"),
+            (HOTKEY_ID_TRANSLATE, u32::from(VK_F), INPUT_F, "translate"),
         ] {
             let registered = unsafe {
                 RegisterHotKey(
@@ -764,7 +764,7 @@ const fn selection_chord_mask(intent: TextActionIntent) -> u32 {
         | INPUT_ALT
         | match intent {
             TextActionIntent::CorrectLayout => INPUT_K,
-            TextActionIntent::Adaptive | TextActionIntent::Translate => INPUT_T,
+            TextActionIntent::Adaptive | TextActionIntent::Translate => INPUT_F,
         }
 }
 
@@ -782,7 +782,7 @@ impl HotkeyState {
         self.keys = keys;
         self.selection_k_down &= self.keys.is_down(VK_K);
         self.insert_v_down &= self.keys.is_down(VK_V);
-        self.adaptive_t_down &= self.keys.is_down(VK_T);
+        self.adaptive_t_down &= self.keys.is_down(VK_F);
         match self.gesture {
             GestureState::Active { gesture_id }
                 if !self.keys.command_modifiers() || !self.keys.is_down(VK_SPACE) =>
@@ -915,7 +915,7 @@ impl HotkeyState {
                 action = Some(HookAction::InsertLastRequested);
             }
         }
-        if registered_commands & INPUT_T == 0 && virtual_key == VK_T {
+        if registered_commands & INPUT_F == 0 && virtual_key == VK_F {
             if self.adaptive_t_down {
                 suppress = true;
                 if key_up {
@@ -979,7 +979,7 @@ impl PhysicalKeys {
             VK_SPACE,
             VK_K,
             VK_V,
-            VK_T,
+            VK_F,
         ] {
             let down = if virtual_key == excluded_key {
                 previous.is_down(virtual_key)
@@ -1067,8 +1067,8 @@ impl PhysicalKeys {
         if self.is_down(VK_V) {
             mask |= INPUT_V;
         }
-        if self.is_down(VK_T) {
-            mask |= INPUT_T;
+        if self.is_down(VK_F) {
+            mask |= INPUT_F;
         }
         mask
     }
@@ -1196,7 +1196,7 @@ const fn is_hotkey_key(virtual_key: u16) -> bool {
             | VK_SPACE
             | VK_K
             | VK_V
-            | VK_T
+            | VK_F
     )
 }
 
@@ -1238,7 +1238,7 @@ mod tests {
 
     use super::{
         EndReason, EventOrigin, GestureState, HOTKEY_ID_CORRECT_LAYOUT, HOTKEY_ID_INSERT_LAST,
-        HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_K, INPUT_T,
+        HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_F, INPUT_K,
         INPUT_V, PhysicalKeys, classify_event, monotonic_us, registered_hotkey_action,
         selection_chord_mask, wait_for_mask_clear_using,
     };
@@ -1246,7 +1246,7 @@ mod tests {
     use crate::inject::SYNTHETIC_MARKER;
     use windows_sys::Win32::UI::{
         Input::KeyboardAndMouse::{
-            VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_SPACE, VK_T,
+            VK_F, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_SPACE,
             VK_V,
         },
         WindowsAndMessaging::LLKHF_INJECTED,
@@ -1377,12 +1377,12 @@ mod tests {
 
     #[test]
     fn command_keys_emit_once_and_are_suppressed_until_release() {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_K, VK_T, VK_V};
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_F, VK_K, VK_V};
 
         let cases = [
             (VK_V, HookAction::InsertLastRequested),
             (
-                VK_T,
+                VK_F,
                 HookAction::SelectionRequested {
                     intent: TextActionIntent::Translate,
                 },
@@ -1415,7 +1415,7 @@ mod tests {
         let mut state = HotkeyState::default();
         event(&mut state, VK_LCONTROL, true);
         event(&mut state, VK_LMENU, true);
-        for (key, mask) in [(VK_K, INPUT_K), (VK_V, INPUT_V), (VK_T, INPUT_T)] {
+        for (key, mask) in [(VK_K, INPUT_K), (VK_V, INPUT_V), (VK_F, INPUT_F)] {
             let decision = registered_event(&mut state, key, true, mask);
             assert!(!decision.suppress);
             assert!(decision.action.is_none());
@@ -1527,17 +1527,17 @@ mod tests {
         );
         assert_eq!(
             selection_chord_mask(TextActionIntent::Adaptive),
-            INPUT_CONTROL | INPUT_ALT | INPUT_T
+            INPUT_CONTROL | INPUT_ALT | INPUT_F
         );
         assert_eq!(
             selection_chord_mask(TextActionIntent::Translate),
-            INPUT_CONTROL | INPUT_ALT | INPUT_T
+            INPUT_CONTROL | INPUT_ALT | INPUT_F
         );
     }
 
     #[test]
     fn release_wait_reconciles_until_a_late_modifier_release_is_stable() {
-        let chord = INPUT_CONTROL | INPUT_ALT | INPUT_T;
+        let chord = INPUT_CONTROL | INPUT_ALT | INPUT_F;
         let input = Cell::new(chord);
         let last_change = Cell::new(monotonic_us());
         let samples = Cell::new(0_u32);

@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 default = []
 cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
 
 [dependencies]
 anyhow = "1.0.100"

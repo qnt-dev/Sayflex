@@ -4597,7 +4597,7 @@ checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
 
 [[package]]
 name = "rust-app-core"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "rust-protocol",
  "tempfile",
@@ -4606,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "rust-model-manager"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "rust-speech-api",
  "serde",
@@ -4618,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "rust-platform-api"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "rust-protocol",
  "thiserror 2.0.19",
@@ -4626,14 +4626,14 @@ dependencies = [
 
 [[package]]
 name = "rust-platform-windows"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "rust-protocol"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "serde",
  "serde_json",
@@ -4642,7 +4642,7 @@ dependencies = [
 
 [[package]]
 name = "rust-speech-api"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "rust-protocol",
  "serde",
@@ -4651,7 +4651,7 @@ dependencies = [
 
 [[package]]
 name = "rust-translation-engine"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -4788,7 +4788,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-companion-renderer"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "pet_orb",
  "pet_particles",
@@ -4801,7 +4801,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-desktop"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "rust-app-core",
  "rust-platform-windows",
@@ -4811,11 +4811,12 @@ dependencies = [
  "slint",
  "slint-build",
  "unicode-segmentation",
+ "winresource",
 ]
 
 [[package]]
 name = "sayflex-input-host"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "rust-app-core",
  "rust-platform-windows",
@@ -4829,7 +4830,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-speech-worker"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4849,7 +4850,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-translation-worker"
-version = "0.5.25"
+version = "0.5.27"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -6327,6 +6328,7 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6"
 dependencies = [
+ "libc",
  "whisper-rs-sys",
 ]
 
@@ -6678,6 +6680,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]

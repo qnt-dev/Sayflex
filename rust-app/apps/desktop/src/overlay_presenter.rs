@@ -206,11 +206,14 @@ impl OverlayPresenter {
                     if !can_reveal {
                         return;
                     }
-                    let result = verify_contract(contract, ticket.window_handle, true)
-                        .and_then(|()| {
-                            rust_platform_windows::reveal_overlay_window(ticket.window_handle)
-                        })
-                        .and_then(|()| verify_contract(contract, ticket.window_handle, false));
+                    let result =
+                        reconcile_and_verify_contract(contract, ticket.window_handle, true)
+                            .and_then(|()| {
+                                rust_platform_windows::reveal_overlay_window(ticket.window_handle)
+                            })
+                            .and_then(|()| {
+                                reconcile_and_verify_contract(contract, ticket.window_handle, false)
+                            });
 
                     match result {
                         Ok(()) => {
@@ -265,7 +268,7 @@ impl OverlayPresenter {
     }
 
     pub(crate) fn attach(&self, window_handle: u64) -> Result<(), String> {
-        verify_contract(self.contract, window_handle, true)?;
+        reconcile_and_verify_contract(self.contract, window_handle, true)?;
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -283,8 +286,9 @@ impl OverlayPresenter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .begin_prepare()?;
-        if let Err(error) = rust_platform_windows::conceal_overlay_window(ticket.window_handle)
-            .and_then(|()| verify_contract(self.contract, ticket.window_handle, true))
+        if let Err(error) = reconcile_contract(self.contract, ticket.window_handle)
+            .and_then(|()| rust_platform_windows::conceal_overlay_window(ticket.window_handle))
+            .and_then(|()| reconcile_and_verify_contract(self.contract, ticket.window_handle, true))
         {
             self.state
                 .lock()
@@ -302,8 +306,9 @@ impl OverlayPresenter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .begin_refresh()?;
-        if let Err(error) = rust_platform_windows::cloak_overlay_window(ticket.window_handle)
-            .and_then(|()| verify_contract(self.contract, ticket.window_handle, true))
+        if let Err(error) = reconcile_contract(self.contract, ticket.window_handle)
+            .and_then(|()| rust_platform_windows::cloak_overlay_window(ticket.window_handle))
+            .and_then(|()| reconcile_and_verify_contract(self.contract, ticket.window_handle, true))
         {
             self.state
                 .lock()
@@ -394,8 +399,9 @@ impl OverlayPresenter {
         let Some((window_handle, generation)) = retirement else {
             return;
         };
-        let conceal_result = rust_platform_windows::conceal_overlay_window(window_handle)
-            .and_then(|()| verify_contract(self.contract, window_handle, true));
+        let conceal_result = reconcile_contract(self.contract, window_handle)
+            .and_then(|()| rust_platform_windows::conceal_overlay_window(window_handle))
+            .and_then(|()| reconcile_and_verify_contract(self.contract, window_handle, true));
         window.request_redraw();
         match conceal_result {
             Ok(()) => rust_app_core::diagnostics::log_line(&format!(
@@ -428,6 +434,26 @@ fn verify_contract(
             )
         }
     }
+}
+
+fn reconcile_contract(contract: OverlayContract, window_handle: u64) -> Result<(), String> {
+    match contract {
+        OverlayContract::ClickThrough => {
+            rust_platform_windows::reconcile_overlay_window_contract(window_handle)
+        }
+        OverlayContract::Interactive => {
+            rust_platform_windows::reconcile_interactive_overlay_window_contract(window_handle)
+        }
+    }
+}
+
+fn reconcile_and_verify_contract(
+    contract: OverlayContract,
+    window_handle: u64,
+    expected_cloaked: bool,
+) -> Result<(), String> {
+    reconcile_contract(contract, window_handle)?;
+    verify_contract(contract, window_handle, expected_cloaked)
 }
 
 #[cfg(test)]
