@@ -170,6 +170,7 @@ dependencies = [
  "pet_face",
  "pet_hands",
  "pet_ipc",
+ "pet_motion",
  "pet_particles",
  "pet_platform",
  "pet_render",

@@ -10,6 +10,7 @@ pet_core = { path = "../../crates/pet_core" }
 pet_face = { path = "../../crates/pet_face" }
 pet_hands = { path = "../../crates/pet_hands" }
 pet_ipc = { path = "../../crates/pet_ipc" }
+pet_motion = { path = "../../crates/pet_motion" }
 pet_particles = { path = "../../crates/pet_particles" }
 pet_platform = { path = "../../crates/pet_platform" }
 pet_render = { path = "../../crates/pet_render" }

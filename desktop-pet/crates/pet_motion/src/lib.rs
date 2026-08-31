@@ -6,6 +6,63 @@
 //! layers separate prevents each new jump or climb from becoming another
 //! collection of mutually conflicting timers in the window loop.
 
+/// The authored walk cycle follows the conventional two-step sequence.  These
+/// names are a contract between motion planning, asset manifests and visual QA;
+/// the renderer never guesses phases from a file name or image similarity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalkFramePhase {
+    ContactA,
+    DownA,
+    PassingA,
+    UpA,
+    ContactB,
+    DownB,
+    PassingB,
+    UpB,
+}
+
+impl WalkFramePhase {
+    pub const ALL: [Self; 8] = [
+        Self::ContactA,
+        Self::DownA,
+        Self::PassingA,
+        Self::UpA,
+        Self::ContactB,
+        Self::DownB,
+        Self::PassingB,
+        Self::UpB,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WalkFrameSample {
+    pub index: usize,
+    pub phase: WalkFramePhase,
+    /// Progress between this painted frame and the next one.  The current
+    /// renderer uses nearest authored frames; the value is retained for a
+    /// future optical-flow or hand-authored in-between layer.
+    pub progress: f32,
+}
+
+/// Resolves a distance-driven normalized cycle position to one authored frame.
+/// Values outside 0..1 wrap, so an accumulator can run indefinitely without a
+/// discontinuity or a frame-rate-dependent timer reset.
+#[must_use]
+pub fn sample_walk_cycle(cycle: f32) -> WalkFrameSample {
+    let cycle = if cycle.is_finite() {
+        cycle.rem_euclid(1.0)
+    } else {
+        0.0
+    };
+    let frame = cycle * WalkFramePhase::ALL.len() as f32;
+    let index = (frame.floor() as usize).min(WalkFramePhase::ALL.len() - 1);
+    WalkFrameSample {
+        index,
+        phase: WalkFramePhase::ALL[index],
+        progress: frame - index as f32,
+    }
+}
+
 /// A traversal mechanic selected for one obstacle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mechanic {
@@ -404,7 +461,35 @@ pub const fn timeline_for(mechanic: Mechanic) -> Timeline {
 mod tests {
     use super::{
         Attachment, GraphError, Mechanic, MotionGraph, Phase, PlanError, Planner, Request,
+        WalkFramePhase, sample_walk_cycle,
     };
+
+    #[test]
+    fn authored_walk_cycle_has_the_standard_eight_semantic_phases() {
+        let expected = [
+            WalkFramePhase::ContactA,
+            WalkFramePhase::DownA,
+            WalkFramePhase::PassingA,
+            WalkFramePhase::UpA,
+            WalkFramePhase::ContactB,
+            WalkFramePhase::DownB,
+            WalkFramePhase::PassingB,
+            WalkFramePhase::UpB,
+        ];
+        for (index, phase) in expected.into_iter().enumerate() {
+            let sample = sample_walk_cycle(index as f32 / 8.0);
+            assert_eq!(sample.index, index);
+            assert_eq!(sample.phase, phase);
+            assert!(sample.progress.abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn authored_walk_cycle_wraps_without_a_timer_discontinuity() {
+        assert_eq!(sample_walk_cycle(1.0).index, 0);
+        assert_eq!(sample_walk_cycle(-0.125).index, 7);
+        assert_eq!(sample_walk_cycle(f32::NAN).index, 0);
+    }
 
     fn request(height: f32) -> Request {
         Request {

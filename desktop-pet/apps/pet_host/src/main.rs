@@ -15,6 +15,7 @@
 //!   `cargo run -p pet_host --release -- --dump sheet.png`
 
 mod manifest;
+mod walk_cycle;
 
 use std::{
     path::{Path, PathBuf},
@@ -87,6 +88,18 @@ fn main() {
         },
         None => WalkStyle::default(),
     };
+    let walk_pack = match argument_value(&arguments, "--walk-cycle") {
+        Some(value) => match walk_cycle::Pack::parse(&value) {
+            Some(pack) => pack,
+            None => {
+                eprintln!(
+                    "pet_host: unknown walk cycle '{value}'; expected a, b, c, d or procedural"
+                );
+                std::process::exit(2);
+            }
+        },
+        None => walk_cycle::Pack::default(),
+    };
 
     let result = match (
         argument_value(&arguments, "--dump"),
@@ -94,9 +107,9 @@ fn main() {
         argument_value(&arguments, "--hands"),
     ) {
         (_, _, Some(path)) => dump_hands(Path::new(&path), scale),
-        (_, Some(path), None) => dump_walk(Path::new(&path), scale, walk_style),
+        (_, Some(path), None) => dump_walk(Path::new(&path), scale, walk_style, walk_pack),
         (Some(path), None, None) => dump_sheet(Path::new(&path), scale),
-        (None, None, None) => run(scale, stdin_control, walk_style),
+        (None, None, None) => run(scale, stdin_control, walk_style, walk_pack),
     };
     if let Err(error) = result {
         eprintln!("pet_host: {error}");
@@ -131,6 +144,9 @@ struct Rig {
     /// раздельны, чтобы в кадре не зеркалить сотни тысяч пикселей.
     profile_right: ProfileRig,
     profile_left: ProfileRig,
+    /// Complete painted contact/down/passing/up frames.  The old articulated
+    /// profile remains available for run, transitions and diagnostics.
+    walk_cycle: Option<walk_cycle::Cycle>,
 }
 
 struct ProfileRig {
@@ -183,6 +199,7 @@ struct Assets {
     manifest: FaceManifest,
     profile_right: PoseAssets,
     profile_left: PoseAssets,
+    walk_cycle: Option<walk_cycle::Assets>,
 }
 
 struct PoseAssets {
@@ -325,6 +342,10 @@ impl PoseAssets {
 
 impl Assets {
     fn load() -> Result<Self, String> {
+        Self::load_with_walk(walk_cycle::Pack::default())
+    }
+
+    fn load_with_walk(walk_pack: walk_cycle::Pack) -> Result<Self, String> {
         let manifest = FaceManifest::load(&asset_path(MANIFEST))?;
         let creature = SpriteSource::load(&asset_path(&manifest.sprite), 10)
             .map_err(|error| format!("{}: {error}", manifest.sprite))?;
@@ -346,6 +367,10 @@ impl Assets {
                 sprite,
             });
         }
+        let walk_cycle = walk_pack
+            .manifest_name()
+            .map(|name| walk_cycle::Assets::load(&asset_path(name)))
+            .transpose()?;
         Ok(Self {
             creature,
             orb,
@@ -353,6 +378,7 @@ impl Assets {
             manifest,
             profile_right: PoseAssets::load("profile_motion_right.json")?,
             profile_left: PoseAssets::load("profile_motion_left.json")?,
+            walk_cycle,
         })
     }
 
@@ -425,6 +451,10 @@ impl Assets {
 
         let profile_right = self.profile_right.build(scale, canvas_size, ground);
         let profile_left = self.profile_left.build(scale, canvas_size, ground);
+        let walk_cycle = self
+            .walk_cycle
+            .as_ref()
+            .map(|cycle| cycle.build(scale, canvas_size.0, ground));
 
         Rig {
             scale,
@@ -441,6 +471,7 @@ impl Assets {
             ground,
             profile_right,
             profile_left,
+            walk_cycle,
         }
     }
 }
@@ -951,7 +982,15 @@ impl Walk {
     /// `travelled` — путь за кадр, `stride` — полный ход стопы от переднего
     /// контакта до заднего в пикселях,
     /// `direction` — знак движения по горизонтали.
-    fn update(&mut self, dt: f32, travelled: f32, stride: f32, gait: Gait, direction: f32) {
+    fn update(
+        &mut self,
+        dt: f32,
+        travelled: f32,
+        stride: f32,
+        authored_cycle_distance: Option<f32>,
+        gait: Gait,
+        direction: f32,
+    ) {
         // Phase follows the *actual rendered paw trajectory*. During stance a
         // walk paw traverses one stride in `stance` of a cycle; a run paw
         // traverses 1.12 strides in 0.36 of a cycle. The old implementation
@@ -959,7 +998,10 @@ impl Walk {
         // rendered stride, so the body moved while a paw barely moved: the
         // visible result was shuffling even though the IK target was grounded.
         let stride = stride.max(1.0);
-        let walk_cycle_distance = stride / self.style.profile().stance;
+        let procedural_walk_cycle_distance = stride / self.style.profile().stance;
+        let walk_cycle_distance = authored_cycle_distance
+            .filter(|distance| distance.is_finite() && *distance > 0.0)
+            .unwrap_or(procedural_walk_cycle_distance);
         let run_cycle_distance = stride * 1.12 / 0.36;
         let cycle_distance = mix(
             walk_cycle_distance,
@@ -1474,8 +1516,13 @@ impl Clouds {
     }
 }
 
-fn run(initial_scale: f32, stdin_control: bool, walk_style: WalkStyle) -> Result<(), String> {
-    let assets = Assets::load()?;
+fn run(
+    initial_scale: f32,
+    stdin_control: bool,
+    walk_style: WalkStyle,
+    walk_pack: walk_cycle::Pack,
+) -> Result<(), String> {
+    let assets = Assets::load_with_walk(walk_pack)?;
     let rig = assets.build(initial_scale);
 
     let (initial_cursor_x, initial_cursor_y) = pet_platform::cursor_position();
@@ -1511,7 +1558,7 @@ fn run(initial_scale: f32, stdin_control: bool, walk_style: WalkStyle) -> Result
     let mut hands = Hands::new(0x00BA_DA55);
 
     eprintln!(
-        "pet_host: масштаб {:.2}, холст {}x{}, зверёк {}x{}, шарик {}x{}",
+        "pet_host: масштаб {:.2}, холст {}x{}, зверёк {}x{}, шарик {}x{}, походка {walk_pack:?}",
         rig.scale,
         rig.canvas_size.0,
         rig.canvas_size.1,
@@ -1638,6 +1685,9 @@ fn run(initial_scale: f32, stdin_control: bool, walk_style: WalkStyle) -> Result
             dt,
             travel.abs(),
             profile_common_stride(&rig.profile_right.leg_chains, &walk),
+            rig.walk_cycle
+                .as_ref()
+                .map(walk_cycle::Cycle::travel_distance),
             gait,
             direction,
         );
@@ -1735,7 +1785,10 @@ struct Frame<'a> {
 
 struct CharacterLayers {
     front: Canvas,
+    /// Final profile composite used by the front/profile orientation blend.
     profile: Canvas,
+    profile_procedural: Canvas,
+    profile_authored: Canvas,
     profile_body: Canvas,
 }
 
@@ -1744,6 +1797,8 @@ impl CharacterLayers {
         Self {
             front: Canvas::new(rig.canvas_size.0, rig.canvas_size.1),
             profile: Canvas::new(rig.canvas_size.0, rig.canvas_size.1),
+            profile_procedural: Canvas::new(rig.canvas_size.0, rig.canvas_size.1),
+            profile_authored: Canvas::new(rig.canvas_size.0, rig.canvas_size.1),
             profile_body: Canvas::new(
                 rig.profile_right.creature.width(),
                 rig.profile_right.creature.height(),
@@ -1794,15 +1849,47 @@ fn draw_character_transition(canvas: &mut Canvas, frame: &Frame<'_>, layers: &mu
     let mix = frame.orientation.profile;
     if mix <= 0.001 {
         draw_front_character(canvas, frame);
-    } else if mix >= 0.999 {
-        draw_profile_character(canvas, frame, &mut layers.profile_body);
+        return;
+    }
+
+    render_profile_layer(layers, frame);
+    if mix >= 0.999 {
+        canvas.draw_canvas(&layers.profile, 0, 0);
+        return;
+    }
+
+    layers.front.clear();
+    draw_front_character(&mut layers.front, frame);
+    canvas.draw_canvas_opacity(&layers.front, 1.0 - mix);
+    canvas.draw_canvas_opacity(&layers.profile, mix);
+}
+
+fn render_profile_layer(layers: &mut CharacterLayers, frame: &Frame<'_>) {
+    layers.profile.clear();
+    let authored_mix = if frame.rig.walk_cycle.is_some() {
+        frame.walk.blend * (1.0 - smooth_unit(frame.walk.run))
     } else {
-        layers.front.clear();
-        layers.profile.clear();
-        draw_front_character(&mut layers.front, frame);
-        draw_profile_character(&mut layers.profile, frame, &mut layers.profile_body);
-        canvas.draw_canvas_opacity(&layers.front, 1.0 - mix);
-        canvas.draw_canvas_opacity(&layers.profile, mix);
+        0.0
+    };
+    if authored_mix <= 0.001 {
+        draw_procedural_profile_character(&mut layers.profile, frame, &mut layers.profile_body);
+    } else if authored_mix >= 0.999 {
+        draw_authored_profile_character(&mut layers.profile, frame);
+    } else {
+        layers.profile_procedural.clear();
+        layers.profile_authored.clear();
+        draw_procedural_profile_character(
+            &mut layers.profile_procedural,
+            frame,
+            &mut layers.profile_body,
+        );
+        draw_authored_profile_character(&mut layers.profile_authored, frame);
+        layers
+            .profile
+            .draw_canvas_opacity(&layers.profile_procedural, 1.0 - authored_mix);
+        layers
+            .profile
+            .draw_canvas_opacity(&layers.profile_authored, authored_mix);
     }
 }
 
@@ -1879,7 +1966,43 @@ fn front_tail_warp(mut warp: Warp, swing: f32) -> Warp {
     warp
 }
 
-fn draw_profile_character(canvas: &mut Canvas, frame: &Frame<'_>, body_layer: &mut Canvas) {
+fn draw_authored_profile_character(canvas: &mut Canvas, frame: &Frame<'_>) {
+    let Some(cycle) = frame.rig.walk_cycle.as_ref() else {
+        return;
+    };
+    let facing_right = frame.orientation.facing > 0.0;
+    let sample = pet_motion::sample_walk_cycle(frame.walk.phase / std::f32::consts::TAU);
+    let painted = cycle.frame(sample.index, facing_right);
+    let lift = frame.hopper.height;
+    canvas.draw(
+        &painted.sprite,
+        painted.origin.0.round() as i32,
+        (painted.origin.1 - lift).round() as i32,
+    );
+
+    // Expressions remain procedural, but the body silhouette is not.  Each
+    // authored frame owns a separately measured visor rectangle, preventing
+    // the face from sliding while the painted head rises through the step.
+    let face = pet_face::render_profile(
+        &frame.mood.face,
+        painted.visor,
+        frame.rig.scale,
+        facing_right,
+    );
+    canvas.draw_rgba(
+        face.data(),
+        face.width(),
+        face.height(),
+        painted.visor_origin.0.round() as i32,
+        (painted.visor_origin.1 - lift).round() as i32,
+    );
+}
+
+fn draw_procedural_profile_character(
+    canvas: &mut Canvas,
+    frame: &Frame<'_>,
+    body_layer: &mut Canvas,
+) {
     let rig = frame.rig;
     let pose = frame.orientation.profile_rig(rig);
     let facing_right = frame.orientation.facing > 0.0;
@@ -2669,8 +2792,13 @@ fn dump_sheet(path: &Path, scale: f32) -> Result<(), String> {
 ///
 /// Верхний ряд — шаг, нижний — бег: разницу в амплитуде и наклоне на статичном
 /// кадре иначе не оценить.
-fn dump_walk(path: &Path, scale: f32, walk_style: WalkStyle) -> Result<(), String> {
-    let assets = Assets::load()?;
+fn dump_walk(
+    path: &Path,
+    scale: f32,
+    walk_style: WalkStyle,
+    walk_pack: walk_cycle::Pack,
+) -> Result<(), String> {
+    let assets = Assets::load_with_walk(walk_pack)?;
     let rig = assets.build(scale.clamp(MIN_SCALE, MAX_SCALE));
     if rig.profile_right.legs.is_empty() && rig.profile_right.leg_chains.is_empty() {
         return Err("профильная поза не содержит ног: ходьбу показать нечем".to_owned());
@@ -2736,7 +2864,7 @@ fn dump_walk(path: &Path, scale: f32, walk_style: WalkStyle) -> Result<(), Strin
     }
     pet_render::save_on_checkerboard(&sheet, path).map_err(|error| error.to_string())?;
     eprintln!(
-        "полоса ходьбы: {} ({walk_style:?}, шаг и бег, по {FRAMES} кадров)",
+        "полоса ходьбы: {} ({walk_style:?}, {walk_pack:?}, шаг и бег, по {FRAMES} кадров)",
         path.display(),
     );
     Ok(())
@@ -3295,7 +3423,7 @@ mod gait_tests {
         for _ in 0..360 {
             let stride = profile_common_stride(&pose.leg_chains, &walk);
             let travelled = stride / 180.0;
-            walk.update(1.0 / 120.0, travelled, stride, Gait::Walk, 1.0);
+            walk.update(1.0 / 120.0, travelled, stride, None, Gait::Walk, 1.0);
             root_x += travelled;
             let motions = [walk.profile_leg_motion(0), walk.profile_leg_motion(1)];
             let pelvis = profile_pelvis_for_walk(&pose.leg_chains, motions, true, &walk);
