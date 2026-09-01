@@ -36,6 +36,33 @@
         </nav>
       </aside>
 
+      <!-- ─────────── Сводка: Overview ─────────── -->
+      <section class="stage stage-wide page" data-page="overview" hidden>
+        <div class="list-head">
+          <div>
+            <p class="index">01 / 08</p>
+            <h1>Overview</h1>
+          </div>
+          <div class="list-summary" id="overview-privacy">
+            <span class="privacy-dot" aria-hidden="true"></span>
+            <span id="overview-privacy-text">Audio stays on this device</span>
+          </div>
+        </div>
+
+        <div class="summary">
+          <p class="statement" id="overview-statement">Ready to dictate</p>
+          <p class="statement-sub" id="overview-sub">Hold Ctrl + Alt + Space anywhere in Windows.</p>
+
+          <div class="note" id="overview-note" hidden>
+            <span class="note-mark" aria-hidden="true"></span>
+            <p id="overview-note-text"></p>
+            <button class="note-action" id="overview-note-action" hidden></button>
+          </div>
+
+          <dl class="facts" id="overview-facts"></dl>
+        </div>
+      </section>
+
       <!-- ─────────── Прибор: Dictation ─────────── -->
       <section class="stage page" data-page="dictation" hidden>
         <div class="stage-heading">
@@ -86,6 +113,29 @@
         </div>
       </aside>
 
+      <!-- ─────────── Форма: Translation ─────────── -->
+      <section class="stage stage-wide page" data-page="translation" hidden>
+        <div class="list-head">
+          <div>
+            <p class="index">03 / 08</p>
+            <h1>Translation</h1>
+          </div>
+          <div class="list-summary" id="translation-summary">
+            <span class="privacy-dot" aria-hidden="true"></span>
+            <span id="translation-summary-text">Runs on this device</span>
+          </div>
+        </div>
+
+        <div class="form">
+          <div class="note" id="translation-note" hidden>
+            <span class="note-mark" aria-hidden="true"></span>
+            <p id="translation-note-text"></p>
+            <button class="note-action" id="translation-note-action" hidden></button>
+          </div>
+          <dl class="form-rows" id="translation-rows"></dl>
+        </div>
+      </section>
+
       <!-- ─────────── Список: Models ─────────── -->
       <section class="stage stage-wide page" data-page="models" hidden>
         <div class="list-head">
@@ -123,13 +173,84 @@
         <ul class="rows rows-drag" id="provider-rows"></ul>
       </section>
 
-      <!-- ─────────── Ещё не нарисовано ─────────── -->
-      <section class="stage stage-wide page page-blank" data-page="blank" hidden>
-        <div class="blank">
-          <p class="index" id="blank-index">— / 08</p>
-          <h1 id="blank-title">Overview</h1>
-          <p class="blank-note">Эта страница ещё не нарисована. Архетип — <b id="blank-archetype">сводка</b>.</p>
+      <!-- ─────────── Прибор: Visuals ─────────── -->
+      <section class="stage page" data-page="visuals" hidden>
+        <div class="stage-heading">
+          <p>06 / 08</p>
+          <h1>Visuals</h1>
+          <span id="visuals-subtitle">Voice orb · shown while recording</span>
         </div>
+
+        <div class="instrument">
+          <div class="preview" id="visual-preview" data-style="orb">
+            <div class="preview-orb" aria-hidden="true"></div>
+            <div class="preview-bars" id="preview-bars" aria-hidden="true"></div>
+            <svg class="preview-ribbon" viewBox="0 0 200 90" aria-hidden="true">
+              <path id="ribbon-path" d="M0 45 Q 25 20 50 45 T 100 45 T 150 45 T 200 45" fill="none" stroke="currentColor" stroke-width="1.4"/>
+            </svg>
+            <div class="preview-slate" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="preview-off" aria-hidden="true">no overlay</div>
+          </div>
+
+          <div class="readout">
+            <span id="visuals-caption" class="readout-alone">Drawn in the recording overlay</span>
+          </div>
+
+          <div class="note" id="visuals-note" hidden>
+            <span class="note-mark" aria-hidden="true"></span>
+            <p id="visuals-note-text"></p>
+            <button class="note-action" id="visuals-note-action" hidden></button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="right-panel page-side" data-page="visuals" hidden aria-label="Настройки визуализатора">
+        <div class="eyebrow">Style</div>
+        <div class="choice-grid" id="visual-choices"></div>
+        <p class="side-note" id="visuals-side-note">Drawn by the application itself.</p>
+
+        <div class="setting-rows">
+          <button class="setting-row"><span>Palette</span><b>Monochrome</b></button>
+          <button class="setting-row"><span>Response</span><b>Fast</b></button>
+        </div>
+      </aside>
+
+      <!-- ─────────── Список: History ─────────── -->
+      <section class="stage stage-wide page" data-page="history" hidden>
+        <div class="list-head">
+          <div>
+            <p class="index">07 / 08</p>
+            <h1>History</h1>
+          </div>
+          <div class="list-summary" id="history-summary">
+            <span id="history-count">128 entries</span>
+            <span class="sep" aria-hidden="true"></span>
+            <span id="history-scope">stored on this device</span>
+          </div>
+        </div>
+        <p class="list-lede" id="history-lede">Newest first. Cleared entries are removed from disk, not hidden.</p>
+        <ul class="rows" id="history-rows"></ul>
+        <div class="empty" id="history-empty" hidden>
+          <p id="history-empty-title">Nothing here yet</p>
+          <p class="empty-note" id="history-empty-note"></p>
+          <button class="note-action" id="history-empty-action" hidden></button>
+        </div>
+      </section>
+
+      <!-- ─────────── Форма: Hotkeys ─────────── -->
+      <section class="stage stage-wide page" data-page="hotkeys" hidden>
+        <div class="list-head">
+          <div>
+            <p class="index">08 / 08</p>
+            <h1>Hotkeys</h1>
+          </div>
+          <div class="list-summary" id="hotkeys-summary">
+            <span class="privacy-dot" aria-hidden="true"></span>
+            <span id="hotkeys-summary-text">All four are held by SayFlex</span>
+          </div>
+        </div>
+        <p class="list-lede">Held, not toggled: the action lasts exactly as long as the keys are down.</p>
+        <ul class="rows" id="hotkey-rows"></ul>
       </section>
     </section>
 

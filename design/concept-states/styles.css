@@ -84,10 +84,11 @@ button, input { font: inherit; color: inherit; }
 /* A list needs width, so on those pages the third column simply is not there. */
 .workspace.is-list { grid-template-columns: 27% 1fr; }
 
-.left-panel { padding-left: 9.55vw; }
+.left-panel { padding-left: 9.55vw; padding-right: 2.4vw; min-width: 0; }
 .eyebrow { color: #6c7075; font-size: clamp(10px,.95vw,14px); line-height: 1; }
 
-.tool-nav { display: grid; gap: 1.05vh; margin-top: 2.2vh; width: min(238px, 19vw); }
+/* The nav lives inside its column and can never spill over the page beside it. */
+.tool-nav { display: grid; gap: 1.05vh; margin-top: 2.2vh; width: 100%; max-width: 238px; }
 .tool-nav button {
   min-height: 42px; display:flex; align-items:center; gap:17px;
   border:0; background:transparent; padding:0 15px; text-align:left; cursor:pointer;
@@ -257,3 +258,71 @@ button, input { font: inherit; color: inherit; }
   font:600 9px/1 ui-monospace, monospace; letter-spacing:.06em; color:#6f7478; transition:all .16s var(--ease); }
 .state-switch button:hover { border-style:solid; color:var(--ink); }
 .state-switch button.active { background:var(--ink); border-color:var(--ink); color:#f5f5f2; }
+
+/* ── summary archetype (Overview) ──────────────────────── */
+.summary { max-width: 62ch; padding-top: 2vh; }
+.statement { margin:0; font-size:clamp(24px,2.6vw,38px); font-weight:380; letter-spacing:-.045em; line-height:1.08; }
+.statement-sub { margin:12px 0 0; font-size:13px; color:#6f7478; line-height:1.5; }
+.summary .note { margin-top:3vh; max-width:none; }
+.facts { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:0 3vw; margin:4vh 0 0; padding:0; }
+.facts > div { display:grid; gap:6px; padding:14px 0; border-top:1px solid var(--hairline); }
+.facts dt { font-size:8.5px; letter-spacing:.13em; text-transform:uppercase; color:#767b80; }
+.facts dd { margin:0; font-size:13px; font-weight:600; letter-spacing:-.01em; }
+.facts dd small { display:block; margin-top:4px; font-size:10.5px; font-weight:400; color:#6f7478; letter-spacing:0; }
+.facts > div[data-tone="signal"] dd { color:var(--signal); }
+
+/* ── form archetype (Translation, Hotkeys) ─────────────── */
+.form { max-width: 68ch; padding-top: 1vh; }
+.form .note { margin:0 0 2.4vh; max-width:none; }
+.form-rows { margin:0; padding:0; }
+.form-rows > div { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:baseline; gap:20px;
+  padding:15px 4px; border-top:1px solid var(--hairline); }
+.form-rows > div:last-child { border-bottom:1px solid var(--hairline); }
+.form-rows dt { font-size:12.5px; font-weight:650; letter-spacing:-.01em; }
+.form-rows dt small { display:block; margin-top:5px; font-size:11px; font-weight:400; color:#6f7478; letter-spacing:0; }
+.form-rows dd { margin:0; display:flex; align-items:center; gap:11px; font-size:12px; font-weight:600; white-space:nowrap; }
+.form-rows dd em { font-style:normal; font-weight:400; color:#6f7478; }
+.form-rows > div[data-tone="signal"] dd { color:var(--signal); }
+.stepper { display:flex; align-items:center; gap:9px; }
+.stepper button { width:22px; height:22px; border:1px solid rgba(17,19,23,.55); background:transparent; cursor:pointer;
+  line-height:1; font-size:12px; }
+.stepper button:hover { background:var(--ink); color:#fff; }
+.stepper b { min-width:14px; text-align:center; font-variant-numeric:tabular-nums; }
+
+/* ── visualizer preview ────────────────────────────────── */
+.preview { position:relative; width:min(24vw,290px); aspect-ratio:1.9; display:grid; place-items:center;
+  border:1px solid var(--hairline); }
+.preview > * { position:absolute; opacity:0; transition:opacity .28s var(--ease); }
+.preview-orb { width:38%; aspect-ratio:1; border-radius:50%;
+  background:radial-gradient(circle at 42% 38%, rgba(255,255,255,.95) 0 8%, rgba(255,255,255,.35) 26%, rgba(17,19,23,.5) 62%, rgba(17,19,23,.75) 100%); }
+.preview-bars { inset:26% 12%; display:flex; align-items:center; justify-content:center; gap:3px; }
+.preview-bars i { width:2px; height:14%; background:var(--ink); opacity:.8; transition:height 70ms linear; }
+.preview-ribbon { width:76%; color:rgba(17,19,23,.75); }
+.preview-slate { inset:30% 16%; display:grid; align-content:center; gap:9px; }
+.preview-slate i { height:2px; background:rgba(17,19,23,.65); }
+.preview-slate i:nth-child(2) { width:78%; }
+.preview-slate i:nth-child(3) { width:44%; opacity:.5; }
+.preview-off { font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:#7b8085; }
+.preview[data-style="orb"] .preview-orb,
+.preview[data-style="companion"] .preview-orb,
+.preview[data-style="spectrum"] .preview-bars,
+.preview[data-style="ribbon"] .preview-ribbon,
+.preview[data-style="slate"] .preview-slate,
+.preview[data-style="off"] .preview-off { opacity:1; }
+.preview[data-style="companion"] { border-style:dashed; border-color:rgba(17,19,23,.34); }
+
+/* ── empty state ───────────────────────────────────────── */
+.empty { padding:6vh 4px 0; max-width:52ch; }
+.empty p { margin:0; font-size:15px; font-weight:600; letter-spacing:-.02em; }
+.empty .empty-note { margin-top:10px; font-size:12px; font-weight:400; color:#6f7478; line-height:1.55; }
+.empty .note-action { margin:18px 0 0; }
+
+/* A row that is only text — history entries carry no size column. */
+.row-quote { font-size:13px; letter-spacing:-.005em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.row[data-state="remote"] .row-mark { background:var(--signal); border-color:var(--signal); }
+.row[data-state="remote"] .state-text { color:var(--signal); }
+
+/* Hotkey rows lead with the combination itself, set in the numeric column so
+   the four line up as a keyboard rather than as prose. */
+.row-keys { width:min(150px,13vw); font:600 12px/1 ui-monospace, monospace; letter-spacing:-.01em; }
+.row[data-state="disabled"] .row-keys { text-decoration:line-through; text-decoration-thickness:1px; }
