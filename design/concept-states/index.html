@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#bfc2c6">
+  <title>SayFlex — States</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell" aria-label="Концепт интерфейса SayFlex: состояния">
+    <header class="topline">
+      <div class="date-lockup">
+        <strong id="weekday">Tue</strong>
+        <span class="date-rule" aria-hidden="true"></span>
+        <strong id="date">1 September</strong>
+      </div>
+      <div class="product-lockup">
+        <span>SAYFLEX</span>
+        <strong id="year">2026</strong>
+      </div>
+    </header>
+
+    <section class="workspace" id="workspace">
+      <aside class="left-panel" aria-label="Разделы">
+        <div class="eyebrow">Tools</div>
+        <nav class="tool-nav" id="tool-nav">
+          <button data-page="overview"><i class="nav-icon overview-icon"></i><span>Overview</span></button>
+          <button data-page="dictation" class="active"><i class="nav-icon dictate-icon"></i><span>Dictation</span></button>
+          <button data-page="translation"><i class="nav-icon translate-icon"></i><span>Translation</span></button>
+          <button data-page="models"><i class="nav-icon model-icon"></i><span>Models</span></button>
+          <button data-page="providers"><i class="nav-icon provider-icon"></i><span>Providers</span></button>
+          <button data-page="visuals"><i class="nav-icon visual-icon"></i><span>Visuals</span></button>
+          <button data-page="history"><i class="nav-icon history-icon"></i><span>History</span></button>
+          <button data-page="hotkeys"><i class="nav-icon hotkey-icon"></i><span>Hotkeys</span></button>
+        </nav>
+      </aside>
+
+      <!-- ─────────── Прибор: Dictation ─────────── -->
+      <section class="stage page" data-page="dictation" hidden>
+        <div class="stage-heading">
+          <p>02 / 08</p>
+          <h1>Dictation</h1>
+          <span id="dictation-subtitle">Local speech · ready</span>
+        </div>
+
+        <div class="instrument">
+          <div class="signal" id="signal" data-state="ready">
+            <div class="signal-bars" id="signal-bars" aria-hidden="true"></div>
+            <div class="signal-arc" aria-hidden="true"></div>
+          </div>
+
+          <div class="readout">
+            <strong id="readout-value">—</strong>
+            <span id="readout-label">hold Ctrl + Alt + Space</span>
+          </div>
+
+          <div class="note" id="dictation-note" hidden>
+            <span class="note-mark" aria-hidden="true"></span>
+            <p id="dictation-note-text"></p>
+            <button class="note-action" id="dictation-note-action" hidden></button>
+          </div>
+
+          <dl class="metrics" id="dictation-metrics" hidden>
+            <div><dt>release → insert</dt><dd id="metric-latency">—</dd></div>
+            <div><dt>target</dt><dd id="metric-target">—</dd></div>
+            <div><dt>source</dt><dd id="metric-source">—</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <aside class="right-panel page-side" data-page="dictation" hidden aria-label="Настройки диктовки">
+        <div class="eyebrow">Engine</div>
+        <div class="choice-grid">
+          <button class="choice active"><i class="spot-mark"></i><span>Local<br>GPU</span></button>
+          <button class="choice"><i class="area-mark"></i><span>Local<br>CPU</span></button>
+          <button class="choice"><i class="target-mark"></i><span>Auto</span></button>
+          <button class="choice"><i class="sun-mark"></i><span>API</span></button>
+        </div>
+        <p class="side-note" id="engine-note">CUDA verified by warm-up · 5070 Ti</p>
+
+        <div class="setting-rows">
+          <button class="setting-row"><span>Output</span><b>Original language</b></button>
+          <button class="setting-row"><span>Release</span><b>Fastest</b></button>
+          <button class="setting-row"><span>History</span><b>Enabled</b></button>
+        </div>
+      </aside>
+
+      <!-- ─────────── Список: Models ─────────── -->
+      <section class="stage stage-wide page" data-page="models" hidden>
+        <div class="list-head">
+          <div>
+            <p class="index">04 / 08</p>
+            <h1>Models</h1>
+          </div>
+          <div class="list-summary">
+            <span>4.7 GB on disk</span>
+            <span class="sep" aria-hidden="true"></span>
+            <span>2 installed</span>
+          </div>
+        </div>
+
+        <div class="group-label">Speech</div>
+        <ul class="rows" id="model-rows"></ul>
+
+        <div class="group-label">Translation packs</div>
+        <ul class="rows" id="pack-rows"></ul>
+      </section>
+
+      <!-- ─────────── Список: Providers ─────────── -->
+      <section class="stage stage-wide page" data-page="providers" hidden>
+        <div class="list-head">
+          <div>
+            <p class="index">05 / 08</p>
+            <h1>Transcription order</h1>
+          </div>
+          <div class="list-summary" id="privacy-summary">
+            <span class="privacy-dot" aria-hidden="true"></span>
+            <span id="privacy-text">Audio stays on this device</span>
+          </div>
+        </div>
+        <p class="list-lede">Top first. The next one is used only when the one above runs out.</p>
+        <ul class="rows rows-drag" id="provider-rows"></ul>
+      </section>
+
+      <!-- ─────────── Ещё не нарисовано ─────────── -->
+      <section class="stage stage-wide page page-blank" data-page="blank" hidden>
+        <div class="blank">
+          <p class="index" id="blank-index">— / 08</p>
+          <h1 id="blank-title">Overview</h1>
+          <p class="blank-note">Эта страница ещё не нарисована. Архетип — <b id="blank-archetype">сводка</b>.</p>
+        </div>
+      </section>
+    </section>
+
+    <footer class="footerline">
+      <button class="brand-mark" type="button">SAY<br>FLEX<i></i></button>
+      <div class="status-copy">
+        <span id="status-mode">LOCAL · PRIVATE</span>
+        <strong id="status-line">SYSTEM READY</strong>
+      </div>
+
+      <div class="state-switch" id="state-switch" aria-label="Состояния (только в прототипе)">
+        <span class="state-switch-label">STATE</span>
+        <div class="state-switch-buttons" id="state-buttons"></div>
+      </div>
+
+      <div class="page-number" id="page-number">013</div>
+    </footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
