@@ -33,6 +33,7 @@
           <button data-page="visuals"><i class="nav-icon visual-icon"></i><span>Visuals</span></button>
           <button data-page="history"><i class="nav-icon history-icon"></i><span>History</span></button>
           <button data-page="hotkeys"><i class="nav-icon hotkey-icon"></i><span>Hotkeys</span></button>
+          <button data-page="controls"><i class="nav-icon controls-icon"></i><span>Controls</span></button>
         </nav>
       </aside>
 
@@ -106,11 +107,7 @@
         </div>
         <p class="side-note" id="engine-note">CUDA verified by warm-up · 5070 Ti</p>
 
-        <div class="setting-rows">
-          <button class="setting-row"><span>Output</span><b>Original language</b></button>
-          <button class="setting-row"><span>Release</span><b>Fastest</b></button>
-          <button class="setting-row"><span>History</span><b>Enabled</b></button>
-        </div>
+        <div class="setting-rows" id="dictation-settings"></div>
       </aside>
 
       <!-- ─────────── Форма: Translation ─────────── -->
@@ -209,10 +206,7 @@
         <div class="choice-grid" id="visual-choices"></div>
         <p class="side-note" id="visuals-side-note">Drawn by the application itself.</p>
 
-        <div class="setting-rows">
-          <button class="setting-row"><span>Palette</span><b>Monochrome</b></button>
-          <button class="setting-row"><span>Response</span><b>Fast</b></button>
-        </div>
+        <div class="setting-rows" id="visuals-settings"></div>
       </aside>
 
       <!-- ─────────── Список: History ─────────── -->
@@ -226,6 +220,7 @@
             <span id="history-count">128 entries</span>
             <span class="sep" aria-hidden="true"></span>
             <span id="history-scope">stored on this device</span>
+            <span id="history-clear"></span>
           </div>
         </div>
         <p class="list-lede" id="history-lede">Newest first. Cleared entries are removed from disk, not hidden.</p>
@@ -252,10 +247,25 @@
         <p class="list-lede">Held, not toggled: the action lasts exactly as long as the keys are down.</p>
         <ul class="rows" id="hotkey-rows"></ul>
       </section>
+      <!-- ─────────── Лист элементов: Controls ─────────── -->
+      <section class="stage stage-wide page" data-page="controls" hidden>
+        <div class="list-head">
+          <div>
+            <p class="index">09 / 09</p>
+            <h1>Controls</h1>
+          </div>
+          <div class="list-summary">
+            <span id="controls-summary">Every control, every state</span>
+          </div>
+        </div>
+        <p class="list-lede">The choice in force is an ink block, the same signal the navigation uses. Nothing else in view carries that weight.</p>
+        <div class="sheet" id="controls-sheet"></div>
+      </section>
+
     </section>
 
     <footer class="footerline">
-      <button class="brand-mark" type="button">SAY<br>FLEX<i></i></button>
+      <button class="brand-mark" type="button" id="tray-button" aria-haspopup="menu">SAY<br>FLEX<i></i></button>
       <div class="status-copy">
         <span id="status-mode">LOCAL · PRIVATE</span>
         <strong id="status-line">SYSTEM READY</strong>
@@ -269,6 +279,7 @@
       <div class="page-number" id="page-number">013</div>
     </footer>
   </main>
+  <script src="controls.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

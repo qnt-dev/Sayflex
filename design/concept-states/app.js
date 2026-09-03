@@ -558,6 +558,7 @@ const PAGES = {
   visuals: { states: Object.keys(VISUAL_STATES), number: '025', layout: 'instrument' },
   history: { states: Object.keys(HISTORY_STATES), number: '029', layout: 'wide' },
   hotkeys: { states: Object.keys(HOTKEY_STATES), number: '031', layout: 'wide' },
+  controls: { states: [], number: '037', layout: 'wide' },
 };
 
 /* ── rendering ─────────────────────────────────────────── */
@@ -646,6 +647,46 @@ function renderRow(row, index, draggable) {
 function renderRows(host, rows, draggable) {
   host.innerHTML = '';
   rows.forEach((row, index) => host.appendChild(renderRow(row, index, draggable)));
+  if (draggable) makeReorderable(host, rows);
+}
+
+/* Reordering is the whole point of the provider list, so it is done by
+   dragging the row and not by a pair of arrows hidden at the end of it. The
+   arrows stay as well: a list that can only be reordered by dragging cannot be
+   reordered from the keyboard. */
+function makeReorderable(host, rows) {
+  host.querySelectorAll('.grip').forEach((grip, index) => {
+    grip.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      const item = grip.closest('li');
+      const items = [...host.children];
+      item.classList.add('dragging');
+      let target = index;
+
+      const move = (moveEvent) => {
+        items.forEach((candidate, candidateIndex) => {
+          const box = candidate.getBoundingClientRect();
+          if (moveEvent.clientY > box.top && moveEvent.clientY < box.bottom) {
+            target = candidateIndex;
+          }
+          candidate.classList.toggle('drop-target', candidateIndex === target && candidateIndex !== index);
+        });
+      };
+      const drop = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', drop);
+        item.classList.remove('dragging');
+        items.forEach((candidate) => candidate.classList.remove('drop-target'));
+        if (target !== index) {
+          const [moved] = rows.splice(index, 1);
+          rows.splice(target, 0, moved);
+          renderRows(host, rows, true);
+        }
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', drop);
+    });
+  });
 }
 
 function applyDictation(state) {
@@ -749,6 +790,14 @@ function applyOverview(state) {
   setStatus(data.statusMode || 'LOCAL · PRIVATE', data.status);
 }
 
+/* Which form rows are a choice rather than a fact. */
+const TRANSLATION_MENUS = {
+  Direction: 'direction',
+  Model: 'translation-model',
+  Engine: 'translation-engine',
+  Result: 'translation-result',
+};
+
 function applyTranslation(state) {
   const data = TRANSLATION_STATES[state];
   renderNote('translation', data.note);
@@ -771,7 +820,10 @@ function applyTranslation(state) {
     term.appendChild(hint);
 
     const value = document.createElement('dd');
-    if (row.value === 'stepper') {
+    const menuId = TRANSLATION_MENUS[row.label];
+    if (menuId && !row.muted) {
+      value.appendChild(menuValueButton(menuId));
+    } else if (row.value === 'stepper') {
       const stepper = document.createElement('div');
       stepper.className = 'stepper';
       const less = document.createElement('button');
@@ -792,6 +844,23 @@ function applyTranslation(state) {
   setStatus('LOCAL · PRIVATE', data.status);
 }
 
+function buildSettingRows(hostId, menuIds) {
+  const host = element(hostId);
+  host.innerHTML = '';
+  menuIds.forEach((menuId) => host.appendChild(menuButton(menuId, () => afterSettingChange(menuId))));
+}
+
+/* A setting that changes something visible changes it immediately: a control
+   that only looks pressed teaches the user not to trust it. */
+function afterSettingChange(menuId) {
+  if (menuId === 'history' && CHOSEN.history === 'off') {
+    setStatus('LOCAL · PRIVATE', 'HISTORY OFF');
+  }
+  if (menuId === 'palette' || menuId === 'response') {
+    element('visuals-side-note').textContent = `${labelOf('palette')} · ${labelOf('response')} response`;
+  }
+}
+
 function applyVisuals(state) {
   const data = VISUAL_STATES[state];
   element('visual-preview').dataset.style = data.style;
@@ -805,6 +874,38 @@ function applyVisuals(state) {
   });
 
   setStatus('LOCAL · PRIVATE', data.status);
+}
+
+const ENGINES = {
+  cuda: { label: 'CUDA verified by warm-up · 5070 Ti', tile: 0 },
+  cpu: { label: 'CPU · always available, slower', tile: 1 },
+  auto: { label: 'Auto · tries CUDA, then Vulkan, then CPU', tile: 2 },
+  api: { label: 'A service does the work · see Providers', tile: 3 },
+};
+
+function buildEngineChoices() {
+  const tiles = [...document.querySelectorAll('[data-page="dictation"] .choice')];
+  const keys = Object.keys(ENGINES);
+  tiles.forEach((tile, index) => {
+    tile.dataset.engine = keys[index];
+    tile.addEventListener('click', () => {
+      if (tile.disabled) return;
+      tiles.forEach((other) => other.classList.toggle('active', other === tile));
+      // Choosing an engine is not the same as having it: a backend is only
+      // trusted after a real warm-up pass, and the note says which is which.
+      const key = tile.dataset.engine;
+      if (key === 'auto' || key === 'cuda') {
+        tile.dataset.busy = 'true';
+        element('engine-note').textContent = 'Verifying with a warm-up pass…';
+        setTimeout(() => {
+          delete tile.dataset.busy;
+          element('engine-note').textContent = ENGINES[key].label;
+        }, 1400);
+      } else {
+        element('engine-note').textContent = ENGINES[key].label;
+      }
+    });
+  });
 }
 
 function buildVisualChoices() {
@@ -870,10 +971,30 @@ function applyHistory(state) {
     action.textContent = 'Copy';
     stateCell.append(mark, text, action);
 
+    wrap.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      openContextMenu([
+        { heading: 'Entry' },
+        { label: 'Copy text', action: () => setStatus('LOCAL · PRIVATE', 'COPIED') },
+        { label: 'Insert where the caret is', action: () => setStatus('LOCAL · PRIVATE', 'INSERTED') },
+        { label: 'Copy as plain text' },
+        { separator: true },
+        { label: 'Delete this entry', danger: true, action: () => { wrap.parentElement.remove(); } },
+      ], event.clientX, event.clientY);
+    });
+
     wrap.append(order, main, stateCell);
     item.appendChild(wrap);
     host.appendChild(item);
   });
+
+  const clear = element('history-clear');
+  clear.innerHTML = '';
+  if (data.rows.length) {
+    clear.appendChild(confirmAction('Clear history', 'Delete every entry from disk?', () => {
+      showState('empty');
+    }));
+  }
 
   const empty = element('history-empty');
   if (data.empty) {
@@ -963,7 +1084,16 @@ function showPage(page) {
 
   element('page-number').textContent = PAGES[page].number;
   buildStateButtons(PAGES[page].states);
-  showState(PAGES[page].states[0]);
+  // The sheet shows live controls, so it is rebuilt from whatever the settings
+  // are now rather than from what they were at start-up.
+  if (page === 'controls') buildControlsSheet();
+  if (PAGES[page].states.length) {
+    showState(PAGES[page].states[0]);
+  } else {
+    // The control sheet has no states of its own: every control on it is
+    // already showing all of them at once.
+    setStatus('LOCAL · PRIVATE', 'CONTROL SHEET');
+  }
 }
 
 function showState(state) {
@@ -1054,6 +1184,28 @@ function start() {
 
   buildBars();
   buildVisualChoices();
+  buildEngineChoices();
+  buildSettingRows('dictation-settings', ['output', 'release', 'history']);
+  buildSettingRows('visuals-settings', ['palette', 'response']);
+  buildControlsSheet();
+
+  /* The application lives in the tray, so the tray menu is a real part of the
+     design rather than something Windows draws by accident. */
+  element('tray-button').addEventListener('click', (event) => {
+    event.stopPropagation();
+    const box = event.currentTarget.getBoundingClientRect();
+    openContextMenu([
+      { heading: 'SayFlex' },
+      { label: 'Dictate now', note: 'Same as holding Ctrl + Alt + Space' },
+      { label: 'Insert last transcript' },
+      { label: 'Pause input features', note: 'Releases every hotkey until resumed' },
+      { separator: true },
+      { label: 'Open settings' },
+      { label: 'Open history' },
+      { separator: true },
+      { label: 'Quit SayFlex', danger: true },
+    ], box.right + 8, box.top - 190);
+  });
   document.querySelectorAll('#tool-nav button').forEach((button) => {
     button.addEventListener('click', () => showPage(button.dataset.page));
   });
