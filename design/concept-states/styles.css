@@ -121,6 +121,24 @@ button, input { font: inherit; color: inherit; }
 /* ── stage, common ─────────────────────────────────────── */
 .stage { position:relative; min-width:0; }
 .stage-wide { padding-right: 8vw; overflow: hidden; display: flex; flex-direction: column; }
+
+/* The shell never scrolls, so a column whose content can outgrow it must. An
+   editor opened on a lower row was otherwise clipped, with its buttons left
+   under the footer and no way to reach them. This follows .stage-wide because
+   that rule sets the overflow shorthand. */
+.page, .page-side {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(17,19,23,.22) transparent;
+}
+/* Room under the last row, so an editor opened on it can be scrolled clear
+   of the footer rather than stopping against it. */
+.page > .list-body, .page ul { padding-bottom: 3vh; }
+.page::-webkit-scrollbar, .page-side::-webkit-scrollbar { width: 6px; }
+.page::-webkit-scrollbar-thumb, .page-side::-webkit-scrollbar-thumb { background: rgba(17,19,23,.22); }
 .stage-heading { text-align:center; }
 .stage-heading p, .index { margin:0 0 7px; font:600 9px/1 ui-monospace, monospace; color:rgba(17,19,23,.4); letter-spacing:.12em; }
 .stage-heading h1, .list-head h1, .blank h1 { margin:0; font-size:clamp(17px,1.55vw,23px); font-weight:650; letter-spacing:-.035em; }

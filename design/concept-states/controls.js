@@ -470,6 +470,11 @@ function segmentedDemo(mode) {
       button.className = `choice${index === 0 ? ' active' : ''}`;
       if (mode === 'busy' && index === 0) button.dataset.busy = 'true';
       if (mode === 'disabled' && index === 3) button.disabled = true;
+      button.addEventListener('click', () => {
+        if (button.disabled) return;
+        grid.querySelectorAll('.choice').forEach((other) => other.classList.remove('active'));
+        button.classList.add('active');
+      });
       const icon = document.createElement('i');
       icon.className = mark;
       const text = document.createElement('span');
@@ -512,6 +517,35 @@ function actionDemo(label, running) {
   const button = document.createElement('button');
   button.className = 'row-action';
   button.textContent = label;
+
+  // A specimen that does nothing when pressed is a picture of a control. This
+  // one runs, so the second state can be seen rather than read about.
+  let timer = null;
+  let done = running ? 43 : 0;
+  const bar = wrap.querySelector('.progress i');
+
+  const stop = () => {
+    clearInterval(timer);
+    timer = null;
+    done = 0;
+    button.textContent = 'Install';
+    if (bar) bar.style.width = '0%';
+  };
+
+  const run = () => {
+    button.textContent = 'Cancel';
+    timer = setInterval(() => {
+      done = Math.min(100, done + 6);
+      if (bar) bar.style.width = `${done}%`;
+      if (done >= 100) stop();
+    }, 220);
+  };
+
+  button.addEventListener('click', () => (timer ? stop() : run()));
+  // The specimen captioned "while running" should be running, or it is a
+  // picture of the state it claims to show.
+  if (running) run();
+
   wrap.appendChild(button);
   return wrap;
 }

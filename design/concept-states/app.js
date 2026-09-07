@@ -390,6 +390,13 @@ const VISUAL_STATES = {
     sideNote: 'Drawn by the application itself, over whatever you are typing into.',
     status: 'SYSTEM READY',
   },
+  ribbon: {
+    style: 'ribbon',
+    subtitle: 'Fluid ribbon · shown while recording',
+    caption: 'One line that thickens with the voice',
+    sideNote: 'Drawn by the application itself, over whatever you are typing into.',
+    status: 'SYSTEM READY',
+  },
   slate: {
     style: 'slate',
     subtitle: 'Writing slate · shown while recording',
@@ -490,7 +497,7 @@ const HISTORY_STATES = {
 
 const HOTKEY_STATES = {
   active: {
-    summary: { text: 'All four are held by SayFlex', tone: 'ink' },
+    summary: { text: 'All five are held by SayFlex', tone: 'ink' },
     status: 'SYSTEM READY',
     rows: [
       { keys: 'Ctrl + Alt + Space', name: 'Dictate', detail: 'Records while held · transcribes and inserts on release', state: 'selected', text: 'Held' },
@@ -567,83 +574,6 @@ function buildBars() {
   });
 }
 
-function renderRow(row, index, draggable) {
-  const item = document.createElement('li');
-  const wrap = document.createElement('div');
-  wrap.className = 'row';
-  wrap.dataset.state = row.state;
-
-  const lead = document.createElement('div');
-  if (draggable) {
-    lead.className = 'grip';
-    lead.textContent = '⋮⋮';
-    lead.title = 'Drag to reorder';
-  } else {
-    lead.className = 'order';
-    lead.textContent = String(index + 1).padStart(2, '0');
-  }
-
-  const main = document.createElement('div');
-  main.className = 'row-main';
-  const title = document.createElement('div');
-  title.className = 'row-title';
-  const name = document.createElement('b');
-  name.textContent = row.name;
-  title.appendChild(name);
-  if (row.tag) {
-    const tag = document.createElement('em');
-    tag.textContent = row.tag;
-    title.appendChild(tag);
-  }
-  const detail = document.createElement('p');
-  detail.className = 'row-detail';
-  detail.textContent = row.detail;
-  main.append(title, detail);
-
-  const state = document.createElement('div');
-  state.className = 'row-state';
-  if (row.size) {
-    const size = document.createElement('span');
-    size.className = 'row-size';
-    size.textContent = row.size;
-    state.appendChild(size);
-  }
-  if (typeof row.progress === 'number') {
-    const progress = document.createElement('div');
-    progress.className = 'progress';
-    const fill = document.createElement('i');
-    fill.style.width = `${row.progress}%`;
-    progress.appendChild(fill);
-    state.appendChild(progress);
-  }
-  const mark = document.createElement('span');
-  mark.className = 'row-mark';
-  const text = document.createElement('span');
-  text.className = 'state-text';
-  text.textContent = row.text;
-  state.append(mark, text);
-  if (row.action) {
-    const action = document.createElement('button');
-    action.className = 'row-action';
-    action.textContent = row.action;
-    state.appendChild(action);
-  }
-
-  wrap.append(lead, main, state);
-  item.appendChild(wrap);
-  return item;
-}
-
-function renderRows(host, rows, draggable) {
-  host.innerHTML = '';
-  rows.forEach((row, index) => host.appendChild(renderRow(row, index, draggable)));
-  if (draggable) makeReorderable(host, rows);
-}
-
-/* Reordering is the whole point of the provider list, so it is done by
-   dragging the row and not by a pair of arrows hidden at the end of it. The
-   arrows stay as well: a list that can only be reordered by dragging cannot be
-   reordered from the keyboard. */
 function makeReorderable(host, rows, rerender) {
   host.querySelectorAll('.grip').forEach((grip, index) => {
     grip.addEventListener('mousedown', (event) => {
@@ -670,8 +600,7 @@ function makeReorderable(host, rows, rerender) {
         if (target !== index) {
           const [moved] = rows.splice(index, 1);
           rows.splice(target, 0, moved);
-          if (rerender) rerender();
-          else renderRows(host, rows, true);
+          rerender();
         }
       };
       document.addEventListener('mousemove', move);
@@ -701,6 +630,7 @@ function applyDictation(state) {
     const action = element('dictation-note-action');
     action.hidden = !data.note.action;
     action.textContent = data.note.action || '';
+    wireAction(action, data.note.action);
   } else {
     note.hidden = true;
   }
@@ -726,6 +656,62 @@ function applyProviders(state) {
 function applyModels(state) {
   loadModelLists(state);
   renderModelLists();
+}
+
+/* What each note offers to do about the thing it is reporting. A note that
+   states a problem and then offers a button that does nothing is worse than a
+   note with no button at all. */
+const NOTE_ACTIONS = {
+  Reorder: () => showPage('providers'),
+  Details: () => showPage('overview'),
+  Install: () => {
+    showPage('models');
+    const pending = [...speechModel, ...packModel].find((row) => row.state === 'idle');
+    if (pending) startDownload(pending);
+  },
+  'Insert last': () => {
+    showPage('dictation');
+    showState('inserted');
+  },
+  Retry: () => showState('warming'),
+  'Place it': () => {
+    element('visuals-note-text').textContent =
+      'Drag the orb anywhere with Ctrl + Alt held down. It remembers where it was put, and checks the position is still on a visible screen at start-up.';
+  },
+  'Start dictating': () => showPage('dictation'),
+  'Switch on': () => {
+    CHOSEN.history = 'on';
+    showState('recent');
+  },
+};
+
+function renderNote(prefix, note) {
+  const host = element(`${prefix}-note`);
+  if (!host) return;
+  if (!note) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  host.dataset.tone = note.tone || 'ink';
+  element(`${prefix}-note-text`).textContent = note.text;
+  const action = element(`${prefix}-note-action`);
+  action.hidden = !note.action;
+  action.textContent = note.action || '';
+  wireAction(action, note.action);
+}
+
+/* Replacing the node drops the previous handler with it, which is simpler to
+   reason about than remembering what was attached last time. */
+function wireAction(button, label) {
+  if (!label) return;
+  const fresh = button.cloneNode(true);
+  button.replaceWith(fresh);
+  fresh.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const act = NOTE_ACTIONS[label];
+    if (act) act();
+  });
 }
 
 function applyOverview(state) {
@@ -801,6 +787,17 @@ function applyTranslation(state) {
       amount.textContent = String(row.step);
       const more = document.createElement('button');
       more.textContent = '+';
+      // The bound belongs to the control rather than to a complaint after the
+      // fact: the button simply stops at the end of the range.
+      const step = (delta) => {
+        row.step = Math.min(8, Math.max(0, row.step + delta));
+        amount.textContent = String(row.step);
+        less.disabled = row.step === 0;
+        more.disabled = row.step === 8;
+      };
+      less.addEventListener('click', () => step(-1));
+      more.addEventListener('click', () => step(1));
+      step(0);
       stepper.append(less, amount, more);
       value.appendChild(stepper);
     } else {
@@ -938,6 +935,14 @@ function applyHistory(state) {
     const action = document.createElement('button');
     action.className = 'row-action';
     action.textContent = 'Copy';
+    action.addEventListener('click', (event) => {
+      event.stopPropagation();
+      action.textContent = 'Copied';
+      setStatus('LOCAL · PRIVATE', 'COPIED TO CLIPBOARD');
+      setTimeout(() => {
+        action.textContent = 'Copy';
+      }, 1400);
+    });
     stateCell.append(mark, text, action);
 
     wrap.addEventListener('contextmenu', (event) => {
@@ -973,11 +978,114 @@ function applyHistory(state) {
     const action = element('history-empty-action');
     action.hidden = !data.empty.action;
     action.textContent = data.empty.action || '';
+    wireAction(action, data.empty.action);
   } else {
     empty.hidden = true;
   }
 
   setStatus(data.statusMode || 'LOCAL · PRIVATE', data.status);
+}
+
+/* Combinations Windows keeps for itself. Registering one silently fails at
+   run time, so it is worth refusing here where the reason can be given. */
+const RESERVED_HOTKEYS = new Set([
+  'Ctrl + Alt + Delete', 'Ctrl + Shift + Escape', 'Win + L', 'Alt + Tab', 'Alt + F4',
+]);
+
+/* Changing a combination listens for one instead of asking the user to type
+   its name. Escape leaves it as it was. A clash is refused while still
+   listening, because the answer to "that one is taken" is another key, not a
+   dialog to dismiss first. */
+function captureHotkey(wrap, keys, detail, action) {
+  const stateText = wrap.querySelector('.state-text');
+  const previous = {
+    keys: keys.textContent,
+    detail: detail.textContent,
+    state: wrap.dataset.state,
+    text: stateText ? stateText.textContent : '',
+  };
+  keys.textContent = 'Press a combination…';
+  detail.textContent = 'Escape leaves it unchanged.';
+  wrap.dataset.state = 'downloading';
+  if (stateText) stateText.textContent = 'Listening';
+  action.textContent = 'Listening';
+
+  const finish = (text, detailText, state, mark) => {
+    keys.textContent = text;
+    detail.textContent = detailText;
+    wrap.dataset.state = state;
+    if (stateText) stateText.textContent = mark;
+    action.textContent = 'Change';
+    document.removeEventListener('keydown', onKey, true);
+  };
+
+  /* Which command in this list already answers to a combination. */
+  const heldBy = (combination) => {
+    const rows = [...wrap.closest('ul').querySelectorAll('.row')];
+    const clash = rows.find(
+      (row) => row !== wrap && row.firstElementChild.textContent === combination,
+    );
+    return clash ? clash.querySelector('.row-title b').textContent : null;
+  };
+
+  const refuse = (why) => {
+    keys.textContent = 'Press a combination…';
+    detail.textContent = why;
+    wrap.dataset.state = 'refused';
+    if (stateText) stateText.textContent = 'Taken';
+    setStatus('LOCAL · PRIVATE', 'HOTKEY TAKEN');
+  };
+
+  const onKey = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === 'Escape') {
+      finish(previous.keys, previous.detail, previous.state, previous.text);
+      setStatus('LOCAL · PRIVATE', 'UNCHANGED');
+      return;
+    }
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) return;
+
+    const parts = [];
+    if (event.ctrlKey) parts.push('Ctrl');
+    if (event.altKey) parts.push('Alt');
+    if (event.shiftKey) parts.push('Shift');
+    parts.push(event.key.length === 1 ? event.key.toUpperCase() : event.key);
+    const combination = parts.join(' + ');
+
+    if (parts.length < 2) {
+      refuse('Needs a modifier, or it would fire while you type');
+      return;
+    }
+    if (RESERVED_HOTKEYS.has(combination)) {
+      refuse(`Windows keeps ${combination} for itself`);
+      return;
+    }
+    const holder = heldBy(combination);
+    if (holder) {
+      refuse(`${combination} is held by ${holder} · pick another`);
+      return;
+    }
+
+    finish(combination, 'Registered by SayFlex', 'installed', 'Held');
+    refreshHotkeySummary();
+    setStatus('LOCAL · PRIVATE', 'HOTKEY CHANGED');
+  };
+  document.addEventListener('keydown', onKey, true);
+}
+
+/* The line at the top counts what the rows say, so resolving the clash also
+   clears the warning about it. */
+function refreshHotkeySummary() {
+  const rows = [...element('hotkey-rows').querySelectorAll('.row')];
+  const taken = rows.filter((row) => row.dataset.state === 'refused').length;
+  const summary = element('hotkeys-summary');
+  summary.dataset.tone = taken ? 'signal' : 'ink';
+  const WORDS = ['none', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
+  const spell = (count) => WORDS[count] || String(count);
+  element('hotkeys-summary-text').textContent = taken
+    ? `${taken === 1 ? 'One combination is' : `${spell(taken)} combinations are`} taken`
+    : `All ${spell(rows.length)} are held by SayFlex`;
 }
 
 function applyHotkeys(state) {
@@ -1022,6 +1130,10 @@ function applyHotkeys(state) {
       const action = document.createElement('button');
       action.className = 'row-action';
       action.textContent = row.action;
+      action.addEventListener('click', (event) => {
+        event.stopPropagation();
+        captureHotkey(wrap, keys, detail, action);
+      });
       stateCell.appendChild(action);
     }
 
@@ -1145,6 +1257,14 @@ function animatePreview(now) {
   }
 }
 
+/* A panel is placed against the shell, not against the row, so a column that
+   scrolls under it would leave it pointing at nothing. */
+function closeMenusOnScroll() {
+  document.querySelectorAll('.page, .page-side').forEach((column) => {
+    column.addEventListener('scroll', () => closeMenu(), { passive: true });
+  });
+}
+
 function start() {
   const now = new Date();
   element('weekday').textContent = now.toLocaleDateString('en-GB', { weekday: 'short' });
@@ -1157,6 +1277,7 @@ function start() {
   buildSettingRows('dictation-settings', ['output', 'release', 'history']);
   buildSettingRows('visuals-settings', ['palette', 'response']);
   buildControlsSheet();
+  closeMenusOnScroll();
 
   /* The application lives in the tray, so the tray menu is a real part of the
      design rather than something Windows draws by accident. */
@@ -1297,6 +1418,27 @@ function renderProviders() {
 
   makeReorderable(host, providerModel, renderProviders);
   refreshPrivacyLine();
+
+  // Measured once the list is in the document: an editor opened on a lower row
+  // is useless if its buttons land under the footer.
+  const open = host.querySelector('.row-editor');
+  if (open) revealInColumn(open);
+}
+
+/* scrollIntoView aligns an edge and stops; what is wanted here is that the
+   whole thing clears the bottom of the column, with a little room under it.
+   Measured synchronously rather than in an animation frame: those do not run
+   while the window is in the background, and the editor would then open
+   unreachable in a window the user is about to bring forward. */
+function revealInColumn(node) {
+  const column = node.closest('.page, .page-side');
+  if (!column) return;
+  const overshoot = node.getBoundingClientRect().bottom
+    - column.getBoundingClientRect().bottom + 18;
+  // Instant, not smooth: a smooth scroll is animated by the compositor and does
+  // not run at all in a background window, which is exactly the case this
+  // guards against.
+  if (overshoot > 0) column.scrollTop += overshoot;
 }
 
 function providerDetail(provider) {
