@@ -154,63 +154,53 @@ PACK_ROWS.adopted = PACK_ROWS['at-rest'];
 
 const PROVIDER_STATES = {
   'local-only': {
-    privacy: { text: 'Audio stays on this device', tone: 'ink' },
-    statusMode: 'LOCAL · PRIVATE',
     rows: [
-      { name: 'This computer', detail: 'Whisper Large v3 Turbo · CUDA', state: 'active', text: 'In use' },
-      { name: 'Groq', detail: '2 000 requests a day · free', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Cloudflare Workers AI', detail: '10 000 neurons a day, shared across models', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Microsoft Azure Speech', detail: '5 hours a month · needs a region', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Deepgram', detail: '$200 of credit, no expiry', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Custom endpoint', detail: 'Any OpenAI-compatible address · HTTPS only', state: 'disabled', text: 'Not set', action: 'Set up' },
+      { id: 'local', name: 'This computer', enabled: true, detail: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'groq', name: 'Groq', enabled: false, detail: '2 000 requests a day · free', limit: '2 000 requests a day' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: false, detail: '10 000 neurons a day, shared across models', limit: '10 000 neurons a day' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
   'service-first': {
-    privacy: { text: 'Audio leaves this device', tone: 'signal' },
-    statusMode: 'AUDIO LEAVES DEVICE',
     rows: [
-      { name: 'Cloudflare Workers AI', detail: 'Key ••••4f21 · 6 400 of 10 000 neurons left today', state: 'active', text: 'In use' },
-      { name: 'Groq', detail: 'Key ••••9c07 · 2 000 requests a day', state: 'installed', text: 'Standing by' },
-      { name: 'This computer', detail: 'Whisper Large v3 Turbo · CUDA', state: 'installed', text: 'Last resort' },
-      { name: 'Microsoft Azure Speech', detail: '5 hours a month · needs a region', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Deepgram', detail: '$200 of credit, no expiry', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Custom endpoint', detail: 'Any OpenAI-compatible address · HTTPS only', state: 'disabled', text: 'Not set', action: 'Set up' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', limit: '6 400 of 10 000 neurons left today', detail: '10 000 neurons a day' },
+      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', limit: '2 000 requests a day', detail: '2 000 requests a day · free' },
+      { id: 'local', name: 'This computer', enabled: true, detail: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
   'quota-spent': {
-    privacy: { text: 'Audio leaves this device', tone: 'signal' },
-    statusMode: 'AUDIO LEAVES DEVICE',
     rows: [
-      { name: 'Cloudflare Workers AI', detail: 'Daily neurons spent · resets at 00:00 UTC', state: 'exhausted', text: 'Out until 00:00' },
-      { name: 'Groq', detail: 'Key ••••9c07 · 1 840 requests left today', state: 'active', text: 'In use' },
-      { name: 'This computer', detail: 'Whisper Large v3 Turbo · CUDA', state: 'installed', text: 'Last resort' },
-      { name: 'Microsoft Azure Speech', detail: 'Recording longer than 60 s · not offered for it', state: 'installed', text: 'Standing by' },
-      { name: 'Deepgram', detail: '$200 of credit, no expiry', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Custom endpoint', detail: 'Any OpenAI-compatible address · HTTPS only', state: 'disabled', text: 'Not set', action: 'Set up' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', blocked: 'Out until 00:00', limit: 'daily neurons spent', detail: '10 000 neurons a day' },
+      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', limit: '1 840 requests left today', detail: '2 000 requests a day · free' },
+      { id: 'local', name: 'This computer', enabled: true, detail: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
   'key-refused': {
-    privacy: { text: 'Audio leaves this device', tone: 'signal' },
-    statusMode: 'AUDIO LEAVES DEVICE',
     rows: [
-      { name: 'Cloudflare Workers AI', detail: 'The service refused this key · waiting will not fix it', state: 'refused', text: 'Key refused', action: 'Replace' },
-      { name: 'Groq', detail: 'Key ••••9c07 · 2 000 requests a day', state: 'active', text: 'In use' },
-      { name: 'This computer', detail: 'Whisper Large v3 Turbo · CUDA', state: 'installed', text: 'Last resort' },
-      { name: 'Microsoft Azure Speech', detail: '5 hours a month · needs a region', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Deepgram', detail: '$200 of credit, no expiry', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Custom endpoint', detail: 'Any OpenAI-compatible address · HTTPS only', state: 'disabled', text: 'Not set', action: 'Set up' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_dead_0000', extra: 'a1b2c3d4', blocked: 'Key refused', blockedState: 'refused', limit: 'the service refused this key', detail: '10 000 neurons a day' },
+      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', limit: '2 000 requests a day', detail: '2 000 requests a day · free' },
+      { id: 'local', name: 'This computer', enabled: true, detail: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
   'all-out': {
-    privacy: { text: 'Nothing can transcribe right now', tone: 'signal' },
-    statusMode: 'NO PROVIDER AVAILABLE',
     rows: [
-      { name: 'Cloudflare Workers AI', detail: 'Daily neurons spent · resets at 00:00 UTC', state: 'exhausted', text: 'Out until 00:00' },
-      { name: 'Groq', detail: 'Daily requests spent · resets at 00:00 UTC', state: 'exhausted', text: 'Out until 00:00' },
-      { name: 'This computer', detail: 'Switched off in this order', state: 'disabled', text: 'Off', action: 'Switch on' },
-      { name: 'Microsoft Azure Speech', detail: '5 hours a month · needs a region', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Deepgram', detail: '$200 of credit, no expiry', state: 'disabled', text: 'No key stored', action: 'Add key' },
-      { name: 'Custom endpoint', detail: 'Any OpenAI-compatible address · HTTPS only', state: 'disabled', text: 'Not set', action: 'Set up' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', blocked: 'Out until 00:00', limit: 'daily neurons spent', detail: '10 000 neurons a day' },
+      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', blocked: 'Out until 00:00', limit: 'daily requests spent', detail: '2 000 requests a day · free' },
+      { id: 'local', name: 'This computer', enabled: false, detail: 'Switched off in this order' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
 };
@@ -654,7 +644,7 @@ function renderRows(host, rows, draggable) {
    dragging the row and not by a pair of arrows hidden at the end of it. The
    arrows stay as well: a list that can only be reordered by dragging cannot be
    reordered from the keyboard. */
-function makeReorderable(host, rows) {
+function makeReorderable(host, rows, rerender) {
   host.querySelectorAll('.grip').forEach((grip, index) => {
     grip.addEventListener('mousedown', (event) => {
       event.preventDefault();
@@ -680,7 +670,8 @@ function makeReorderable(host, rows) {
         if (target !== index) {
           const [moved] = rows.splice(index, 1);
           rows.splice(target, 0, moved);
-          renderRows(host, rows, true);
+          if (rerender) rerender();
+          else renderRows(host, rows, true);
         }
       };
       document.addEventListener('mousemove', move);
@@ -727,36 +718,14 @@ function applyDictation(state) {
   setStatus(data.statusMode || 'LOCAL · PRIVATE', data.status);
 }
 
-function applyModels(state) {
-  renderRows(element('model-rows'), MODEL_STATES[state], false);
-  renderRows(element('pack-rows'), PACK_ROWS[state] || PACK_ROWS['at-rest'], false);
-  setStatus('LOCAL · PRIVATE', state === 'installing' ? 'DOWNLOADING' : 'SYSTEM READY');
-}
-
 function applyProviders(state) {
-  const data = PROVIDER_STATES[state];
-  renderRows(element('provider-rows'), data.rows, true);
-  const summary = element('privacy-summary');
-  summary.dataset.tone = data.privacy.tone;
-  element('privacy-text').textContent = data.privacy.text;
-  setStatus(data.statusMode, state === 'all-out' ? 'NO PROVIDER' : 'SYSTEM READY');
+  loadProviderModel(state);
+  renderProviders();
 }
 
-/* ── rendering the five remaining pages ────────────────── */
-
-function renderNote(prefix, note) {
-  const host = element(`${prefix}-note`);
-  if (!host) return;
-  if (!note) {
-    host.hidden = true;
-    return;
-  }
-  host.hidden = false;
-  host.dataset.tone = note.tone || 'ink';
-  element(`${prefix}-note-text`).textContent = note.text;
-  const action = element(`${prefix}-note-action`);
-  action.hidden = !note.action;
-  action.textContent = note.action || '';
+function applyModels(state) {
+  loadModelLists(state);
+  renderModelLists();
 }
 
 function applyOverview(state) {
@@ -1211,6 +1180,423 @@ function start() {
   });
   showPage('dictation');
   requestAnimationFrame(animate);
+}
+
+/* ── the provider list, operated rather than illustrated ──
+ *
+ * The rows below are a working model, not a picture of one. Adding a key,
+ * switching a service off, dragging it up the order and watching the privacy
+ * line change are the things that have to be got right before any of this is
+ * written in Slint, and they cannot be judged from a still. */
+
+const PROVIDER_FIELDS = {
+  cloudflare: { label: 'Account identifier', placeholder: '32 hex characters from the dashboard' },
+  azure: { label: 'Region', placeholder: 'westeurope' },
+  custom: { label: 'Endpoint', placeholder: 'https://speech.example.com/v1' },
+};
+
+const PROVIDER_HELP = {
+  groq: 'Free tier: 2 000 requests a day. The key starts with gsk_.',
+  cloudflare: 'Free tier: 10 000 neurons a day, shared across every model. Needs the account identifier as well as the token.',
+  azure: 'Free tier F0: 5 hours a month. The region must match the one the resource was created in.',
+  deepgram: '$200 of credit with no expiry.',
+  custom: 'Any endpoint that speaks the OpenAI transcription API. HTTPS only: the key and the audio both travel in this request.',
+};
+
+let providerModel = [];
+let editingProvider = null;
+
+function loadProviderModel(state) {
+  providerModel = PROVIDER_STATES[state].rows.map((row) => ({ ...row }));
+  editingProvider = null;
+}
+
+/** What the row says about itself, derived rather than stored. */
+function providerStatus(provider) {
+  if (!provider.enabled) return { state: 'disabled', text: 'Off' };
+  if (provider.id !== 'local' && !provider.key) return { state: 'disabled', text: 'No key stored' };
+  if (provider.blocked) return { state: provider.blockedState || 'exhausted', text: provider.blocked };
+  const first = providerModel.find((candidate) => usable(candidate));
+  if (first === provider) return { state: 'active', text: 'In use' };
+  return { state: 'installed', text: provider.id === 'local' ? 'Last resort' : 'Standing by' };
+}
+
+function usable(provider) {
+  if (!provider.enabled) return false;
+  if (provider.id !== 'local' && !provider.key) return false;
+  return !provider.blocked;
+}
+
+function renderProviders() {
+  const host = element('provider-rows');
+  host.innerHTML = '';
+
+  providerModel.forEach((provider, index) => {
+    const status = providerStatus(provider);
+    const item = document.createElement('li');
+    const wrap = document.createElement('div');
+    wrap.className = 'row';
+    wrap.dataset.state = status.state;
+
+    const grip = document.createElement('div');
+    grip.className = 'grip';
+    grip.textContent = '⋮⋮';
+    grip.title = 'Drag to reorder';
+
+    const main = document.createElement('div');
+    main.className = 'row-main';
+    const title = document.createElement('div');
+    title.className = 'row-title';
+    const name = document.createElement('b');
+    name.textContent = provider.name;
+    title.appendChild(name);
+    const detail = document.createElement('p');
+    detail.className = 'row-detail';
+    detail.textContent = providerDetail(provider);
+    main.append(title, detail);
+
+    const stateCell = document.createElement('div');
+    stateCell.className = 'row-state';
+    const mark = document.createElement('span');
+    mark.className = 'row-mark';
+    const text = document.createElement('span');
+    text.className = 'state-text';
+    text.textContent = status.text;
+    stateCell.append(mark, text);
+
+    // Switching a row off keeps its place and its key; only the order and the
+    // switch decide what is used.
+    const toggle = toggleControl(
+      { on: 'On', off: 'Off' },
+      provider.enabled,
+      (next) => {
+        provider.enabled = next;
+        renderProviders();
+      },
+    );
+    toggle.classList.add('row-toggle');
+    stateCell.appendChild(toggle);
+
+    if (provider.id !== 'local') {
+      const action = document.createElement('button');
+      action.className = 'row-action';
+      action.textContent = provider.key ? 'Replace key' : 'Add key';
+      action.addEventListener('click', (event) => {
+        event.stopPropagation();
+        editingProvider = editingProvider === provider.id ? null : provider.id;
+        renderProviders();
+      });
+      stateCell.appendChild(action);
+    }
+
+    wrap.append(grip, main, stateCell);
+    item.appendChild(wrap);
+    if (editingProvider === provider.id) item.appendChild(providerEditor(provider));
+    host.appendChild(item);
+  });
+
+  makeReorderable(host, providerModel, renderProviders);
+  refreshPrivacyLine();
+}
+
+function providerDetail(provider) {
+  if (provider.key) {
+    const extra = provider.extra ? ` · ${provider.extra}` : '';
+    return `Key ••••${provider.key.slice(-4)}${extra} · ${provider.limit || ''}`.replace(/ · $/, '');
+  }
+  return provider.detail;
+}
+
+/** The form that appears in place of nothing when a key is being added. */
+function providerEditor(provider) {
+  const editor = document.createElement('div');
+  editor.className = 'row-editor';
+
+  const fields = document.createElement('div');
+  fields.className = 'editor-fields';
+
+  const keyLabel = document.createElement('span');
+  keyLabel.className = 'editor-label';
+  keyLabel.textContent = provider.key ? 'Replace the key' : 'API key';
+  const keyField = fieldControl({ placeholder: 'Paste the key', masked: true });
+  fields.append(keyLabel, keyField);
+
+  let extraField = null;
+  const spec = PROVIDER_FIELDS[provider.id];
+  if (spec) {
+    const label = document.createElement('span');
+    label.className = 'editor-label';
+    label.textContent = spec.label;
+    extraField = fieldControl({ placeholder: spec.placeholder, value: provider.extra || '' });
+    fields.append(label, extraField);
+  }
+
+  const help = document.createElement('p');
+  help.className = 'editor-note';
+  help.textContent = PROVIDER_HELP[provider.id] || '';
+
+  const storage = document.createElement('p');
+  storage.className = 'editor-note';
+  storage.innerHTML = 'Stored <b>encrypted with Windows DPAPI</b>, in its own file and never in settings.json. '
+    + 'Once saved it is never shown again — only the last four characters.';
+
+  const actions = document.createElement('div');
+  actions.className = 'editor-actions';
+  const save = document.createElement('button');
+  save.className = 'row-action';
+  save.textContent = 'Save';
+  const cancel = document.createElement('button');
+  cancel.className = 'row-action';
+  cancel.textContent = 'Cancel';
+  actions.append(save, cancel);
+  if (provider.key) {
+    actions.appendChild(confirmAction('Remove key', 'Remove the stored key?', () => {
+      provider.key = null;
+      provider.blocked = null;
+      editingProvider = null;
+      renderProviders();
+    }));
+  }
+
+  const problem = document.createElement('p');
+  problem.className = 'editor-note';
+  problem.style.color = 'var(--signal)';
+  problem.hidden = true;
+
+  save.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const key = keyField.querySelector('input').value.trim();
+    const extra = extraField ? extraField.querySelector('input').value.trim() : '';
+
+    // The two refusals worth showing: nothing typed, and an endpoint that
+    // would carry the key and the audio in the clear.
+    if (!key) {
+      keyField.dataset.invalid = 'true';
+      problem.textContent = 'A key is needed before this service can be used.';
+      problem.hidden = false;
+      return;
+    }
+    if (spec && !extra) {
+      extraField.dataset.invalid = 'true';
+      problem.textContent = `${spec.label} is needed as well as the key.`;
+      problem.hidden = false;
+      return;
+    }
+    if (provider.id === 'custom' && !extra.startsWith('https://')) {
+      extraField.dataset.invalid = 'true';
+      problem.textContent = 'The endpoint must be HTTPS: the key and the audio both travel in this request.';
+      problem.hidden = false;
+      return;
+    }
+
+    provider.key = key;
+    provider.extra = extra || null;
+    provider.enabled = true;
+    provider.blocked = null;
+    editingProvider = null;
+    renderProviders();
+    setStatus(privacyTone() === 'signal' ? 'AUDIO LEAVES DEVICE' : 'LOCAL · PRIVATE', 'KEY STORED');
+  });
+
+  cancel.addEventListener('click', (event) => {
+    event.stopPropagation();
+    editingProvider = null;
+    renderProviders();
+  });
+
+  editor.append(fields, help, storage, problem, actions);
+  return editor;
+}
+
+function privacyTone() {
+  const first = providerModel.find((provider) => usable(provider));
+  return first && first.id !== 'local' ? 'signal' : 'ink';
+}
+
+function refreshPrivacyLine() {
+  const tone = privacyTone();
+  const first = providerModel.find((provider) => usable(provider));
+  const summary = element('privacy-summary');
+  summary.dataset.tone = tone;
+  element('privacy-text').textContent = !first
+    ? 'Nothing can transcribe right now'
+    : tone === 'signal'
+      ? `Audio leaves this device for ${first.name}`
+      : 'Audio stays on this device';
+  setStatus(
+    tone === 'signal' ? 'AUDIO LEAVES DEVICE' : 'LOCAL · PRIVATE',
+    first ? 'SYSTEM READY' : 'NO PROVIDER',
+  );
+}
+
+/* ── the model list, operated rather than illustrated ──── */
+
+let speechModel = [];
+let packModel = [];
+const downloads = new Map();
+
+function loadModelLists(state) {
+  downloads.forEach((timer) => clearInterval(timer));
+  downloads.clear();
+  speechModel = MODEL_STATES[state].map((row) => ({ ...row }));
+  packModel = (PACK_ROWS[state] || PACK_ROWS['at-rest']).map((row) => ({ ...row }));
+}
+
+function renderModelLists() {
+  renderModelRows(element('model-rows'), speechModel);
+  renderModelRows(element('pack-rows'), packModel);
+  const installed = [...speechModel, ...packModel].filter((row) => row.state === 'selected' || row.state === 'installed');
+  element('models-summary').textContent = `${installed.length} installed`;
+}
+
+function renderModelRows(host, list) {
+  host.innerHTML = '';
+  list.forEach((row, index) => {
+    const item = document.createElement('li');
+    const wrap = document.createElement('div');
+    wrap.className = 'row';
+    wrap.dataset.state = row.state;
+
+    const order = document.createElement('div');
+    order.className = 'order';
+    order.textContent = String(index + 1).padStart(2, '0');
+
+    const main = document.createElement('div');
+    main.className = 'row-main';
+    const title = document.createElement('div');
+    title.className = 'row-title';
+    const name = document.createElement('b');
+    name.textContent = row.name;
+    title.appendChild(name);
+    if (row.tag) {
+      const tag = document.createElement('em');
+      tag.textContent = row.tag;
+      title.appendChild(tag);
+    }
+    const detail = document.createElement('p');
+    detail.className = 'row-detail';
+    detail.textContent = row.detail;
+    main.append(title, detail);
+
+    const stateCell = document.createElement('div');
+    stateCell.className = 'row-state';
+    const size = document.createElement('span');
+    size.className = 'row-size';
+    size.textContent = row.size;
+    stateCell.appendChild(size);
+
+    if (typeof row.progress === 'number') {
+      const progress = document.createElement('div');
+      progress.className = 'progress';
+      const fill = document.createElement('i');
+      fill.style.width = `${row.progress}%`;
+      progress.appendChild(fill);
+      stateCell.appendChild(progress);
+    }
+
+    const mark = document.createElement('span');
+    mark.className = 'row-mark';
+    const text = document.createElement('span');
+    text.className = 'state-text';
+    text.textContent = row.text;
+    stateCell.append(mark, text);
+
+    modelActions(row, list).forEach((action) => stateCell.appendChild(action));
+
+    wrap.append(order, main, stateCell);
+    item.appendChild(wrap);
+    host.appendChild(item);
+  });
+}
+
+/* One verb per row at rest; a second appears only while something runs. */
+function modelActions(row, list) {
+  const make = (label, handler, danger) => {
+    const button = document.createElement('button');
+    button.className = `row-action${danger ? ' danger' : ''}`;
+    button.textContent = label;
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      handler();
+    });
+    return button;
+  };
+
+  if (row.state === 'downloading' || row.state === 'verifying') {
+    return [make('Cancel', () => cancelDownload(row))];
+  }
+  if (row.state === 'selected') {
+    return [];
+  }
+  if (row.state === 'installed') {
+    return [
+      make('Use', () => {
+        list.forEach((other) => {
+          if (other.state === 'selected') {
+            other.state = 'installed';
+            other.text = 'Installed';
+          }
+        });
+        row.state = 'selected';
+        row.text = 'Selected';
+        renderModelLists();
+        setStatus('LOCAL · PRIVATE', 'MODEL SELECTED');
+      }),
+      make('Remove', () => {
+        row.state = 'idle';
+        row.text = 'Not installed';
+        renderModelLists();
+      }, true),
+    ];
+  }
+  return [make(row.state === 'refused' ? 'Retry' : 'Install', () => startDownload(row))];
+}
+
+/* A download that only moves when the page is reloaded teaches nothing about
+   how the row behaves while it runs. */
+function startDownload(row) {
+  row.state = 'downloading';
+  row.progress = 0;
+  row.text = '0 %';
+  row.detail = 'Resumes from where it stopped if it is interrupted';
+  renderModelLists();
+  setStatus('LOCAL · PRIVATE', 'DOWNLOADING');
+
+  const timer = setInterval(() => {
+    row.progress = Math.min(100, row.progress + 7);
+    row.text = `${row.progress} %`;
+    if (row.progress >= 100) {
+      clearInterval(timer);
+      downloads.delete(row.name);
+      row.state = 'verifying';
+      row.text = 'Verifying';
+      row.detail = 'Checking SHA-256 before the file is put in place';
+      renderModelLists();
+      setTimeout(() => {
+        row.state = 'installed';
+        row.text = 'Installed';
+        delete row.progress;
+        row.detail = 'Verified and installed';
+        renderModelLists();
+        setStatus('LOCAL · PRIVATE', 'INSTALLED');
+      }, 1200);
+      return;
+    }
+    renderModelLists();
+  }, 260);
+  downloads.set(row.name, timer);
+}
+
+function cancelDownload(row) {
+  const timer = downloads.get(row.name);
+  if (timer) clearInterval(timer);
+  downloads.delete(row.name);
+  row.state = 'idle';
+  row.text = 'Not installed';
+  row.detail = 'Cancelled · the partial download is kept and resumes later';
+  delete row.progress;
+  renderModelLists();
+  setStatus('LOCAL · PRIVATE', 'CANCELLED');
 }
 
 start();
