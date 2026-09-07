@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#bfc2c6">
   <title>SayFlex — States</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -33,7 +34,6 @@
           <button data-page="visuals"><i class="nav-icon visual-icon"></i><span>Visuals</span></button>
           <button data-page="history"><i class="nav-icon history-icon"></i><span>History</span></button>
           <button data-page="hotkeys"><i class="nav-icon hotkey-icon"></i><span>Hotkeys</span></button>
-          <button data-page="controls"><i class="nav-icon controls-icon"></i><span>Controls</span></button>
         </nav>
       </aside>
 
@@ -41,7 +41,7 @@
       <section class="stage stage-wide page" data-page="overview" hidden>
         <div class="list-head">
           <div>
-            <p class="index">01 / 08</p>
+            <p class="index"></p>
             <h1>Overview</h1>
           </div>
           <div class="list-summary" id="overview-privacy">
@@ -61,13 +61,18 @@
           </div>
 
           <dl class="facts" id="overview-facts"></dl>
+
+          <p class="colophon">
+            <b>SayFlex</b> <span id="app-version">0.5.27</span> · local tools for language and thought.
+            No cloud account is required, and a model is downloaded only when you choose it.
+          </p>
         </div>
       </section>
 
       <!-- ─────────── Прибор: Dictation ─────────── -->
       <section class="stage page" data-page="dictation" hidden>
         <div class="stage-heading">
-          <p>02 / 08</p>
+          <p class="index"></p>
           <h1>Dictation</h1>
           <span id="dictation-subtitle">Local speech · ready</span>
         </div>
@@ -114,7 +119,7 @@
       <section class="stage stage-wide page" data-page="translation" hidden>
         <div class="list-head">
           <div>
-            <p class="index">03 / 08</p>
+            <p class="index"></p>
             <h1>Translation</h1>
           </div>
           <div class="list-summary" id="translation-summary">
@@ -137,7 +142,7 @@
       <section class="stage stage-wide page" data-page="models" hidden>
         <div class="list-head">
           <div>
-            <p class="index">04 / 08</p>
+            <p class="index"></p>
             <h1>Models</h1>
           </div>
           <div class="list-summary">
@@ -158,7 +163,7 @@
       <section class="stage stage-wide page" data-page="providers" hidden>
         <div class="list-head">
           <div>
-            <p class="index">05 / 08</p>
+            <p class="index"></p>
             <h1>Transcription order</h1>
           </div>
           <div class="list-summary" id="privacy-summary">
@@ -166,14 +171,14 @@
             <span id="privacy-text">Audio stays on this device</span>
           </div>
         </div>
-        <p class="list-lede">Top first. The next one is used only when the one above runs out.</p>
+        <p class="list-lede">Top first. The next one is tried when the one above cannot take the recording — out of quota, rate limited, unreachable, key refused, or it turned the request down. This computer ends the walk: nothing below it is ever reached.</p>
         <ul class="rows rows-drag" id="provider-rows"></ul>
       </section>
 
       <!-- ─────────── Прибор: Visuals ─────────── -->
       <section class="stage page" data-page="visuals" hidden>
         <div class="stage-heading">
-          <p>06 / 08</p>
+          <p class="index"></p>
           <h1>Visuals</h1>
           <span id="visuals-subtitle">Voice orb · shown while recording</span>
         </div>
@@ -186,6 +191,11 @@
               <path id="ribbon-path" d="M0 45 Q 25 20 50 45 T 100 45 T 150 45 T 200 45" fill="none" stroke="currentColor" stroke-width="1.4"/>
             </svg>
             <div class="preview-slate" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="preview-mic" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+            <svg class="preview-circular" viewBox="0 0 120 120" aria-hidden="true">
+              <g id="circular-spokes"></g>
+            </svg>
+            <div class="preview-sphere" aria-hidden="true"><i></i><i></i><i></i></div>
             <div class="preview-off" aria-hidden="true">no overlay</div>
           </div>
 
@@ -203,7 +213,7 @@
 
       <aside class="right-panel page-side" data-page="visuals" hidden aria-label="Настройки визуализатора">
         <div class="eyebrow">Style</div>
-        <div class="choice-grid" id="visual-choices"></div>
+        <div class="choice-grid wide" id="visual-choices"></div>
         <p class="side-note" id="visuals-side-note">Drawn by the application itself.</p>
 
         <div class="setting-rows" id="visuals-settings"></div>
@@ -213,7 +223,7 @@
       <section class="stage stage-wide page" data-page="history" hidden>
         <div class="list-head">
           <div>
-            <p class="index">07 / 08</p>
+            <p class="index"></p>
             <h1>History</h1>
           </div>
           <div class="list-summary" id="history-summary">
@@ -236,12 +246,12 @@
       <section class="stage stage-wide page" data-page="hotkeys" hidden>
         <div class="list-head">
           <div>
-            <p class="index">08 / 08</p>
+            <p class="index"></p>
             <h1>Hotkeys</h1>
           </div>
           <div class="list-summary" id="hotkeys-summary">
             <span class="privacy-dot" aria-hidden="true"></span>
-            <span id="hotkeys-summary-text">All four are held by SayFlex</span>
+            <span id="hotkeys-summary-text"></span>
           </div>
         </div>
         <p class="list-lede">Held, not toggled: the action lasts exactly as long as the keys are down.</p>
@@ -251,7 +261,7 @@
       <section class="stage stage-wide page" data-page="controls" hidden>
         <div class="list-head">
           <div>
-            <p class="index">09 / 09</p>
+            <p class="index"></p>
             <h1>Controls</h1>
           </div>
           <div class="list-summary">
@@ -272,7 +282,8 @@
       </div>
 
       <div class="state-switch" id="state-switch" aria-label="Состояния (только в прототипе)">
-        <span class="state-switch-label">STATE</span>
+        <button class="review-tab" id="controls-tab" data-page="controls">CONTROL SHEET</button>
+          <span class="state-switch-label">STATE</span>
         <div class="state-switch-buttons" id="state-buttons"></div>
       </div>
 

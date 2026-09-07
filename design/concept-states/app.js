@@ -152,55 +152,60 @@ PACK_ROWS.adopted = PACK_ROWS['at-rest'];
 
 /* ── Providers ─────────────────────────────────────────── */
 
+/* One row here is one TranscriptionProviderStatus off the wire: the switch,
+   whether it can run now, a sentence saying why not when it cannot, and a
+   masked tail. Nothing else exists on that message, so nothing else is drawn
+   — a remaining-quota number would be a figure this application invents and
+   then has to defend. The wording of `detail` is the worker's own. */
 const PROVIDER_STATES = {
   'local-only': {
     rows: [
-      { id: 'local', name: 'This computer', enabled: true, detail: 'Whisper Large v3 Turbo · CUDA' },
-      { id: 'groq', name: 'Groq', enabled: false, detail: '2 000 requests a day · free', limit: '2 000 requests a day' },
-      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: false, detail: '10 000 neurons a day, shared across models', limit: '10 000 neurons a day' },
-      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
-      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
-      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
+      { id: 'local', name: 'This computer', enabled: true, about: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'groq', name: 'Groq', enabled: false, about: 'Free tier: 2 000 requests a day' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: false, about: 'Free tier: 10 000 neurons a day, shared across models' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, about: 'Free tier F0: 5 hours a month · needs a region' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, about: '$200 of credit, no expiry' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, about: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
   'service-first': {
     rows: [
-      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', limit: '6 400 of 10 000 neurons left today', detail: '10 000 neurons a day' },
-      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', limit: '2 000 requests a day', detail: '2 000 requests a day · free' },
-      { id: 'local', name: 'This computer', enabled: true, detail: 'Whisper Large v3 Turbo · CUDA' },
-      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
-      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
-      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', about: 'Free tier: 10 000 neurons a day, shared across models' },
+      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', about: 'Free tier: 2 000 requests a day' },
+      { id: 'local', name: 'This computer', enabled: true, about: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, about: 'Free tier F0: 5 hours a month · needs a region' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, about: '$200 of credit, no expiry' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, about: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
   'quota-spent': {
     rows: [
-      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', blocked: 'Out until 00:00', limit: 'daily neurons spent', detail: '10 000 neurons a day' },
-      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', limit: '1 840 requests left today', detail: '2 000 requests a day · free' },
-      { id: 'local', name: 'This computer', enabled: true, detail: 'Whisper Large v3 Turbo · CUDA' },
-      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
-      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
-      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', detail: 'Daily neurons spent; available again in about 54 min', about: 'Free tier: 10 000 neurons a day, shared across models' },
+      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', about: 'Free tier: 2 000 requests a day' },
+      { id: 'local', name: 'This computer', enabled: true, about: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, about: 'Free tier F0: 5 hours a month · needs a region' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, about: '$200 of credit, no expiry' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, about: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
   'key-refused': {
     rows: [
-      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_dead_0000', extra: 'a1b2c3d4', blocked: 'Key refused', blockedState: 'refused', limit: 'the service refused this key', detail: '10 000 neurons a day' },
-      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', limit: '2 000 requests a day', detail: '2 000 requests a day · free' },
-      { id: 'local', name: 'This computer', enabled: true, detail: 'Whisper Large v3 Turbo · CUDA' },
-      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
-      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
-      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_dead_0000', extra: 'a1b2c3d4', detail: 'Key refused: the service rejected this token', refused: true, about: 'Free tier: 10 000 neurons a day, shared across models' },
+      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', about: 'Free tier: 2 000 requests a day' },
+      { id: 'local', name: 'This computer', enabled: true, about: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, about: 'Free tier F0: 5 hours a month · needs a region' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, about: '$200 of credit, no expiry' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, about: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
   'all-out': {
     rows: [
-      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', blocked: 'Out until 00:00', limit: 'daily neurons spent', detail: '10 000 neurons a day' },
-      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', blocked: 'Out until 00:00', limit: 'daily requests spent', detail: '2 000 requests a day · free' },
-      { id: 'local', name: 'This computer', enabled: false, detail: 'Switched off in this order' },
-      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, detail: '5 hours a month · needs a region', limit: '5 hours a month' },
-      { id: 'deepgram', name: 'Deepgram', enabled: false, detail: '$200 of credit, no expiry', limit: '$200 of credit' },
-      { id: 'custom', name: 'Custom endpoint', enabled: false, detail: 'Any OpenAI-compatible address · HTTPS only' },
+      { id: 'cloudflare', name: 'Cloudflare Workers AI', enabled: true, key: 'cf_live_4f21', extra: 'a1b2c3d4', detail: 'Daily neurons spent; available again in about 54 min', about: 'Free tier: 10 000 neurons a day, shared across models' },
+      { id: 'groq', name: 'Groq', enabled: true, key: 'gsk_live_9c07', detail: 'Daily requests spent; available again in about 3 h', about: 'Free tier: 2 000 requests a day' },
+      { id: 'local', name: 'This computer', enabled: false, about: 'Whisper Large v3 Turbo · CUDA' },
+      { id: 'azure', name: 'Microsoft Azure Speech', enabled: false, about: 'Free tier F0: 5 hours a month · needs a region' },
+      { id: 'deepgram', name: 'Deepgram', enabled: false, about: '$200 of credit, no expiry' },
+      { id: 'custom', name: 'Custom endpoint', enabled: false, about: 'Any OpenAI-compatible address · HTTPS only' },
     ],
   },
 };
@@ -366,10 +371,16 @@ const TRANSLATION_STATES = {
 
 /* ── Visuals ───────────────────────────────────────────── */
 
+/* All eight the product draws. A style that exists in the application and not
+   in the design does not get quietly dropped at the port: it either appears
+   here or it is removed on purpose, with the removal written down. */
 const VISUAL_STYLES = [
   { id: 'orb', name: 'Voice<br>orb', mark: 'spot-mark', preview: 'orb' },
   { id: 'spectrum', name: 'Spectrum', mark: 'area-mark', preview: 'spectrum' },
   { id: 'ribbon', name: 'Fluid<br>ribbon', mark: 'target-mark', preview: 'ribbon' },
+  { id: 'mic', name: 'Broadcast<br>mic', mark: 'area-mark', preview: 'mic' },
+  { id: 'circular', name: 'Circular', mark: 'target-mark', preview: 'circular' },
+  { id: 'sphere', name: 'Flow<br>sphere', mark: 'spot-mark', preview: 'sphere' },
   { id: 'slate', name: 'Writing<br>slate', mark: 'sun-mark', preview: 'slate' },
   { id: 'companion', name: 'Companion<br>orb', mark: 'spot-mark', preview: 'companion' },
   { id: 'off', name: 'Off', mark: 'target-mark', preview: 'off' },
@@ -395,6 +406,27 @@ const VISUAL_STATES = {
     subtitle: 'Fluid ribbon · shown while recording',
     caption: 'One line that thickens with the voice',
     sideNote: 'Drawn by the application itself, over whatever you are typing into.',
+    status: 'SYSTEM READY',
+  },
+  mic: {
+    style: 'mic',
+    subtitle: 'Broadcast mic · shown while recording',
+    caption: 'Level bars beside a studio microphone',
+    sideNote: 'Drawn by the application itself, over whatever you are typing into.',
+    status: 'SYSTEM READY',
+  },
+  circular: {
+    style: 'circular',
+    subtitle: 'Circular · shown while recording',
+    caption: 'The spectrum wrapped into a ring',
+    sideNote: 'Drawn on its own native surface, so it can be transparent per pixel.',
+    status: 'SYSTEM READY',
+  },
+  sphere: {
+    style: 'sphere',
+    subtitle: 'Flow sphere · shown while recording',
+    caption: 'A point cloud that accelerates on voice onset',
+    sideNote: 'Drawn on its own native surface, so it can be transparent per pixel.',
     status: 'SYSTEM READY',
   },
   slate: {
@@ -495,51 +527,69 @@ const HISTORY_STATES = {
 
 /* ── Hotkeys ───────────────────────────────────────────── */
 
+/* Every command SayFlex registers, with the three things that belong to a
+   command and were previously spread over two pages: whether it is on, what
+   combination calls it, and — where there is a choice — what it does. The
+   old Text tools page was those switches with the combinations taken away,
+   which is why it is folded in here.
+   `mode` names a menu in the control registry. */
 const HOTKEY_STATES = {
   active: {
-    summary: { text: 'All five are held by SayFlex', tone: 'ink' },
+    summary: { tone: 'ink' },
     status: 'SYSTEM READY',
     rows: [
-      { keys: 'Ctrl + Alt + Space', name: 'Dictate', detail: 'Records while held · transcribes and inserts on release', state: 'selected', text: 'Held' },
-      { keys: 'Ctrl + Alt + V', name: 'Insert last', detail: 'Places the newest transcript where the caret is now', state: 'installed', text: 'Held' },
-      { keys: 'Ctrl + Alt + K', name: 'Correct layout', detail: 'Offers RU/EN candidates for the selection · never automatic', state: 'installed', text: 'Held' },
-      { keys: 'Ctrl + Alt + F', name: 'Translate selection', detail: 'Captures the selection once and opens the preview', state: 'installed', text: 'Held' },
-      { keys: 'Ctrl + Alt + P', name: 'Pause input features', detail: 'Releases every hotkey until pressed again', state: 'installed', text: 'Held' },
+      { keys: 'Ctrl + Alt + Space', name: 'Dictate', on: true, detail: 'Records while held · transcribes and inserts on release', held: true },
+      { keys: 'Ctrl + Alt + V', name: 'Insert last', on: true, detail: 'Places the newest transcript where the caret is now', held: true },
+      { keys: 'Ctrl + Alt + K', name: 'Correct layout', on: true, detail: 'Offers RU/EN candidates for the selection · never automatic', held: true },
+      { keys: 'Ctrl + Alt + F', name: 'Act on selection', on: true, detail: 'Captures the selection once and opens the preview', held: true, mode: 'text-action' },
+      { keys: 'Ctrl + Alt + P', name: 'Pause input features', on: true, detail: 'Releases every hotkey until pressed again', held: true },
     ],
   },
   paused: {
-    summary: { text: 'Paused — no hotkey is held', tone: 'signal' },
+    summary: { tone: 'signal', text: 'Paused — no hotkey is held' },
     status: 'INPUT PAUSED',
     statusMode: 'INPUT PAUSED',
+    paused: true,
     rows: [
-      { keys: 'Ctrl + Alt + Space', name: 'Dictate', detail: 'Released while paused', state: 'disabled', text: 'Paused' },
-      { keys: 'Ctrl + Alt + V', name: 'Insert last', detail: 'Released while paused', state: 'disabled', text: 'Paused' },
-      { keys: 'Ctrl + Alt + K', name: 'Correct layout', detail: 'Released while paused', state: 'disabled', text: 'Paused' },
-      { keys: 'Ctrl + Alt + F', name: 'Translate selection', detail: 'Released while paused', state: 'disabled', text: 'Paused' },
-      { keys: 'Ctrl + Alt + P', name: 'Resume', detail: 'The only combination still held', state: 'active', text: 'Held' },
+      { keys: 'Ctrl + Alt + Space', name: 'Dictate', on: true, detail: 'Released while paused' },
+      { keys: 'Ctrl + Alt + V', name: 'Insert last', on: true, detail: 'Released while paused' },
+      { keys: 'Ctrl + Alt + K', name: 'Correct layout', on: true, detail: 'Released while paused' },
+      { keys: 'Ctrl + Alt + F', name: 'Act on selection', on: true, detail: 'Released while paused', mode: 'text-action' },
+      { keys: 'Ctrl + Alt + P', name: 'Resume', on: true, detail: 'The only combination still held', held: true, resume: true },
     ],
   },
   conflict: {
-    summary: { text: 'One combination is taken', tone: 'signal' },
+    summary: { tone: 'signal' },
     status: 'HOTKEY TAKEN',
     rows: [
-      { keys: 'Ctrl + Alt + Space', name: 'Dictate', detail: 'Records while held · transcribes and inserts on release', state: 'selected', text: 'Held' },
-      { keys: 'Ctrl + Alt + V', name: 'Insert last', detail: 'Another application registered it first', state: 'refused', text: 'Taken', action: 'Change' },
-      { keys: 'Ctrl + Alt + K', name: 'Correct layout', detail: 'Offers RU/EN candidates for the selection · never automatic', state: 'installed', text: 'Held' },
-      { keys: 'Ctrl + Alt + F', name: 'Translate selection', detail: 'Captures the selection once and opens the preview', state: 'installed', text: 'Held' },
-      { keys: 'Ctrl + Alt + P', name: 'Pause input features', detail: 'Releases every hotkey until pressed again', state: 'installed', text: 'Held' },
+      { keys: 'Ctrl + Alt + Space', name: 'Dictate', on: true, detail: 'Records while held · transcribes and inserts on release', held: true },
+      { keys: 'Ctrl + Alt + V', name: 'Insert last', on: true, detail: 'Another application registered it first', taken: true },
+      { keys: 'Ctrl + Alt + K', name: 'Correct layout', on: true, detail: 'Offers RU/EN candidates for the selection · never automatic', held: true },
+      { keys: 'Ctrl + Alt + F', name: 'Act on selection', on: true, detail: 'Captures the selection once and opens the preview', held: true, mode: 'text-action' },
+      { keys: 'Ctrl + Alt + P', name: 'Pause input features', on: true, detail: 'Releases every hotkey until pressed again', held: true },
+    ],
+  },
+  'switched-off': {
+    summary: { tone: 'ink' },
+    status: 'SYSTEM READY',
+    rows: [
+      { keys: 'Ctrl + Alt + Space', name: 'Dictate', on: true, detail: 'Records while held · transcribes and inserts on release', held: true },
+      { keys: 'Ctrl + Alt + V', name: 'Insert last', on: true, detail: 'Places the newest transcript where the caret is now', held: true },
+      { keys: 'Ctrl + Alt + K', name: 'Correct layout', on: false, detail: 'Switched off · the combination is left to other applications' },
+      { keys: 'Ctrl + Alt + F', name: 'Act on selection', on: false, detail: 'Switched off · the combination is left to other applications', mode: 'text-action' },
+      { keys: 'Ctrl + Alt + P', name: 'Pause input features', on: true, detail: 'Releases every hotkey until pressed again', held: true },
     ],
   },
   'protected-field': {
-    summary: { text: 'Standing down in a password field', tone: 'signal' },
+    summary: { tone: 'signal', text: 'Standing down in a password field' },
     status: 'PROTECTED FIELD',
-    note: true,
+    protectedField: true,
     rows: [
-      { keys: 'Ctrl + Alt + Space', name: 'Dictate', detail: 'Refused: the focused field is a password box', state: 'refused', text: 'Refused' },
-      { keys: 'Ctrl + Alt + V', name: 'Insert last', detail: 'Refused: the focused field is a password box', state: 'refused', text: 'Refused' },
-      { keys: 'Ctrl + Alt + K', name: 'Correct layout', detail: 'Refused: selected text cannot be read here', state: 'refused', text: 'Refused' },
-      { keys: 'Ctrl + Alt + F', name: 'Translate selection', detail: 'Refused: selected text cannot be read here', state: 'refused', text: 'Refused' },
-      { keys: 'Ctrl + Alt + P', name: 'Pause input features', detail: 'Always available', state: 'installed', text: 'Held' },
+      { keys: 'Ctrl + Alt + Space', name: 'Dictate', on: true, detail: 'Refused: the focused field is a password box' },
+      { keys: 'Ctrl + Alt + V', name: 'Insert last', on: true, detail: 'Refused: the focused field is a password box' },
+      { keys: 'Ctrl + Alt + K', name: 'Correct layout', on: true, detail: 'Refused: selected text cannot be read here' },
+      { keys: 'Ctrl + Alt + F', name: 'Act on selection', on: true, detail: 'Refused: selected text cannot be read here', mode: 'text-action' },
+      { keys: 'Ctrl + Alt + P', name: 'Pause input features', on: true, detail: 'Always available', held: true },
     ],
   },
 };
@@ -555,7 +605,7 @@ const PAGES = {
   visuals: { states: Object.keys(VISUAL_STATES), number: '025', layout: 'instrument' },
   history: { states: Object.keys(HISTORY_STATES), number: '029', layout: 'wide' },
   hotkeys: { states: Object.keys(HOTKEY_STATES), number: '031', layout: 'wide' },
-  controls: { states: [], number: '037', layout: 'wide' },
+  controls: { states: [], number: '—', layout: 'wide' },
 };
 
 /* ── rendering ─────────────────────────────────────────── */
@@ -895,6 +945,25 @@ function buildEngineChoices() {
   });
 }
 
+/* The ring is thirty-two spokes, the same count the product's circular
+   spectrum uses, so the picture is not a different instrument. */
+function buildCircularPreview() {
+  const host = element('circular-spokes');
+  if (!host) return;
+  const spokes = 32;
+  for (let i = 0; i < spokes; i += 1) {
+    const angle = (i / spokes) * Math.PI * 2 - Math.PI / 2;
+    const inner = 34;
+    const outer = inner + 8 + Math.abs(Math.sin(i * 0.7)) * 16;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', (60 + Math.cos(angle) * inner).toFixed(2));
+    line.setAttribute('y1', (60 + Math.sin(angle) * inner).toFixed(2));
+    line.setAttribute('x2', (60 + Math.cos(angle) * outer).toFixed(2));
+    line.setAttribute('y2', (60 + Math.sin(angle) * outer).toFixed(2));
+    host.appendChild(line);
+  }
+}
+
 function buildVisualChoices() {
   const host = element('visual-choices');
   host.innerHTML = '';
@@ -1014,46 +1083,25 @@ const RESERVED_HOTKEYS = new Set([
 ]);
 
 /* Changing a combination listens for one instead of asking the user to type
-   its name. Escape leaves it as it was. A clash is refused while still
-   listening, because the answer to "that one is taken" is another key, not a
-   dialog to dismiss first. */
-function captureHotkey(wrap, keys, detail, action) {
+   its name. Escape leaves it as it was. A clash is refused in the row while it
+   keeps listening, because the answer to "that one is taken" is another key,
+   not a dialog to dismiss first. */
+function captureHotkey(row, wrap, keys, detail, action) {
   const stateText = wrap.querySelector('.state-text');
-  const previous = {
-    keys: keys.textContent,
-    detail: detail.textContent,
-    state: wrap.dataset.state,
-    text: stateText ? stateText.textContent : '',
-  };
+  const previous = { keys: row.keys, detail: row.detail, taken: row.taken };
   keys.textContent = 'Press a combination…';
   detail.textContent = 'Escape leaves it unchanged.';
   wrap.dataset.state = 'downloading';
-  if (stateText) stateText.textContent = 'Listening';
+  stateText.textContent = 'Listening';
   action.textContent = 'Listening';
 
-  const finish = (text, detailText, state, mark) => {
-    keys.textContent = text;
-    detail.textContent = detailText;
-    wrap.dataset.state = state;
-    if (stateText) stateText.textContent = mark;
-    action.textContent = 'Change';
-    document.removeEventListener('keydown', onKey, true);
-  };
-
-  /* Which command in this list already answers to a combination. */
-  const heldBy = (combination) => {
-    const rows = [...wrap.closest('ul').querySelectorAll('.row')];
-    const clash = rows.find(
-      (row) => row !== wrap && row.firstElementChild.textContent === combination,
-    );
-    return clash ? clash.querySelector('.row-title b').textContent : null;
-  };
+  const stop = () => document.removeEventListener('keydown', onKey, true);
 
   const refuse = (why) => {
     keys.textContent = 'Press a combination…';
     detail.textContent = why;
     wrap.dataset.state = 'refused';
-    if (stateText) stateText.textContent = 'Taken';
+    stateText.textContent = 'Taken';
     setStatus('LOCAL · PRIVATE', 'HOTKEY TAKEN');
   };
 
@@ -1061,7 +1109,9 @@ function captureHotkey(wrap, keys, detail, action) {
     event.preventDefault();
     event.stopPropagation();
     if (event.key === 'Escape') {
-      finish(previous.keys, previous.detail, previous.state, previous.text);
+      stop();
+      Object.assign(row, previous);
+      renderHotkeys();
       setStatus('LOCAL · PRIVATE', 'UNCHANGED');
       return;
     }
@@ -1082,46 +1132,79 @@ function captureHotkey(wrap, keys, detail, action) {
       refuse(`Windows keeps ${combination} for itself`);
       return;
     }
-    const holder = heldBy(combination);
+    const holder = hotkeyModel.find((other) => other !== row && other.on && other.keys === combination);
     if (holder) {
-      refuse(`${combination} is held by ${holder} · pick another`);
+      refuse(`${combination} is held by ${holder.name} · pick another`);
       return;
     }
 
-    finish(combination, 'Registered by SayFlex', 'installed', 'Held');
-    refreshHotkeySummary();
+    stop();
+    row.keys = combination;
+    row.detail = 'Registered by SayFlex';
+    row.taken = false;
+    row.held = true;
+    renderHotkeys();
     setStatus('LOCAL · PRIVATE', 'HOTKEY CHANGED');
   };
   document.addEventListener('keydown', onKey, true);
 }
 
-/* The line at the top counts what the rows say, so resolving the clash also
+/* The line at the top counts what the rows say, so resolving a clash also
    clears the warning about it. */
 function refreshHotkeySummary() {
-  const rows = [...element('hotkey-rows').querySelectorAll('.row')];
-  const taken = rows.filter((row) => row.dataset.state === 'refused').length;
   const summary = element('hotkeys-summary');
-  summary.dataset.tone = taken ? 'signal' : 'ink';
+  const taken = hotkeyModel.filter((row) => row.on && row.taken).length;
+  const held = hotkeyModel.filter((row) => hotkeyStatus(row).text === 'Held').length;
   const WORDS = ['none', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
   const spell = (count) => WORDS[count] || String(count);
-  element('hotkeys-summary-text').textContent = taken
-    ? `${taken === 1 ? 'One combination is' : `${spell(taken)} combinations are`} taken`
-    : `All ${spell(rows.length)} are held by SayFlex`;
+
+  let text;
+  let tone = 'ink';
+  if (taken) {
+    tone = 'signal';
+    text = `${taken === 1 ? 'One combination is' : `${spell(taken)} combinations are`} taken`;
+  } else if (hotkeyContext.summary && hotkeyContext.summary.text) {
+    tone = hotkeyContext.summary.tone || 'ink';
+    text = hotkeyContext.summary.text;
+  } else if (held === hotkeyModel.length) {
+    text = `All ${spell(held)} are held by SayFlex`;
+  } else {
+    text = `${spell(held)} of ${spell(hotkeyModel.length)} held by SayFlex`;
+  }
+  summary.dataset.tone = tone;
+  element('hotkeys-summary-text').textContent = text;
 }
+
+let hotkeyModel = [];
+let hotkeyContext = {};
 
 function applyHotkeys(state) {
   const data = HOTKEY_STATES[state];
-  const summary = element('hotkeys-summary');
-  summary.dataset.tone = data.summary.tone;
-  element('hotkeys-summary-text').textContent = data.summary.text;
+  hotkeyContext = data;
+  hotkeyModel = data.rows.map((row) => ({ ...row }));
+  renderHotkeys();
+  setStatus(data.statusMode || 'LOCAL · PRIVATE', data.status);
+}
 
+/** What one row reports about itself, in the order the reasons override. */
+function hotkeyStatus(row) {
+  if (!row.on) return { state: 'disabled', text: 'Off' };
+  if (row.taken) return { state: 'refused', text: 'Taken' };
+  if (hotkeyContext.protectedField && !row.held) return { state: 'refused', text: 'Refused' };
+  if (hotkeyContext.paused && !row.resume) return { state: 'disabled', text: 'Paused' };
+  return { state: row.resume ? 'active' : 'installed', text: 'Held' };
+}
+
+function renderHotkeys() {
   const host = element('hotkey-rows');
   host.innerHTML = '';
-  data.rows.forEach((row) => {
+
+  hotkeyModel.forEach((row) => {
+    const status = hotkeyStatus(row);
     const item = document.createElement('li');
     const wrap = document.createElement('div');
     wrap.className = 'row';
-    wrap.dataset.state = row.state;
+    wrap.dataset.state = status.state;
 
     const keys = document.createElement('div');
     keys.className = 'row-keys';
@@ -1139,21 +1222,45 @@ function applyHotkeys(state) {
     detail.textContent = row.detail;
     main.append(title, detail);
 
+    // A command with a choice about what it does carries that choice, rather
+    // than leaving it on a separate page with the combination taken away.
+    if (row.mode && row.on) {
+      const mode = document.createElement('div');
+      mode.className = 'row-mode';
+      mode.appendChild(menuValueButton(row.mode));
+      main.appendChild(mode);
+    }
+
     const stateCell = document.createElement('div');
     stateCell.className = 'row-state';
     const mark = document.createElement('span');
     mark.className = 'row-mark';
     const text = document.createElement('span');
     text.className = 'state-text';
-    text.textContent = row.text;
+    text.textContent = status.text;
     stateCell.append(mark, text);
-    if (row.action) {
+
+    // Switching a command off leaves its combination to other applications;
+    // it is not the same as changing the combination, so both are offered.
+    const toggle = toggleControl({ on: 'On', off: 'Off' }, row.on, (next) => {
+      row.on = next;
+      row.detail = next
+        ? 'Registered by SayFlex'
+        : 'Switched off · the combination is left to other applications';
+      if (!next) row.taken = false;
+      renderHotkeys();
+      setStatus('LOCAL · PRIVATE', next ? 'HOTKEY HELD' : 'HOTKEY RELEASED');
+    });
+    toggle.classList.add('row-toggle');
+    stateCell.appendChild(toggle);
+
+    if (row.on) {
       const action = document.createElement('button');
       action.className = 'row-action';
-      action.textContent = row.action;
+      action.textContent = 'Change';
       action.addEventListener('click', (event) => {
         event.stopPropagation();
-        captureHotkey(wrap, keys, detail, action);
+        captureHotkey(row, wrap, keys, detail, action);
       });
       stateCell.appendChild(action);
     }
@@ -1163,7 +1270,7 @@ function applyHotkeys(state) {
     host.appendChild(item);
   });
 
-  setStatus(data.statusMode || 'LOCAL · PRIVATE', data.status);
+  refreshHotkeySummary();
 }
 
 function setStatus(mode, line) {
@@ -1183,8 +1290,10 @@ function showPage(page) {
   document.querySelectorAll('#tool-nav button').forEach((button) => {
     button.classList.toggle('active', button.dataset.page === page);
   });
+  element('controls-tab').classList.toggle('active', page === 'controls');
 
   element('page-number').textContent = PAGES[page].number;
+  numberThePage(page);
   buildStateButtons(PAGES[page].states);
   // The sheet shows live controls, so it is rebuilt from whatever the settings
   // are now rather than from what they were at start-up.
@@ -1214,6 +1323,29 @@ function showState(state) {
     hotkeys: applyHotkeys,
   }[currentPage];
   if (apply) apply(state);
+}
+
+/* The control sheet is review tooling, like the state switcher beside it, so
+   it is reached the way review tooling is reached and never appears in the
+   product's own navigation. */
+function wireReviewTab() {
+  const tab = element('controls-tab');
+  tab.addEventListener('click', () => {
+    showPage(currentPage === 'controls' ? 'overview' : 'controls');
+  });
+}
+
+/* Written once, from the order the navigation is built from. Typed into the
+   markup it drifted: two pages carried the same number and the review sheet
+   claimed to be the ninth of nine. */
+function numberThePage(page) {
+  const product = Object.keys(PAGES).filter((name) => name !== 'controls');
+  const host = document.querySelector(`.page[data-page="${page}"] .index`);
+  if (!host) return;
+  const at = product.indexOf(page);
+  host.textContent = at === -1
+    ? 'CONTROL SHEET'
+    : `${String(at + 1).padStart(2, '0')} / ${String(product.length).padStart(2, '0')}`;
 }
 
 function buildStateButtons(states) {
@@ -1294,11 +1426,13 @@ function start() {
 
   buildBars();
   buildVisualChoices();
+  buildCircularPreview();
   buildEngineChoices();
   buildSettingRows('dictation-settings', ['output', 'release', 'history']);
   buildSettingRows('visuals-settings', ['palette', 'response']);
   buildControlsSheet();
   closeMenusOnScroll();
+  wireReviewTab();
 
   /* The application lives in the tray, so the tray menu is a real part of the
      design rather than something Windows draws by accident. */
@@ -1353,20 +1487,34 @@ function loadProviderModel(state) {
   editingProvider = null;
 }
 
-/** What the row says about itself, derived rather than stored. */
-function providerStatus(provider) {
-  if (!provider.enabled) return { state: 'disabled', text: 'Off' };
+/** What the row says about itself, derived rather than stored.
+ *
+ * The words come from the worker's own vocabulary, because the interface has
+ * no other source: Switched off, No key stored, Key refused: …, and
+ * "<reason>; available again in about N min" for a service that is cooling
+ * down. There is no remaining-quota figure on the wire and none is drawn. */
+function providerStatus(provider, index) {
+  if (!provider.enabled) return { state: 'disabled', text: 'Switched off' };
   if (provider.id !== 'local' && !provider.key) return { state: 'disabled', text: 'No key stored' };
-  if (provider.blocked) return { state: provider.blockedState || 'exhausted', text: provider.blocked };
+  if (provider.detail) {
+    return { state: provider.refused ? 'refused' : 'exhausted', text: provider.detail };
+  }
+  // The router hands the recording to the local engine as soon as it reaches
+  // it and stops walking, so a row under an enabled local engine is never
+  // consulted. Saying so is better than leaving it looking ready.
+  const localAt = providerModel.findIndex((row) => row.id === 'local' && usable(row));
+  if (localAt !== -1 && index > localAt) {
+    return { state: 'disabled', text: 'Never reached' };
+  }
   const first = providerModel.find((candidate) => usable(candidate));
   if (first === provider) return { state: 'active', text: 'In use' };
-  return { state: 'installed', text: provider.id === 'local' ? 'Last resort' : 'Standing by' };
+  return { state: 'installed', text: 'Standing by' };
 }
 
 function usable(provider) {
   if (!provider.enabled) return false;
   if (provider.id !== 'local' && !provider.key) return false;
-  return !provider.blocked;
+  return !provider.detail;
 }
 
 function renderProviders() {
@@ -1374,7 +1522,7 @@ function renderProviders() {
   host.innerHTML = '';
 
   providerModel.forEach((provider, index) => {
-    const status = providerStatus(provider);
+    const status = providerStatus(provider, index);
     const item = document.createElement('li');
     const wrap = document.createElement('div');
     wrap.className = 'row';
@@ -1463,11 +1611,9 @@ function revealInColumn(node) {
 }
 
 function providerDetail(provider) {
-  if (provider.key) {
-    const extra = provider.extra ? ` · ${provider.extra}` : '';
-    return `Key ••••${provider.key.slice(-4)}${extra} · ${provider.limit || ''}`.replace(/ · $/, '');
-  }
-  return provider.detail;
+  if (!provider.key) return provider.about;
+  const extra = provider.extra ? ` · ${provider.extra}` : '';
+  return `Key ••••${provider.key.slice(-4)}${extra} · ${provider.about}`;
 }
 
 /** The form that appears in place of nothing when a key is being added. */
@@ -1515,7 +1661,8 @@ function providerEditor(provider) {
   if (provider.key) {
     actions.appendChild(confirmAction('Remove key', 'Remove the stored key?', () => {
       provider.key = null;
-      provider.blocked = null;
+      delete provider.detail;
+      delete provider.refused;
       editingProvider = null;
       renderProviders();
     }));
@@ -1523,7 +1670,7 @@ function providerEditor(provider) {
 
   const problem = document.createElement('p');
   problem.className = 'editor-note';
-  problem.style.color = 'var(--signal)';
+  problem.style.color = 'var(--signal-text)';
   problem.hidden = true;
 
   save.addEventListener('click', (event) => {
@@ -1555,7 +1702,8 @@ function providerEditor(provider) {
     provider.key = key;
     provider.extra = extra || null;
     provider.enabled = true;
-    provider.blocked = null;
+    delete provider.detail;
+    delete provider.refused;
     editingProvider = null;
     renderProviders();
     setStatus(privacyTone() === 'signal' ? 'AUDIO LEAVES DEVICE' : 'LOCAL · PRIVATE', 'KEY STORED');

@@ -7,7 +7,11 @@
 :root {
   --canvas: #bfc2c6;
   --ink: #111317;
-  --muted: #777b80;
+  /* 4.69:1 against the canvas. The greys this replaces sat at 2.4-2.6:1,
+     which is a hairline masquerading as text. */
+  --muted: #4a4e53;
+  /* For marks that are structure rather than reading matter: still 3.4:1. */
+  --muted-soft: #5c6166;
   --faint: rgba(17, 19, 23, .17);
   --hairline: rgba(17, 19, 23, .18);
   --active: #101216;
@@ -15,6 +19,8 @@
   /* The only colour in the system. It marks one thing at a time: something
      happening now, or something the user must decide. */
   --signal: #b8501c;
+  /* The same rust, dark enough to read as words rather than as a stain. */
+  --signal-text: #83380f;
   --ease: cubic-bezier(.2,.8,.2,1);
 }
 
@@ -85,7 +91,7 @@ button, input { font: inherit; color: inherit; }
 .workspace.is-list { grid-template-columns: 27% 1fr; }
 
 .left-panel { padding-left: 9.55vw; padding-right: 2.4vw; min-width: 0; }
-.eyebrow { color: #6c7075; font-size: clamp(10px,.95vw,14px); line-height: 1; }
+.eyebrow { color: var(--muted); font-size: clamp(10px,.95vw,14px); line-height: 1; }
 
 /* The nav lives inside its column and can never spill over the page beside it. */
 .tool-nav { display: grid; gap: 1.05vh; margin-top: 2.2vh; width: 100%; max-width: 238px; }
@@ -140,9 +146,9 @@ button, input { font: inherit; color: inherit; }
 .page::-webkit-scrollbar, .page-side::-webkit-scrollbar { width: 6px; }
 .page::-webkit-scrollbar-thumb, .page-side::-webkit-scrollbar-thumb { background: rgba(17,19,23,.22); }
 .stage-heading { text-align:center; }
-.stage-heading p, .index { margin:0 0 7px; font:600 9px/1 ui-monospace, monospace; color:rgba(17,19,23,.4); letter-spacing:.12em; }
+.stage-heading p, .index { margin:0 0 7px; font:600 10px/1 ui-monospace, monospace; color:var(--muted); letter-spacing:.12em; }
 .stage-heading h1, .list-head h1, .blank h1 { margin:0; font-size:clamp(17px,1.55vw,23px); font-weight:650; letter-spacing:-.035em; }
-.stage-heading span { display:block; margin-top:6px; font-size:10px; color:#6f7478; letter-spacing:.04em; }
+.stage-heading span { display:block; margin-top:6px; font-size:11.5px; color:var(--muted); letter-spacing:.04em; }
 
 /* ── instrument (Dictation) ────────────────────────────── */
 .instrument { position:absolute; inset:12vh 0 0; display:flex; flex-direction:column; align-items:center; }
@@ -166,7 +172,7 @@ button, input { font: inherit; color: inherit; }
 
 .readout { margin-top:10vh; text-align:center; }
 .readout strong { display:block; font-size:clamp(30px,3.4vw,50px); letter-spacing:-.05em; font-weight:380; line-height:1; font-variant-numeric:tabular-nums; }
-.readout span { display:block; margin-top:8px; font-size:11px; color:#70757a; letter-spacing:.02em; }
+.readout span { display:block; margin-top:8px; font-size:11.5px; color:var(--muted); letter-spacing:.02em; }
 .readout span.readout-alone { margin-top:0; font-size:13px; color:var(--ink); letter-spacing:-.01em; }
 
 .note { margin-top:3.4vh; max-width:min(31vw,420px); display:flex; align-items:flex-start; gap:10px; }
@@ -174,18 +180,23 @@ button, input { font: inherit; color: inherit; }
 .note[data-tone="signal"] .note-mark { background:var(--signal); border-color:var(--signal); }
 .note p { margin:0; font-size:12.5px; line-height:1.45; }
 .note-action { margin-left:auto; flex:none; border:1px solid rgba(17,19,23,.72); background:transparent;
-  padding:6px 11px; font-size:9px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; cursor:pointer;
+  padding:6px 11px; font-size:10px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; cursor:pointer;
   transition:all .18s var(--ease); }
 .note-action:hover { background:var(--ink); color:#fff; }
 
 .metrics { display:flex; gap:2.6vw; margin:3.6vh 0 0; padding:0; }
 .metrics div { display:grid; gap:5px; }
-.metrics dt { font-size:8.5px; letter-spacing:.13em; text-transform:uppercase; color:#767b80; }
+.metrics dt { font-size:10px; letter-spacing:.13em; text-transform:uppercase; color:var(--muted); }
 .metrics dd { margin:0; font-size:12px; font-weight:600; font-variant-numeric:tabular-nums; }
 
 /* ── right column (form rows) ──────────────────────────── */
 .right-panel { padding-right:8.2vw; padding-left:2.2vw; }
+/* Two columns fit the four speech backends. The nine visual styles need
+   three, or the note under them falls off the bottom of the column. */
 .choice-grid { width:min(175px,17vw); display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:2.25vh; }
+.choice-grid.wide { width:min(238px,23vw); grid-template-columns:repeat(3,1fr); gap:7px; }
+.choice-grid.wide .choice span { padding:0 0 8px 7px; font-size:clamp(9px,.85vw,12px); }
+.choice-grid.wide .choice i { right:7px; top:7px; transform:scale(.85); }
 .choice { position:relative; aspect-ratio:1; border:1px solid rgba(17,19,23,.72); background:rgba(255,255,255,.045);
   padding:0; cursor:pointer; display:flex; align-items:flex-end; text-align:left;
   transition:background .18s var(--ease),color .18s var(--ease),transform .18s var(--ease); }
@@ -197,26 +208,26 @@ button, input { font: inherit; color: inherit; }
 .area-mark { width:19px;height:14px;border-top:1px dotted currentColor;border-right:1px dotted currentColor;opacity:.7; }
 .target-mark { width:13px;height:13px;border-left:1px solid currentColor;border-bottom:1px solid currentColor;transform:rotate(-45deg); }
 .sun-mark { width:15px;height:15px;border:1px solid currentColor;border-radius:50%;opacity:.8; }
-.side-note { width:min(175px,17vw); margin:1.6vh 0 0; font-size:10px; line-height:1.5; color:#6f7478; }
+.side-note { width:min(175px,17vw); margin:1.6vh 0 0; font-size:11.5px; line-height:1.5; color:var(--muted); }
 
 .setting-rows { width:min(175px,17vw); margin-top:4vh; display:grid; }
 .setting-row { display:flex; align-items:baseline; justify-content:space-between; gap:10px;
   padding:11px 0; border:0; border-top:1px solid var(--hairline); background:transparent; cursor:pointer; text-align:left; }
 .setting-row:last-child { border-bottom:1px solid var(--hairline); }
-.setting-row span { font-size:11px; color:#70757a; }
+.setting-row span { font-size:11.5px; color:var(--muted); }
 .setting-row b { font-size:11.5px; font-weight:650; }
 .setting-row:hover b { text-decoration:underline; text-underline-offset:3px; }
 
 /* ── list archetype ────────────────────────────────────── */
 .list-head { display:flex; align-items:flex-end; justify-content:space-between; gap:20px; padding-bottom:2.2vh; }
-.list-summary { display:flex; align-items:center; gap:11px; font-size:11px; color:#6f7478; }
+.list-summary { display:flex; align-items:center; gap:11px; font-size:11px; color:var(--muted); }
 .list-summary .sep { width:12px; height:1px; background:var(--hairline); }
 .privacy-dot { width:7px; height:7px; border:1px solid var(--ink); }
-.list-summary[data-tone="signal"] { color:var(--signal); }
+.list-summary[data-tone="signal"] { color:var(--signal-text); }
 .list-summary[data-tone="signal"] .privacy-dot { background:var(--signal); border-color:var(--signal); }
-.list-lede { margin:0 0 2vh; font-size:11px; color:#6f7478; }
+.list-lede { margin:0 0 2vh; font-size:11px; color:var(--muted); }
 
-.group-label { margin:2.4vh 0 .9vh; font-size:8.5px; letter-spacing:.16em; text-transform:uppercase; color:#767b80; }
+.group-label { margin:2.4vh 0 .9vh; font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); }
 .rows { list-style:none; margin:0; padding:0; }
 .row { display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:16px;
   padding:13px 4px; border-top:1px solid var(--hairline); }
@@ -224,17 +235,19 @@ button, input { font: inherit; color: inherit; }
 .row-main { min-width:0; }
 .row-title { display:flex; align-items:baseline; gap:10px; }
 .row-title b { font-size:13px; font-weight:650; letter-spacing:-.01em; }
-.row-title em { font-style:normal; font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:#767b80; }
-.row-detail { margin:4px 0 0; font-size:11px; color:#6f7478; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.row-size { font-size:11px; color:#6f7478; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.row-title em { font-style:normal; font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
+/* A command's choice about what it does belongs under its own name. */
+.row-mode { margin-top:7px; }
+.row-detail { margin:4px 0 0; font-size:11.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.row-size { font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
 .row-state { display:flex; align-items:center; gap:10px; min-width:min(230px,20vw); justify-content:flex-end; }
-.state-text { font-size:11px; color:#6f7478; white-space:nowrap; }
+.state-text { font-size:11.5px; color:var(--muted); white-space:nowrap; }
 .row[data-state="selected"] .state-text,
 .row[data-state="active"] .state-text { color:var(--ink); font-weight:650; }
 .row[data-state="downloading"] .state-text,
 .row[data-state="verifying"] .state-text,
 .row[data-state="exhausted"] .state-text,
-.row[data-state="refused"] .state-text { color:var(--signal); }
+.row[data-state="refused"] .state-text { color:var(--signal-text); }
 .row-mark { width:7px; height:7px; flex:none; border:1px solid rgba(17,19,23,.45); }
 .row[data-state="selected"] .row-mark,
 .row[data-state="active"] .row-mark { background:var(--ink); border-color:var(--ink); }
@@ -247,8 +260,8 @@ button, input { font: inherit; color: inherit; }
 
 .progress { position:relative; width:min(150px,12vw); height:3px; background:rgba(17,19,23,.16); }
 .progress i { position:absolute; inset:0 auto 0 0; background:var(--signal); }
-.row-action { border:1px solid rgba(17,19,23,.6); background:transparent; padding:5px 10px; cursor:pointer;
-  font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; transition:all .18s var(--ease); white-space:nowrap; }
+.row-action { border:1px solid rgba(17,19,23,.6); background:transparent; padding:5px 11px; cursor:pointer;
+  font-size:10px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; transition:all .18s var(--ease); white-space:nowrap; }
 .row-action:hover { background:var(--ink); color:#fff; }
 .grip { width:14px; color:rgba(17,19,23,.4); cursor:grab; font-size:13px; line-height:1; user-select:none; }
 /* The handle takes focus, so it has to show it. */
@@ -257,8 +270,13 @@ button, input { font: inherit; color: inherit; }
 
 /* ── not designed yet ──────────────────────────────────── */
 .blank { padding-top:14vh; max-width:38ch; }
-.blank-note { margin-top:14px; font-size:12px; line-height:1.6; color:#6f7478; }
+.blank-note { margin-top:14px; font-size:12px; line-height:1.6; color:var(--muted); }
 .blank-note b { color:var(--ink); }
+
+/* What used to be a page of its own: the version, and the one claim about
+   this application that is not tied to a particular page. */
+.colophon { margin:3.4vh 0 0; max-width:52ch; font-size:11.5px; line-height:1.6; color:var(--muted); }
+.colophon b { color:var(--ink); font-weight:650; }
 
 /* ── footer ────────────────────────────────────────────── */
 .footerline { position:relative; z-index:3; border-top:1px solid rgba(17,19,23,.07);
@@ -266,32 +284,37 @@ button, input { font: inherit; color: inherit; }
 .brand-mark { width:60px;height:66px;border:1px solid var(--ink);background:transparent;padding:9px 8px;text-align:left;
   cursor:pointer;display:flex;flex-direction:column;justify-content:flex-end;font-weight:700;font-size:13px;line-height:.94; }
 .brand-mark i { width:4px;height:4px;background:var(--ink);align-self:flex-end;margin-top:7px; }
-.status-copy { display:grid; gap:5px; font-size:8px; letter-spacing:.13em; color:#73787d; }
-.status-copy strong { color:var(--ink); font-size:9px; }
-.status-copy[data-tone="signal"] span { color:var(--signal); font-weight:700; }
+.status-copy { display:grid; gap:5px; font-size:11px; letter-spacing:.13em; color:var(--muted); }
+.status-copy strong { color:var(--ink); font-size:12px; }
+.status-copy[data-tone="signal"] span { color:var(--signal-text); font-weight:700; }
 .page-number { margin-left:auto; font-size:17px; font-weight:600; font-variant-numeric:tabular-nums; }
 
 /* The state switcher is a review instrument, not part of the product. It is
    deliberately drawn as a tool: monospace, unfilled, out of the way. */
 .state-switch { display:flex; align-items:center; gap:12px; padding-bottom:2px; }
-.state-switch-label { font:600 8px/1 ui-monospace, monospace; letter-spacing:.16em; color:rgba(17,19,23,.35); }
+.review-tab { border:1px dashed rgba(17,19,23,.42); background:transparent; padding:4px 9px; cursor:pointer;
+  font:600 10px/1 ui-monospace, monospace; letter-spacing:.1em; color:var(--muted);
+  transition:all .16s var(--ease); }
+.review-tab:hover { border-style:solid; color:var(--ink); }
+.review-tab.active { background:var(--ink); border-color:var(--ink); color:#f5f5f2; }
+.state-switch-label { font:600 10px/1 ui-monospace, monospace; letter-spacing:.16em; color:var(--muted); }
 .state-switch-buttons { display:flex; flex-wrap:wrap; gap:5px; }
-.state-switch button { border:1px dashed rgba(17,19,23,.3); background:transparent; padding:4px 8px; cursor:pointer;
-  font:600 9px/1 ui-monospace, monospace; letter-spacing:.06em; color:#6f7478; transition:all .16s var(--ease); }
+.state-switch button { border:1px dashed rgba(17,19,23,.42); background:transparent; padding:4px 8px; cursor:pointer;
+  font:600 10px/1 ui-monospace, monospace; letter-spacing:.06em; color:var(--muted); transition:all .16s var(--ease); }
 .state-switch button:hover { border-style:solid; color:var(--ink); }
 .state-switch button.active { background:var(--ink); border-color:var(--ink); color:#f5f5f2; }
 
 /* ── summary archetype (Overview) ──────────────────────── */
 .summary { max-width: 62ch; padding-top: 2vh; }
 .statement { margin:0; font-size:clamp(24px,2.6vw,38px); font-weight:380; letter-spacing:-.045em; line-height:1.08; }
-.statement-sub { margin:12px 0 0; font-size:13px; color:#6f7478; line-height:1.5; }
+.statement-sub { margin:12px 0 0; font-size:13px; color:var(--muted); line-height:1.5; }
 .summary .note { margin-top:3vh; max-width:none; }
 .facts { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:0 3vw; margin:4vh 0 0; padding:0; }
 .facts > div { display:grid; gap:6px; padding:14px 0; border-top:1px solid var(--hairline); }
-.facts dt { font-size:8.5px; letter-spacing:.13em; text-transform:uppercase; color:#767b80; }
+.facts dt { font-size:10px; letter-spacing:.13em; text-transform:uppercase; color:var(--muted); }
 .facts dd { margin:0; font-size:13px; font-weight:600; letter-spacing:-.01em; }
-.facts dd small { display:block; margin-top:4px; font-size:10.5px; font-weight:400; color:#6f7478; letter-spacing:0; }
-.facts > div[data-tone="signal"] dd { color:var(--signal); }
+.facts dd small { display:block; margin-top:4px; font-size:11.5px; font-weight:400; color:var(--muted); letter-spacing:0; }
+.facts > div[data-tone="signal"] dd { color:var(--signal-text); }
 
 /* ── form archetype (Translation, Hotkeys) ─────────────── */
 .form { max-width: 68ch; padding-top: 1vh; }
@@ -301,10 +324,10 @@ button, input { font: inherit; color: inherit; }
   padding:15px 4px; border-top:1px solid var(--hairline); }
 .form-rows > div:last-child { border-bottom:1px solid var(--hairline); }
 .form-rows dt { font-size:12.5px; font-weight:650; letter-spacing:-.01em; }
-.form-rows dt small { display:block; margin-top:5px; font-size:11px; font-weight:400; color:#6f7478; letter-spacing:0; }
+.form-rows dt small { display:block; margin-top:5px; font-size:11px; font-weight:400; color:var(--muted); letter-spacing:0; }
 .form-rows dd { margin:0; display:flex; align-items:center; gap:11px; font-size:12px; font-weight:600; white-space:nowrap; }
-.form-rows dd em { font-style:normal; font-weight:400; color:#6f7478; }
-.form-rows > div[data-tone="signal"] dd { color:var(--signal); }
+.form-rows dd em { font-style:normal; font-weight:400; color:var(--muted); }
+.form-rows > div[data-tone="signal"] dd { color:var(--signal-text); }
 .stepper { display:flex; align-items:center; gap:9px; }
 .stepper button { width:22px; height:22px; border:1px solid rgba(17,19,23,.55); background:transparent; cursor:pointer;
   line-height:1; font-size:12px; }
@@ -324,25 +347,54 @@ button, input { font: inherit; color: inherit; }
 .preview-slate i { height:2px; background:rgba(17,19,23,.65); }
 .preview-slate i:nth-child(2) { width:78%; }
 .preview-slate i:nth-child(3) { width:44%; opacity:.5; }
-.preview-off { font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:#7b8085; }
+/* Broadcast mic: the capsule, and the level beside it. */
+.preview-mic { inset:22% 20%; display:flex; align-items:center; justify-content:center; gap:7px; }
+.preview-mic i:first-child { width:13px; height:60%; border:1.5px solid var(--ink); border-radius:7px; }
+.preview-mic i:not(:first-child) { width:2px; background:var(--ink); opacity:.75; }
+.preview-mic i:nth-child(2) { height:34%; }
+.preview-mic i:nth-child(3) { height:66%; }
+.preview-mic i:nth-child(4) { height:48%; }
+.preview-mic i:nth-child(5) { height:22%; }
+
+/* Circular: the same spectrum, wrapped. */
+.preview-circular { width:52%; color:rgba(17,19,23,.72); }
+.preview-circular line { stroke:currentColor; stroke-width:1.6; }
+
+/* Flow sphere: a point cloud, drawn on its own surface in the product. */
+.preview-sphere { width:44%; aspect-ratio:1; border-radius:50%; display:grid; place-items:center;
+  background:radial-gradient(circle at 38% 34%, rgba(17,19,23,.16), transparent 62%);
+  border:1px solid rgba(17,19,23,.32); }
+.preview-sphere i { position:absolute; border-radius:50%; background:var(--ink); opacity:.6; }
+.preview-sphere i:nth-child(1) { width:5px; height:5px; transform:translate(-26%,-34%); }
+.preview-sphere i:nth-child(2) { width:3px; height:3px; transform:translate(46%,12%); opacity:.4; }
+.preview-sphere i:nth-child(3) { width:4px; height:4px; transform:translate(6%,52%); opacity:.5; }
+
+.preview-off { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
 .preview[data-style="orb"] .preview-orb,
 .preview[data-style="companion"] .preview-orb,
 .preview[data-style="spectrum"] .preview-bars,
 .preview[data-style="ribbon"] .preview-ribbon,
+.preview[data-style="mic"] .preview-mic,
+.preview[data-style="circular"] .preview-circular,
+.preview[data-style="sphere"] .preview-sphere,
 .preview[data-style="slate"] .preview-slate,
 .preview[data-style="off"] .preview-off { opacity:1; }
+/* Circular and Flow sphere are the two the product draws on their own native
+   surface, so the frame says so rather than leaving them looking like the
+   others. */
+.preview[data-style="circular"], .preview[data-style="sphere"] { border-style:dotted; }
 .preview[data-style="companion"] { border-style:dashed; border-color:rgba(17,19,23,.34); }
 
 /* ── empty state ───────────────────────────────────────── */
 .empty { padding:6vh 4px 0; max-width:52ch; }
 .empty p { margin:0; font-size:15px; font-weight:600; letter-spacing:-.02em; }
-.empty .empty-note { margin-top:10px; font-size:12px; font-weight:400; color:#6f7478; line-height:1.55; }
+.empty .empty-note { margin-top:10px; font-size:12px; font-weight:400; color:var(--muted); line-height:1.55; }
 .empty .note-action { margin:18px 0 0; }
 
 /* A row that is only text — history entries carry no size column. */
 .row-quote { font-size:13px; letter-spacing:-.005em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .row[data-state="remote"] .row-mark { background:var(--signal); border-color:var(--signal); }
-.row[data-state="remote"] .state-text { color:var(--signal); }
+.row[data-state="remote"] .state-text { color:var(--signal-text); }
 
 /* Hotkey rows lead with the combination itself, set in the numeric column so
    the four line up as a keyboard rather than as prose. */
@@ -363,7 +415,7 @@ button, input { font: inherit; color: inherit; }
 .menu-button:last-of-type { border-bottom:1px solid var(--hairline); }
 .menu-button:hover { background:rgba(255,255,255,.16); }
 .menu-button:focus-visible { outline:1px solid var(--ink); outline-offset:2px; }
-.menu-button > span { font-size:11px; color:#70757a; }
+.menu-button > span { font-size:11.5px; color:var(--muted); }
 .menu-button > b { display:flex; align-items:center; gap:8px; font-size:11.5px; font-weight:650; }
 .menu-button > b::after {
   content:""; width:0; height:0; border:3.5px solid transparent; border-top-color:var(--ink);
@@ -398,8 +450,8 @@ button, input { font: inherit; color: inherit; }
 .menu-item[disabled] { opacity:.45; cursor:not-allowed; }
 .menu-item i { flex:none; width:7px; height:7px; margin-top:4px; border:1px solid currentColor; }
 .menu-item[aria-checked="true"] i { background:currentColor; }
-.menu-item small { display:block; margin-top:4px; font-size:10.5px; opacity:.72; }
-.menu-item.danger { color:var(--signal); }
+.menu-item small { display:block; margin-top:4px; font-size:11.5px; opacity:.72; }
+.menu-item.danger { color:var(--signal-text); }
 .menu-item.danger i { border-color:var(--signal); }
 .menu-separator { height:1px; margin:5px 0; background:rgba(17,19,23,.2); }
 .menu-label { padding:7px 13px 5px; font:600 8px/1 ui-monospace, monospace; letter-spacing:.16em;
@@ -432,13 +484,13 @@ button, input { font: inherit; color: inherit; }
 .field[data-invalid="true"] { border-color:var(--signal); }
 .field input { flex:1; min-width:0; border:0; background:transparent; outline:0; font-size:11.5px; }
 .field input::placeholder { color:#83888d; }
-.field-note { margin:6px 0 0; font-size:10px; color:#6f7478; }
-.field[data-invalid="true"] + .field-note { color:var(--signal); }
+.field-note { margin:6px 0 0; font-size:11.5px; color:var(--muted); }
+.field[data-invalid="true"] + .field-note { color:var(--signal-text); }
 
 /* ── confirm (destructive) ─────────────────────────────── */
 .confirm { display:inline-flex; align-items:center; gap:9px; }
-.confirm-question { font-size:11px; color:var(--signal); }
-.row-action.danger { border-color:var(--signal); color:var(--signal); }
+.confirm-question { font-size:11px; color:var(--signal-text); }
+.row-action.danger { border-color:var(--signal); color:var(--signal-text); }
 .row-action.danger:hover { background:var(--signal); color:#fff; border-color:var(--signal); }
 
 /* ── drag feedback ─────────────────────────────────────── */
@@ -453,10 +505,10 @@ button, input { font: inherit; color: inherit; }
   flex:1; min-height:0; overflow-y:auto; padding-bottom:4vh; padding-right:1vw; }
 .sheet section { padding:2.2vh 0; border-top:1px solid var(--hairline); }
 .sheet h2 { margin:0 0 4px; font-size:12px; font-weight:650; letter-spacing:-.01em; }
-.sheet p { margin:0 0 14px; font-size:10.5px; color:#6f7478; line-height:1.5; max-width:34ch; }
+.sheet p { margin:0 0 14px; font-size:11.5px; color:var(--muted); line-height:1.5; max-width:34ch; }
 .sheet .demo { display:grid; gap:10px; justify-items:start; }
 .sheet .demo > * { max-width:100%; }
-.state-caption { font:600 8px/1 ui-monospace, monospace; letter-spacing:.14em; text-transform:uppercase; color:#83888d; }
+.state-caption { font:600 10px/1 ui-monospace, monospace; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
 
 /* ── tray menu ─────────────────────────────────────────── */
 .tray-anchor { position:relative; }
@@ -467,8 +519,8 @@ button, input { font: inherit; color: inherit; }
    is being set up, and the list behind it does not disappear. */
 .row-editor { padding:2px 4px 18px 42px; display:grid; gap:12px; max-width:560px; }
 .editor-fields { display:grid; gap:10px; }
-.editor-label { font:600 8.5px/1 ui-monospace, monospace; letter-spacing:.14em; text-transform:uppercase; color:#767b80; }
+.editor-label { font:600 10px/1 ui-monospace, monospace; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); }
 .editor-actions { display:flex; align-items:center; gap:9px; }
-.editor-note { margin:0; font-size:10.5px; line-height:1.5; color:#6f7478; }
+.editor-note { margin:0; font-size:11.5px; line-height:1.5; color:var(--muted); }
 .editor-note b { color:var(--ink); font-weight:650; }
 .row-toggle { display:flex; align-items:center; }

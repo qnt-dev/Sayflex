@@ -57,6 +57,14 @@ const MENUS = {
       { value: 'copy', label: 'Copy to clipboard' },
     ],
   },
+  'text-action': {
+    label: 'On selected text',
+    options: [
+      { value: 'adaptive', label: 'Decide from the text', note: 'Translates foreign text, corrects a wrong layout' },
+      { value: 'translate', label: 'Always translate' },
+      { value: 'layout', label: 'Always correct the layout' },
+    ],
+  },
   direction: {
     label: 'Direction',
     options: [
