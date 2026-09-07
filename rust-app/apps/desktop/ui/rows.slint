@@ -69,7 +69,10 @@ export struct HotkeyRow {
     enabled: bool,
     // Set when the combination is fixed in this build, with the reason.
     locked-reason: string,
-    // Names a menu of modes when the command has a choice about what it does.
+    // Names a menu of modes when the command has a choice about what it does:
+    // `mode` is which menu, `mode-value` the words on the row, `mode-key` the
+    // option in force.
     mode: string,
     mode-value: string,
+    mode-key: string,
 }

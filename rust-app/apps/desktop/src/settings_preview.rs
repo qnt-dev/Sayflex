@@ -318,6 +318,7 @@ fn fill_hotkeys(settings: &SettingsWindow) {
             locked_reason: FIXED.into(),
             mode: "".into(),
             mode_value: "".into(),
+            mode_key: "".into(),
         },
         HotkeyRow {
             keys: "Ctrl + Alt + V".into(),
@@ -329,6 +330,7 @@ fn fill_hotkeys(settings: &SettingsWindow) {
             locked_reason: FIXED.into(),
             mode: "".into(),
             mode_value: "".into(),
+            mode_key: "".into(),
         },
         HotkeyRow {
             keys: "Ctrl + Alt + K".into(),
@@ -340,6 +342,7 @@ fn fill_hotkeys(settings: &SettingsWindow) {
             locked_reason: FIXED.into(),
             mode: "".into(),
             mode_value: "".into(),
+            mode_key: "".into(),
         },
         HotkeyRow {
             keys: "Ctrl + Alt + F".into(),
@@ -351,6 +354,7 @@ fn fill_hotkeys(settings: &SettingsWindow) {
             locked_reason: FIXED.into(),
             mode: "text-action".into(),
             mode_value: "Decide from the text".into(),
+            mode_key: "adaptive".into(),
         },
         HotkeyRow {
             keys: "Ctrl + Alt + P".into(),
@@ -362,6 +366,7 @@ fn fill_hotkeys(settings: &SettingsWindow) {
             locked_reason: "Not implemented in this version".into(),
             mode: "".into(),
             mode_value: "".into(),
+            mode_key: "".into(),
         },
     ])));
 }

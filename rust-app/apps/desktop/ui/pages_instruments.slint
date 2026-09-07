@@ -90,8 +90,10 @@ export component DictationPage inherits HorizontalLayout {
     in property <int> backend: 0;
     in property <bool> backend-verified: false;
     in property <string> output-mode;
+    in property <string> output-mode-value;
     in property <bool> output-locked: false;
     in property <string> release-mode;
+    in property <string> release-mode-value;
     in property <bool> keeping-history: true;
     in property <string> hotkey;
 
@@ -214,7 +216,8 @@ export component DictationPage inherits HorizontalLayout {
 
         GroupLabel { text: "OUTPUT"; height: 30px; }
         MenuButton {
-            value: root.output-mode;
+            text: root.output-mode;
+            value: root.output-mode-value;
             // The unavailable choice stays in the list and says why. Removing
             // it would leave the user wondering whether the feature exists.
             options: [
@@ -231,7 +234,8 @@ export component DictationPage inherits HorizontalLayout {
 
         GroupLabel { text: "RELEASE"; height: 30px; }
         MenuButton {
-            value: root.release-mode;
+            text: root.release-mode;
+            value: root.release-mode-value;
             options: [
                 { value: "fastest", label: "Fastest", note: "Prepares results during natural pauses" },
                 { value: "efficient", label: "Efficient", note: "Less GPU and battery, slightly slower" },
@@ -380,7 +384,8 @@ export component VisualsPage inherits HorizontalLayout {
         // that style is chosen rather than sitting greyed out for the others.
         if root.selected == 4 : GroupLabel { text: "PALETTE"; height: 30px; }
         if root.selected == 4 : MenuButton {
-            value: root.circular-palette == 0 ? "Monochrome" : "Warm";
+            text: root.circular-palette == 0 ? "Monochrome" : "Warm";
+            value: root.circular-palette == 0 ? "0" : "1";
             options: [
                 { value: "0", label: "Monochrome" },
                 { value: "1", label: "Warm" },
@@ -390,7 +395,8 @@ export component VisualsPage inherits HorizontalLayout {
 
         if root.selected == 5 : GroupLabel { text: "PALETTE"; height: 30px; }
         if root.selected == 5 : MenuButton {
-            value: root.sphere-palette == 0 ? "Reference" : "Black and yellow";
+            text: root.sphere-palette == 0 ? "Reference" : "Black and yellow";
+            value: root.sphere-palette == 0 ? "0" : "1";
             options: [
                 { value: "0", label: "Reference" },
                 { value: "1", label: "Black and yellow" },
@@ -400,7 +406,8 @@ export component VisualsPage inherits HorizontalLayout {
 
         if root.selected == 6 : GroupLabel { text: "SURFACE"; height: 30px; }
         if root.selected == 6 : MenuButton {
-            value: root.slate-surface == 0 ? "Paper" : "Glass";
+            text: root.slate-surface == 0 ? "Paper" : "Glass";
+            value: root.slate-surface == 0 ? "0" : "1";
             options: [
                 { value: "0", label: "Paper" },
                 { value: "1", label: "Glass" },

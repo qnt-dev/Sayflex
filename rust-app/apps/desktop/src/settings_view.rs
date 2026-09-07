@@ -280,6 +280,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         locked_reason: FIXED.into(),
         mode: "".into(),
         mode_value: "".into(),
+        mode_key: "".into(),
     });
     rows.push(HotkeyRow {
         keys: "Ctrl + Alt + V".into(),
@@ -291,6 +292,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         locked_reason: FIXED.into(),
         mode: "".into(),
         mode_value: "".into(),
+        mode_key: "".into(),
     });
 
     let (layout_tone, layout_state) = held(state.layout_enabled);
@@ -308,6 +310,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         locked_reason: FIXED.into(),
         mode: "".into(),
         mode_value: "".into(),
+        mode_key: "".into(),
     });
 
     let (action_tone, action_state) = held(state.translation_enabled);
@@ -328,6 +331,10 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
             TextActionMode::Adaptive => "Decide from the text".into(),
             TextActionMode::AlwaysPalette => "Always ask".into(),
         },
+        mode_key: match state.text_action_mode {
+            TextActionMode::Adaptive => "adaptive".into(),
+            TextActionMode::AlwaysPalette => "palette".into(),
+        },
     });
 
     rows.push(HotkeyRow {
@@ -340,6 +347,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         locked_reason: "Not implemented in this version".into(),
         mode: "".into(),
         mode_value: "".into(),
+        mode_key: "".into(),
     });
     rows
 }

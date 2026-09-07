@@ -277,8 +277,10 @@ export component SettingsWindow inherits Window {
                     backend: root.speech-backend-index;
                     backend-verified: root.speech-backend-verified;
                     output-mode: root.output-mode-label;
+                    output-mode-value: root.output-mode;
                     output-locked: root.output-mode-locked;
                     release-mode: root.release-mode-label;
+                    release-mode-value: root.release-mode;
                     keeping-history: root.history-enabled;
                     hotkey: root.dictate-hotkey;
                     select-backend(index) => { root.select-speech-backend(index); }
@@ -292,7 +294,9 @@ export component SettingsWindow inherits Window {
                     ready: root.translation-ready;
                     model-name: root.translation-model-name;
                     delivery: root.translation-delivery-label;
+                    delivery-value: root.translation-delivery;
                     text-action: root.text-action-mode-label;
+                    text-action-value: root.text-action-mode;
                     warm: root.translation-warm;
                     blur-radius: root.translation-blur-radius;
                     note-text: root.translation-note;

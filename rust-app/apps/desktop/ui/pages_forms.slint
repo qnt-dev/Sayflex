@@ -16,7 +16,9 @@ export component TranslationPage inherits VerticalLayout {
     in property <string> model-name;
     in property <string> engine-state;
     in property <string> delivery;
+    in property <string> delivery-value;
     in property <string> text-action;
+    in property <string> text-action-value;
     in property <bool> warm: false;
     in property <int> blur-radius: 3;
     in property <string> note-text;
@@ -86,7 +88,8 @@ export component TranslationPage inherits VerticalLayout {
         hint: "What happens to it once it exists";
         MenuButton {
             compact: true;
-            value: root.delivery;
+            text: root.delivery;
+            value: root.delivery-value;
             options: [
                 { value: "preview", label: "Show a preview", note: "Nothing is replaced until you say so" },
                 { value: "replace", label: "Replace the selection", note: "The original goes to the clipboard first" },
@@ -101,7 +104,8 @@ export component TranslationPage inherits VerticalLayout {
         hint: "What Ctrl + Alt + F does with what it finds";
         MenuButton {
             compact: true;
-            value: root.text-action;
+            text: root.text-action;
+            value: root.text-action-value;
             options: [
                 { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
                 { value: "palette", label: "Always ask", note: "Shows the palette every time, whatever the text looks like" },
@@ -191,7 +195,8 @@ export component HotkeysPage inherits VerticalLayout {
             }
             MenuButton {
                 compact: true;
-                value: row.mode-value;
+                text: row.mode-value;
+                value: row.mode-key;
                 options: [
                     { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
                     { value: "palette", label: "Always ask", note: "Shows the palette every time" },

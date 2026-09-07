@@ -374,6 +374,10 @@ export component ChoiceTile inherits Rectangle {
 // so this one only remembers: destructive items live in the context menu.
 export component MenuButton inherits Rectangle {
     in property <string> label;
+    /// What the row reads.
+    in property <string> text;
+    /// Which option is in force. Compared against the options' own values, so
+    /// it must be the identity and not the words.
     in property <string> value;
     in property <[MenuOption]> options;
     in property <bool> compact: false;
@@ -401,7 +405,7 @@ export component MenuButton inherits Rectangle {
         }
         if !root.compact : Rectangle { width: 4px; }
         Text {
-            text: root.value;
+            text: root.text;
             color: Sheet.ink;
             font-size: Sheet.detail-size;
             font-weight: 650;
