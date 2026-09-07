@@ -1,0 +1,523 @@
+// The control system from design/concept-states, in Slint.
+//
+// The prototype has a page — the control sheet — whose whole argument is that
+// an element drawn once at rest is not yet designed: the work starts where it
+// is busy, refused, or unavailable. These components carry those states, and
+// nothing here is a picture of a control.
+//
+// One rule runs through all of them: **what is chosen now is an ink block**,
+// the same signal the navigation uses. Nothing else in view carries that
+// weight.
+
+import { Sheet } from "sheet.slint";
+
+export struct MenuOption {
+    value: string,
+    label: string,
+    note: string,
+    // A choice that cannot be taken yet says why, rather than vanishing.
+    reason: string,
+    danger: bool,
+    separator: bool,
+}
+
+// ── the plain verb in a row ──────────────────────────────
+//
+// The verb belongs to the row it acts on. One action per row at rest; a second
+// appears only while something is running.
+export component RowAction inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    // Why it cannot be pressed. A disabled control with no reason is a dead
+    // end; with one it is an explanation.
+    in property <string> reason;
+    callback clicked();
+
+    height: 26px;
+    width: caption.preferred-width + 22px;
+    border-width: 1px;
+    border-color: root.enabled
+        ? (root.danger ? Sheet.signal : Sheet.hairline)
+        : Sheet.hairline-faint;
+    background: touch.has-hover && root.enabled
+        ? (root.danger ? Sheet.signal : Sheet.ink)
+        : transparent;
+    opacity: root.enabled ? 1.0 : 0.55;
+
+    caption := Text {
+        text: root.label;
+        color: touch.has-hover && root.enabled
+            ? Sheet.on-ink
+            : (root.danger ? Sheet.signal-text : Sheet.ink);
+        font-size: Sheet.label-size;
+        font-weight: 700;
+        letter-spacing: 1px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    if !root.enabled && root.reason != "" && touch.has-hover : Rectangle {
+        y: parent.height + 4px;
+        height: why.preferred-height + 10px;
+        width: why.preferred-width + 16px;
+        background: Sheet.ink;
+        why := Text {
+            text: root.reason;
+            color: Sheet.on-ink;
+            font-size: Sheet.label-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ── the handle that sets an order ────────────────────────
+//
+// It takes focus and answers to the arrow keys as well as to a drag, because a
+// list that only a mouse can rearrange is a list some people cannot rearrange
+// at all. Two buttons would do the same job and cost sixty pixels of every row,
+// which is width the row's own words need more.
+export component Grip inherits Rectangle {
+    in property <bool> can-rise: true;
+    in property <bool> can-fall: true;
+    // How tall one row is, so a drag can be turned into a number of places.
+    in property <length> row-height: 56px;
+    callback moved(int);
+
+    width: 22px;
+    background: focus.has-focus ? Sheet.raised-strong : (touch.has-hover ? Sheet.raised : transparent);
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: Sheet.ink;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 3px;
+        for line in [0, 1, 2] : Rectangle {
+            height: 1px;
+            width: 10px;
+            x: (parent.width - self.width) / 2;
+            background: Sheet.muted;
+        }
+    }
+
+    focus := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow && root.can-rise) {
+                root.moved(-1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow && root.can-fall) {
+                root.moved(1);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    touch := TouchArea {
+        property <length> pressed-at: 0px;
+        mouse-cursor: grab;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                focus.focus();
+                self.pressed-at = self.mouse-y;
+            }
+            if (event.kind == PointerEventKind.up) {
+                // The handle reports how far the pointer travelled; turning
+                // that into places is the row's business, since the row is
+                // what knows how tall it is.
+                root.moved(round((self.mouse-y - self.pressed-at) / root.row-height));
+            }
+        }
+    }
+}
+
+// ── destructive, asked in place ──────────────────────────
+//
+// It replaces the button it was pressed from. There are no modal dialogs in
+// this design: a question that covers the thing it is about is a question
+// asked in the wrong place.
+export component ConfirmAction inherits Rectangle {
+    in property <string> label;
+    in property <string> question;
+    callback confirmed();
+    property <bool> asking: false;
+
+    height: 26px;
+    width: layout.preferred-width;
+
+    layout := HorizontalLayout {
+        spacing: 8px;
+
+        if !root.asking : RowAction {
+            label: root.label;
+            danger: true;
+            clicked => { root.asking = true; }
+        }
+
+        if root.asking : Text {
+            text: root.question;
+            color: Sheet.signal-text;
+            font-size: Sheet.detail-size;
+            vertical-alignment: center;
+        }
+        if root.asking : RowAction {
+            label: "Yes";
+            danger: true;
+            clicked => {
+                root.asking = false;
+                root.confirmed();
+            }
+        }
+        if root.asking : RowAction {
+            label: "No";
+            clicked => { root.asking = false; }
+        }
+    }
+}
+
+// ── on or off, in force immediately ──────────────────────
+//
+// The label states what is true now, not what pressing it would do.
+export component Toggle inherits Rectangle {
+    in property <string> on-label: "On";
+    in property <string> off-label: "Off";
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+
+    height: 22px;
+    width: layout.preferred-width;
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    layout := HorizontalLayout {
+        spacing: 8px;
+
+        Rectangle {
+            width: 34px;
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            border-width: 1px;
+            border-color: root.checked ? Sheet.ink : Sheet.hairline;
+            background: root.checked ? Sheet.ink : transparent;
+
+            Rectangle {
+                width: 12px;
+                height: 12px;
+                x: root.checked ? parent.width - self.width - 2px : 2px;
+                y: (parent.height - self.height) / 2;
+                background: root.checked ? Sheet.on-ink : Sheet.muted;
+                animate x { duration: 140ms; easing: cubic-bezier(0.2, 0.8, 0.2, 1); }
+            }
+        }
+
+        Text {
+            text: root.checked ? root.on-label : root.off-label;
+            color: root.checked ? Sheet.ink : Sheet.muted;
+            font-size: Sheet.detail-size;
+            font-weight: root.checked ? 650 : 400;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.checked); }
+    }
+}
+
+// ── a small bounded number ───────────────────────────────
+//
+// For a value where the exact number matters and a slider would only
+// approximate it. The bound belongs to the control, not to a complaint after
+// the fact: the button simply stops at the end of the range.
+export component Stepper inherits Rectangle {
+    in property <int> value: 0;
+    in property <int> minimum: 0;
+    in property <int> maximum: 8;
+    callback changed(int);
+
+    height: 24px;
+    width: layout.preferred-width;
+
+    layout := HorizontalLayout {
+        spacing: 2px;
+
+        RowAction {
+            label: "−";
+            enabled: root.value > root.minimum;
+            clicked => { root.changed(root.value - 1); }
+        }
+        Text {
+            width: 30px;
+            text: root.value;
+            color: Sheet.ink;
+            font-size: Sheet.body-size;
+            font-weight: 650;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        RowAction {
+            label: "+";
+            enabled: root.value < root.maximum;
+            clicked => { root.changed(root.value + 1); }
+        }
+    }
+}
+
+// ── a key or an address ──────────────────────────────────
+//
+// A stored key is never shown again: the field carries a masked tail, and
+// typing replaces it.
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in property <bool> masked: false;
+    in property <bool> invalid: false;
+    in-out property <string> value;
+    callback accepted(string);
+
+    height: 30px;
+    border-width: 1px;
+    border-color: root.invalid ? Sheet.signal : Sheet.hairline;
+    background: Sheet.raised;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        if root.value == "" && !input.has-focus : Text {
+            text: root.placeholder;
+            color: Sheet.muted;
+            font-size: Sheet.detail-size;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        input := TextInput {
+            horizontal-stretch: 1;
+            single-line: true;
+            input-type: root.masked ? InputType.password : InputType.text;
+            text <=> root.value;
+            color: Sheet.ink;
+            font-size: Sheet.detail-size;
+            vertical-alignment: center;
+            accepted => { root.accepted(self.text); }
+        }
+    }
+}
+
+// ── the note under a field ───────────────────────────────
+export component FieldNote inherits Text {
+    in property <bool> problem: false;
+    color: root.problem ? Sheet.signal-text : Sheet.muted;
+    font-size: Sheet.detail-size;
+    wrap: word-wrap;
+}
+
+// ── three or four alternatives worth seeing at once ──────
+export component ChoiceTile inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    // Shown while something about this choice is being verified.
+    in property <bool> busy: false;
+    callback clicked();
+
+    border-width: 1px;
+    border-color: root.selected ? Sheet.ink : Sheet.hairline;
+    background: root.selected
+        ? Sheet.ink
+        : (touch.has-hover && root.enabled ? Sheet.raised-strong : Sheet.raised);
+    opacity: root.enabled ? 1.0 : 0.35;
+
+    VerticalLayout {
+        padding: 9px;
+        spacing: 2px;
+        alignment: end;
+
+        Text {
+            text: root.label;
+            color: root.selected ? Sheet.on-ink : Sheet.ink;
+            font-size: Sheet.detail-size;
+            font-weight: 650;
+            wrap: word-wrap;
+        }
+        if root.detail != "" : Text {
+            text: root.busy ? "checking…" : root.detail;
+            color: root.selected ? Sheet.on-ink : Sheet.muted;
+            font-size: Sheet.label-size;
+            opacity: root.selected ? 0.75 : 1.0;
+            wrap: word-wrap;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : not-allowed;
+        clicked => { root.clicked(); }
+    }
+}
+
+// ── a setting with a small fixed set of answers ──────────
+//
+// The panel opens under the row and closes on Escape, on a click outside, or
+// on a choice. A menu that both does things and remembers things is two menus,
+// so this one only remembers: destructive items live in the context menu.
+export component MenuButton inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <[MenuOption]> options;
+    in property <bool> compact: false;
+    callback chosen(string);
+
+    height: 30px;
+    // Compact is the in-a-row form: it takes only the width its value needs.
+    // The full form fills the settings column it is placed in.
+    min-width: face.preferred-width + 26px;
+    horizontal-stretch: root.compact ? 0 : 1;
+    border-width: 1px;
+    border-color: root.compact ? Sheet.hairline-faint : Sheet.hairline;
+    background: touch.has-hover ? Sheet.raised-strong : Sheet.raised;
+
+    face := HorizontalLayout {
+        padding-left: root.compact ? 9px : 12px;
+        padding-right: root.compact ? 9px : 12px;
+        spacing: 10px;
+
+        if !root.compact : Text {
+            text: root.label;
+            color: Sheet.muted;
+            font-size: Sheet.detail-size;
+            vertical-alignment: center;
+        }
+        if !root.compact : Rectangle { width: 4px; }
+        Text {
+            text: root.value;
+            color: Sheet.ink;
+            font-size: Sheet.detail-size;
+            font-weight: 650;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        // Drawn, not typed: a chevron glyph is one missing font away from a
+        // control with no affordance at all.
+        Rectangle {
+            width: 9px;
+            Path {
+                width: 9px;
+                height: 5px;
+                y: (parent.height - self.height) / 2;
+                viewbox-width: 9;
+                viewbox-height: 5;
+                stroke: Sheet.muted;
+                stroke-width: 1.4px;
+                MoveTo { x: 0.7; y: 0.7; }
+                LineTo { x: 4.5; y: 4.2; }
+                LineTo { x: 8.3; y: 0.7; }
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { panel.show(); }
+    }
+
+    panel := PopupWindow {
+        x: 0;
+        y: root.height + 2px;
+        width: max(root.width, 240px);
+        height: items.preferred-height;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: #c9ccd0;
+            border-width: 1px;
+            border-color: Sheet.ink;
+
+            items := VerticalLayout {
+                padding-top: 5px;
+                padding-bottom: 5px;
+
+                for option in root.options : Rectangle {
+                    height: option.separator
+                        ? 9px
+                        : (option.note == "" && option.reason == "" ? 32px : 46px);
+
+                    if option.separator : Rectangle {
+                        height: 1px;
+                        y: 4px;
+                        x: 11px;
+                        width: parent.width - 22px;
+                        background: Sheet.hairline;
+                    }
+
+                    if !option.separator : Rectangle {
+                        background: item-touch.has-hover && option.reason == ""
+                            ? Sheet.raised-strong
+                            : transparent;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 9px;
+
+                            // The choice in force is an ink block, the same
+                            // signal the navigation carries.
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                y: 12px;
+                                background: option.value == root.value ? Sheet.ink : transparent;
+                                border-width: 1px;
+                                border-color: option.value == root.value
+                                    ? Sheet.ink
+                                    : Sheet.hairline;
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 3px;
+                                Text {
+                                    text: option.label;
+                                    color: option.reason != ""
+                                        ? Sheet.muted
+                                        : (option.danger ? Sheet.signal-text : Sheet.ink);
+                                    font-size: Sheet.detail-size;
+                                    font-weight: option.value == root.value ? 650 : 400;
+                                }
+                                if option.note != "" || option.reason != "" : Text {
+                                    text: option.reason != "" ? option.reason : option.note;
+                                    color: option.reason != "" ? Sheet.signal-text : Sheet.muted;
+                                    font-size: Sheet.label-size;
+                                    wrap: no-wrap;
+                                    overflow: elide;
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+
+                        item-touch := TouchArea {
+                            enabled: option.reason == "";
+                            mouse-cursor: option.reason == "" ? pointer : not-allowed;
+                            clicked => {
+                                root.chosen(option.value);
+                                panel.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

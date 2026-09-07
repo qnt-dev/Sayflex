@@ -1,0 +1,75 @@
+// What one row of each list carries.
+//
+// The rule these follow: a row shows what the backend actually reports and
+// nothing else. Where a field looks like it is missing — a remaining quota, a
+// removal verb — it is missing because the code behind it does not exist, and
+// inventing it here would only mean defending an invented number later.
+
+// A speech or translation model.
+export struct ModelRow {
+    catalog-id: string,
+    // "Speech" or "Translation". The row knows, so the list does not need to be
+    // split in two to say it.
+    section: string,
+    title: string,
+    detail: string,
+    // Kept out of `detail` so the sizes line up down the column.
+    size: string,
+    // What the row says about itself: Selected · Installed · Not installed ·
+    // "42 %" · Verifying.
+    state: string,
+    // resting · active · working · refused · off
+    tone: string,
+    // The one verb the row offers at rest, and the second that appears only
+    // while something is running.
+    action: string,
+    secondary: string,
+    selected: bool,
+    installed: bool,
+    progress: float,
+}
+
+// One entry in the transcription order.
+export struct ProviderRow {
+    id: string,
+    title: string,
+    detail: string,
+    enabled: bool,
+    available: bool,
+    needs-key: bool,
+    key-hint: string,
+    field-label: string,
+    field-value: string,
+    // The worker's own words for why it cannot run: Switched off, No key
+    // stored, "Key refused: …", "<reason>; available again in about N min".
+    state: string,
+    tone: string,
+    // The router hands the recording to the local engine as soon as it reaches
+    // one and stops, so a row below an enabled local engine is never asked.
+    // Saying so beats leaving it looking ready.
+    unreachable: bool,
+}
+
+// One dictation kept on this device.
+export struct HistoryRow {
+    text: string,
+    detail: string,
+    // local · remote — which one produced it, since a list that mixes them and
+    // does not say so is a list that misleads.
+    origin: string,
+}
+
+// One command SayFlex registers.
+export struct HotkeyRow {
+    keys: string,
+    name: string,
+    detail: string,
+    state: string,
+    tone: string,
+    enabled: bool,
+    // Set when the combination is fixed in this build, with the reason.
+    locked-reason: string,
+    // Names a menu of modes when the command has a choice about what it does.
+    mode: string,
+    mode-value: string,
+}

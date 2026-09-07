@@ -1,0 +1,448 @@
+// The settings window.
+//
+// The shell is three rows that never scroll — topline, workspace, footer — and
+// the workspace is the only thing that gives. A column whose content can
+// outgrow the window scrolls on its own; the window itself has a floor of
+// 940×640, below which the third column and the footer would simply leave the
+// screen.
+
+import { Sheet } from "sheet.slint";
+import { Fact } from "parts.slint";
+import { ModelRow, ProviderRow, HistoryRow, HotkeyRow } from "rows.slint";
+import { RowAction } from "controls.slint";
+import { ModelsPage, ProvidersPage, HistoryPage } from "pages_lists.slint";
+import { TranslationPage, HotkeysPage } from "pages_forms.slint";
+import { OverviewPage, DictationPage, VisualsPage } from "pages_instruments.slint";
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 42px;
+    background: root.active
+        ? Sheet.ink
+        : (touch.has-hover ? Sheet.raised : transparent);
+
+    HorizontalLayout {
+        padding-left: 15px;
+        padding-right: 15px;
+        spacing: 14px;
+
+        // The mark is the same square the rest of the interface uses for
+        // "this one", filled when the page is the one you are on.
+        Rectangle {
+            width: 9px;
+            height: 9px;
+            y: (parent.height - self.height) / 2;
+            background: root.active ? Sheet.on-ink : transparent;
+            border-width: root.active ? 0px : 1px;
+            border-color: Sheet.hairline;
+        }
+        Text {
+            text: root.label;
+            color: root.active ? Sheet.on-ink : Sheet.ink;
+            font-size: Sheet.body-size;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    title: "SayFlex";
+    icon: @image-url("../assets/tray-icon.svg");
+    // The floor every page is drawn to fit. Below it the two-column workspace
+    // has nowhere left to give and there is no outer scroll to fall back on,
+    // so the window refuses to go smaller rather than cutting the footer off.
+    // The window opens at whatever the tallest page needs, which is a little
+    // above this.
+    min-width: 940px;
+    min-height: 640px;
+    // Without these the window opens at whatever the current page happens to
+    // need and changes size when the page does, which is the interface moving
+    // under the pointer.
+    preferred-width: 1000px;
+    preferred-height: 720px;
+    background: Sheet.canvas;
+    default-font-family: "Segoe UI Variable Text";
+
+    // ── what page, and what the frame says ──
+    in-out property <int> active-page: 0;
+    in property <string> today: "";
+    in property <string> app-version: "";
+    in-out property <string> runtime-status: "Starting workers…";
+    in-out property <string> indicator-status: "Idle";
+    in property <bool> remote-transcription-enabled: false;
+
+    // ── Overview ──
+    in property <string> overview-statement: "Starting up";
+    in property <string> overview-sub: "";
+    in property <[Fact]> overview-facts;
+    in property <string> overview-note;
+    in property <string> overview-note-action;
+    in property <bool> overview-note-signal: false;
+
+    // ── Dictation ──
+    in property <string> dictation-subtitle: "Local speech";
+    in property <string> dictation-readout: "";
+    in property <string> dictation-caption: "";
+    in-out property <int> speech-backend-index: 0;
+    in property <bool> speech-backend-verified: false;
+    in property <string> speech-backend-detail: "";
+    in-out property <string> output-mode: "original";
+    in-out property <string> output-mode-label: "Original language";
+    in property <bool> output-mode-locked: false;
+    in-out property <string> release-mode: "fastest";
+    in-out property <string> release-mode-label: "Fastest";
+    in-out property <bool> history-enabled: true;
+    in property <string> dictate-hotkey: "Ctrl + Alt + Space";
+
+    // ── Translation ──
+    in-out property <bool> translation-enabled: false;
+    in property <bool> translation-ready: false;
+    in property <string> translation-model-name: "";
+    in-out property <string> translation-delivery: "preview";
+    in property <string> translation-delivery-label: "Show a preview";
+    in-out property <string> text-action-mode: "adaptive";
+    in property <string> text-action-mode-label: "Decide from the text";
+    in-out property <bool> translation-warm: true;
+    in-out property <int> translation-blur-radius: 3;
+    in property <string> translation-note: "";
+    in property <string> translation-note-action: "";
+    in property <bool> translation-note-signal: false;
+
+    // ── the lists ──
+    // Speech models then the translator, in one list: the page is about
+    // models, and the row says which kind it is.
+    in property <[ModelRow]> model-rows;
+    in property <string> models-summary: "";
+    in property <[ProviderRow]> provider-rows;
+    in property <string> provider-claim: "";
+    in property <[HistoryRow]> history-rows;
+    in property <string> history-scope: "";
+    in property <[HotkeyRow]> hotkey-rows;
+    in property <string> hotkeys-summary: "";
+    in property <bool> hotkeys-summary-signal: false;
+
+    // ── Visuals ──
+    in-out property <int> selected-visualizer: 0;
+    in property <string> visuals-subtitle: "";
+    in property <string> visuals-caption: "";
+    in property <string> visuals-note: "";
+    in property <bool> visuals-native-surface: false;
+    in-out property <int> selected-circular-palette: 0;
+    in-out property <int> selected-flow-sphere-palette: 0;
+    in-out property <int> selected-writing-slate-surface: 0;
+
+    // ── what the window can be asked to do ──
+    callback choose-model(string);
+    callback cancel-model-install();
+    callback refresh-history();
+    callback copy-history(int);
+    callback clear-history();
+    callback set-history-enabled(bool);
+    callback set-output-mode(string);
+    callback set-release-mode(string);
+    callback select-speech-backend(int);
+    callback select-visualizer(int);
+    callback select-circular-palette(int);
+    callback select-flow-sphere-palette(int);
+    callback select-writing-slate-surface(int);
+    callback set-translation-enabled(bool);
+    callback set-translation-delivery(string);
+    callback set-text-action-mode(string);
+    callback set-translation-warm(bool);
+    callback set-translation-blur(int);
+    callback open-translator();
+    callback set-hotkey-enabled(int, bool);
+    callback move-provider(int, int);
+    callback toggle-provider(int);
+    callback set-provider-key(string, string);
+    callback set-provider-field(string, string);
+    callback quit-requested();
+
+    // The page's own number, written once from the order the navigation is
+    // built from rather than typed into eight places — and the same number the
+    // heading shows, because two numbering schemes for one page read as a bug
+    // whether or not both were deliberate.
+    property <[string]> page-numbers: ["01", "02", "03", "04", "05", "06", "07", "08"];
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // ── topline ──
+        HorizontalLayout {
+            height: 74px;
+            padding-left: 40px;
+            padding-right: 40px;
+            padding-top: 26px;
+
+            HorizontalLayout {
+                spacing: 20px;
+                alignment: start;
+                Text {
+                    text: root.today;
+                    color: Sheet.ink;
+                    font-size: 16px;
+                    font-weight: 650;
+                    letter-spacing: -0.5px;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            HorizontalLayout {
+                spacing: 16px;
+                alignment: end;
+                Text {
+                    text: "SAYFLEX";
+                    color: Sheet.muted;
+                    font-size: Sheet.label-size;
+                    font-weight: 650;
+                    letter-spacing: 2.4px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.app-version;
+                    color: Sheet.ink;
+                    font-size: 16px;
+                    font-weight: 650;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ── workspace ──
+        HorizontalLayout {
+            vertical-stretch: 1;
+            padding-left: 40px;
+            padding-right: 40px;
+            padding-top: 30px;
+            spacing: 30px;
+
+            VerticalLayout {
+                width: Sheet.nav-width;
+                spacing: 6px;
+
+                Text {
+                    text: "Tools";
+                    color: Sheet.muted;
+                    font-size: Sheet.detail-size;
+                    height: 22px;
+                }
+
+                NavItem { label: "Overview"; active: root.active-page == 0; clicked => { root.active-page = 0; } }
+                NavItem { label: "Dictation"; active: root.active-page == 1; clicked => { root.active-page = 1; } }
+                NavItem { label: "Translation"; active: root.active-page == 2; clicked => { root.active-page = 2; } }
+                NavItem { label: "Models"; active: root.active-page == 3; clicked => { root.active-page = 3; } }
+                NavItem { label: "Providers"; active: root.active-page == 4; clicked => { root.active-page = 4; } }
+                NavItem { label: "Visuals"; active: root.active-page == 5; clicked => { root.active-page = 5; } }
+                NavItem { label: "History"; active: root.active-page == 6; clicked => { root.active-page = 6; } }
+                NavItem { label: "Hotkeys"; active: root.active-page == 7; clicked => { root.active-page = 7; } }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+
+            // The page fills the column. Pages whose rows can outgrow it put
+            // those rows in a ListView, which scrolls; the rest are drawn to
+            // fit the 940x640 floor this window declares.
+            page := VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 0px;
+
+                if root.active-page == 0 : OverviewPage {
+                    statement: root.overview-statement;
+                    sub: root.overview-sub;
+                    claim: root.provider-claim;
+                    audio-leaves-device: root.remote-transcription-enabled;
+                    facts: root.overview-facts;
+                    note-text: root.overview-note;
+                    note-action: root.overview-note-action;
+                    note-signal: root.overview-note-signal;
+                    version: root.app-version;
+                    note-acted => { root.active-page = 3; }
+                }
+
+                if root.active-page == 1 : DictationPage {
+                    subtitle: root.dictation-subtitle;
+                    readout: root.dictation-readout;
+                    caption: root.dictation-caption;
+                    engine-note: root.speech-backend-detail;
+                    backend: root.speech-backend-index;
+                    backend-verified: root.speech-backend-verified;
+                    output-mode: root.output-mode-label;
+                    output-locked: root.output-mode-locked;
+                    release-mode: root.release-mode-label;
+                    keeping-history: root.history-enabled;
+                    hotkey: root.dictate-hotkey;
+                    select-backend(index) => { root.select-speech-backend(index); }
+                    set-output-mode(value) => { root.set-output-mode(value); }
+                    set-release-mode(value) => { root.set-release-mode(value); }
+                    set-keeping-history(next) => { root.set-history-enabled(next); }
+                }
+
+                if root.active-page == 2 : TranslationPage {
+                    enabled: root.translation-enabled;
+                    ready: root.translation-ready;
+                    model-name: root.translation-model-name;
+                    delivery: root.translation-delivery-label;
+                    text-action: root.text-action-mode-label;
+                    warm: root.translation-warm;
+                    blur-radius: root.translation-blur-radius;
+                    note-text: root.translation-note;
+                    note-action: root.translation-note-action;
+                    note-signal: root.translation-note-signal;
+                    set-enabled(next) => { root.set-translation-enabled(next); }
+                    set-delivery(value) => { root.set-translation-delivery(value); }
+                    set-text-action(value) => { root.set-text-action-mode(value); }
+                    set-warm(next) => { root.set-translation-warm(next); }
+                    set-blur(value) => { root.set-translation-blur(value); }
+                    open-translator => { root.open-translator(); }
+                    note-acted => { root.active-page = 3; }
+                }
+
+                if root.active-page == 3 : ModelsPage {
+                    rows: root.model-rows;
+                    summary: root.models-summary;
+                    choose(catalog-id) => { root.choose-model(catalog-id); }
+                    cancel-install => { root.cancel-model-install(); }
+                }
+
+                if root.active-page == 4 : ProvidersPage {
+                    rows: root.provider-rows;
+                    audio-leaves-device: root.remote-transcription-enabled;
+                    claim: root.provider-claim;
+                    toggle-provider(index) => { root.toggle-provider(index); }
+                    move-provider(from, to) => { root.move-provider(from, to); }
+                    set-provider-key(id, secret) => { root.set-provider-key(id, secret); }
+                    set-provider-field(id, value) => { root.set-provider-field(id, value); }
+                }
+
+                if root.active-page == 5 : VisualsPage {
+                    selected: root.selected-visualizer;
+                    subtitle: root.visuals-subtitle;
+                    caption: root.visuals-caption;
+                    side-note: root.visuals-note;
+                    native-surface: root.visuals-native-surface;
+                    circular-palette: root.selected-circular-palette;
+                    sphere-palette: root.selected-flow-sphere-palette;
+                    slate-surface: root.selected-writing-slate-surface;
+                    select-visualizer(index) => { root.select-visualizer(index); }
+                    select-circular-palette(index) => { root.select-circular-palette(index); }
+                    select-sphere-palette(index) => { root.select-flow-sphere-palette(index); }
+                    select-slate-surface(index) => { root.select-writing-slate-surface(index); }
+                }
+
+                if root.active-page == 6 : HistoryPage {
+                    rows: root.history-rows;
+                    keeping: root.history-enabled;
+                    scope: root.history-scope;
+                    set-keeping(next) => { root.set-history-enabled(next); }
+                    clear-history => { root.clear-history(); }
+                    refresh-history => { root.refresh-history(); }
+                    copy-history(index) => { root.copy-history(index); }
+                }
+
+                if root.active-page == 7 : HotkeysPage {
+                    rows: root.hotkey-rows;
+                    summary: root.hotkeys-summary;
+                    summary-signal: root.hotkeys-summary-signal;
+                    toggle-row(index, next) => { root.set-hotkey-enabled(index, next); }
+                    set-mode(menu, value) => { root.set-text-action-mode(value); }
+                }
+            }
+        }
+
+        // ── footer ──
+        Rectangle {
+            height: 92px;
+
+            Rectangle {
+                height: 1px;
+                background: Sheet.hairline-faint;
+            }
+
+            HorizontalLayout {
+                padding-left: 40px;
+                padding-right: 40px;
+                padding-top: 20px;
+                padding-bottom: 26px;
+                spacing: 26px;
+
+                Rectangle {
+                    width: 60px;
+                    height: 66px;
+                    border-width: 1px;
+                    border-color: Sheet.ink;
+                    VerticalLayout {
+                        padding: 8px;
+                        alignment: end;
+                        spacing: 0px;
+                        Text {
+                            text: "SAY";
+                            color: Sheet.ink;
+                            font-size: 13px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "FLEX";
+                            color: Sheet.ink;
+                            font-size: 13px;
+                            font-weight: 700;
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: end;
+                    spacing: 5px;
+                    Text {
+                        text: root.remote-transcription-enabled
+                            ? "AUDIO LEAVES DEVICE"
+                            : "LOCAL · PRIVATE";
+                        color: root.remote-transcription-enabled
+                            ? Sheet.signal-text
+                            : Sheet.muted;
+                        font-size: Sheet.label-size;
+                        font-weight: root.remote-transcription-enabled ? 700 : 400;
+                        letter-spacing: 1.6px;
+                    }
+                    Text {
+                        text: root.runtime-status;
+                        color: Sheet.ink;
+                        font-size: 11px;
+                        font-weight: 650;
+                        letter-spacing: 1.4px;
+                        overflow: elide;
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                VerticalLayout {
+                    alignment: end;
+                    RowAction {
+                        label: "Quit SayFlex";
+                        clicked => { root.quit-requested(); }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: end;
+                    Text {
+                        text: root.page-numbers[root.active-page];
+                        color: Sheet.ink;
+                        font-size: 17px;
+                        font-weight: 600;
+                    }
+                }
+            }
+        }
+    }
+}

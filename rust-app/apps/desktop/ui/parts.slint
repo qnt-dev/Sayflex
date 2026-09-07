@@ -1,0 +1,408 @@
+// The furniture the pages are built from.
+//
+// Four archetypes, and the layout follows the shape of the data rather than one
+// template: an instrument for a live signal, a summary for a claim about the
+// state, a list for rows, a form for label/value pairs. On list and form pages
+// the third column does not shrink or hide — it is not there, and the grid
+// becomes two columns.
+
+import { Sheet } from "sheet.slint";
+import { Grip, RowAction, Toggle, MenuOption, MenuButton } from "controls.slint";
+
+export struct Fact {
+    label: string,
+    value: string,
+    detail: string,
+    // Marks the one fact that is happening now or wants a decision.
+    signal: bool,
+}
+
+// ── the page's own number, written once ──────────────────
+export component PageIndex inherits Text {
+    color: Sheet.muted;
+    font-size: Sheet.mono-size;
+    font-family: "Consolas";
+    font-weight: 600;
+    letter-spacing: 1.2px;
+}
+
+export component PageTitle inherits Text {
+    color: Sheet.ink;
+    font-size: Sheet.title-size;
+    font-weight: 650;
+    letter-spacing: -0.7px;
+}
+
+export component PageLede inherits Text {
+    color: Sheet.muted;
+    font-size: Sheet.detail-size;
+    wrap: word-wrap;
+    // A sentence should not decide how wide the window opens.
+    max-width: 660px;
+}
+
+// ── the claim in the corner of a page ────────────────────
+//
+// Every statement about audio staying on this machine is drawn the same way and
+// from the same source, so the interface cannot say two different things.
+export component ClaimLine inherits Rectangle {
+    in property <string> text;
+    in property <bool> signal: false;
+
+    height: 18px;
+    width: layout.preferred-width;
+
+    layout := HorizontalLayout {
+        spacing: 8px;
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            y: (parent.height - self.height) / 2;
+            background: root.signal ? Sheet.signal : Sheet.ink;
+        }
+        Text {
+            text: root.text;
+            color: root.signal ? Sheet.signal-text : Sheet.muted;
+            font-size: Sheet.detail-size;
+            font-weight: root.signal ? 650 : 400;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ── the heading of a list or form page ───────────────────
+export component ListHead inherits VerticalLayout {
+    in property <string> index;
+    in property <string> title;
+    in property <string> lede;
+    in property <string> claim;
+    in property <bool> claim-signal: false;
+
+    spacing: 0px;
+
+    HorizontalLayout {
+        VerticalLayout {
+            spacing: 7px;
+            PageIndex { text: root.index; }
+            PageTitle { text: root.title; }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        if root.claim != "" : ClaimLine {
+            text: root.claim;
+            signal: root.claim-signal;
+        }
+    }
+    if root.lede != "" : PageLede {
+        height: self.preferred-height + 26px;
+        text: root.lede;
+    }
+}
+
+// ── the heading of an instrument page ────────────────────
+export component StageHeading inherits VerticalLayout {
+    in property <string> index;
+    in property <string> title;
+    in property <string> subtitle;
+
+    spacing: 6px;
+    PageIndex {
+        text: root.index;
+        horizontal-alignment: center;
+    }
+    PageTitle {
+        text: root.title;
+        horizontal-alignment: center;
+    }
+    Text {
+        text: root.subtitle;
+        color: Sheet.muted;
+        font-size: Sheet.detail-size;
+        horizontal-alignment: center;
+    }
+}
+
+// ── something the page wants to say about itself ─────────
+//
+// A note that states a problem and then offers a button that does nothing is
+// worse than a note with no button at all, so the action is required to mean
+// something wherever one is given.
+export component Note inherits Rectangle {
+    in property <string> text;
+    in property <string> action;
+    in property <bool> signal: false;
+    callback acted();
+
+    height: layout.preferred-height + 20px;
+
+    layout := HorizontalLayout {
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 11px;
+
+        Rectangle {
+            width: 8px;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                y: (parent.height - self.height) / 2;
+                background: root.signal ? Sheet.signal : Sheet.ink;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: root.signal ? Sheet.signal-text : Sheet.ink;
+            font-size: Sheet.detail-size;
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+        if root.action != "" : RowAction {
+            label: root.action;
+            clicked => { root.acted(); }
+        }
+    }
+}
+
+// ── one row of a list ────────────────────────────────────
+//
+// Rows are one line of detail by design. A refusal that needs two lines is a
+// refusal that has not been edited.
+export component ListRow inherits Rectangle {
+    in property <string> lead;
+    in property <string> title;
+    in property <string> tag;
+    in property <string> detail;
+    in property <string> state-text;
+    // resting · active · working · refused · off
+    in property <string> tone: "resting";
+    in property <bool> show-progress: false;
+    in property <float> progress: 0;
+    // How much room the row's verbs need. A models row has one button; a
+    // provider row has a switch, two arrows and a button. Reserving the larger
+    // on every page would squeeze the titles for no reason.
+    in property <length> controls-width: 132px;
+    // A row in a list whose order matters carries the handle that sets it.
+    in property <bool> orderable: false;
+    in property <bool> can-rise: true;
+    in property <bool> can-fall: true;
+    callback moved(int);
+
+    height: Sheet.row-height;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Sheet.hairline-faint;
+    }
+
+    HorizontalLayout {
+        padding-top: 11px;
+        padding-bottom: 11px;
+        spacing: 14px;
+
+        if root.orderable : Grip {
+            can-rise: root.can-rise;
+            can-fall: root.can-fall;
+            row-height: Sheet.row-height;
+            moved(places) => { root.moved(places); }
+        }
+
+        if root.lead != "" : Text {
+            width: 132px;
+            text: root.lead;
+            color: root.tone == "off" ? Sheet.muted : Sheet.ink;
+            font-size: Sheet.detail-size;
+            font-family: "Consolas";
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 4px;
+
+            HorizontalLayout {
+                spacing: 9px;
+                alignment: start;
+                Text {
+                    text: root.title;
+                    color: root.tone == "off" ? Sheet.muted : Sheet.ink;
+                    font-size: Sheet.body-size;
+                    font-weight: 650;
+                    overflow: elide;
+                }
+                if root.tag != "" : Text {
+                    text: root.tag;
+                    color: Sheet.muted;
+                    font-size: Sheet.label-size;
+                    font-weight: 650;
+                    letter-spacing: 1.2px;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: root.detail;
+                color: Sheet.muted;
+                font-size: Sheet.detail-size;
+                overflow: elide;
+            }
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: 9px;
+            Rectangle {
+                width: root.show-progress ? 72px : 0px;
+                Rectangle {
+                    height: 3px;
+                    y: (parent.height - self.height) / 2;
+                    background: Sheet.hairline;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * root.progress;
+                        height: parent.height;
+                        background: Sheet.signal;
+                    }
+                }
+            }
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                y: (parent.height - self.height) / 2;
+                background: root.tone == "active"
+                    ? Sheet.ink
+                    : (root.tone == "working" || root.tone == "refused"
+                        ? Sheet.signal
+                        : transparent);
+                border-width: root.tone == "resting" || root.tone == "off" ? 1px : 0px;
+                border-color: Sheet.hairline;
+            }
+            Text {
+                width: 108px;
+                text: root.state-text;
+                color: root.tone == "active"
+                    ? Sheet.ink
+                    : (root.tone == "working" || root.tone == "refused"
+                        ? Sheet.signal-text
+                        : Sheet.muted);
+                font-size: Sheet.detail-size;
+                font-weight: root.tone == "active" ? 650 : 400;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            // The verbs get a column too. Without one, a row with fewer of them
+            // pulled its state word right and the column read as a ragged edge.
+            HorizontalLayout {
+                width: root.controls-width;
+                alignment: end;
+                spacing: 9px;
+                @children
+            }
+        }
+    }
+}
+
+// ── a label/value pair on a form page ────────────────────
+export component FormRow inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+
+    height: max(48px, layout.preferred-height + 14px);
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Sheet.hairline-faint;
+    }
+
+    layout := HorizontalLayout {
+        padding-top: 7px;
+        padding-bottom: 7px;
+        spacing: 20px;
+
+        VerticalLayout {
+            width: 46%;
+            alignment: center;
+            spacing: 3px;
+            Text {
+                text: root.label;
+                color: Sheet.ink;
+                font-size: Sheet.body-size;
+                font-weight: 650;
+            }
+            if root.hint != "" : Text {
+                text: root.hint;
+                color: Sheet.muted;
+                font-size: Sheet.detail-size;
+                wrap: word-wrap;
+            }
+        }
+
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            alignment: end;
+            @children
+        }
+    }
+}
+
+// ── the facts under a summary ────────────────────────────
+export component FactList inherits VerticalLayout {
+    in property <[Fact]> facts;
+
+    spacing: 0px;
+    for fact in root.facts : Rectangle {
+        height: 46px;
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Sheet.hairline-faint;
+        }
+        HorizontalLayout {
+            spacing: 18px;
+            Text {
+                width: 150px;
+                text: fact.label;
+                color: Sheet.muted;
+                font-size: Sheet.label-size;
+                font-weight: 650;
+                letter-spacing: 1.3px;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: fact.value;
+                    color: fact.signal ? Sheet.signal-text : Sheet.ink;
+                    font-size: Sheet.body-size;
+                    font-weight: fact.signal ? 650 : 400;
+                    overflow: elide;
+                }
+                if fact.detail != "" : Text {
+                    text: fact.detail;
+                    color: Sheet.muted;
+                    font-size: Sheet.detail-size;
+                    overflow: elide;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+    }
+}
+
+// ── the small caption above a group in the side column ───
+export component GroupLabel inherits Text {
+    color: Sheet.muted;
+    font-size: Sheet.label-size;
+    font-weight: 650;
+    letter-spacing: 1.6px;
+}
+
+export component SideNote inherits Text {
+    color: Sheet.muted;
+    font-size: Sheet.detail-size;
+    wrap: word-wrap;
+}

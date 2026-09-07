@@ -11,16 +11,11 @@ use rust_protocol::{SpeechWorkerCommand, TranscriptionProviderEntry};
 use slint::{ModelRc, VecModel};
 
 use crate::{
-    AppState, ProviderRow, SettingsWindow, set_indicator_status, settings_document::save_settings,
+    AppState, ProviderRow, SettingsWindow, set_indicator_status,
+    settings_document::save_settings,
+    settings_projection::{chain_positions, privacy_claim, provider_row},
     worker_supervisor::Workers,
 };
-
-/// Height of one row in the transcription list, in logical pixels.
-///
-/// The drag handle reports how far the pointer travelled rather than a target
-/// index, so this number lives here instead of being repeated in the interface
-/// and in the code that reads it.
-pub(crate) const PROVIDER_ROW_HEIGHT: f32 = 96.0;
 
 pub(crate) fn provider_display_name(id: &str) -> String {
     match id {
@@ -99,48 +94,34 @@ pub(crate) fn sync_providers(
         return;
     };
     let state = state.borrow();
-    let rows: Vec<ProviderRow> = state
-        .transcription_chain
-        .iter()
-        .map(|entry| {
-            let status = state
-                .transcription_providers
-                .iter()
-                .find(|status| status.id == entry.id);
-            ProviderRow {
-                id: entry.id.clone().into(),
-                title: provider_display_name(&entry.id).into(),
-                detail: status
-                    .map(|status| {
-                        if status.detail.is_empty() {
-                            "Ready".to_owned()
-                        } else {
-                            status.detail.clone()
-                        }
-                    })
-                    .unwrap_or_default()
-                    .into(),
-                enabled: entry.enabled,
-                available: status.is_some_and(|status| status.available),
-                needs_key: entry.id != "local",
-                // Only ever a masked tail; the key itself never comes back
-                // from the worker.
-                key_hint: status
-                    .and_then(|status| status.credential_hint.clone())
-                    .unwrap_or_default()
-                    .into(),
-                field_label: provider_field_label(&entry.id).into(),
-                field_value: provider_field_value(entry).into(),
-            }
-        })
-        .collect();
-    let sending_audio_out = audio_can_leave_device(&state.transcription_chain, |id| {
+    let has_credential = |id: &str| {
         state
             .transcription_providers
             .iter()
             .any(|status| status.id == id && status.has_credential)
-    });
-    settings.set_remote_transcription_enabled(sending_audio_out);
+    };
+    // Where the walk starts and where it stops, worked out once for the whole
+    // list: a row cannot say "in use" while another row says the same.
+    let (first_local, first_usable) = chain_positions(&state.transcription_chain, has_credential);
+
+    let rows: Vec<ProviderRow> = state
+        .transcription_chain
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            let status = state
+                .transcription_providers
+                .iter()
+                .find(|status| status.id == entry.id);
+            provider_row(entry, status, position, first_local, first_usable)
+        })
+        .collect();
+
+    let leaves = audio_can_leave_device(&state.transcription_chain, has_credential);
+    settings.set_remote_transcription_enabled(leaves);
+    settings.set_provider_claim(
+        privacy_claim(&state.transcription_chain, leaves, has_credential).into(),
+    );
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
     settings.set_provider_rows(ModelRc::new(VecModel::from(rows)));
 }
@@ -171,8 +152,8 @@ mod transcription_provider_tests {
     use rust_protocol::TranscriptionProviderEntry;
 
     use super::{
-        PROVIDER_ROW_HEIGHT, audio_can_leave_device, provider_display_name, provider_field_label,
-        provider_field_value, set_provider_field_value,
+        audio_can_leave_device, provider_display_name, provider_field_label, provider_field_value,
+        set_provider_field_value,
     };
 
     fn entry(id: &str) -> TranscriptionProviderEntry {
@@ -272,12 +253,5 @@ mod transcription_provider_tests {
         assert!(!audio_can_leave_device(&[], |_| true));
         let off = chain(&[("groq", false), ("local", false)]);
         assert!(!audio_can_leave_device(&off, |_| true));
-    }
-
-    #[test]
-    fn the_drag_distance_matches_the_row_height_in_the_interface() {
-        // A drag of one row must move the entry exactly one place; the value
-        // is duplicated in app.slint and the two must agree.
-        assert!((PROVIDER_ROW_HEIGHT - 96.0).abs() < f32::EPSILON);
     }
 }

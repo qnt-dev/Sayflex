@@ -356,3 +356,45 @@ mod tests {
         }
     }
 }
+
+/// Today, as the design's topline shows it: "Mon — 8 September".
+///
+/// From `GetLocalTime` rather than a conversion off the system clock, because
+/// a UTC date shown to someone three hours east is yesterday's date for part of
+/// every evening, and this line exists to orient a person looking at a list of
+/// their own dictations.
+#[cfg(windows)]
+pub fn local_date_line() -> String {
+    // SAFETY: GetLocalTime only writes the SYSTEMTIME it is given.
+    let now = unsafe {
+        let mut now = std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>();
+        windows_sys::Win32::System::SystemInformation::GetLocalTime(&raw mut now);
+        now
+    };
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let day = DAYS.get(now.wDayOfWeek as usize).copied().unwrap_or("");
+    let month = MONTHS
+        .get(now.wMonth.saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or("");
+    format!("{day} — {} {month}", now.wDay)
+}
+
+#[cfg(not(windows))]
+pub fn local_date_line() -> String {
+    String::new()
+}

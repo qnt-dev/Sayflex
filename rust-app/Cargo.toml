@@ -25,7 +25,12 @@ license = "MIT"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
-slint = { version = "1.17.1", features = ["unstable-winit-030"] }
+# `renderer-software` is not for shipping — the winit backend still picks
+# the GPU renderer. It exists so a build can be told SLINT_BACKEND=
+# winit-software and render on the CPU, which is the only way to read the
+# window back as pixels on a machine whose composited surface the screen
+# capture APIs return blank for. Seeing the interface is part of building it.
+slint = { version = "1.17.1", features = ["unstable-winit-030", "renderer-software"] }
 slint-build = "1.17.1"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
@@ -44,6 +49,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",

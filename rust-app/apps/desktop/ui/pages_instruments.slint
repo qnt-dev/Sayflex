@@ -1,0 +1,413 @@
+// Overview, Dictation and Visuals.
+//
+// Overview is the summary archetype: one claim about the state, then the facts
+// behind it. Dictation and Visuals are instruments — the thing itself in the
+// middle, its settings in a third column.
+//
+// The large-number rule these follow: only a quantity that changes while you
+// are looking at it earns that size. A recording timer does. "128 entries" does
+// not; that is a caption under a heading.
+
+import { Sheet } from "sheet.slint";
+import { Fact, ListHead, StageHeading, FactList, Note, GroupLabel, SideNote, PageLede, ClaimLine } from "parts.slint";
+import { RowAction, Toggle, ChoiceTile, MenuButton, MenuOption } from "controls.slint";
+
+// ── Overview ─────────────────────────────────────────────
+export component OverviewPage inherits VerticalLayout {
+    in property <string> statement;
+    in property <string> sub;
+    in property <string> claim;
+    in property <bool> audio-leaves-device: false;
+    in property <[Fact]> facts;
+    in property <string> note-text;
+    in property <string> note-action;
+    in property <bool> note-signal: false;
+    in property <string> version;
+    callback note-acted();
+
+    spacing: 0px;
+
+    ListHead {
+        index: "01 / 08";
+        title: "Overview";
+        claim: root.claim;
+        claim-signal: root.audio-leaves-device;
+    }
+
+    VerticalLayout {
+        padding-top: 24px;
+        spacing: 8px;
+
+        Text {
+            text: root.statement;
+            color: Sheet.ink;
+            font-size: 27px;
+            font-weight: 650;
+            letter-spacing: -0.9px;
+        }
+        Text {
+            text: root.sub;
+            color: Sheet.muted;
+            font-size: Sheet.body-size;
+        }
+    }
+
+    if root.note-text != "" : Note {
+        text: root.note-text;
+        action: root.note-action;
+        signal: root.note-signal;
+        acted => { root.note-acted(); }
+    }
+
+    Rectangle { height: 18px; }
+
+    FactList { facts: root.facts; }
+
+    // What used to be a page of its own: the version, and the one claim about
+    // this application that is not tied to a particular page.
+    Text {
+        height: 64px;
+        vertical-alignment: bottom;
+        text: "SayFlex " + root.version + " · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it.";
+        color: Sheet.muted;
+        font-size: Sheet.detail-size;
+        wrap: word-wrap;
+    }
+
+    Rectangle { vertical-stretch: 1; }
+}
+
+// ── Dictation ────────────────────────────────────────────
+//
+// The centre is the state of the thing, not a control panel. The engine and its
+// settings are in the third column, where a choice about the instrument
+// belongs.
+export component DictationPage inherits HorizontalLayout {
+    in property <string> subtitle;
+    in property <string> readout;
+    in property <string> caption;
+    in property <string> engine-note;
+    in property <int> backend: 0;
+    in property <bool> backend-verified: false;
+    in property <string> output-mode;
+    in property <bool> output-locked: false;
+    in property <string> release-mode;
+    in property <bool> keeping-history: true;
+    in property <string> hotkey;
+
+    callback select-backend(int);
+    callback set-output-mode(string);
+    callback set-release-mode(string);
+    callback set-keeping-history(bool);
+
+    spacing: 24px;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 0px;
+
+        StageHeading {
+            index: "02 / 08";
+            title: "Dictation";
+            subtitle: root.subtitle;
+        }
+
+        Rectangle { height: 34px; }
+
+        // The flat line is the resting state and is drawn as one: nothing is
+        // being heard, and the interface does not pretend otherwise.
+        Rectangle {
+            height: 116px;
+            HorizontalLayout {
+                alignment: center;
+                spacing: 3px;
+                // Thirty-two bars, the same count the recording overlay draws,
+                // sitting flat because nothing is being heard. The interface
+                // does not pretend otherwise at rest.
+                for bar in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+                            29, 30, 31] : Rectangle {
+                    width: 2px;
+                    height: 1px;
+                    y: (parent.height - self.height) / 2;
+                    background: Sheet.ink;
+                    opacity: 0.4;
+                }
+            }
+            Rectangle {
+                y: parent.height - 22px;
+                height: 1px;
+                width: 216px;
+                x: (parent.width - self.width) / 2;
+                background: Sheet.hairline;
+            }
+        }
+
+        Text {
+            text: root.readout;
+            color: Sheet.ink;
+            font-size: 15px;
+            font-weight: 650;
+            horizontal-alignment: center;
+        }
+        Text {
+            height: 34px;
+            text: root.caption;
+            color: Sheet.muted;
+            font-size: Sheet.detail-size;
+            horizontal-alignment: center;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+    }
+
+    VerticalLayout {
+        width: 262px;
+        spacing: 0px;
+
+        GroupLabel { text: "ENGINE"; height: 24px; }
+
+        // Auto, CUDA, Vulkan, CPU: the four the application really has. Seeing
+        // them at once matters more here than saving the space, because the
+        // one in force is the answer to "why is this slow".
+        GridLayout {
+            height: 118px;
+            spacing: 7px;
+            Row {
+                ChoiceTile {
+                    label: "Auto";
+                    detail: "Fastest that works";
+                    selected: root.backend == 0;
+                    busy: root.backend == 0 && !root.backend-verified;
+                    clicked => { root.select-backend(0); }
+                }
+                ChoiceTile {
+                    label: "CUDA";
+                    detail: "NVIDIA";
+                    selected: root.backend == 1;
+                    busy: root.backend == 1 && !root.backend-verified;
+                    clicked => { root.select-backend(1); }
+                }
+            }
+            Row {
+                ChoiceTile {
+                    label: "Vulkan";
+                    detail: "Any modern GPU";
+                    selected: root.backend == 2;
+                    busy: root.backend == 2 && !root.backend-verified;
+                    clicked => { root.select-backend(2); }
+                }
+                ChoiceTile {
+                    label: "CPU";
+                    detail: "Always available";
+                    selected: root.backend == 3;
+                    busy: root.backend == 3 && !root.backend-verified;
+                    clicked => { root.select-backend(3); }
+                }
+            }
+        }
+
+        SideNote {
+            height: 46px;
+            text: root.engine-note;
+        }
+
+        GroupLabel { text: "OUTPUT"; height: 30px; }
+        MenuButton {
+            value: root.output-mode;
+            // The unavailable choice stays in the list and says why. Removing
+            // it would leave the user wondering whether the feature exists.
+            options: [
+                { value: "original", label: "Original language", note: "Whatever you spoke, written as spoken" },
+                {
+                    value: "english",
+                    label: "Translate to English",
+                    note: "Only for models trained for it",
+                    reason: root.output-locked ? "This model was not trained for it" : "",
+                },
+            ];
+            chosen(value) => { root.set-output-mode(value); }
+        }
+
+        GroupLabel { text: "RELEASE"; height: 30px; }
+        MenuButton {
+            value: root.release-mode;
+            options: [
+                { value: "fastest", label: "Fastest", note: "Prepares results during natural pauses" },
+                { value: "efficient", label: "Efficient", note: "Less GPU and battery, slightly slower" },
+            ];
+            chosen(value) => { root.set-release-mode(value); }
+        }
+
+        GroupLabel { text: "HISTORY"; height: 30px; }
+        Toggle {
+            checked: root.keeping-history;
+            on-label: "Kept on this device";
+            off-label: "Not kept";
+            toggled(next) => { root.set-keeping-history(next); }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        SideNote {
+            height: 34px;
+            text: "Hold " + root.hotkey + " anywhere in Windows.";
+        }
+    }
+}
+
+// ── Visuals ──────────────────────────────────────────────
+export component VisualsPage inherits HorizontalLayout {
+    in property <int> selected: 0;
+    in property <string> subtitle;
+    in property <string> caption;
+    in property <string> side-note;
+    // Circular and Flow sphere are drawn on their own native surface so they
+    // can be transparent per pixel; the frame says so instead of leaving them
+    // looking like the others.
+    in property <bool> native-surface: false;
+    in property <int> circular-palette: 0;
+    in property <int> sphere-palette: 0;
+    in property <int> slate-surface: 0;
+
+    callback select-visualizer(int);
+    callback select-circular-palette(int);
+    callback select-sphere-palette(int);
+    callback select-slate-surface(int);
+
+    spacing: 24px;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 0px;
+
+        StageHeading {
+            index: "06 / 08";
+            title: "Visuals";
+            subtitle: root.subtitle;
+        }
+
+        Rectangle { height: 26px; }
+
+        Rectangle {
+            height: 168px;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 290px;
+                    border-width: 1px;
+                    border-color: Sheet.hairline;
+                    background: Sheet.raised;
+
+                    if root.native-surface : Text {
+                        y: 8px;
+                        x: 10px;
+                        text: "OWN SURFACE";
+                        color: Sheet.muted;
+                        font-size: Sheet.label-size;
+                        font-weight: 650;
+                        letter-spacing: 1.4px;
+                    }
+
+                    Text {
+                        text: root.selected == 8 ? "no overlay" : "";
+                        color: Sheet.muted;
+                        font-size: Sheet.detail-size;
+                        letter-spacing: 1.6px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    if root.selected != 8 : Rectangle {
+                        width: 92px;
+                        height: 92px;
+                        border-radius: root.selected == 0 || root.selected == 5 || root.selected == 7
+                            ? 46px
+                            : 0px;
+                        border-width: 1px;
+                        border-color: Sheet.hairline;
+                        background: @radial-gradient(circle, #ffffff55 0%, #11131714 70%);
+                    }
+                }
+            }
+        }
+
+        Text {
+            height: 44px;
+            text: root.caption;
+            color: Sheet.muted;
+            font-size: Sheet.detail-size;
+            horizontal-alignment: center;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+    }
+
+    VerticalLayout {
+        width: 262px;
+        spacing: 0px;
+
+        GroupLabel { text: "STYLE"; height: 24px; }
+
+        // All eight the product draws, and off. A style that exists in the
+        // application and not here would be deleted by omission.
+        GridLayout {
+            height: 190px;
+            spacing: 6px;
+            Row {
+                ChoiceTile { label: "Voice orb"; selected: root.selected == 0; clicked => { root.select-visualizer(0); } }
+                ChoiceTile { label: "Spectrum"; selected: root.selected == 1; clicked => { root.select-visualizer(1); } }
+                ChoiceTile { label: "Fluid ribbon"; selected: root.selected == 2; clicked => { root.select-visualizer(2); } }
+            }
+            Row {
+                ChoiceTile { label: "Broadcast mic"; selected: root.selected == 3; clicked => { root.select-visualizer(3); } }
+                ChoiceTile { label: "Circular"; selected: root.selected == 4; clicked => { root.select-visualizer(4); } }
+                ChoiceTile { label: "Flow sphere"; selected: root.selected == 5; clicked => { root.select-visualizer(5); } }
+            }
+            Row {
+                ChoiceTile { label: "Writing slate"; selected: root.selected == 6; clicked => { root.select-visualizer(6); } }
+                ChoiceTile { label: "Companion orb"; selected: root.selected == 7; clicked => { root.select-visualizer(7); } }
+                ChoiceTile { label: "Off"; selected: root.selected == 8; clicked => { root.select-visualizer(8); } }
+            }
+        }
+
+        SideNote {
+            height: 46px;
+            text: root.side-note;
+        }
+
+        // A palette belongs to the style that has one, so it appears only when
+        // that style is chosen rather than sitting greyed out for the others.
+        if root.selected == 4 : GroupLabel { text: "PALETTE"; height: 30px; }
+        if root.selected == 4 : MenuButton {
+            value: root.circular-palette == 0 ? "Monochrome" : "Warm";
+            options: [
+                { value: "0", label: "Monochrome" },
+                { value: "1", label: "Warm" },
+            ];
+            chosen(value) => { root.select-circular-palette(value == "0" ? 0 : 1); }
+        }
+
+        if root.selected == 5 : GroupLabel { text: "PALETTE"; height: 30px; }
+        if root.selected == 5 : MenuButton {
+            value: root.sphere-palette == 0 ? "Reference" : "Black and yellow";
+            options: [
+                { value: "0", label: "Reference" },
+                { value: "1", label: "Black and yellow" },
+            ];
+            chosen(value) => { root.select-sphere-palette(value == "0" ? 0 : 1); }
+        }
+
+        if root.selected == 6 : GroupLabel { text: "SURFACE"; height: 30px; }
+        if root.selected == 6 : MenuButton {
+            value: root.slate-surface == 0 ? "Paper" : "Glass";
+            options: [
+                { value: "0", label: "Paper" },
+                { value: "1", label: "Glass" },
+            ];
+            chosen(value) => { root.select-slate-surface(value == "0" ? 0 : 1); }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+    }
+}

@@ -70,6 +70,8 @@ mod overlay_presenter;
 mod preview_modes;
 mod providers_view;
 mod settings_document;
+mod settings_preview;
+mod settings_projection;
 mod settings_view;
 mod speech_backend;
 mod translation_view;
@@ -374,6 +376,10 @@ struct AppState {
     pending_translations: HashMap<RequestId, PendingTranslation>,
     queued_selection_translation: Option<SelectionTranslationRequest>,
     translation_history: Vec<TranslationHistoryEntry>,
+    /// Installs in flight, by catalog id. The workers report progress for
+    /// exactly as long as a download runs, so an entry here is the same fact
+    /// as "this row is downloading" and the two cannot disagree.
+    downloads: HashMap<String, settings_projection::Download>,
     /// The ordered transcription list as the worker reports it, for Settings.
     transcription_providers: Vec<TranscriptionProviderStatus>,
     /// The same list as configured and persisted, which is what is sent to the
@@ -428,6 +434,7 @@ impl AppState {
             pending_translations: HashMap::new(),
             queued_selection_translation: None,
             translation_history: Vec::new(),
+            downloads: HashMap::new(),
             transcription_providers: Vec::new(),
             transcription_chain: saved_settings.transcription_providers.clone(),
             history_enabled: saved_settings.history_enabled,
@@ -521,6 +528,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if env::args().any(|argument| argument == "--layout-preview") {
         return run_layout_preview();
     }
+    if env::args().any(|argument| argument.starts_with("--settings-preview")) {
+        return settings_preview::run_settings_preview();
+    }
 
     if let Err(error) = rust_app_core::product::migrate_legacy_data_root() {
         eprintln!("SayFlex data migration is deferred: {error}");
@@ -532,6 +542,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut run_session =
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
+    settings.set_app_version(env!("CARGO_PKG_VERSION").into());
+    settings.set_today(rust_platform_windows::local_date_line().into());
     let saved_settings = load_settings();
     let (panel_indicator, transparent_indicator, indicator_animation) = new_recording_indicators()?;
     let panel_indicator_presenter = OverlayPresenter::install(
@@ -2238,16 +2250,24 @@ fn handle_speech_event(
             downloaded_bytes,
             total_bytes,
         } => {
-            let percent = downloaded_bytes
-                .saturating_mul(100)
-                .checked_div(total_bytes)
-                .unwrap_or(0);
-            set_runtime_status(settings, &format!("Model {percent}%"));
+            // The row this belongs to can show it, which is where a progress
+            // figure is actually useful. Reporting it only as a status line
+            // left the list saying "Not installed" about a file that was
+            // halfway down the wire.
+            state.borrow_mut().downloads.insert(
+                catalog_id.clone(),
+                settings_projection::Download {
+                    downloaded_bytes,
+                    total_bytes,
+                },
+            );
+            sync_models(settings, state);
             set_indicator_status(settings, &format!("Installing {catalog_id}…"));
         }
         SpeechWorkerEvent::ModelInstalled { catalog_id, .. } => {
             {
                 let mut state = state.borrow_mut();
+                state.downloads.remove(&catalog_id);
                 if let Some(model) = state
                     .models
                     .iter_mut()
@@ -2742,6 +2762,14 @@ fn handle_translation_event(
                 .saturating_mul(100)
                 .checked_div(total_bytes)
                 .unwrap_or(0);
+            state.borrow_mut().downloads.insert(
+                catalog_id.clone(),
+                settings_projection::Download {
+                    downloaded_bytes,
+                    total_bytes,
+                },
+            );
+            sync_translation_models(settings, state);
             set_indicator_status(settings, &format!("Downloading {catalog_id}: {percent}%"));
             set_translation_status(translator, &format!("Downloading model… {percent}%"));
         }
@@ -2750,6 +2778,7 @@ fn handle_translation_event(
         } => {
             {
                 let mut state = state.borrow_mut();
+                state.downloads.remove(&catalog_id);
                 state.selected_translation_tier = Some(tier);
                 for model in &mut state.translation_models {
                     if model.catalog_id == catalog_id {

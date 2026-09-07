@@ -1,0 +1,270 @@
+// The list pages: Models, Providers, History.
+//
+// A list needs width, so on these pages the third column is not squeezed and
+// not hidden — it is not there, and the grid becomes two columns.
+
+import { ListView } from "std-widgets.slint";
+import { Sheet } from "sheet.slint";
+import { ModelRow, ProviderRow, HistoryRow } from "rows.slint";
+import { RowAction, ConfirmAction, Toggle, Field, FieldNote, MenuButton, MenuOption } from "controls.slint";
+import { ListHead, ListRow, Note, GroupLabel, PageLede } from "parts.slint";
+
+// ── Models ───────────────────────────────────────────────
+export component ModelsPage inherits VerticalLayout {
+    in property <[ModelRow]> rows;
+    in property <string> summary;
+    // Identified by catalog id rather than by row number: one list holding two
+    // kinds of model is one index arithmetic mistake away from installing the
+    // wrong thing.
+    callback choose(string);
+    callback cancel-install();
+
+    spacing: 0px;
+
+    ListHead {
+        index: "04 / 08";
+        title: "Models";
+        lede: "Downloaded once, verified by SHA-256, then used from disk. An interrupted download resumes where it stopped.";
+        claim: root.summary;
+    }
+
+    ListView {
+        vertical-stretch: 1;
+
+        for row[index] in root.rows : VerticalLayout {
+            spacing: 0px;
+
+            if index == 0 || root.rows[index - 1].section != row.section : GroupLabel {
+                text: row.section;
+                height: index == 0 ? 26px : 38px;
+                vertical-alignment: bottom;
+            }
+
+            ListRow {
+                title: row.title;
+                detail: row.detail;
+                tag: row.size;
+                state-text: row.state;
+                tone: row.tone;
+                show-progress: row.progress > 0;
+                progress: row.progress;
+
+                if row.action != "" : RowAction {
+                    label: row.action;
+                    clicked => {
+                        if (row.action == "Cancel") {
+                            root.cancel-install();
+                        } else {
+                            root.choose(row.catalog-id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Providers ────────────────────────────────────────────
+export component ProvidersPage inherits VerticalLayout {
+    in property <[ProviderRow]> rows;
+    in property <bool> audio-leaves-device: false;
+    in property <string> claim;
+    in-out property <string> editing;
+    callback toggle-provider(int);
+    callback move-provider(int, int);
+    callback set-provider-key(string, string);
+    callback set-provider-field(string, string);
+
+    spacing: 0px;
+
+    ListHead {
+        index: "05 / 08";
+        title: "Transcription order";
+        lede: "Top first. The next is tried when the one above cannot take the recording: out of quota, rate limited, unreachable, key refused, or it turned the request down. This computer ends the walk.";
+        claim: root.claim;
+        claim-signal: root.audio-leaves-device;
+    }
+
+    // An open key form makes a row three times its height, so the list has to
+    // be able to scroll even with six services in it.
+    ListView {
+        vertical-stretch: 1;
+
+        for row[index] in root.rows : VerticalLayout {
+            spacing: 0px;
+
+            ListRow {
+                title: row.title;
+                detail: row.detail;
+                state-text: row.state;
+                tone: row.tone;
+                controls-width: 208px;
+                orderable: true;
+                can-rise: index > 0;
+                can-fall: index < root.rows.length - 1;
+                moved(places) => {
+                    root.move-provider(index, clamp(index + places, 0, root.rows.length - 1));
+                }
+
+                Toggle {
+                    checked: row.enabled;
+                    on-label: "On";
+                    off-label: "Off";
+                    toggled(next) => { root.toggle-provider(index); }
+                }
+
+                if row.needs-key : RowAction {
+                    label: row.key-hint == "" ? "Add key" : "Replace key";
+                    clicked => {
+                        root.editing = root.editing == row.id ? "" : row.id;
+                    }
+                }
+            }
+
+            // The form opens in the row it belongs to. There are no modal dialogs
+            // here: a question that covers the thing it is about is asked in the
+            // wrong place.
+            if root.editing == row.id : Rectangle {
+                height: editor.preferred-height + 22px;
+
+                editor := VerticalLayout {
+                    padding-left: 34px;
+                    padding-bottom: 18px;
+                    padding-top: 4px;
+                    spacing: 9px;
+
+                    GroupLabel { text: row.key-hint == "" ? "API KEY" : "REPLACE THE KEY"; }
+                    key := Field {
+                        width: 340px;
+                        placeholder: "Paste the key";
+                        masked: true;
+                    }
+
+                    if row.field-label != "" : GroupLabel { text: row.field-label; }
+                    if row.field-label != "" : Field {
+                        width: 340px;
+                        placeholder: row.field-label == "Endpoint"
+                            ? "https://speech.example.com/v1"
+                            : "";
+                        value: row.field-value;
+                        accepted(text) => { root.set-provider-field(row.id, text); }
+                    }
+
+                    FieldNote {
+                        width: 460px;
+                        text: "Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters.";
+                    }
+
+                    HorizontalLayout {
+                        spacing: 9px;
+                        alignment: start;
+                        RowAction {
+                            label: "Save";
+                            clicked => {
+                                root.set-provider-key(row.id, key.value);
+                                key.value = "";
+                                root.editing = "";
+                            }
+                        }
+                        RowAction {
+                            label: "Cancel";
+                            clicked => {
+                                key.value = "";
+                                root.editing = "";
+                            }
+                        }
+                        if row.key-hint != "" : ConfirmAction {
+                            label: "Remove key";
+                            question: "Remove the stored key?";
+                            confirmed => {
+                                root.set-provider-key(row.id, "");
+                                root.editing = "";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+}
+
+// ── History ──────────────────────────────────────────────
+export component HistoryPage inherits VerticalLayout {
+    in property <[HistoryRow]> rows;
+    in property <bool> keeping: true;
+    in property <string> scope;
+    callback set-keeping(bool);
+    callback clear-history();
+    callback refresh-history();
+    callback copy-history(int);
+
+    spacing: 0px;
+
+    ListHead {
+        index: "07 / 08";
+        title: "History";
+        lede: root.keeping
+            ? "Kept on this device only. Insert-last works from the newest entry."
+            : "Not kept. Insert-last still works for the newest one, which is held in memory until the application closes.";
+        claim: root.scope;
+    }
+
+    HorizontalLayout {
+        height: 44px;
+        spacing: 10px;
+        alignment: start;
+        Toggle {
+            checked: root.keeping;
+            on-label: "Kept on this device";
+            off-label: "Not kept";
+            toggled(next) => { root.set-keeping(next); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        RowAction {
+            label: "Refresh";
+            clicked => { root.refresh-history(); }
+        }
+        ConfirmAction {
+            label: "Clear history";
+            question: "Delete every entry from disk?";
+            confirmed => { root.clear-history(); }
+        }
+    }
+
+    if root.rows.length == 0 : VerticalLayout {
+        padding-top: 26px;
+        spacing: 10px;
+        alignment: start;
+        Text {
+            text: root.keeping
+                ? "Nothing has been dictated yet."
+                : "History is switched off, so nothing is being kept.";
+            color: Sheet.ink;
+            font-size: Sheet.body-size;
+            font-weight: 650;
+        }
+        PageLede {
+            text: root.keeping
+                ? "Hold the dictate combination anywhere in Windows and the transcript appears here."
+                : "Switch it on above and dictations from then on will be kept.";
+        }
+    }
+
+    ListView {
+        vertical-stretch: 1;
+
+        for row[index] in root.rows : ListRow {
+            title: row.text;
+            detail: row.detail;
+            state-text: row.origin == "remote" ? "Sent to a service" : "On this device";
+            tone: row.origin == "remote" ? "refused" : "resting";
+
+            RowAction {
+                label: "Copy";
+                clicked => { root.copy-history(index); }
+            }
+        }
+
+    }
+}

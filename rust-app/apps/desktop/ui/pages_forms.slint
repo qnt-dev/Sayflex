@@ -1,0 +1,204 @@
+// The form pages: Translation and Hotkeys.
+//
+// A form is label/value pairs where the value is a choice. The label says what
+// the setting is; the value says what is true now, never what pressing it would
+// do.
+
+import { Sheet } from "sheet.slint";
+import { HotkeyRow } from "rows.slint";
+import { RowAction, Toggle, Stepper, MenuButton, MenuOption } from "controls.slint";
+import { ListHead, FormRow, ListRow, Note, GroupLabel, PageLede } from "parts.slint";
+
+// ── Translation ──────────────────────────────────────────
+export component TranslationPage inherits VerticalLayout {
+    in property <bool> enabled: false;
+    in property <bool> ready: false;
+    in property <string> model-name;
+    in property <string> engine-state;
+    in property <string> delivery;
+    in property <string> text-action;
+    in property <bool> warm: false;
+    in property <int> blur-radius: 3;
+    in property <string> note-text;
+    in property <string> note-action;
+    in property <bool> note-signal: false;
+
+    callback set-enabled(bool);
+    callback set-delivery(string);
+    callback set-text-action(string);
+    callback set-warm(bool);
+    callback set-blur(int);
+    callback open-translator();
+    callback note-acted();
+
+    spacing: 0px;
+
+    ListHead {
+        index: "03 / 08";
+        title: "Translation";
+        lede: "Runs on this machine, in a llama.cpp process of its own. Nothing typed or spoken here is sent anywhere.";
+        claim: root.ready ? "Engine warm" : "Engine cold";
+    }
+
+    if root.note-text != "" : Note {
+        text: root.note-text;
+        action: root.note-action;
+        signal: root.note-signal;
+        acted => { root.note-acted(); }
+    }
+
+    FormRow {
+        label: "Translation";
+        hint: "Whether the selection shortcut may translate";
+        Toggle {
+            checked: root.enabled;
+            on-label: "Enabled";
+            off-label: "Disabled";
+            toggled(next) => { root.set-enabled(next); }
+        }
+    }
+
+    FormRow {
+        label: "Model";
+        hint: "Chosen on the Models page";
+        Text {
+            text: root.model-name == "" ? "None installed" : root.model-name;
+            color: root.model-name == "" ? Sheet.signal-text : Sheet.ink;
+            font-size: Sheet.body-size;
+            font-weight: 650;
+            vertical-alignment: center;
+        }
+    }
+
+    FormRow {
+        label: "Engine";
+        hint: "Faster to answer, and holds memory to be";
+        Toggle {
+            checked: root.warm;
+            on-label: "Kept warm";
+            off-label: "Started on demand";
+            toggled(next) => { root.set-warm(next); }
+        }
+    }
+
+    FormRow {
+        label: "Result";
+        hint: "What happens to it once it exists";
+        MenuButton {
+            compact: true;
+            value: root.delivery;
+            options: [
+                { value: "preview", label: "Show a preview", note: "Nothing is replaced until you say so" },
+                { value: "replace", label: "Replace the selection", note: "The original goes to the clipboard first" },
+                { value: "copy", label: "Copy it", note: "The selection is left exactly as it was" },
+            ];
+            chosen(value) => { root.set-delivery(value); }
+        }
+    }
+
+    FormRow {
+        label: "On selected text";
+        hint: "What Ctrl + Alt + F does with what it finds";
+        MenuButton {
+            compact: true;
+            value: root.text-action;
+            options: [
+                { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
+                { value: "palette", label: "Always ask", note: "Shows the palette every time, whatever the text looks like" },
+            ];
+            chosen(value) => { root.set-text-action(value); }
+        }
+    }
+
+    FormRow {
+        label: "Preview blur";
+        hint: "The backdrop behind the preview";
+        Stepper {
+            value: root.blur-radius;
+            minimum: 0;
+            maximum: 8;
+            changed(next) => { root.set-blur(next); }
+        }
+    }
+
+    HorizontalLayout {
+        height: 54px;
+        alignment: start;
+        RowAction {
+            label: "Open the translator";
+            clicked => { root.open-translator(); }
+        }
+    }
+
+}
+
+// ── Hotkeys ──────────────────────────────────────────────
+export component HotkeysPage inherits VerticalLayout {
+    in property <[HotkeyRow]> rows;
+    in property <string> summary;
+    in property <bool> summary-signal: false;
+    callback toggle-row(int, bool);
+    callback set-mode(string, string);
+
+    spacing: 0px;
+
+    ListHead {
+        index: "08 / 08";
+        title: "Hotkeys";
+        lede: "Held, not toggled: the action lasts exactly as long as the keys are down.";
+        claim: root.summary;
+        claim-signal: root.summary-signal;
+    }
+
+    for row[index] in root.rows : VerticalLayout {
+        spacing: 0px;
+
+        ListRow {
+            lead: row.keys;
+            title: row.name;
+            detail: row.detail;
+            state-text: row.state;
+            tone: row.tone;
+            controls-width: 186px;
+
+            Toggle {
+                checked: row.enabled;
+                on-label: "On";
+                off-label: "Off";
+                toggled(next) => { root.toggle-row(index, next); }
+            }
+
+            // The combination itself is fixed in this build. The button says
+            // so rather than being absent, because a page that silently omits
+            // the thing its design promised is a page that has been quietly
+            // reduced.
+            RowAction {
+                label: "Change";
+                enabled: row.locked-reason == "";
+                reason: row.locked-reason;
+            }
+        }
+
+        if row.mode != "" && row.enabled : HorizontalLayout {
+            height: 42px;
+            padding-left: 110px;
+            padding-bottom: 10px;
+            alignment: start;
+            spacing: 12px;
+            GroupLabel {
+                text: "DOES";
+                vertical-alignment: center;
+            }
+            MenuButton {
+                compact: true;
+                value: row.mode-value;
+                options: [
+                    { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
+                    { value: "palette", label: "Always ask", note: "Shows the palette every time" },
+                ];
+                chosen(value) => { root.set-mode(row.mode, value); }
+            }
+        }
+    }
+
+}

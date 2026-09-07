@@ -1,0 +1,47 @@
+// The settings window's own material.
+//
+// Separate from `Theme`, which dresses the overlays. Those sit on top of other
+// people's applications and have to read against anything; this window is a
+// document and is drawn as one: graphite on warm grey paper, hairlines, one
+// accent with a single job.
+//
+// Every number here was measured against the design prototype in
+// design/concept-states, including the contrast floor: nothing functional is
+// below 10px or 4.5:1 on the canvas.
+
+export global Sheet {
+    // ── material ──
+    out property <brush> canvas: #bfc2c6;
+    out property <brush> canvas-deep: #aeb1b5;
+    out property <brush> ink: #111317;
+    // 4.69:1 on the canvas. The greys this replaces sat at 2.6:1, which is a
+    // hairline masquerading as text.
+    out property <brush> muted: #4a4e53;
+    out property <brush> muted-soft: #5c6166;
+    out property <brush> hairline: #1113172e;
+    out property <brush> hairline-faint: #1113171c;
+    out property <brush> raised: #ffffff12;
+    out property <brush> raised-strong: #ffffff24;
+    out property <brush> on-ink: #f5f5f2;
+
+    // ── the one colour ──
+    //
+    // It marks what is happening now, or what needs a decision. Nothing else.
+    // If it starts meaning "important in general" it stops meaning anything.
+    out property <brush> signal: #b8501c;
+    // The same rust, dark enough to read as words rather than as a stain.
+    out property <brush> signal-text: #83380f;
+    out property <brush> signal-soft: #b8501c1f;
+
+    // ── type ──
+    out property <length> title-size: 21px;
+    out property <length> body-size: 12.5px;
+    out property <length> detail-size: 11.5px;
+    out property <length> label-size: 10px;
+    out property <length> mono-size: 10px;
+
+    // ── metrics ──
+    out property <length> row-height: 56px;
+    out property <length> gutter: 22px;
+    out property <length> nav-width: 238px;
+}

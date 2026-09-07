@@ -17,18 +17,21 @@ use slint::{
 };
 
 use crate::{
-    ActionPalette, AppState, AppTray, HistoryRow, MAX_TRANSLATION_BLUR_RADIUS, ModelRow,
-    PendingSelection, PendingTranslation, RecordingOverlays, SelectionChooser,
+    ActionPalette, AppState, AppTray, Fact, HistoryRow, HotkeyRow, MAX_TRANSLATION_BLUR_RADIUS,
+    ModelRow, PendingSelection, PendingTranslation, RecordingOverlays, SelectionChooser,
     SelectionTranslationRequest, SettingsWindow, TextActionMode, TranslationDelivery,
     TranslationOrigin, TranslatorWindow, begin_selection_translation,
     configure_standard_app_window, dispatch_or_defer_selection_replacement, flow_sphere,
     native_window_handle,
     overlay_presenter::OverlayPresenter,
     providers_view::{
-        PROVIDER_ROW_HEIGHT, apply_provider_chain, provider_display_name, set_provider_field_value,
-        sync_providers,
+        apply_provider_chain, audio_can_leave_device, provider_display_name,
+        set_provider_field_value, sync_providers,
     },
     settings_document::save_settings,
+    settings_projection::{
+        history_row, privacy_claim, speech_model_row, tone, translation_model_row,
+    },
     slint_window_handle,
     speech_backend::SpeechBackendPreference,
     translation_view::{TranslationPreviewRegistry, adaptive_text_panel_height},
@@ -39,72 +42,66 @@ use crate::{
     worker_supervisor::Workers,
 };
 
+/// Both lists, in the order the page shows them: speech models, then the
+/// translator. One list because the page is about models, and because a
+/// `ListView` takes a single `for`.
 pub(crate) fn sync_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<RefCell<AppState>>) {
     let Some(settings) = settings.upgrade() else {
         return;
     };
-    let rows = state
-        .borrow()
+    let state = state.borrow();
+    let mut rows: Vec<ModelRow> = state
         .models
         .iter()
-        .map(|model| ModelRow {
-            title: model.display_name.clone().into(),
-            detail: format!(
-                "{} · {:.1} GB{}",
-                model.description,
-                model.size_bytes as f64 / 1_000_000_000.0,
-                if model.recommended {
-                    " · recommended"
-                } else {
-                    ""
-                }
-            )
-            .into(),
-            state: if model.installed {
-                "Installed".into()
-            } else {
-                "Download".into()
-            },
-            selected: model.selected,
-        })
-        .collect::<Vec<_>>();
+        .map(|model| speech_model_row(model, state.downloads.get(&model.catalog_id).copied()))
+        .collect();
+    rows.extend(state.translation_models.iter().map(|model| {
+        translation_model_row(
+            model,
+            state.selected_translation_tier == Some(model.tier),
+            state.downloads.get(&model.catalog_id).copied(),
+        )
+    }));
     settings.set_model_rows(ModelRc::new(VecModel::from(rows)));
+    settings.set_translation_model_name(
+        state
+            .translation_models
+            .iter()
+            .find(|model| state.selected_translation_tier == Some(model.tier) && model.installed)
+            .map(|model| model.display_name.clone())
+            .unwrap_or_default()
+            .into(),
+    );
+    set_models_summary(&settings, &state);
 }
 
+/// The translation list changes for the same reasons the speech one does, and
+/// they are drawn as one list, so they are rebuilt together.
 pub(crate) fn sync_translation_models(
     settings: &slint::Weak<SettingsWindow>,
     state: &Rc<RefCell<AppState>>,
 ) {
-    let Some(settings) = settings.upgrade() else {
-        return;
-    };
-    let rows = state
-        .borrow()
-        .translation_models
-        .iter()
-        .map(|model| ModelRow {
-            title: model.display_name.clone().into(),
-            detail: format!(
-                "{} · {:.0} MB · {}{}",
-                model.description,
-                model.size_bytes as f64 / 1_000_000.0,
-                model.license,
-                if model.recommended {
-                    " · recommended for your system language"
-                } else {
-                    ""
-                }
-            )
-            .into(),
-            state: if model.installed {
-                "Installed".into()
-            } else {
-                "Download".into()
-            },
-            selected: model.selected,
-        })
-        .collect::<Vec<_>>();
-    settings.set_translation_model_rows(ModelRc::new(VecModel::from(rows)));
+    sync_models(settings, state);
+}
+
+/// How many models are on disk, for the line beside the heading. A count is a
+/// caption, not a figure worth the large-number treatment: it does not change
+/// while you are looking at it.
+fn set_models_summary(settings: &SettingsWindow, state: &AppState) {
+    let installed = state.models.iter().filter(|model| model.installed).count()
+        + state
+            .translation_models
+            .iter()
+            .filter(|model| model.installed)
+            .count();
+    settings.set_models_summary(
+        match installed {
+            0 => "None installed yet".to_owned(),
+            1 => "1 installed".to_owned(),
+            many => format!("{many} installed"),
+        }
+        .into(),
+    );
 }
 
 pub(crate) fn sync_action_settings(
@@ -115,9 +112,10 @@ pub(crate) fn sync_action_settings(
         return;
     };
     let state = state.borrow();
-    settings.set_speech_backend_label(
-        format!("Backend: {}", state.speech_backend_preference.label()).into(),
-    );
+
+    // ── Dictation ──
+    settings.set_speech_backend_index(state.speech_backend_preference.index());
+    settings.set_speech_backend_verified(state.speech_backend_active.is_some());
     settings.set_speech_backend_detail(
         state
             .speech_backend_active
@@ -125,75 +123,346 @@ pub(crate) fn sync_action_settings(
                 || "No compatible speech backend is active".to_owned(),
                 |active| {
                     format!(
-                        "Preference: {} · active now: {}",
-                        state.speech_backend_preference.label(),
+                        "{} verified by warm-up. The preference above is where the search starts.",
                         active.display_name()
                     )
                 },
             )
             .into(),
     );
-    settings.set_translation_enabled_label(
-        if state.translation_enabled {
-            "Translation: enabled"
+    settings.set_release_mode(
+        if state.fast_release_previews {
+            "fastest"
         } else {
-            "Translation: disabled"
+            "efficient"
         }
         .into(),
     );
-    settings.set_layout_enabled_label(
-        if state.layout_enabled {
-            "Layout correction: enabled"
+    settings.set_release_mode_label(
+        if state.fast_release_previews {
+            "Fastest"
         } else {
-            "Layout correction: disabled"
+            "Efficient"
         }
         .into(),
     );
-    settings.set_text_action_mode_label(
-        match state.text_action_mode {
-            TextActionMode::Adaptive => "Ctrl+Alt+F: adaptive",
-            TextActionMode::AlwaysPalette => "Ctrl+Alt+F: always show palette",
+    settings.set_history_enabled(state.history_enabled);
+    settings.set_dictation_subtitle(
+        if state.speech_ready {
+            "Local speech · ready"
+        } else {
+            "Local speech · starting"
+        }
+        .into(),
+    );
+    settings.set_dictation_readout(
+        if state.speech_ready {
+            "Ready"
+        } else {
+            "Warming up"
+        }
+        .into(),
+    );
+    settings.set_dictation_caption("hold Ctrl + Alt + Space".into());
+
+    // ── Translation ──
+    settings.set_translation_enabled(state.translation_enabled);
+    settings.set_translation_warm(state.translation_keep_warm);
+    settings.set_translation_delivery(
+        match state.translation_delivery {
+            TranslationDelivery::Preview => "preview",
+            TranslationDelivery::Replace => "replace",
+            TranslationDelivery::Copy => "copy",
         }
         .into(),
     );
     settings.set_translation_delivery_label(
         match state.translation_delivery {
-            TranslationDelivery::Preview => "Translation result: preview",
-            TranslationDelivery::Replace => "Translation result: replace selection",
-            TranslationDelivery::Copy => "Translation result: copy",
+            TranslationDelivery::Preview => "Show a preview",
+            TranslationDelivery::Replace => "Replace the selection",
+            TranslationDelivery::Copy => "Copy it",
         }
         .into(),
     );
-    settings.set_translation_warm_label(
-        if state.translation_keep_warm {
-            "Warm engine: on (fastest)"
-        } else {
-            "Warm engine: off (less memory)"
+    settings.set_text_action_mode(
+        match state.text_action_mode {
+            TextActionMode::Adaptive => "adaptive",
+            TextActionMode::AlwaysPalette => "palette",
+        }
+        .into(),
+    );
+    settings.set_text_action_mode_label(
+        match state.text_action_mode {
+            TextActionMode::Adaptive => "Decide from the text",
+            TextActionMode::AlwaysPalette => "Always ask",
         }
         .into(),
     );
     settings.set_translation_blur_radius(state.translation_blur_radius as i32);
-    settings.set_release_optimization_label(
-        if state.fast_release_previews {
-            "Release optimization: fastest"
-        } else {
-            "Release optimization: efficient"
-        }
-        .into(),
-    );
+    settings.set_translation_ready(state.translation_ready);
+
+    // ── Visuals ──
     settings.set_selected_visualizer(state.visualizer_style.index());
     settings.set_selected_circular_palette(state.circular_spectrum_palette.index());
     settings.set_selected_flow_sphere_palette(state.flow_sphere_palette.index());
     settings.set_selected_writing_slate_surface(state.writing_slate_surface.index());
-    settings.set_translation_ready(state.translation_ready);
-    settings.set_history_enabled_label(
-        if state.history_enabled {
-            "History: enabled"
+    sync_visualizer_copy(&settings, state.visualizer_style.index());
+
+    // ── Hotkeys ──
+    settings.set_hotkey_rows(ModelRc::new(VecModel::from(hotkey_rows(&state))));
+    settings.set_hotkeys_summary(hotkeys_summary(&state).into());
+
+    sync_overview(&settings, &state);
+}
+
+/// The subtitle and note beside the visualizer preview.
+///
+/// Circular and Flow sphere are drawn on a native surface of their own so they
+/// can be transparent per pixel; that is not decoration, it is why they behave
+/// differently, so the page says it.
+fn sync_visualizer_copy(settings: &SettingsWindow, index: i32) {
+    let (name, caption) = match index {
+        0 => ("Voice orb", "Follows the level of your voice"),
+        1 => ("Spectrum", "Thirty-two bands, thirty-one times a second"),
+        2 => ("Fluid ribbon", "One line that thickens with the voice"),
+        3 => ("Broadcast mic", "Level bars beside a studio microphone"),
+        4 => ("Circular", "The spectrum wrapped into a ring"),
+        5 => (
+            "Flow sphere",
+            "A point cloud that accelerates on voice onset",
+        ),
+        6 => ("Writing slate", "The words as they are recognised"),
+        7 => (
+            "Companion orb",
+            "Stays where you put it, between dictations",
+        ),
+        _ => ("Off", "No overlay is drawn while recording"),
+    };
+    let native = index == 4 || index == 5;
+    settings.set_visuals_subtitle(format!("{name} · shown while recording").into());
+    settings.set_visuals_caption(caption.into());
+    settings.set_visuals_native_surface(native);
+    settings.set_visuals_note(
+        if native {
+            "Drawn on its own native surface, so it can be transparent per pixel."
         } else {
-            "History: disabled"
+            "Drawn by the application itself, over whatever you are typing into."
         }
         .into(),
     );
+}
+
+/// The five commands SayFlex registers.
+///
+/// The combinations are fixed in this build — `input-host` registers K, V and F
+/// at start-up and the dictate gesture is recognised by the low-level hook — so
+/// the row says so on its Change button rather than the page quietly not
+/// offering one. Switching a command off is a different thing from changing its
+/// combination, and only the first is possible here.
+fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
+    const FIXED: &str = "Fixed in this version";
+    let held = |on: bool| {
+        if on {
+            (tone::RESTING, "Held")
+        } else {
+            (tone::OFF, "Off")
+        }
+    };
+
+    let mut rows = Vec::with_capacity(5);
+    rows.push(HotkeyRow {
+        keys: "Ctrl + Alt + Space".into(),
+        name: "Dictate".into(),
+        detail: "Records while held · transcribes and inserts on release".into(),
+        state: "Held".into(),
+        tone: tone::ACTIVE.into(),
+        enabled: true,
+        locked_reason: FIXED.into(),
+        mode: "".into(),
+        mode_value: "".into(),
+    });
+    rows.push(HotkeyRow {
+        keys: "Ctrl + Alt + V".into(),
+        name: "Insert last".into(),
+        detail: "Places the newest transcript where the caret is now".into(),
+        state: "Held".into(),
+        tone: tone::RESTING.into(),
+        enabled: true,
+        locked_reason: FIXED.into(),
+        mode: "".into(),
+        mode_value: "".into(),
+    });
+
+    let (layout_tone, layout_state) = held(state.layout_enabled);
+    rows.push(HotkeyRow {
+        keys: "Ctrl + Alt + K".into(),
+        name: "Correct layout".into(),
+        detail: if state.layout_enabled {
+            "Offers RU/EN candidates for the selection · never automatic".into()
+        } else {
+            "Switched off · the combination is left to other applications".into()
+        },
+        state: layout_state.into(),
+        tone: layout_tone.into(),
+        enabled: state.layout_enabled,
+        locked_reason: FIXED.into(),
+        mode: "".into(),
+        mode_value: "".into(),
+    });
+
+    let (action_tone, action_state) = held(state.translation_enabled);
+    rows.push(HotkeyRow {
+        keys: "Ctrl + Alt + F".into(),
+        name: "Act on selection".into(),
+        detail: if state.translation_enabled {
+            "Captures the selection once and acts on it".into()
+        } else {
+            "Switched off · the combination is left to other applications".into()
+        },
+        state: action_state.into(),
+        tone: action_tone.into(),
+        enabled: state.translation_enabled,
+        locked_reason: FIXED.into(),
+        mode: "text-action".into(),
+        mode_value: match state.text_action_mode {
+            TextActionMode::Adaptive => "Decide from the text".into(),
+            TextActionMode::AlwaysPalette => "Always ask".into(),
+        },
+    });
+
+    rows.push(HotkeyRow {
+        keys: "Ctrl + Alt + P".into(),
+        name: "Pause input features".into(),
+        detail: "Not implemented in this version".into(),
+        state: "Not held".into(),
+        tone: tone::OFF.into(),
+        enabled: false,
+        locked_reason: "Not implemented in this version".into(),
+        mode: "".into(),
+        mode_value: "".into(),
+    });
+    rows
+}
+
+fn hotkeys_summary(state: &AppState) -> String {
+    // Dictate and insert-last are always registered; the other two follow their
+    // switches, and pause does not exist yet. Counting rather than asserting
+    // means the line cannot drift from the list under it.
+    let held = 2 + usize::from(state.layout_enabled) + usize::from(state.translation_enabled);
+    match held {
+        4 => "Four of five held · pause is not implemented".to_owned(),
+        n => format!("{n} of five held · pause is not implemented"),
+    }
+}
+
+/// The claim, the statement and the facts on Overview.
+fn sync_overview(settings: &SettingsWindow, state: &AppState) {
+    let leaves = audio_can_leave_device(&state.transcription_chain, |id| {
+        state
+            .transcription_providers
+            .iter()
+            .any(|status| status.id == id && status.has_credential)
+    });
+    settings.set_remote_transcription_enabled(leaves);
+    settings.set_provider_claim(
+        privacy_claim(&state.transcription_chain, leaves, |id| {
+            state
+                .transcription_providers
+                .iter()
+                .any(|status| status.id == id && status.has_credential)
+        })
+        .into(),
+    );
+
+    let installed_speech = state.models.iter().any(|model| model.installed);
+    let (statement, sub) = if !installed_speech {
+        (
+            "No speech model yet",
+            "Install one on the Models page and dictation starts working.",
+        )
+    } else if !state.speech_ready {
+        ("Warming up", "The engine is loading the model you chose.")
+    } else {
+        (
+            "Ready to dictate",
+            "Hold Ctrl + Alt + Space anywhere in Windows.",
+        )
+    };
+    settings.set_overview_statement(statement.into());
+    settings.set_overview_sub(sub.into());
+
+    // The note carries the one thing that wants attention, and its button goes
+    // where the thing can be dealt with.
+    if !installed_speech {
+        settings.set_overview_note(
+            "No speech model is installed, so nothing can be dictated yet.".into(),
+        );
+        settings.set_overview_note_action("Install one".into());
+        settings.set_overview_note_signal(true);
+    } else if !state.downloads.is_empty() {
+        settings
+            .set_overview_note("A model is downloading. It resumes if it is interrupted.".into());
+        settings.set_overview_note_action("Details".into());
+        settings.set_overview_note_signal(true);
+    } else if state.translation_enabled && !state.translation_ready {
+        settings.set_overview_note("Translation is on, but its engine is not warm yet.".into());
+        settings.set_overview_note_action("Details".into());
+        settings.set_overview_note_signal(false);
+    } else {
+        settings.set_overview_note("".into());
+        settings.set_overview_note_action("".into());
+        settings.set_overview_note_signal(false);
+    }
+
+    let facts = vec![
+        Fact {
+            label: "SPEECH ENGINE".into(),
+            value: state
+                .speech_backend_active
+                .map_or_else(
+                    || "none".to_owned(),
+                    |active| active.display_name().to_owned(),
+                )
+                .into(),
+            detail: format!("preference: {}", state.speech_backend_preference.label()).into(),
+            signal: state.speech_backend_active.is_none(),
+        },
+        Fact {
+            label: "SPEECH MODEL".into(),
+            value: state
+                .models
+                .iter()
+                .find(|model| model.catalog_id == state.selected_model_id)
+                .map(|model| model.display_name.clone())
+                .unwrap_or_else(|| "none selected".to_owned())
+                .into(),
+            detail: "".into(),
+            signal: false,
+        },
+        Fact {
+            label: "TRANSLATION".into(),
+            value: if !state.translation_enabled {
+                "off".into()
+            } else if state.translation_ready {
+                "warm".into()
+            } else {
+                "cold".into()
+            },
+            detail: "".into(),
+            signal: false,
+        },
+        Fact {
+            label: "HISTORY".into(),
+            value: if state.history_enabled {
+                format!("{} kept on this device", state.history.len()).into()
+            } else {
+                "not kept".into()
+            },
+            detail: "".into(),
+            signal: false,
+        },
+    ];
+    settings.set_overview_facts(ModelRc::new(VecModel::from(facts)));
 }
 
 thread_local! {
@@ -214,43 +483,6 @@ pub(crate) fn history_rows_model(settings: &SettingsWindow) -> Rc<VecModel<Histo
         *model = Some(Rc::clone(&created));
         created
     })
-}
-
-pub(crate) fn history_row(entry: &HistoryEntry) -> HistoryRow {
-    // A line produced by a service says so: which dictations left the machine
-    // is not something a user should have to remember.
-    let source = entry
-        .transcript
-        .provider
-        .as_deref()
-        .map_or_else(String::new, |provider| {
-            format!(" · via {}", provider_display_name(provider))
-        });
-    HistoryRow {
-        text: entry.transcript.text.clone().into(),
-        detail: if entry.transcript.latency.after_release_ms > 0 {
-            format!(
-                "{} · {:.1}s audio · {}ms release{}{source}",
-                entry.transcript.language,
-                entry.transcript.audio_duration_ms as f64 / 1000.0,
-                entry.transcript.latency.after_release_ms,
-                if entry.transcript.latency.speculative_reuse {
-                    " · prepared"
-                } else {
-                    ""
-                }
-            )
-            .into()
-        } else {
-            format!(
-                "{} · {:.1}s audio · {}ms processing{source}",
-                entry.transcript.language,
-                entry.transcript.audio_duration_ms as f64 / 1000.0,
-                entry.transcript.processing_duration_ms
-            )
-            .into()
-        },
-    }
 }
 
 /// Adds one completed transcript to the top of the visible history without
@@ -275,12 +507,31 @@ pub(crate) fn sync_history(settings: &slint::Weak<SettingsWindow>, state: &Rc<Re
     let Some(settings) = settings.upgrade() else {
         return;
     };
-    let rows = state
-        .borrow()
+    let state = state.borrow();
+    let rows = state.history.iter().map(history_row).collect::<Vec<_>>();
+    // How many entries there are is a caption under a heading, not a figure
+    // worth the large-number treatment: it does not change while you look at
+    // it. How many of them left the machine, on the other hand, is worth
+    // saying out loud.
+    let remote = state
         .history
         .iter()
-        .map(history_row)
-        .collect::<Vec<_>>();
+        .filter(|entry| {
+            entry
+                .transcript
+                .provider
+                .as_deref()
+                .is_some_and(|provider| provider != "local")
+        })
+        .count();
+    settings.set_history_scope(
+        match (rows.len(), remote) {
+            (0, _) => "Nothing kept yet".to_owned(),
+            (total, 0) => format!("{total} kept · all on this device"),
+            (total, remote) => format!("{total} kept · {remote} went to a service"),
+        }
+        .into(),
+    );
     history_rows_model(&settings).set_vec(rows);
 }
 
@@ -406,14 +657,14 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_cycle_speech_backend(move || {
-            let preference = {
-                let state = state.borrow();
-                SpeechBackendPreference::from_index(
-                    (state.speech_backend_preference.index() + 1) % 4,
-                )
-                .unwrap_or_default()
-            };
+        // Four backends shown at once rather than cycled through: the one in
+        // force is the answer to "why is this slow", and an answer you have to
+        // click three times to read is not one.
+        settings.on_select_speech_backend(move |index| {
+            let preference = SpeechBackendPreference::from_index(index).unwrap_or_default();
+            if preference == state.borrow().speech_backend_preference {
+                return;
+            }
             match workers.switch_speech_backend(preference) {
                 Ok(active) => {
                     let initialization = {
@@ -457,11 +708,15 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_select_model(move |index| {
-            let Some(model) = usize::try_from(index)
-                .ok()
-                .and_then(|index| state.borrow().models.get(index).cloned())
+        settings.on_choose_model(move |catalog_id| {
+            let Some(model) = state
+                .borrow()
+                .models
+                .iter()
+                .find(|model| model.catalog_id == catalog_id.as_str())
+                .cloned()
             else {
+                // Not a speech model: the translation handler below takes it.
                 return;
             };
             let reset_output_mode = {
@@ -501,12 +756,8 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_toggle_history_enabled(move || {
-            let enabled = {
-                let mut state = state.borrow_mut();
-                state.history_enabled = !state.history_enabled;
-                state.history_enabled
-            };
+        settings.on_set_history_enabled(move |enabled| {
+            state.borrow_mut().history_enabled = enabled;
             let _ = workers
                 .speech
                 .send(&SpeechWorkerCommand::SetHistoryEnabled { enabled });
@@ -664,36 +915,6 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_drag_provider(move |index, travel| {
-            // The handle reports how far the pointer moved; turning that into
-            // rows belongs here, where the row height is defined.
-            let moved_rows = (travel / PROVIDER_ROW_HEIGHT).round() as i32;
-            if moved_rows == 0 {
-                return;
-            }
-            {
-                let mut state = state.borrow_mut();
-                let Ok(from) = usize::try_from(index) else {
-                    return;
-                };
-                if from >= state.transcription_chain.len() {
-                    return;
-                }
-                let last = state.transcription_chain.len() - 1;
-                let to = (index + moved_rows).clamp(0, last as i32) as usize;
-                if to == from {
-                    return;
-                }
-                let entry = state.transcription_chain.remove(from);
-                state.transcription_chain.insert(to, entry);
-            }
-            apply_provider_chain(&settings_weak, &state, &workers);
-        });
-    }
-    {
-        let settings_weak = settings.as_weak();
-        let state = Rc::clone(state);
-        let workers = Rc::clone(workers);
         settings.on_toggle_provider(move |index| {
             {
                 let mut state = state.borrow_mut();
@@ -703,9 +924,34 @@ pub(crate) fn wire_settings(
                 else {
                     return;
                 };
+                // Switching a service off keeps its place and its key. Only the
+                // order and this switch decide what is used.
                 entry.enabled = !entry.enabled;
             }
             apply_provider_chain(&settings_weak, &state, &workers);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        // The verb that appears in a row only while something is running. The
+        // partial file is kept, so a later attempt resumes rather than starting
+        // over — which is why the row says so while it downloads.
+        settings.on_cancel_model_install(move || {
+            let _ = workers
+                .speech
+                .send(&SpeechWorkerCommand::CancelModelInstall);
+            let _ = workers
+                .translation
+                .send(&TranslationWorkerCommand::CancelModelInstall);
+            state.borrow_mut().downloads.clear();
+            sync_models(&settings_weak, &state);
+            sync_translation_models(&settings_weak, &state);
+            set_indicator_status(
+                &settings_weak,
+                "Install cancelled. The partial file is kept.",
+            );
         });
     }
     {
@@ -787,7 +1033,8 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_toggle_output_mode(move || {
+        settings.on_set_output_mode(move |value| {
+            let wants_english = value == "english";
             let supports_translation = {
                 let state = state.borrow();
                 state
@@ -796,18 +1043,22 @@ pub(crate) fn wire_settings(
                     .find(|model| model.catalog_id == state.selected_model_id)
                     .is_none_or(|model| model.supports_speech_translation)
             };
-            if !supports_translation {
+            // The menu shows this choice greyed with its reason attached, so
+            // reaching here with it means the model changed underneath. Say so
+            // rather than silently doing nothing.
+            if wants_english && !supports_translation {
                 set_indicator_status(
                     &settings_weak,
-                    "Whisper Turbo is transcription-only. Translation will use the separate selection translator.",
+                    "This model was not trained to translate. Use the selection translator instead.",
                 );
                 return;
             }
             let output_mode = {
                 let mut state = state.borrow_mut();
-                state.output_mode = match state.output_mode {
-                    SpeechOutputMode::OriginalLanguage => SpeechOutputMode::TranslateToEnglish,
-                    SpeechOutputMode::TranslateToEnglish => SpeechOutputMode::OriginalLanguage,
+                state.output_mode = if wants_english {
+                    SpeechOutputMode::TranslateToEnglish
+                } else {
+                    SpeechOutputMode::OriginalLanguage
                 };
                 state.output_mode
             };
@@ -822,12 +1073,9 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_toggle_release_optimization(move || {
-            let enabled = {
-                let mut state = state.borrow_mut();
-                state.fast_release_previews = !state.fast_release_previews;
-                state.fast_release_previews
-            };
+        settings.on_set_release_mode(move |value| {
+            let enabled = value == "fastest";
+            state.borrow_mut().fast_release_previews = enabled;
             let _ = workers
                 .speech
                 .send(&SpeechWorkerCommand::SetFastReleasePreviews { enabled });
@@ -839,10 +1087,15 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_select_translation_model(move |index| {
-            let Some(model) = usize::try_from(index)
-                .ok()
-                .and_then(|index| state.borrow().translation_models.get(index).cloned())
+        // The same callback: the two kinds of model live in one list, and each
+        // handler takes the rows it recognises.
+        settings.on_choose_model(move |catalog_id| {
+            let Some(model) = state
+                .borrow()
+                .translation_models
+                .iter()
+                .find(|model| model.catalog_id == catalog_id.as_str())
+                .cloned()
             else {
                 return;
             };
@@ -881,10 +1134,28 @@ pub(crate) fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
-        settings.on_toggle_translation_enabled(move || {
+        settings.on_set_translation_enabled(move |enabled| {
+            state.borrow_mut().translation_enabled = enabled;
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        // The old Text tools page was these switches with the combinations
+        // taken away from them, so each one now lives on the command it
+        // belongs to. The indexes are the rows built by `hotkey_rows`.
+        settings.on_set_hotkey_enabled(move |index, enabled| {
             {
                 let mut state = state.borrow_mut();
-                state.translation_enabled = !state.translation_enabled;
+                match index {
+                    2 => state.layout_enabled = enabled,
+                    3 => state.translation_enabled = enabled,
+                    // Dictate, insert-last and pause are registered
+                    // unconditionally in this build; the row says so.
+                    _ => return,
+                }
             }
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
@@ -893,11 +1164,12 @@ pub(crate) fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
-        settings.on_toggle_layout_enabled(move || {
-            {
-                let mut state = state.borrow_mut();
-                state.layout_enabled = !state.layout_enabled;
-            }
+        settings.on_set_text_action_mode(move |value| {
+            state.borrow_mut().text_action_mode = if value == "palette" {
+                TextActionMode::AlwaysPalette
+            } else {
+                TextActionMode::Adaptive
+            };
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
         });
@@ -905,30 +1177,12 @@ pub(crate) fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
-        settings.on_cycle_text_action_mode(move || {
-            {
-                let mut state = state.borrow_mut();
-                state.text_action_mode = match state.text_action_mode {
-                    TextActionMode::Adaptive => TextActionMode::AlwaysPalette,
-                    TextActionMode::AlwaysPalette => TextActionMode::Adaptive,
-                };
-            }
-            let _ = save_settings(&state.borrow());
-            sync_action_settings(&settings_weak, &state);
-        });
-    }
-    {
-        let settings_weak = settings.as_weak();
-        let state = Rc::clone(state);
-        settings.on_cycle_translation_delivery(move || {
-            {
-                let mut state = state.borrow_mut();
-                state.translation_delivery = match state.translation_delivery {
-                    TranslationDelivery::Preview => TranslationDelivery::Replace,
-                    TranslationDelivery::Replace => TranslationDelivery::Copy,
-                    TranslationDelivery::Copy => TranslationDelivery::Preview,
-                };
-            }
+        settings.on_set_translation_delivery(move |value| {
+            state.borrow_mut().translation_delivery = match value.as_str() {
+                "replace" => TranslationDelivery::Replace,
+                "copy" => TranslationDelivery::Copy,
+                _ => TranslationDelivery::Preview,
+            };
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
         });
@@ -937,10 +1191,10 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_toggle_translation_warm(move || {
+        settings.on_set_translation_warm(move |warm| {
             let selected = {
                 let mut state = state.borrow_mut();
-                state.translation_keep_warm = !state.translation_keep_warm;
+                state.translation_keep_warm = warm;
                 state.selected_translation_tier
             };
             if let Some(tier) = selected {
@@ -960,28 +1214,13 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let translation_previews = Rc::clone(translation_previews);
         let state = Rc::clone(state);
-        settings.on_decrease_translation_blur(move || {
-            let radius = {
-                let mut state = state.borrow_mut();
-                state.translation_blur_radius = state.translation_blur_radius.saturating_sub(1);
-                state.translation_blur_radius
-            };
-            translation_previews.borrow_mut().set_blur_radius(radius);
-            let _ = save_settings(&state.borrow());
-            sync_action_settings(&settings_weak, &state);
-        });
-    }
-    {
-        let settings_weak = settings.as_weak();
-        let translation_previews = Rc::clone(translation_previews);
-        let state = Rc::clone(state);
-        settings.on_increase_translation_blur(move || {
-            let radius = {
-                let mut state = state.borrow_mut();
-                state.translation_blur_radius =
-                    (state.translation_blur_radius + 1).min(MAX_TRANSLATION_BLUR_RADIUS);
-                state.translation_blur_radius
-            };
+        // The stepper clamps before it asks, so a value out of range never
+        // reaches here in the first place; the clamp is repeated because a
+        // callback that trusts its caller is a callback waiting to be called
+        // from somewhere else.
+        settings.on_set_translation_blur(move |value| {
+            let radius = value.clamp(0, MAX_TRANSLATION_BLUR_RADIUS as i32) as u32;
+            state.borrow_mut().translation_blur_radius = radius;
             translation_previews.borrow_mut().set_blur_radius(radius);
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
