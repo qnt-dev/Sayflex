@@ -251,6 +251,8 @@ button, input { font: inherit; color: inherit; }
   font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; transition:all .18s var(--ease); white-space:nowrap; }
 .row-action:hover { background:var(--ink); color:#fff; }
 .grip { width:14px; color:rgba(17,19,23,.4); cursor:grab; font-size:13px; line-height:1; user-select:none; }
+/* The handle takes focus, so it has to show it. */
+.grip:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
 .order { width:16px; font:600 10px/1 ui-monospace, monospace; color:rgba(17,19,23,.4); font-variant-numeric:tabular-nums; }
 
 /* ── not designed yet ──────────────────────────────────── */

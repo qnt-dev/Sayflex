@@ -576,6 +576,27 @@ function buildBars() {
 
 function makeReorderable(host, rows, rerender) {
   host.querySelectorAll('.grip').forEach((grip, index) => {
+    // A list that can only be reordered with a mouse cannot be reordered at
+    // all by someone working from the keyboard, so the handle is a control in
+    // its own right rather than a decoration that happens to accept a drag.
+    grip.tabIndex = 0;
+    grip.setAttribute('role', 'button');
+    grip.setAttribute('aria-label', `Move ${rows[index].name}: arrow keys, or drag`);
+    grip.addEventListener('keydown', (event) => {
+      const step = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+      if (!step) return;
+      event.preventDefault();
+      const target = index + step;
+      if (target < 0 || target >= rows.length) return;
+      const [moved] = rows.splice(index, 1);
+      rows.splice(target, 0, moved);
+      rerender();
+      // The list was rebuilt, so the handle the user was holding is a new
+      // node: focus follows the row rather than staying at the position.
+      const handles = host.querySelectorAll('.grip');
+      if (handles[target]) handles[target].focus();
+    });
+
     grip.addEventListener('mousedown', (event) => {
       event.preventDefault();
       const item = grip.closest('li');
