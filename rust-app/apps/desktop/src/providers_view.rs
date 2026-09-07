@@ -62,6 +62,35 @@ pub(crate) fn set_provider_field_value(entry: &mut TranscriptionProviderEntry, v
     }
 }
 
+/// Whether this arrangement can send a recording off the machine.
+///
+/// Every claim in the interface about audio staying here rests on this, so it
+/// walks the list the way the router walks it rather than asking whether a
+/// service is switched on somewhere. `Router::transcribe` returns
+/// `UseLocalEngine` at the first local candidate and stops, so a keyed service
+/// below an enabled local engine is never consulted: it must not make the
+/// interface announce that audio is leaving.
+///
+/// Momentary availability is deliberately not consulted. A service that is
+/// cooling down will be used again within the hour, and a privacy claim that
+/// flickers with a quota counter teaches the user to ignore it.
+pub(crate) fn audio_can_leave_device(
+    chain: &[TranscriptionProviderEntry],
+    has_credential: impl Fn(&str) -> bool,
+) -> bool {
+    chain
+        .iter()
+        .filter(|entry| entry.enabled)
+        .find_map(|entry| {
+            if entry.id == "local" {
+                // The walk ends here; nothing below is reached.
+                return Some(false);
+            }
+            has_credential(&entry.id).then_some(true)
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn sync_providers(
     settings: &slint::Weak<SettingsWindow>,
     state: &Rc<RefCell<AppState>>,
@@ -105,16 +134,11 @@ pub(crate) fn sync_providers(
             }
         })
         .collect();
-    // Every claim in the interface about audio staying on this machine is
-    // conditional on this, so it is computed from the same list the router
-    // walks rather than from a separate setting.
-    let sending_audio_out = state.transcription_chain.iter().any(|entry| {
-        entry.enabled
-            && entry.id != "local"
-            && state
-                .transcription_providers
-                .iter()
-                .any(|status| status.id == entry.id && status.has_credential)
+    let sending_audio_out = audio_can_leave_device(&state.transcription_chain, |id| {
+        state
+            .transcription_providers
+            .iter()
+            .any(|status| status.id == id && status.has_credential)
     });
     settings.set_remote_transcription_enabled(sending_audio_out);
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
@@ -147,8 +171,8 @@ mod transcription_provider_tests {
     use rust_protocol::TranscriptionProviderEntry;
 
     use super::{
-        PROVIDER_ROW_HEIGHT, provider_display_name, provider_field_label, provider_field_value,
-        set_provider_field_value,
+        PROVIDER_ROW_HEIGHT, audio_can_leave_device, provider_display_name, provider_field_label,
+        provider_field_value, set_provider_field_value,
     };
 
     fn entry(id: &str) -> TranscriptionProviderEntry {
@@ -204,6 +228,50 @@ mod transcription_provider_tests {
             provider_display_name("a-service-from-the-future"),
             "a-service-from-the-future"
         );
+    }
+
+    fn chain(rows: &[(&str, bool)]) -> Vec<TranscriptionProviderEntry> {
+        rows.iter()
+            .map(|(id, enabled)| TranscriptionProviderEntry {
+                enabled: *enabled,
+                ..entry(id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_keyed_service_below_the_local_engine_does_not_send_audio_out() {
+        // The router stops at the local engine, so Groq here is never asked,
+        // and the interface must not say the recording is leaving.
+        let rows = chain(&[("local", true), ("groq", true)]);
+        assert!(!audio_can_leave_device(&rows, |id| id == "groq"));
+    }
+
+    #[test]
+    fn a_keyed_service_above_the_local_engine_does_send_audio_out() {
+        let rows = chain(&[("groq", true), ("local", true)]);
+        assert!(audio_can_leave_device(&rows, |id| id == "groq"));
+    }
+
+    #[test]
+    fn a_service_without_a_key_is_not_a_service() {
+        let rows = chain(&[("groq", true), ("local", true)]);
+        assert!(!audio_can_leave_device(&rows, |_| false));
+    }
+
+    #[test]
+    fn a_switched_off_local_engine_does_not_end_the_walk() {
+        // Switching the local engine off is how a user says "always use a
+        // service", and the row below it is then genuinely reached.
+        let rows = chain(&[("local", false), ("groq", true)]);
+        assert!(audio_can_leave_device(&rows, |id| id == "groq"));
+    }
+
+    #[test]
+    fn an_empty_or_silent_chain_claims_nothing() {
+        assert!(!audio_can_leave_device(&[], |_| true));
+        let off = chain(&[("groq", false), ("local", false)]);
+        assert!(!audio_can_leave_device(&off, |_| true));
     }
 
     #[test]

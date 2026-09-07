@@ -437,8 +437,13 @@ component CircularPaletteChoice inherits Rectangle {
 export component SettingsWindow inherits Window {
     title: "SayFlex";
     icon: @image-url("../assets/tray-icon.svg");
-    width: 1000px;
-    height: 720px;
+    // Below this the two-column workspace has nowhere left to give, and the
+    // window has no outer scroll to fall back on: the right-hand column and
+    // the footer simply leave the screen. The design is drawn to this floor.
+    min-width: 940px;
+    min-height: 640px;
+    preferred-width: 1000px;
+    preferred-height: 720px;
     background: Theme.ink;
     default-font-family: "Segoe UI Variable Text";
 

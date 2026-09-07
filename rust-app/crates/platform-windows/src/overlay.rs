@@ -442,6 +442,18 @@ pub fn reveal_overlay_window(window_handle: u64) -> Result<(), String> {
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
     }
+    // Uncloaking a window that has lost WS_VISIBLE leaves it invisible and
+    // says nothing about it. The overlay is meant to be hidden by the DWM
+    // cloak alone, so if the style has gone missing, put it back rather than
+    // uncloak into silence.
+    //
+    // SAFETY: hwnd belongs to this process and both calls only read or set
+    // this window's own visibility.
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
     set_overlay_cloaked(hwnd, false)?;
     // DwmFlush is a compositor acknowledgement, not a timing workaround. It
     // guarantees that the already-rendered frame has crossed the native
