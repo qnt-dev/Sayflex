@@ -12,7 +12,7 @@
 
 use std::error::Error;
 
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::{Fact, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow};
 
@@ -47,12 +47,184 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     fill_history(&settings);
     fill_hotkeys(&settings);
 
+    wire(&settings);
     settings.on_quit_requested(|| {
         let _ = slint::quit_event_loop();
     });
     settings.show()?;
     slint::run_event_loop()?;
     Ok(())
+}
+
+/// The preview answers its own controls.
+///
+/// Not to imitate the application — nothing here talks to a worker — but
+/// because a control that renders and does nothing is exactly the failure this
+/// preview exists to catch, and a still picture cannot catch it. The rules are
+/// the same ones the real handlers follow, kept deliberately short.
+fn wire(settings: &SettingsWindow) {
+    {
+        let weak = settings.as_weak();
+        settings.on_move_provider(move |from, to| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            let rows = settings.get_provider_rows();
+            let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
+                return;
+            };
+            let mut moved: Vec<ProviderRow> = rows.iter().collect();
+            if from >= moved.len() || from == to {
+                return;
+            }
+            let to = to.min(moved.len() - 1);
+            let row = moved.remove(from);
+            moved.insert(to, row);
+            settings.set_provider_rows(ModelRc::new(VecModel::from(moved)));
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_toggle_provider(move |index| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            let rows = settings.get_provider_rows();
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            let mut toggled: Vec<ProviderRow> = rows.iter().collect();
+            let Some(row) = toggled.get_mut(index) else {
+                return;
+            };
+            row.enabled = !row.enabled;
+            row.state = if row.enabled {
+                "Standing by"
+            } else {
+                "Switched off"
+            }
+            .into();
+            row.tone = if row.enabled { "resting" } else { "off" }.into();
+            settings.set_provider_rows(ModelRc::new(VecModel::from(toggled)));
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_translation_delivery(move |value| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            settings.set_translation_delivery(value.clone());
+            settings.set_translation_delivery_label(
+                match value.as_str() {
+                    "replace" => "Replace the selection",
+                    "copy" => "Copy it",
+                    _ => "Show a preview",
+                }
+                .into(),
+            );
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_text_action_mode(move |value| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            settings.set_text_action_mode(value.clone());
+            settings.set_text_action_mode_label(
+                if value == "palette" {
+                    "Always ask"
+                } else {
+                    "Decide from the text"
+                }
+                .into(),
+            );
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_output_mode(move |value| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            settings.set_output_mode(value.clone());
+            settings.set_output_mode_label(
+                if value == "english" {
+                    "Translate to English"
+                } else {
+                    "Original language"
+                }
+                .into(),
+            );
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_release_mode(move |value| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            settings.set_release_mode(value.clone());
+            settings.set_release_mode_label(
+                if value == "efficient" {
+                    "Efficient"
+                } else {
+                    "Fastest"
+                }
+                .into(),
+            );
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_select_speech_backend(move |index| {
+            if let Some(settings) = weak.upgrade() {
+                settings.set_speech_backend_index(index);
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_select_visualizer(move |index| {
+            if let Some(settings) = weak.upgrade() {
+                settings.set_selected_visualizer(index);
+                settings.set_visuals_native_surface(index == 4 || index == 5);
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_translation_blur(move |value| {
+            if let Some(settings) = weak.upgrade() {
+                settings.set_translation_blur_radius(value.clamp(0, 8));
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_history_enabled(move |on| {
+            if let Some(settings) = weak.upgrade() {
+                settings.set_history_enabled(on);
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_translation_enabled(move |on| {
+            if let Some(settings) = weak.upgrade() {
+                settings.set_translation_enabled(on);
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_translation_warm(move |on| {
+            if let Some(settings) = weak.upgrade() {
+                settings.set_translation_warm(on);
+            }
+        });
+    }
 }
 
 fn fill_overview(settings: &SettingsWindow) {
