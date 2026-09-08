@@ -34,6 +34,17 @@ function Assert-OwnedBuildTarget([string]$Path) {
     }
 }
 
+# Git for Windows ships a GNU `link` in usr\bin. If this script is started from
+# anything that put that directory on PATH — a Git Bash shell, or a tool that
+# inherited one — rustc finds it instead of the MSVC linker and every build
+# script fails with "extra operand". The CUDA pass survives because cargo is
+# invoked from PowerShell; the Vulkan pass hands PATH through to cmd.exe and
+# does not. Take those entries out once, for the whole script.
+$env:PATH = (
+    $env:PATH -split ';' |
+    Where-Object { $_ -and $_ -notmatch '\\Git\\usr\\bin' -and $_ -notmatch '\\Git\\bin$' }
+) -join ';'
+
 Assert-WorkspaceChild $output
 foreach ($target in $temporaryTargets) {
     Assert-OwnedBuildTarget $target
