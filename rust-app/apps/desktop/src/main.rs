@@ -36,9 +36,9 @@ use serde::{Deserialize, Serialize};
 use settings_document::{SavedSettings, data_root, load_settings, save_settings};
 use settings_view::{
     precreate_action_windows, prepend_history_row, set_indicator_status, set_runtime_status,
-    show_layout_chooser, sync_action_settings, sync_history, sync_models, sync_output_mode,
-    sync_translation_models, wire_action_palette, wire_chooser, wire_settings, wire_translator,
-    wire_tray,
+    set_status_problem, show_layout_chooser, sync_action_settings, sync_history, sync_models,
+    sync_output_mode, sync_translation_models, wire_action_palette, wire_chooser, wire_settings,
+    wire_translator, wire_tray,
 };
 use slint::winit_030::{
     WinitWindowAccessor,
@@ -1096,8 +1096,8 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             runtime.recording_overlays.retire_all("worker_error");
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Worker error".into());
-                settings.set_indicator_status(message.into());
             }
+            set_status_problem(&runtime.settings, &message);
         }
         RuntimeEvent::WorkerExited {
             kind,
@@ -1199,7 +1199,7 @@ fn handle_worker_exit(
                 );
             }
             Ok(WorkerRecovery::Deferred | WorkerRecovery::Stopping | WorkerRecovery::Stale) => {}
-            Err(error) => set_indicator_status(
+            Err(error) => set_status_problem(
                 &runtime.settings,
                 &format!("Companion Orb is unavailable: {error}"),
             ),
@@ -1283,11 +1283,19 @@ fn handle_worker_exit(
             };
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Recovering worker".into());
-                let detail = initialization.map_or_else(
-                    |error| format!("{message}; restart initialization failed: {error}"),
-                    |()| format!("{message}; worker restarted automatically"),
-                );
-                settings.set_indicator_status(detail.into());
+            }
+            // A restart that worked is progress; one that did not is trouble.
+            // Reading that out of the sentence is what the old classifier got
+            // wrong in both directions.
+            match initialization {
+                Ok(()) => set_indicator_status(
+                    &runtime.settings,
+                    &format!("{message}; worker restarted automatically"),
+                ),
+                Err(error) => set_status_problem(
+                    &runtime.settings,
+                    &format!("{message}; restart initialization failed: {error}"),
+                ),
             }
         }
         Ok(WorkerRecovery::Deferred) => {
@@ -1308,8 +1316,8 @@ fn handle_worker_exit(
             }
             if let Some(settings) = runtime.settings.upgrade() {
                 settings.set_runtime_status("Worker unavailable".into());
-                settings.set_indicator_status(format!("{message}; {error}").into());
             }
+            set_status_problem(&runtime.settings, &format!("{message}; {error}"));
         }
     }
 }
@@ -1346,7 +1354,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             target,
         } => {
             if !state.borrow().input_ready {
-                set_indicator_status(settings, "Input worker is not ready.");
+                set_status_problem(settings, "Input worker is not ready.");
                 return;
             }
             if !state.borrow().speech_ready {
@@ -1386,7 +1394,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 state.targets.remove(&session_id);
                 state.indicator_session = None;
                 state.active_visualizer_style = None;
-                set_indicator_status(settings, &format!("Could not start recording: {error}"));
+                set_status_problem(settings, &format!("Could not start recording: {error}"));
                 return;
             }
             let active_style = state.borrow().active_visualizer_style.unwrap_or_default();
@@ -1452,7 +1460,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     }
                     indicator_animation.borrow_mut().stop();
                     recording_overlays.retire_all("speech_end_send_failed");
-                    set_indicator_status(settings, &format!("Could not finish recording: {error}"));
+                    set_status_problem(settings, &format!("Could not finish recording: {error}"));
                     return;
                 }
                 indicator_animation.borrow_mut().begin_processing();
@@ -2041,7 +2049,7 @@ reason=translation_disabled"
         translation_previews
             .borrow_mut()
             .clear_current_request(request_id);
-        set_indicator_status(settings, &format!("Could not start translation: {error}"));
+        set_status_problem(settings, &format!("Could not start translation: {error}"));
     } else {
         set_indicator_status(settings, "Translating locally…");
         rust_app_core::diagnostics::log_line(&format!(
@@ -3002,6 +3010,23 @@ fn handle_translation_event(
             message,
             ..
         } => {
+            // A failure with no request behind it did not come from a
+            // translation — every one of those carries its id — so it came from
+            // the install that was running. Ending it here stops the row
+            // offering a Cancel for a download that is already over.
+            //
+            // This is a guess the protocol should not make necessary:
+            // `Failed` needs the catalog id that `ModelDownloadProgress`
+            // already carries.
+            if request_id.is_none() {
+                let installing: Vec<String> = state.borrow().downloads.keys().cloned().collect();
+                if !installing.is_empty() {
+                    for catalog_id in installing {
+                        finish_download(state, &catalog_id);
+                    }
+                    sync_translation_models(settings, state);
+                }
+            }
             if let Some(request_id) = request_id {
                 translation_previews
                     .borrow_mut()
@@ -3461,8 +3486,10 @@ fn finish_download(state: &Rc<RefCell<AppState>>, catalog_id: &str) -> bool {
 ///
 /// It asked for five, and then the page said "5 kept" as though that were the
 /// whole of it. The list scrolls, so the only thing more rows cost is the size
-/// of one message.
-pub(crate) const HISTORY_LIMIT: usize = 200;
+/// of one message — and this is every entry the worker keeps
+/// (`MAX_HISTORY_ENTRIES` in the speech worker), so the page is now showing all
+/// of them rather than a window onto them.
+pub(crate) const HISTORY_LIMIT: usize = 250;
 
 fn unix_ms() -> u64 {
     SystemTime::now()

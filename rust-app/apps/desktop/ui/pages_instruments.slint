@@ -116,8 +116,12 @@ export component DictationPage inherits HorizontalLayout {
 
         Rectangle { height: 34px; }
 
-        // The flat line is the resting state and is drawn as one: nothing is
-        // being heard, and the interface does not pretend otherwise.
+        // Not a live meter. These thirty-two bars are the shape the recording
+        // overlay draws, at rest, so the page shows which instrument is
+        // configured — it does not show the microphone. The overlay is where a
+        // live level belongs, because that is what is on screen while you
+        // speak; a settings page you are not looking at during a dictation is
+        // the wrong place for it.
         Rectangle {
             height: 116px;
             HorizontalLayout {
@@ -322,6 +326,11 @@ export component VisualsPage inherits HorizontalLayout {
                         vertical-alignment: center;
                     }
 
+                    // One shape for every style. Drawing each visualizer
+                    // properly means running the renderers this page is meant
+                    // to be choosing between, which is the recording overlay's
+                    // job; until that is shared, this frame says which one is
+                    // chosen rather than showing it.
                     if root.selected != 8 : Rectangle {
                         width: 92px;
                         height: 92px;

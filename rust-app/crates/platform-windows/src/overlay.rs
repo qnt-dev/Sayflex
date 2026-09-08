@@ -13,8 +13,8 @@ use windows_sys::Win32::{
     Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
         CreateRectRgn, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
-        MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow, ReleaseDC,
-        SRCCOPY, SelectObject,
+        InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
+        ReleaseDC, SRCCOPY, SelectObject,
     },
     System::{
         LibraryLoader::{GetModuleHandleW, GetProcAddress},
@@ -435,6 +435,25 @@ pub fn cloak_overlay_window(window_handle: u64) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Asks the compositor to repaint a window.
+///
+/// The same thing Slint's `request_redraw` reaches in the end, but callable
+/// with nothing but the handle — a timer cannot hold a `slint::Window`. Used to
+/// ask a second time for the first frame of an overlay that is waiting to be
+/// shown, because a request issued while the window is still settling after a
+/// move is sometimes coalesced away.
+pub fn request_repaint(window_handle: u64) {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: hwnd belongs to this process; invalidating its whole client area
+    // only schedules a paint.
+    unsafe {
+        let _ = InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
 }
 
 pub fn reveal_overlay_window(window_handle: u64) -> Result<(), String> {

@@ -33,9 +33,9 @@ pub use overlay::{
     enable_translation_live_backdrop, prepare_action_window, prepare_blue_glass_overlay_window,
     prepare_overlay_window, prepare_translation_window, prepare_transparent_overlay_window,
     primary_pointer_button_is_down, reconcile_interactive_overlay_window_contract,
-    reconcile_overlay_window_contract, restore_target_if_our_action_window_activated,
-    reveal_overlay_window, verify_interactive_overlay_window_contract,
-    verify_overlay_window_contract,
+    reconcile_overlay_window_contract, request_repaint,
+    restore_target_if_our_action_window_activated, reveal_overlay_window,
+    verify_interactive_overlay_window_contract, verify_overlay_window_contract,
 };
 #[cfg(windows)]
 pub use popup_dismiss::{
@@ -155,6 +155,9 @@ pub fn cloak_overlay_window(_window_handle: u64) -> Result<(), String> {
 pub fn reveal_overlay_window(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
+
+#[cfg(not(windows))]
+pub fn request_repaint(_window_handle: u64) {}
 
 #[cfg(not(windows))]
 pub fn verify_overlay_window_contract(

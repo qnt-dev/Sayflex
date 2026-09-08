@@ -389,15 +389,17 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
     rows
 }
 
-fn hotkeys_summary(state: &AppState) -> String {
-    // Dictate and insert-last are always registered; the other two follow their
-    // switches, and pause does not exist yet. Counting rather than asserting
-    // means the line cannot drift from the list under it.
-    let held = 2 + usize::from(state.layout_enabled) + usize::from(state.translation_enabled);
-    match held {
-        4 => "Four of five held · pause is not implemented".to_owned(),
-        n => format!("{n} of five held · pause is not implemented"),
-    }
+fn hotkeys_summary(_state: &AppState) -> String {
+    // Four combinations are registered at start-up and never released, whatever
+    // the switches say: `input-host` calls RegisterHotKey for K, V and F once,
+    // and the dictate gesture is recognised by the low-level hook. Switching a
+    // command off stops SayFlex acting on its keys; it does not give them back
+    // to Windows.
+    //
+    // The line used to count the switches and report "Two of five held" above
+    // rows that each said SayFlex still holds the combination. Until the
+    // registration is actually dynamic, the true number is four.
+    "Four of five held · pause is not implemented".to_owned()
 }
 
 /// Whether anything is actually coming down the wire.
@@ -596,11 +598,23 @@ pub(crate) fn sync_history(settings: &slint::Weak<SettingsWindow>, state: &Rc<Re
                 .is_some_and(|provider| provider != "local")
         })
         .count();
+    // The worker keeps 250 and hands over as many as were asked for, so a page
+    // showing two hundred of them must not report two hundred as the whole of
+    // it. Both counts are of what is on this page, and the line says so.
+    let shown = rows.len();
     settings.set_history_scope(
-        match (rows.len(), remote) {
+        match (shown, remote) {
             (0, _) => "Nothing kept yet".to_owned(),
-            (total, 0) => format!("{total} kept · all on this device"),
-            (total, remote) => format!("{total} kept · {remote} went to a service"),
+            (total, 0) if total < HISTORY_LIMIT => {
+                format!("{total} kept · all on this device")
+            }
+            (total, 0) => format!("Showing {total} · all on this device"),
+            (total, remote) if total < HISTORY_LIMIT => {
+                format!("{total} kept · {remote} went to a service")
+            }
+            (total, remote) => {
+                format!("Showing {total} · {remote} of them went to a service")
+            }
         }
         .into(),
     );
@@ -645,31 +659,47 @@ pub(crate) fn set_runtime_status(settings: &slint::Weak<SettingsWindow>, message
     }
 }
 
-pub(crate) fn set_indicator_status(settings: &slint::Weak<SettingsWindow>, message: &str) {
+/// How much attention a status line deserves.
+///
+/// Declared by whoever writes the message. The previous version read English
+/// substrings — "could not", "failed" — which missed "Input worker is not
+/// ready", missed a protocol mismatch, changed meaning whenever a sentence was
+/// reworded, and would classify nothing at all once these strings are
+/// translated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Severity {
+    /// Something is happening, or has finished happily.
+    Progress,
+    /// Something went wrong that the user has to act on.
+    Trouble,
+}
+
+/// Says what the application is doing, and whether it is in trouble.
+///
+/// The one place either of those properties is written. Setting the message
+/// without the severity left the accent lit after a recovery, or dark through
+/// a failure, depending on which of the two was written last.
+pub(crate) fn set_status(
+    settings: &slint::Weak<SettingsWindow>,
+    severity: Severity,
+    message: &str,
+) {
     if let Some(settings) = settings.upgrade() {
         settings.set_indicator_status(message.into());
-        settings.set_status_is_a_problem(status_is_a_problem(message));
+        settings.set_status_is_a_problem(severity == Severity::Trouble);
     }
 }
 
-/// Whether a status line is reporting a failure rather than progress.
-///
-/// The backend writes both through the same channel, and the accent is only
-/// worth anything if it marks the ones the user has to do something about.
-fn status_is_a_problem(message: &str) -> bool {
-    const TROUBLE: [&str; 8] = [
-        "could not",
-        "cannot",
-        "failed",
-        "refused",
-        "no longer",
-        "not available",
-        "unavailable",
-        "denied",
-    ];
-    let lowered = message.to_lowercase();
-    TROUBLE.iter().any(|word| lowered.contains(word))
+/// The common case: reporting progress.
+pub(crate) fn set_indicator_status(settings: &slint::Weak<SettingsWindow>, message: &str) {
+    set_status(settings, Severity::Progress, message);
 }
+
+/// Reporting something the user has to do something about.
+pub(crate) fn set_status_problem(settings: &slint::Weak<SettingsWindow>, message: &str) {
+    set_status(settings, Severity::Trouble, message);
+}
+
 pub(crate) fn show_layout_chooser(
     request_id: RequestId,
     target: TargetSnapshot,
@@ -897,7 +927,7 @@ pub(crate) fn wire_settings(
                         );
                     }
                 }
-                Err(error) => set_indicator_status(
+                Err(error) => set_status_problem(
                     &settings_weak,
                     &format!("Speech backend could not be changed: {error}"),
                 ),
@@ -1214,7 +1244,7 @@ pub(crate) fn wire_settings(
                         provider_display_name(&provider_id)
                     ),
                 ),
-                Err(error) => set_indicator_status(
+                Err(error) => set_status_problem(
                     &settings_weak,
                     &format!("The key could not be stored: {error}"),
                 ),
@@ -1245,7 +1275,7 @@ pub(crate) fn wire_settings(
                         provider_display_name(&provider_id)
                     ),
                 ),
-                Err(error) => set_indicator_status(
+                Err(error) => set_status_problem(
                     &settings_weak,
                     &format!("The key could not be removed: {error}"),
                 ),
@@ -1287,7 +1317,7 @@ pub(crate) fn wire_settings(
             // reaching here with it means the model changed underneath. Say so
             // rather than silently doing nothing.
             if wants_english && !supports_translation {
-                set_indicator_status(
+                set_status_problem(
                     &settings_weak,
                     "This model was not trained to translate. Use the selection translator instead.",
                 );
@@ -1790,35 +1820,5 @@ pub(crate) fn precreate_action_windows(
                 }
             }
         });
-    }
-}
-#[cfg(test)]
-mod status_tests {
-    use super::status_is_a_problem;
-
-    #[test]
-    fn progress_is_not_marked_as_trouble() {
-        assert!(!status_is_a_problem("Listening"));
-        assert!(!status_is_a_problem(
-            "Ready · hold Ctrl + Alt + Space to speak."
-        ));
-        assert!(!status_is_a_problem(
-            "Downloading and verifying the translation model…"
-        ));
-    }
-
-    #[test]
-    fn a_failure_the_user_must_act_on_is_marked() {
-        // The one that started this: the transcript existed, the insertion was
-        // refused, and the interface said nothing at all.
-        assert!(status_is_a_problem(
-            "The target application is no longer focused, so nothing was inserted."
-        ));
-        assert!(status_is_a_problem(
-            "Speech backend could not be changed: no device"
-        ));
-        assert!(status_is_a_problem(
-            "Could not configure translation model: broken pipe"
-        ));
     }
 }
