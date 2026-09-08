@@ -86,6 +86,58 @@ pub(crate) fn audio_can_leave_device(
         .unwrap_or(false)
 }
 
+/// Why a provider's configuration was refused.
+///
+/// Every rule lives here rather than in the markup: a rule enforced only where
+/// the form is drawn stops applying the moment anything else calls the same
+/// callback, and it cannot be tested without a window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SaveRefused(pub String);
+
+/// Checks one provider's configuration before any of it is stored.
+///
+/// Returns the values as they should be written. Nothing is written on a
+/// refusal — the previous save called two callbacks in a row, so an endpoint
+/// this function rejects still had its key stored, and the form closed as
+/// though it had worked.
+pub(crate) fn check_provider_configuration(
+    provider_id: &str,
+    secret: &str,
+    extra: &str,
+) -> Result<(String, Option<String>), SaveRefused> {
+    let secret = secret.trim();
+    let extra = extra.trim();
+
+    // A key of nothing but spaces used to pass the form's own emptiness check,
+    // reach here, and delete a stored key without being asked — beside a Remove
+    // key button that does ask.
+    if secret.is_empty() {
+        return Err(SaveRefused(
+            "A key is needed. To remove the one already stored, use Remove key.".to_owned(),
+        ));
+    }
+
+    let label = provider_field_label(provider_id);
+    if !label.is_empty() && extra.is_empty() {
+        return Err(SaveRefused(format!(
+            "{label} is needed as well as the key."
+        )));
+    }
+
+    // A custom endpoint carries the key and the audio in the same request.
+    if provider_id == "custom" && !extra.is_empty() && !extra.starts_with("https://") {
+        return Err(SaveRefused(
+            "The endpoint must be HTTPS: the key and the audio both travel in this request."
+                .to_owned(),
+        ));
+    }
+
+    Ok((
+        secret.to_owned(),
+        (!extra.is_empty()).then(|| extra.to_owned()),
+    ))
+}
+
 pub(crate) fn sync_providers(
     settings: &slint::Weak<SettingsWindow>,
     state: &Rc<RefCell<AppState>>,
@@ -152,8 +204,8 @@ mod transcription_provider_tests {
     use rust_protocol::TranscriptionProviderEntry;
 
     use super::{
-        audio_can_leave_device, provider_display_name, provider_field_label, provider_field_value,
-        set_provider_field_value,
+        audio_can_leave_device, check_provider_configuration, provider_display_name,
+        provider_field_label, provider_field_value, set_provider_field_value,
     };
 
     fn entry(id: &str) -> TranscriptionProviderEntry {
@@ -218,6 +270,55 @@ mod transcription_provider_tests {
                 ..entry(id)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_key_of_nothing_but_spaces_does_not_delete_the_one_already_stored() {
+        // The form checked `value == ""`, which spaces pass. Rust then trimmed
+        // it to empty and sent `secret: None`, deleting a working key with no
+        // question asked — next to a Remove key button that asks one.
+        let refused = check_provider_configuration("groq", "   ", "")
+            .expect_err("a blank key is not a deletion");
+
+        assert!(refused.0.contains("Remove key"));
+    }
+
+    #[test]
+    fn an_endpoint_that_is_not_https_stops_the_whole_save() {
+        // It used to reject the endpoint and store the key anyway, leaving the
+        // provider keyed and misconfigured while the form closed as though it
+        // had worked.
+        let refused = check_provider_configuration("custom", "sk-live-1234", "http://example.test")
+            .expect_err("the key and the audio both travel in this request");
+
+        assert!(refused.0.contains("HTTPS"));
+    }
+
+    #[test]
+    fn a_provider_that_needs_a_second_field_will_not_save_without_it() {
+        let refused = check_provider_configuration("azure", "sk-live-1234", "  ")
+            .expect_err("Azure answers 403 without a region");
+
+        assert!(refused.0.contains("Region"));
+    }
+
+    #[test]
+    fn a_good_configuration_comes_back_trimmed_and_whole() {
+        let (secret, extra) =
+            check_provider_configuration("azure", "  sk-live-1234  ", "  westeurope  ")
+                .expect("both fields are present");
+
+        assert_eq!(secret, "sk-live-1234");
+        assert_eq!(extra.as_deref(), Some("westeurope"));
+    }
+
+    #[test]
+    fn a_provider_with_no_second_field_saves_with_the_key_alone() {
+        let (secret, extra) = check_provider_configuration("groq", "gsk_live_9c07", "")
+            .expect("Groq takes no region");
+
+        assert_eq!(secret, "gsk_live_9c07");
+        assert_eq!(extra, None);
     }
 
     #[test]

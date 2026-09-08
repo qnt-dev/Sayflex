@@ -25,8 +25,8 @@ use crate::{
     native_window_handle,
     overlay_presenter::OverlayPresenter,
     providers_view::{
-        apply_provider_chain, audio_can_leave_device, provider_display_name,
-        set_provider_field_value, sync_providers,
+        SaveRefused, apply_provider_chain, audio_can_leave_device, check_provider_configuration,
+        provider_display_name, set_provider_field_value, sync_providers,
     },
     settings_document::save_settings,
     settings_projection::{
@@ -1156,72 +1156,101 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_set_provider_key(move |provider_id, secret| {
-            let secret = secret.trim().to_owned();
-            // The key goes to the worker, which owns the encrypted store. It
-            // is never written to settings and never read back for display.
+        // One owner for the whole of a provider's configuration. Every rule is
+        // decided before anything is written, and on a refusal nothing is: the
+        // previous version called two callbacks in a row, so an endpoint that
+        // was rejected still had its key stored and the form closed as though
+        // it had worked.
+        settings.on_save_provider(move |provider_id, secret, extra| {
+            let provider_id = provider_id.to_string();
+            let checked = check_provider_configuration(&provider_id, &secret, &extra);
+            let (secret, extra) = match checked {
+                Ok(values) => values,
+                Err(SaveRefused(reason)) => {
+                    if let Some(settings) = settings_weak.upgrade() {
+                        settings.set_provider_problem(reason.into());
+                        settings.set_provider_problem_for(provider_id.clone().into());
+                    }
+                    return;
+                }
+            };
+
+            // The second field is settings, and is written first: if the key
+            // then fails to reach the worker, the row is configured but
+            // keyless, which the interface already knows how to say. The other
+            // order would leave a key addressed to the wrong place.
+            {
+                let mut state = state.borrow_mut();
+                if let Some(entry) = state
+                    .transcription_chain
+                    .iter_mut()
+                    .find(|entry| entry.id == provider_id)
+                {
+                    set_provider_field_value(entry, extra.clone().unwrap_or_default());
+                }
+            }
+            let _ = save_settings(&state.borrow());
+
+            // The key goes to the worker, which owns the encrypted store. It is
+            // never written to settings and never read back for display.
             let sent = workers
                 .speech
                 .send(&SpeechWorkerCommand::SetProviderCredential {
-                    provider_id: provider_id.to_string(),
-                    secret: (!secret.is_empty()).then_some(secret.clone()),
+                    provider_id: provider_id.clone(),
+                    secret: Some(secret),
                 });
+            if let Some(settings) = settings_weak.upgrade() {
+                settings.set_provider_problem("".into());
+                settings.set_provider_problem_for("".into());
+            }
             match sent {
                 // Deliberately not "stored": the write happens in the worker,
-                // and the row below reports what is actually in the store once
-                // it answers. Claiming success here would be a guess.
+                // and the row reports what is actually in the store once it
+                // answers. Claiming success here would be a guess.
                 Ok(()) => set_indicator_status(
                     &settings_weak,
-                    &if secret.is_empty() {
-                        format!(
-                            "Removing the key for {}…",
-                            provider_display_name(&provider_id)
-                        )
-                    } else {
-                        format!(
-                            "Storing the key for {}…",
-                            provider_display_name(&provider_id)
-                        )
-                    },
+                    &format!(
+                        "Storing the key for {}…",
+                        provider_display_name(&provider_id)
+                    ),
                 ),
                 Err(error) => set_indicator_status(
                     &settings_weak,
                     &format!("The key could not be stored: {error}"),
                 ),
             }
-            sync_providers(&settings_weak, &state);
+            apply_provider_chain(&settings_weak, &state, &workers);
         });
     }
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
-        settings.on_set_provider_field(move |provider_id, value| {
-            // A custom endpoint carries the key and the audio in the same
-            // request, so it has to be HTTPS. Refusing here rather than in the
-            // markup means the rule holds for every caller of this callback.
-            if provider_id == "custom" {
-                let value = value.trim();
-                if !value.is_empty() && !value.starts_with("https://") {
-                    set_indicator_status(
-                        &settings_weak,
-                        "The endpoint must be HTTPS: the key and the audio both travel in this request.",
-                    );
-                    return;
-                }
+        // Deleting a key stays its own command, asked for in place. It is the
+        // only path that clears one, which is why an empty Save is refused
+        // rather than quietly treated as a deletion.
+        settings.on_forget_provider_key(move |provider_id| {
+            let provider_id = provider_id.to_string();
+            let sent = workers
+                .speech
+                .send(&SpeechWorkerCommand::SetProviderCredential {
+                    provider_id: provider_id.clone(),
+                    secret: None,
+                });
+            match sent {
+                Ok(()) => set_indicator_status(
+                    &settings_weak,
+                    &format!(
+                        "Removing the key for {}…",
+                        provider_display_name(&provider_id)
+                    ),
+                ),
+                Err(error) => set_indicator_status(
+                    &settings_weak,
+                    &format!("The key could not be removed: {error}"),
+                ),
             }
-            {
-                let mut state = state.borrow_mut();
-                let Some(entry) = state
-                    .transcription_chain
-                    .iter_mut()
-                    .find(|entry| entry.id == provider_id.as_str())
-                else {
-                    return;
-                };
-                set_provider_field_value(entry, value.to_string());
-            }
-            apply_provider_chain(&settings_weak, &state, &workers);
+            sync_providers(&settings_weak, &state);
         });
     }
     {

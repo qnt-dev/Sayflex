@@ -168,8 +168,12 @@ export component SettingsWindow inherits Window {
     callback set-hotkey-enabled(int, bool);
     callback move-provider(int, int);
     callback toggle-provider(int);
-    callback set-provider-key(string, string);
-    callback set-provider-field(string, string);
+    callback save-provider(string, string, string);
+    callback forget-provider-key(string);
+    /// What the last save was refused for, and which row asked. Written by the
+    /// one owner in Rust so the form cannot decide it locally and be wrong.
+    in-out property <string> provider-problem;
+    in-out property <string> provider-problem-for;
     callback quit-requested();
 
     // The page's own number, written once from the order the navigation is
@@ -336,8 +340,12 @@ export component SettingsWindow inherits Window {
                     claim: root.provider-claim;
                     toggle-provider(index) => { root.toggle-provider(index); }
                     move-provider(from, to) => { root.move-provider(from, to); }
-                    set-provider-key(id, secret) => { root.set-provider-key(id, secret); }
-                    set-provider-field(id, value) => { root.set-provider-field(id, value); }
+                    problem <=> root.provider-problem;
+                    problem-for <=> root.provider-problem-for;
+                    save-provider(id, secret, extra) => {
+                        root.save-provider(id, secret, extra);
+                    }
+                    forget-provider-key(id) => { root.forget-provider-key(id); }
                 }
 
                 if root.active-page == 5 : VisualsPage {

@@ -70,12 +70,16 @@ export component ProvidersPage inherits VerticalLayout {
     in property <bool> audio-leaves-device: false;
     in property <string> claim;
     in-out property <string> editing;
-    // Why the last Save was refused, said in the form that refused it.
+    /// Which row the refusal below belongs to, so opening another provider's
+    /// form does not inherit this one's complaint.
+    in-out property <string> problem-for;
     in-out property <string> problem;
     callback toggle-provider(int);
     callback move-provider(int, int);
-    callback set-provider-key(string, string);
-    callback set-provider-field(string, string);
+    /// The whole configuration of one provider, sent together.
+    callback save-provider(string, string, string);
+    /// Deleting a stored key stays its own command, asked for in place.
+    callback forget-provider-key(string);
 
     spacing: 0px;
 
@@ -162,7 +166,7 @@ export component ProvidersPage inherits VerticalLayout {
                         text: "Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters.";
                     }
 
-                    if root.problem != "" : FieldNote {
+                    if root.problem != "" && root.problem-for == row.id : FieldNote {
                         width: 460px;
                         problem: true;
                         text: root.problem;
@@ -174,29 +178,13 @@ export component ProvidersPage inherits VerticalLayout {
                         RowAction {
                             label: "Save";
                             clicked => {
-                                // One operation: both fields go together, and
-                                // every refusal is decided before anything is
-                                // sent anywhere.
-                                if (key.value == "") {
-                                    root.problem = "A key is needed. To remove the one already stored, use Remove key.";
-                                } else if (row.field-label != "" && extra.value == "") {
-                                    root.problem = row.field-label + " is needed as well as the key.";
-                                } else {
-                                    // Whether the endpoint is HTTPS is checked
-                                    // in Rust, where the value is used: Slint
-                                    // has no string prefix test, and a rule
-                                    // enforced only in the drawing is a rule
-                                    // that stops applying the moment anything
-                                    // else calls the same callback.
-
-                                    root.problem = "";
-                                    if (row.field-label != "") {
-                                        root.set-provider-field(row.id, extra.value);
-                                    }
-                                    root.set-provider-key(row.id, key.value);
-                                    key.value = "";
-                                    root.editing = "";
-                                }
+                                // One call. Every rule — a key that is only
+                                // spaces, a missing region, an endpoint that is
+                                // not HTTPS — is decided by the one owner in
+                                // Rust, which either stores both fields together
+                                // or stores neither and says why. The form stays
+                                // open until it hears that it succeeded.
+                                root.save-provider(row.id, key.value, extra.value);
                             }
                         }
                         RowAction {
@@ -204,6 +192,7 @@ export component ProvidersPage inherits VerticalLayout {
                             clicked => {
                                 key.value = "";
                                 root.problem = "";
+                                root.problem-for = "";
                                 root.editing = "";
                             }
                         }
@@ -211,7 +200,7 @@ export component ProvidersPage inherits VerticalLayout {
                             label: "Remove key";
                             question: "Remove the stored key?";
                             confirmed => {
-                                root.set-provider-key(row.id, "");
+                                root.forget-provider-key(row.id);
                                 root.editing = "";
                             }
                         }
