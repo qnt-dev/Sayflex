@@ -1507,9 +1507,9 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                         "insert_last decision=load_history target_pid={}",
                         target.process_id
                     ));
-                    let _ = workers
-                        .speech
-                        .send(&SpeechWorkerCommand::GetHistory { limit: 20 });
+                    let _ = workers.speech.send(&SpeechWorkerCommand::GetHistory {
+                        limit: HISTORY_LIMIT,
+                    });
                     set_indicator_status(settings, "Loading the latest transcript…");
                 }
                 InsertLastResolution::Unavailable(message) => {
@@ -2244,9 +2244,9 @@ fn handle_speech_event(
             sync_models(settings, state);
             set_runtime_status(settings, "Preparing model");
             set_indicator_status(settings, "Loading and warming the local speech engine…");
-            let _ = workers
-                .speech
-                .send(&SpeechWorkerCommand::GetHistory { limit: 5 });
+            let _ = workers.speech.send(&SpeechWorkerCommand::GetHistory {
+                limit: HISTORY_LIMIT,
+            });
         }
         SpeechWorkerEvent::ModelDownloadProgress {
             catalog_id,
@@ -3422,6 +3422,13 @@ fn short_id(session_id: SessionId) -> String {
 fn finish_download(state: &Rc<RefCell<AppState>>, catalog_id: &str) -> bool {
     state.borrow_mut().downloads.remove(catalog_id).is_some()
 }
+
+/// How many dictations the History page asks for.
+///
+/// It asked for five, and then the page said "5 kept" as though that were the
+/// whole of it. The list scrolls, so the only thing more rows cost is the size
+/// of one message.
+pub(crate) const HISTORY_LIMIT: usize = 200;
 
 fn unix_ms() -> u64 {
     SystemTime::now()

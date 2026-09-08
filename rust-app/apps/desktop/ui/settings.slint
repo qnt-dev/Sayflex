@@ -79,6 +79,10 @@ export component SettingsWindow inherits Window {
     in property <string> app-version: "";
     in-out property <string> runtime-status: "Starting workers…";
     in-out property <string> indicator-status: "Idle";
+    /// Whether the line above reports something that went wrong, rather than
+    /// something that is merely happening. Set by the same code that writes the
+    /// message, because only that code knows.
+    in property <bool> status-is-a-problem: false;
     in property <bool> remote-transcription-enabled: false;
 
     // ── Overview ──
@@ -143,7 +147,7 @@ export component SettingsWindow inherits Window {
 
     // ── what the window can be asked to do ──
     callback choose-model(string);
-    callback cancel-model-install();
+    callback cancel-model-install(string);
     callback refresh-history();
     callback copy-history(int);
     callback clear-history();
@@ -323,7 +327,7 @@ export component SettingsWindow inherits Window {
                     rows: root.model-rows;
                     summary: root.models-summary;
                     choose(catalog-id) => { root.choose-model(catalog-id); }
-                    cancel-install => { root.cancel-model-install(); }
+                    cancel-install(catalog-id) => { root.cancel-model-install(catalog-id); }
                 }
 
                 if root.active-page == 4 : ProvidersPage {
@@ -435,7 +439,43 @@ export component SettingsWindow inherits Window {
                     }
                 }
 
-                Rectangle { horizontal-stretch: 1; }
+                // What the application is doing or has just failed to do. This
+                // is where the accent earns its keep: a refused insertion, a
+                // backend that would not start, a model that would not
+                // download. Without it the interface knows and does not say.
+                HorizontalLayout {
+                    horizontal-stretch: 1;
+                    padding-left: 18px;
+                    alignment: start;
+                    VerticalLayout {
+                        alignment: end;
+                        HorizontalLayout {
+                            spacing: 9px;
+                            Rectangle {
+                                width: 8px;
+                                Rectangle {
+                                    width: 8px;
+                                    height: 8px;
+                                    y: parent.height - self.height - 4px;
+                                    background: root.status-is-a-problem
+                                        ? Sheet.signal
+                                        : Sheet.hairline;
+                                    border-width: root.status-is-a-problem ? 0px : 1px;
+                                    border-color: Sheet.hairline;
+                                }
+                            }
+                            Text {
+                                text: root.indicator-status;
+                                color: root.status-is-a-problem
+                                    ? Sheet.signal-text
+                                    : Sheet.muted;
+                                font-size: Sheet.detail-size;
+                                font-weight: root.status-is-a-problem ? 650 : 400;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
 
                 VerticalLayout {
                     alignment: end;

@@ -20,3 +20,11 @@ slint-build.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.23"
+
+[features]
+# Compiles Slint's CPU renderer in as well, so a build can be told
+# SLINT_BACKEND=winit-software and have its window read back as pixels. That is
+# the only way to see this interface on a machine whose composited surface the
+# screen-capture APIs return blank for. Off by default: a shipped binary has no
+# use for a second renderer.
+inspect = ["slint/renderer-software"]

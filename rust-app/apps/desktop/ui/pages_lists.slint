@@ -17,7 +17,7 @@ export component ModelsPage inherits VerticalLayout {
     // kinds of model is one index arithmetic mistake away from installing the
     // wrong thing.
     callback choose(string);
-    callback cancel-install();
+    callback cancel-install(string);
 
     spacing: 0px;
 
@@ -53,7 +53,7 @@ export component ModelsPage inherits VerticalLayout {
                     label: row.action;
                     clicked => {
                         if (row.action == "Cancel") {
-                            root.cancel-install();
+                            root.cancel-install(row.catalog-id);
                         } else {
                             root.choose(row.catalog-id);
                         }
@@ -70,6 +70,8 @@ export component ProvidersPage inherits VerticalLayout {
     in property <bool> audio-leaves-device: false;
     in property <string> claim;
     in-out property <string> editing;
+    // Why the last Save was refused, said in the form that refused it.
+    in-out property <string> problem;
     callback toggle-provider(int);
     callback move-provider(int, int);
     callback set-provider-key(string, string);
@@ -141,18 +143,29 @@ export component ProvidersPage inherits VerticalLayout {
                     }
 
                     if row.field-label != "" : GroupLabel { text: row.field-label; }
-                    if row.field-label != "" : Field {
+                    extra := Field {
                         width: 340px;
+                        // Kept in the tree rather than behind an `if`, so Save
+                        // can read it. Reached only through Enter before, which
+                        // meant typing a region and pressing Save sent the key
+                        // and dropped the region on the floor.
+                        visible: row.field-label != "";
+                        height: row.field-label == "" ? 0px : 30px;
                         placeholder: row.field-label == "Endpoint"
                             ? "https://speech.example.com/v1"
                             : "";
                         value: row.field-value;
-                        accepted(text) => { root.set-provider-field(row.id, text); }
                     }
 
                     FieldNote {
                         width: 460px;
                         text: "Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters.";
+                    }
+
+                    if root.problem != "" : FieldNote {
+                        width: 460px;
+                        problem: true;
+                        text: root.problem;
                     }
 
                     HorizontalLayout {
@@ -161,15 +174,36 @@ export component ProvidersPage inherits VerticalLayout {
                         RowAction {
                             label: "Save";
                             clicked => {
-                                root.set-provider-key(row.id, key.value);
-                                key.value = "";
-                                root.editing = "";
+                                // One operation: both fields go together, and
+                                // every refusal is decided before anything is
+                                // sent anywhere.
+                                if (key.value == "") {
+                                    root.problem = "A key is needed. To remove the one already stored, use Remove key.";
+                                } else if (row.field-label != "" && extra.value == "") {
+                                    root.problem = row.field-label + " is needed as well as the key.";
+                                } else {
+                                    // Whether the endpoint is HTTPS is checked
+                                    // in Rust, where the value is used: Slint
+                                    // has no string prefix test, and a rule
+                                    // enforced only in the drawing is a rule
+                                    // that stops applying the moment anything
+                                    // else calls the same callback.
+
+                                    root.problem = "";
+                                    if (row.field-label != "") {
+                                        root.set-provider-field(row.id, extra.value);
+                                    }
+                                    root.set-provider-key(row.id, key.value);
+                                    key.value = "";
+                                    root.editing = "";
+                                }
                             }
                         }
                         RowAction {
                             label: "Cancel";
                             clicked => {
                                 key.value = "";
+                                root.problem = "";
                                 root.editing = "";
                             }
                         }

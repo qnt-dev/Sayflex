@@ -17,10 +17,10 @@ use slint::{
 };
 
 use crate::{
-    ActionPalette, AppState, AppTray, Fact, HistoryRow, HotkeyRow, MAX_TRANSLATION_BLUR_RADIUS,
-    ModelRow, PendingSelection, PendingTranslation, RecordingOverlays, SelectionChooser,
-    SelectionTranslationRequest, SettingsWindow, TextActionMode, TranslationDelivery,
-    TranslationOrigin, TranslatorWindow, begin_selection_translation,
+    ActionPalette, AppState, AppTray, Fact, HISTORY_LIMIT, HistoryRow, HotkeyRow,
+    MAX_TRANSLATION_BLUR_RADIUS, ModelRow, PendingSelection, PendingTranslation, RecordingOverlays,
+    SelectionChooser, SelectionTranslationRequest, SettingsWindow, TextActionMode,
+    TranslationDelivery, TranslationOrigin, TranslatorWindow, begin_selection_translation,
     configure_standard_app_window, dispatch_or_defer_selection_replacement, flow_sphere,
     native_window_handle,
     overlay_presenter::OverlayPresenter,
@@ -119,17 +119,26 @@ pub(crate) fn sync_action_settings(
 
     // ── Dictation ──
     settings.set_speech_backend_index(state.speech_backend_preference.index());
-    settings.set_speech_backend_verified(state.speech_backend_active.is_some());
+    settings.set_speech_backend_verified(state.speech_ready);
     settings.set_speech_backend_detail(
         state
             .speech_backend_active
             .map_or_else(
                 || "No compatible speech backend is active".to_owned(),
                 |active| {
-                    format!(
-                        "{} verified by warm-up. The preference above is where the search starts.",
-                        active.display_name()
-                    )
+                    if state.speech_ready {
+                        format!(
+                            "{} verified by warm-up. The preference above is where the search starts.",
+                            active.display_name()
+                        )
+                    } else {
+                        // Chosen is not the same as proved. The warm-up is what
+                        // proves it, and until it finishes the line says so.
+                        format!(
+                            "Warming up on {}. If it fails, the search moves to the next one down.",
+                            active.display_name()
+                        )
+                    }
                 },
             )
             .into(),
@@ -327,7 +336,10 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         detail: if state.layout_enabled {
             "Offers RU/EN candidates for the selection · never automatic".into()
         } else {
-            "Switched off · the combination is left to other applications".into()
+            // Not "left to other applications": input-host registers this
+            // combination at start-up and never releases it, so SayFlex still
+            // receives the keys and simply does nothing with them.
+            "Switched off · SayFlex ignores it but still holds the combination".into()
         },
         state: layout_state.into(),
         tone: layout_tone.into(),
@@ -345,7 +357,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         detail: if state.translation_enabled {
             "Captures the selection once and acts on it".into()
         } else {
-            "Switched off · the combination is left to other applications".into()
+            "Switched off · SayFlex ignores it but still holds the combination".into()
         },
         state: action_state.into(),
         tone: action_tone.into(),
@@ -636,7 +648,27 @@ pub(crate) fn set_runtime_status(settings: &slint::Weak<SettingsWindow>, message
 pub(crate) fn set_indicator_status(settings: &slint::Weak<SettingsWindow>, message: &str) {
     if let Some(settings) = settings.upgrade() {
         settings.set_indicator_status(message.into());
+        settings.set_status_is_a_problem(status_is_a_problem(message));
     }
+}
+
+/// Whether a status line is reporting a failure rather than progress.
+///
+/// The backend writes both through the same channel, and the accent is only
+/// worth anything if it marks the ones the user has to do something about.
+fn status_is_a_problem(message: &str) -> bool {
+    const TROUBLE: [&str; 8] = [
+        "could not",
+        "cannot",
+        "failed",
+        "refused",
+        "no longer",
+        "not available",
+        "unavailable",
+        "denied",
+    ];
+    let lowered = message.to_lowercase();
+    TROUBLE.iter().any(|word| lowered.contains(word))
 }
 pub(crate) fn show_layout_chooser(
     request_id: RequestId,
@@ -709,6 +741,97 @@ pub(crate) fn show_layout_chooser(
             chooser_presenter.abort_prepare(chooser.window(), ticket, "await_frame", &error);
         }
     }
+}
+
+/// Selects a speech model, installing it first if it is not on disk.
+fn choose_speech_model(
+    settings_weak: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Rc<Workers>,
+    catalog_id: &str,
+) {
+    let Some(model) = state
+        .borrow()
+        .models
+        .iter()
+        .find(|model| model.catalog_id == catalog_id)
+        .cloned()
+    else {
+        return;
+    };
+
+    let reset_output_mode = {
+        let mut state = state.borrow_mut();
+        state.selected_model_id.clone_from(&model.catalog_id);
+        state.speech_ready = false;
+        if !model.supports_speech_translation
+            && state.output_mode == SpeechOutputMode::TranslateToEnglish
+        {
+            state.output_mode = SpeechOutputMode::OriginalLanguage;
+            true
+        } else {
+            false
+        }
+    };
+    if reset_output_mode {
+        let _ = workers.speech.send(&SpeechWorkerCommand::SetOutputMode {
+            output_mode: SpeechOutputMode::OriginalLanguage,
+        });
+        sync_output_mode(settings_weak, state);
+    }
+    let _ = save_settings(&state.borrow());
+    let _ = workers.speech.send(&SpeechWorkerCommand::SelectModel {
+        catalog_id: model.catalog_id,
+    });
+}
+
+/// Selects a translation model, downloading it first if it is not on disk.
+fn choose_translation_model(
+    settings_weak: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Rc<Workers>,
+    catalog_id: &str,
+) {
+    let Some(model) = state
+        .borrow()
+        .translation_models
+        .iter()
+        .find(|model| model.catalog_id == catalog_id)
+        .cloned()
+    else {
+        return;
+    };
+
+    {
+        let mut state = state.borrow_mut();
+        state.translation_enabled = true;
+        state.translation_ready = false;
+    }
+    let command = if model.installed {
+        TranslationWorkerCommand::SelectTier {
+            tier: model.tier,
+            keep_warm: state.borrow().translation_keep_warm,
+        }
+    } else {
+        TranslationWorkerCommand::EnsureModel { tier: model.tier }
+    };
+    if let Err(error) = workers.translation.send(&command) {
+        set_indicator_status(
+            settings_weak,
+            &format!("Could not configure translation model: {error}"),
+        );
+    } else {
+        set_indicator_status(
+            settings_weak,
+            if model.installed {
+                "Loading the selected translation model…"
+            } else {
+                "Downloading and verifying the translation model…"
+            },
+        );
+    }
+    let _ = save_settings(&state.borrow());
+    sync_action_settings(settings_weak, state);
 }
 
 pub(crate) fn wire_settings(
@@ -785,48 +908,32 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
+        // One callback, one registration. Slint keeps the last handler given to
+        // a callback, so registering this twice — once for speech models, once
+        // for the translator — silently threw the first away and left every
+        // speech row's Install and Use doing nothing.
+        //
+        // The row is identified by catalog id, so the handler asks which list it
+        // belongs to and does the matching thing.
         settings.on_choose_model(move |catalog_id| {
-            let Some(model) = state
+            let is_speech = state
                 .borrow()
                 .models
                 .iter()
-                .find(|model| model.catalog_id == catalog_id.as_str())
-                .cloned()
-            else {
-                // Not a speech model: the translation handler below takes it.
-                return;
-            };
-            let reset_output_mode = {
-                let mut state = state.borrow_mut();
-                state.selected_model_id.clone_from(&model.catalog_id);
-                state.speech_ready = false;
-                if !model.supports_speech_translation
-                    && state.output_mode == SpeechOutputMode::TranslateToEnglish
-                {
-                    state.output_mode = SpeechOutputMode::OriginalLanguage;
-                    true
-                } else {
-                    false
-                }
-            };
-            if reset_output_mode {
-                let _ = workers.speech.send(&SpeechWorkerCommand::SetOutputMode {
-                    output_mode: SpeechOutputMode::OriginalLanguage,
-                });
-                sync_output_mode(&settings_weak, &state);
+                .any(|model| model.catalog_id == catalog_id.as_str());
+            if is_speech {
+                choose_speech_model(&settings_weak, &state, &workers, &catalog_id);
+            } else {
+                choose_translation_model(&settings_weak, &state, &workers, &catalog_id);
             }
-            let _ = save_settings(&state.borrow());
-            let _ = workers.speech.send(&SpeechWorkerCommand::SelectModel {
-                catalog_id: model.catalog_id,
-            });
         });
     }
     {
         let workers = Rc::clone(workers);
         settings.on_refresh_history(move || {
-            let _ = workers
-                .speech
-                .send(&SpeechWorkerCommand::GetHistory { limit: 5 });
+            let _ = workers.speech.send(&SpeechWorkerCommand::GetHistory {
+                limit: HISTORY_LIMIT,
+            });
         });
     }
     {
@@ -1015,19 +1122,33 @@ pub(crate) fn wire_settings(
         // The verb that appears in a row only while something is running. The
         // partial file is kept, so a later attempt resumes rather than starting
         // over — which is why the row says so while it downloads.
-        settings.on_cancel_model_install(move || {
-            let _ = workers
-                .speech
-                .send(&SpeechWorkerCommand::CancelModelInstall);
-            let _ = workers
-                .translation
-                .send(&TranslationWorkerCommand::CancelModelInstall);
-            state.borrow_mut().downloads.clear();
+        // Cancel belongs to the row it was pressed in. Sending it to both
+        // workers and clearing the whole map stopped a download the user had
+        // not asked to stop.
+        settings.on_cancel_model_install(move |catalog_id| {
+            let catalog_id = catalog_id.to_string();
+            let is_speech = state
+                .borrow()
+                .models
+                .iter()
+                .any(|model| model.catalog_id == catalog_id);
+            let sent = if is_speech {
+                workers
+                    .speech
+                    .send(&SpeechWorkerCommand::CancelModelInstall)
+            } else {
+                workers
+                    .translation
+                    .send(&TranslationWorkerCommand::CancelModelInstall)
+            };
+            state.borrow_mut().downloads.remove(&catalog_id);
             sync_models(&settings_weak, &state);
-            sync_translation_models(&settings_weak, &state);
             set_indicator_status(
                 &settings_weak,
-                "Install cancelled. The partial file is kept.",
+                &match sent {
+                    Ok(()) => "Install cancelled. The partial file is kept.".to_owned(),
+                    Err(error) => format!("Could not cancel the install: {error}"),
+                },
             );
         });
     }
@@ -1076,6 +1197,19 @@ pub(crate) fn wire_settings(
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         settings.on_set_provider_field(move |provider_id, value| {
+            // A custom endpoint carries the key and the audio in the same
+            // request, so it has to be HTTPS. Refusing here rather than in the
+            // markup means the rule holds for every caller of this callback.
+            if provider_id == "custom" {
+                let value = value.trim();
+                if !value.is_empty() && !value.starts_with("https://") {
+                    set_indicator_status(
+                        &settings_weak,
+                        "The endpoint must be HTTPS: the key and the audio both travel in this request.",
+                    );
+                    return;
+                }
+            }
             {
                 let mut state = state.borrow_mut();
                 let Some(entry) = state
@@ -1156,54 +1290,6 @@ pub(crate) fn wire_settings(
             let _ = workers
                 .speech
                 .send(&SpeechWorkerCommand::SetFastReleasePreviews { enabled });
-            let _ = save_settings(&state.borrow());
-            sync_action_settings(&settings_weak, &state);
-        });
-    }
-    {
-        let settings_weak = settings.as_weak();
-        let state = Rc::clone(state);
-        let workers = Rc::clone(workers);
-        // The same callback: the two kinds of model live in one list, and each
-        // handler takes the rows it recognises.
-        settings.on_choose_model(move |catalog_id| {
-            let Some(model) = state
-                .borrow()
-                .translation_models
-                .iter()
-                .find(|model| model.catalog_id == catalog_id.as_str())
-                .cloned()
-            else {
-                return;
-            };
-            {
-                let mut state = state.borrow_mut();
-                state.translation_enabled = true;
-                state.translation_ready = false;
-            }
-            let command = if model.installed {
-                TranslationWorkerCommand::SelectTier {
-                    tier: model.tier,
-                    keep_warm: state.borrow().translation_keep_warm,
-                }
-            } else {
-                TranslationWorkerCommand::EnsureModel { tier: model.tier }
-            };
-            if let Err(error) = workers.translation.send(&command) {
-                set_indicator_status(
-                    &settings_weak,
-                    &format!("Could not configure translation model: {error}"),
-                );
-            } else {
-                set_indicator_status(
-                    &settings_weak,
-                    if model.installed {
-                        "Loading the selected translation model…"
-                    } else {
-                        "Downloading and verifying the translation model…"
-                    },
-                );
-            }
             let _ = save_settings(&state.borrow());
             sync_action_settings(&settings_weak, &state);
         });
@@ -1675,5 +1761,35 @@ pub(crate) fn precreate_action_windows(
                 }
             }
         });
+    }
+}
+#[cfg(test)]
+mod status_tests {
+    use super::status_is_a_problem;
+
+    #[test]
+    fn progress_is_not_marked_as_trouble() {
+        assert!(!status_is_a_problem("Listening"));
+        assert!(!status_is_a_problem(
+            "Ready · hold Ctrl + Alt + Space to speak."
+        ));
+        assert!(!status_is_a_problem(
+            "Downloading and verifying the translation model…"
+        ));
+    }
+
+    #[test]
+    fn a_failure_the_user_must_act_on_is_marked() {
+        // The one that started this: the transcript existed, the insertion was
+        // refused, and the interface said nothing at all.
+        assert!(status_is_a_problem(
+            "The target application is no longer focused, so nothing was inserted."
+        ));
+        assert!(status_is_a_problem(
+            "Speech backend could not be changed: no device"
+        ));
+        assert!(status_is_a_problem(
+            "Could not configure translation model: broken pipe"
+        ));
     }
 }
