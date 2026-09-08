@@ -400,6 +400,96 @@ pub(crate) fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dy
     Ok(())
 }
 
+/// Answers one question, with a real window and a real compositor: does
+/// Windows draw a window that is visible but standing off the desktop, and does
+/// it refuse to draw one that is cloaked?
+///
+/// The whole presentation contract rests on that answer and it was never
+/// measured. The frame gate was written against a cloaked window and, in the
+/// live application, did not get a single frame in four consecutive
+/// translations — every one of them was revealed by the watchdog.
+pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
+    let _single_instance =
+        rust_platform_windows::SingleInstanceGuard::acquire(r"Local\SayFlex.StagingProbe")?;
+    let preview = TranslationPreview::new()?;
+    preview.set_prepared(false);
+    preview
+        .window()
+        .set_position(PhysicalPosition::new(-32_000, -32_000));
+    preview.show()?;
+
+    let frames = Rc::new(Cell::new(0u32));
+    let counted = Rc::clone(&frames);
+    preview
+        .window()
+        .set_rendering_notifier(move |state, _| {
+            if matches!(state, slint::RenderingState::AfterRendering) {
+                counted.set(counted.get() + 1);
+            }
+        })
+        .map_err(|error| format!("could not observe rendering: {error:?}"))?;
+
+    let step = Rc::new(Cell::new(0u32));
+    let staged_before = Rc::new(Cell::new(0u32));
+    let staged = Rc::new(Cell::new(0u32));
+    let cloaked_before = Rc::new(Cell::new(0u32));
+    let handle = Rc::new(Cell::new(0u64));
+
+    let timer = slint::Timer::default();
+    let preview_weak = preview.as_weak();
+    timer.start(slint::TimerMode::Repeated, Duration::from_millis(50), {
+        let frames = Rc::clone(&frames);
+        let step = Rc::clone(&step);
+        let staged_before = Rc::clone(&staged_before);
+        let staged = Rc::clone(&staged);
+        let cloaked_before = Rc::clone(&cloaked_before);
+        let handle = Rc::clone(&handle);
+        move || {
+            let Some(preview) = preview_weak.upgrade() else {
+                return;
+            };
+            let now = step.get();
+            step.set(now + 1);
+            match now {
+                0 => {
+                    if let Some(hwnd) = crate::slint_window_handle(preview.window()) {
+                        handle.set(hwnd);
+                        let _ = rust_platform_windows::prepare_translation_window(hwnd);
+                    }
+                }
+                2 => {
+                    // Off the desktop, visible, not cloaked.
+                    preview.set_translated_text("staged".into());
+                    preview.set_prepared(true);
+                    staged_before.set(frames.get());
+                    preview.window().request_redraw();
+                }
+                14 => {
+                    staged.set(frames.get() - staged_before.get());
+                    let _ = rust_platform_windows::cloak_overlay_window(handle.get());
+                    preview.set_translated_text("cloaked".into());
+                    cloaked_before.set(frames.get());
+                    preview.window().request_redraw();
+                }
+                26 => {
+                    let cloaked = frames.get() - cloaked_before.get();
+                    let _ = rust_platform_windows::reveal_overlay_window(handle.get());
+                    println!(
+                        "staging_probe off_desktop_visible_frames={} cloaked_frames={}",
+                        staged.get(),
+                        cloaked
+                    );
+                    let _ = slint::quit_event_loop();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    slint::run_event_loop()?;
+    Ok(())
+}
+
 pub(crate) fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {
     let _single_instance = rust_platform_windows::SingleInstanceGuard::acquire(
         "Local\\SayFlex.TranslationOverlayProbe",
@@ -474,7 +564,7 @@ pub(crate) fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<
             } else {
                 "The translation overlay is rendered completely before DWM reveals its native window."
             };
-            apply_translation_preview_layout(&preview, text);
+            apply_translation_preview_layout(&preview, "", text);
             preview.set_translated_text(text.into());
             preview.set_prepared(false);
             let ticket = match presenter_for_timer.begin_prepare() {
@@ -617,7 +707,7 @@ pub(crate) fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Err
             },
         ]
     };
-    apply_translation_preview_layout(&preview, &translated);
+    apply_translation_preview_layout(&preview, source, &translated);
     preview.set_card_width(480.0);
     preview.set_source_text(source.into());
     preview.set_original_card_height(if long_text { 124.0 } else { 96.0 });

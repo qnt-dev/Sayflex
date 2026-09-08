@@ -413,6 +413,12 @@ pub(crate) struct PendingCredential {
     pub(crate) extra: Option<String>,
     /// What to call the service when telling the user how it went.
     pub(crate) display_name: String,
+    /// Whether this operation removes the key rather than storing one. A
+    /// removal must not take the row's region or endpoint with it.
+    pub(crate) forget: bool,
+    /// When this was sent. A worker that dies mid-write answers nothing, and a
+    /// form that waits forever is a form holding a key nobody will store.
+    pub(crate) sent: Instant,
 }
 
 impl AppState {
@@ -532,7 +538,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Before any window: the shell reads the application's identity when the
     // first one appears, and the taskbar's icon follows that identity rather
     // than the window.
-    rust_platform_windows::name_this_application_to_the_shell();
+    if let Err(error) = rust_platform_windows::name_this_application_to_the_shell() {
+        eprintln!("{error}");
+    }
     let startup_gate = Arc::new(StartupSessionGate::new());
     let session_event_router = Arc::new(SessionEventRouter::new(Arc::clone(&startup_gate)));
     let session_router_for_monitor = Arc::clone(&session_event_router);
@@ -546,6 +554,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(cycles) = translation_presentation_probe_cycles() {
         return run_translation_presentation_probe(cycles);
+    }
+    if env::args().any(|argument| argument == "--staging-probe") {
+        return preview_modes::run_staging_probe();
     }
     if let Some(style) = indicator_preview_style() {
         let live_microphone = env::args().any(|argument| {
@@ -770,6 +781,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     workers
         .translation
         .send(&TranslationWorkerCommand::GetTranslationProviders)?;
+
+    // A key save that never gets an answer is released with a reason rather
+    // than left holding what the user typed. Checked on a slow timer, because
+    // the deadline is ten seconds and the map is almost always empty.
+    let credential_watch = Timer::default();
+    {
+        let settings = settings.as_weak();
+        let state = Rc::clone(&state);
+        credential_watch.start(
+            TimerMode::Repeated,
+            std::time::Duration::from_secs(2),
+            move || {
+                providers_view::expire_pending_credentials(&settings, &state, "no answer in time");
+            },
+        );
+    }
 
     wire_settings(
         &settings,
@@ -1137,6 +1164,14 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 state.indicator_session = None;
                 state.active_visualizer_style = None;
             }
+            // A worker that has fallen over owes answers it will never send.
+            // A key save waiting on one of them would otherwise hold the form
+            // open forever with no reason shown.
+            providers_view::abandon_pending_credentials(
+                &runtime.settings,
+                &runtime.state,
+                "the worker stopped",
+            );
             runtime.indicator_animation.borrow_mut().stop();
             runtime.recording_overlays.retire_all("worker_error");
             if let Some(settings) = runtime.settings.upgrade() {
@@ -2143,12 +2178,18 @@ fn show_selection_translation_preview(
             let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
         }
     }
-    apply_translation_preview_layout(preview, translated_text);
+    apply_translation_preview_layout(preview, source_text, translated_text);
     preview.set_translated_text(translated_text.into());
     preview.set_dual_pairs(ModelRc::new(VecModel::from(translation_pairs(
         source_text,
         translated_text,
     ))));
+    // The presenter is told what is on the window, every time it changes. A
+    // frame drawn before there was anything to draw must not reveal it, and a
+    // `Completed` that lands while the `Partial` is still being drawn has to
+    // produce a new frame rather than let the old wait be satisfied.
+    translation_preview_presenter
+        .content_changed(preview.window(), !translated_text.trim().is_empty());
     if first_show {
         preview.set_prepared(false);
         preview.invoke_reset_scroll();
@@ -2161,19 +2202,32 @@ fn show_selection_translation_preview(
                 "translation_preview_overlay transition=failed stage=present error={error}"
             ));
         }
-    } else if final_update
-        && let Some(handle) = slint_window_handle(preview.window())
-        && let Ok(ticket) = translation_preview_presenter.begin_refresh()
-    {
-        refresh_cloaked_translation_backdrop(preview, handle);
-        if let Err(error) = translation_preview_presenter.await_frame(preview.window(), ticket) {
-            preview.set_prepared(false);
-            translation_preview_presenter.abort_prepare(
-                preview.window(),
-                ticket,
-                "refresh_frame",
-                &error,
-            );
+    } else if final_update && let Some(handle) = slint_window_handle(preview.window()) {
+        match translation_preview_presenter.begin_refresh() {
+            Ok(ticket) => {
+                refresh_cloaked_translation_backdrop(preview, handle);
+                if let Err(error) =
+                    translation_preview_presenter.await_frame(preview.window(), ticket)
+                {
+                    preview.set_prepared(false);
+                    translation_preview_presenter.abort_prepare(
+                        preview.window(),
+                        ticket,
+                        "refresh_frame",
+                        &error,
+                    );
+                }
+            }
+            // Still on its way to the screen. The content above has already
+            // replaced the partial and `content_changed` has re-armed the frame
+            // it is waiting for, so the presentation in flight will show the
+            // final text. This used to be `if let Ok`, which threw the error
+            // away and left the window to be revealed with whatever it had.
+            Err(reason) => rust_app_core::diagnostics::log_line(&format!(
+                "translation_preview_overlay update=folded_into_pending request={request_id} \
+                 final_len={} reason={reason}",
+                translated_text.chars().count()
+            )),
         }
     }
 }

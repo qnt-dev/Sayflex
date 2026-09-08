@@ -442,17 +442,20 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_answer_stops_the_walk_rather_than_asking_everyone_for_the_same_nothing() {
+    fn an_empty_answer_is_one_service_failing_and_the_next_is_asked() {
+        // This asserted the opposite, on the reasoning that the same nothing
+        // would come back from everyone. It would not: these three do not have
+        // the same languages, and the local engine is usually last in the list.
         let mut router = Router::new(chain(&[
             ProviderId::DEEPL,
             ProviderId::GOOGLE,
             ProviderId::LOCAL,
         ]));
-        let executor = Scripted::new(vec![Err(ProviderFailure::Empty)]);
+        let executor = Scripted::new(vec![Err(ProviderFailure::Empty), Ok("привет".to_owned())]);
 
         let outcome = router.translate(
             Translation {
-                text: "   ",
+                text: "hello",
                 source: None,
                 target: "ru",
             },
@@ -462,8 +465,13 @@ mod tests {
             &|| false,
         );
 
-        assert!(matches!(outcome, RouteOutcome::Exhausted { .. }));
-        assert_eq!(executor.seen.borrow().len(), 1);
+        match outcome {
+            RouteOutcome::Translated { provider, .. } => {
+                assert_eq!(provider.as_str(), ProviderId::GOOGLE);
+            }
+            other => panic!("expected the next service to answer, got {other:?}"),
+        }
+        assert_eq!(executor.seen.borrow().len(), 2);
     }
 
     #[test]

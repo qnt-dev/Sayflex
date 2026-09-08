@@ -979,16 +979,62 @@ mod tests {
     }
 }
 
+/// The name every message carries on the wire, from an exhaustive match.
+///
+/// Exhaustive on purpose. A list of strings sitting next to an enum drifts from
+/// it silently — that is how protocol 16 came to describe two different
+/// schemas. This does not compile until a new variant is named here, and the
+/// test below does not pass until the version number moves with it.
+#[must_use]
+pub fn translation_event_name(event: &TranslationWorkerEvent) -> &'static str {
+    match event {
+        TranslationWorkerEvent::Ready { .. } => "ready",
+        TranslationWorkerEvent::ModelDownloadProgress { .. } => "model_download_progress",
+        TranslationWorkerEvent::ModelInstalled { .. } => "model_installed",
+        TranslationWorkerEvent::ModelReady { .. } => "model_ready",
+        TranslationWorkerEvent::ModelSelected { .. } => "model_selected",
+        TranslationWorkerEvent::Partial { .. } => "partial",
+        TranslationWorkerEvent::Completed { .. } => "completed",
+        TranslationWorkerEvent::Cancelled { .. } => "cancelled",
+        TranslationWorkerEvent::History { .. } => "history",
+        TranslationWorkerEvent::TranslationProviders { .. } => "translation_providers",
+        TranslationWorkerEvent::CredentialSaved { .. } => "credential_saved",
+        TranslationWorkerEvent::Failed { .. } => "failed",
+    }
+}
+
+/// The same, for what the speech worker sends.
+#[must_use]
+pub fn speech_event_name(event: &SpeechWorkerEvent) -> &'static str {
+    match event {
+        SpeechWorkerEvent::Ready { .. } => "ready",
+        SpeechWorkerEvent::ModelDownloadProgress { .. } => "model_download_progress",
+        SpeechWorkerEvent::ModelInstalled { .. } => "model_installed",
+        SpeechWorkerEvent::ModelReady { .. } => "model_ready",
+        SpeechWorkerEvent::ModelSelected { .. } => "model_selected",
+        SpeechWorkerEvent::Listening { .. } => "listening",
+        SpeechWorkerEvent::AudioLevel { .. } => "audio_level",
+        SpeechWorkerEvent::Processing { .. } => "processing",
+        SpeechWorkerEvent::Completed { .. } => "completed",
+        SpeechWorkerEvent::Cancelled { .. } => "cancelled",
+        SpeechWorkerEvent::History { .. } => "history",
+        SpeechWorkerEvent::TranscriptionProviders { .. } => "transcription_providers",
+        SpeechWorkerEvent::CredentialSaved { .. } => "credential_saved",
+        SpeechWorkerEvent::TranscribedRemotely { .. } => "transcribed_remotely",
+        SpeechWorkerEvent::Failed { .. } => "failed",
+    }
+}
+
 #[cfg(test)]
 mod schema_version_tests {
-    use super::{PROTOCOL_VERSION, TranslationWorkerEvent};
+    use super::{PROTOCOL_VERSION, speech_event_name, translation_event_name};
 
-    /// The shape of this build's schema, as a set of names.
+    /// Every name this version puts on the wire, in order.
     ///
-    /// Not a hash of the file: comments and formatting change constantly and
-    /// mean nothing on the wire. This is the list of variants a peer would have
-    /// to understand, and it is written down so that removing one without
-    /// touching the version number fails here rather than in the field.
+    /// Version 16 was used twice — an event added under it, then removed under
+    /// it again — so two incompatible schemas introduced themselves with the
+    /// same number and the handshake let them through. Changing either list
+    /// without changing `PROTOCOL_VERSION` fails here.
     const TRANSLATION_EVENTS: &[&str] = &[
         "ready",
         "model_download_progress",
@@ -1004,33 +1050,55 @@ mod schema_version_tests {
         "failed",
     ];
 
-    fn variant_name(event: &TranslationWorkerEvent) -> String {
-        serde_json::to_value(event).unwrap()["type"]
-            .as_str()
-            .unwrap()
-            .to_owned()
+    const SPEECH_EVENTS: &[&str] = &[
+        "ready",
+        "model_download_progress",
+        "model_installed",
+        "model_ready",
+        "model_selected",
+        "listening",
+        "audio_level",
+        "processing",
+        "completed",
+        "cancelled",
+        "history",
+        "transcription_providers",
+        "credential_saved",
+        "transcribed_remotely",
+        "failed",
+    ];
+
+    #[test]
+    fn the_schema_on_the_wire_is_the_one_this_version_describes() {
+        assert_eq!(
+            PROTOCOL_VERSION, 17,
+            "the two lists below belong to protocol 17: change all three or none"
+        );
+        assert_eq!(TRANSLATION_EVENTS.len(), 12);
+        assert_eq!(SPEECH_EVENTS.len(), 15);
     }
 
     #[test]
-    fn the_translation_schema_is_the_one_this_version_describes() {
-        // Version 16 was used twice — an event added under it, then removed
-        // under it — so two incompatible schemas introduced themselves with the
-        // same number and the handshake let them through. Changing the set of
-        // events below without changing PROTOCOL_VERSION now fails here.
+    fn the_name_on_the_wire_is_the_name_the_schema_lists() {
+        // `translation_event_name` and `speech_event_name` are exhaustive
+        // matches, so a variant cannot be added or removed without touching
+        // them, and they cannot disagree with what serde writes.
+        let cancelled = super::TranslationWorkerEvent::Cancelled {
+            request_id: super::RequestId::new(),
+        };
+        assert_eq!(translation_event_name(&cancelled), "cancelled");
         assert_eq!(
-            PROTOCOL_VERSION, 17,
-            "the schema listed here belongs to protocol 17;              change both or neither"
+            serde_json::to_value(&cancelled).unwrap()["type"],
+            translation_event_name(&cancelled)
         );
+
+        let listening = super::SpeechWorkerEvent::Listening {
+            session_id: super::SessionId::new(),
+        };
+        assert_eq!(speech_event_name(&listening), "listening");
         assert_eq!(
-            variant_name(&TranslationWorkerEvent::Cancelled {
-                request_id: crate::RequestId::new(),
-            }),
-            "cancelled"
+            serde_json::to_value(&listening).unwrap()["type"],
+            speech_event_name(&listening)
         );
-        assert!(
-            !TRANSLATION_EVENTS.contains(&"translated_remotely"),
-            "the event removed in protocol 17 must not come back without another bump"
-        );
-        assert_eq!(TRANSLATION_EVENTS.len(), 12);
     }
 }

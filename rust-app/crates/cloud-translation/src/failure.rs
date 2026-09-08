@@ -57,21 +57,31 @@ pub enum ProviderFailure {
     /// The service understood the request and refused it: a language pair it
     /// does not have, a text longer than it takes.
     Rejected(String),
-    /// The service answered and handed back nothing. Not a fault, and not worth
-    /// asking anyone else: the same nothing would come back.
+    /// The service answered and handed back nothing for a text that had
+    /// something in it.
+    ///
+    /// That is this provider failing, not a fact about the text: DeepL and
+    /// Google do not have the same languages, and a model that returns nothing
+    /// for a sentence is a model having a bad day. So the walk carries on. An
+    /// empty *source* never gets this far — it is refused before anything is
+    /// routed, because there is nothing to translate.
     Empty,
 }
 
 impl ProviderFailure {
     /// Whether the next provider in the list should be tried.
     ///
-    /// Only an empty answer stops the walk. A rejection moves on, because these
-    /// three do not cover the same language pairs — DeepL has around thirty
-    /// languages where Google has hundreds — and stopping would strand a
-    /// translation the local engine, usually sitting further down, could do.
+    /// Always. These three do not cover the same language pairs — DeepL has
+    /// around thirty languages where Google has hundreds — and the local
+    /// engine usually sits at the end of the list, so stopping strands a
+    /// translation somebody else could have done.
+    ///
+    /// An empty answer used to stop the walk, on the reasoning that the same
+    /// nothing would come back from everyone. It would not: an empty answer to
+    /// a non-empty text is one service failing.
     #[must_use]
     pub const fn should_fail_over(&self) -> bool {
-        !matches!(self, Self::Empty)
+        true
     }
 
     /// Whether this provider should stop being offered until the user acts.
@@ -349,7 +359,10 @@ mod tests {
 
     #[test]
     fn nothing_back_is_the_one_answer_that_stops_the_walk() {
-        assert!(!ProviderFailure::Empty.should_fail_over());
+        assert!(
+            ProviderFailure::Empty.should_fail_over(),
+            "an empty answer to a text that had words in it is this service failing"
+        );
         assert!(ProviderFailure::Rejected("no such language pair".into()).should_fail_over());
     }
 

@@ -495,9 +495,24 @@ pub(crate) fn adaptive_text_panel_height(
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TranslationPreviewLayout {
     pub(crate) card_width: f32,
+    /// How tall the window has to be for this much text at this width.
+    pub(crate) window_height: f32,
 }
 
-pub(crate) fn translation_preview_layout(result_text: &str) -> TranslationPreviewLayout {
+/// Room enough for the whole translation.
+///
+/// The width was already chosen from the result's length. The height was not
+/// chosen at all: a `Window` takes its size from `preferred-height` when it is
+/// first shown and never again, and the first thing shown is the first
+/// *partial* — often a single word. Everything that arrived afterwards was
+/// crammed into a window sized for that word, which is why a finished
+/// translation read as a squashed block of text with its last lines cut off.
+#[must_use]
+pub(crate) fn translation_preview_layout(
+    source_text: &str,
+    result_text: &str,
+    view_mode: i32,
+) -> TranslationPreviewLayout {
     let content_characters = result_text.chars().count();
     let card_width = match content_characters {
         0..=28 => 252.0,
@@ -505,12 +520,42 @@ pub(crate) fn translation_preview_layout(result_text: &str) -> TranslationPrevie
         _ => 480.0,
     };
 
-    TranslationPreviewLayout { card_width }
+    // The character measure the text actually wraps at, from the card's own
+    // width less its padding, at roughly six pixels a character for the
+    // thirteen-point face the card is drawn in.
+    let characters_per_line = f32::floor((card_width - 28.0) / 6.4).max(12.0) as usize;
+    let result_lines = estimated_wrapped_lines(result_text, characters_per_line).clamp(1, 14);
+    // 17 a line, 30 for the toolbar above and 22 of padding.
+    let mut window_height = result_lines as f32 * 17.0 + 61.0;
+    if view_mode == 1 {
+        let source_lines = estimated_wrapped_lines(source_text, characters_per_line).clamp(1, 7);
+        window_height += source_lines as f32 * 17.0 + 28.0;
+    }
+
+    TranslationPreviewLayout {
+        card_width,
+        window_height: window_height.clamp(96.0, 640.0),
+    }
 }
 
-pub(crate) fn apply_translation_preview_layout(preview: &TranslationPreview, result_text: &str) {
-    let layout = translation_preview_layout(result_text);
+/// Sizes the window to the text and tells the card how wide it is.
+///
+/// A pinned window is left alone: the user has put it where they want it and
+/// may have resized it themselves.
+pub(crate) fn apply_translation_preview_layout(
+    preview: &TranslationPreview,
+    source_text: &str,
+    result_text: &str,
+) {
+    let layout = translation_preview_layout(source_text, result_text, preview.get_view_mode());
     preview.set_card_width(layout.card_width);
+    if preview.get_pinned() {
+        return;
+    }
+    preview.window().set_size(slint::LogicalSize::new(
+        layout.card_width,
+        layout.window_height,
+    ));
 }
 
 pub(crate) fn refresh_cloaked_translation_backdrop(
@@ -716,14 +761,45 @@ mod adaptive_popup_tests {
 
     #[test]
     fn short_translation_uses_the_compact_width() {
-        let layout = translation_preview_layout("Привет");
+        let layout = translation_preview_layout("Hello", "Привет", 0);
         assert_eq!(layout.card_width, 252.0);
     }
 
     #[test]
     fn long_translation_uses_the_readable_width() {
-        let layout = translation_preview_layout(&"translated text ".repeat(500));
+        let layout = translation_preview_layout("source", &"translated text ".repeat(500), 0);
         assert_eq!(layout.card_width, 480.0);
+    }
+
+    #[test]
+    fn the_window_grows_with_the_translation_instead_of_squashing_it() {
+        // The defect this replaces: a window takes its size from
+        // `preferred-height` once, when it is first shown, and the first thing
+        // shown is the first partial — often one word. Everything that arrived
+        // afterwards was crammed into a window sized for that word.
+        let one_word = translation_preview_layout("Hi", "Привет", 0);
+        let a_paragraph = translation_preview_layout("source", &"слово ".repeat(60), 0);
+
+        assert!(
+            a_paragraph.window_height > one_word.window_height,
+            "one word {} vs a paragraph {}",
+            one_word.window_height,
+            a_paragraph.window_height
+        );
+        assert!(
+            a_paragraph.window_height <= 640.0,
+            "and it never grows past the screen"
+        );
+    }
+
+    #[test]
+    fn showing_the_original_alongside_makes_room_for_it() {
+        let result_only =
+            translation_preview_layout("A fairly long original sentence", "Перевод", 0);
+        let with_original =
+            translation_preview_layout("A fairly long original sentence", "Перевод", 1);
+
+        assert!(with_original.window_height > result_only.window_height);
     }
 
     #[test]

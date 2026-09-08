@@ -1279,6 +1279,8 @@ pub(crate) fn wire_settings(
                     row_id: row_id.clone(),
                     extra: extra.clone(),
                     display_name: row_display_name(kind, &provider_id),
+                    forget: false,
+                    sent: Instant::now(),
                 },
             );
 
@@ -1342,6 +1344,8 @@ pub(crate) fn wire_settings(
                     row_id: row_id.clone(),
                     extra: None,
                     display_name: row_display_name(kind, &provider_id),
+                    forget: true,
+                    sent: Instant::now(),
                 },
             );
             let sent = match kind {

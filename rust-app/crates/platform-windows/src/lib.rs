@@ -429,7 +429,7 @@ pub fn local_date_line() -> String {
 ///
 /// Called before any window exists, because the shell reads it when the first
 /// one is created.
-pub fn name_this_application_to_the_shell() {
+pub fn name_this_application_to_the_shell() -> Result<(), String> {
     const APP_ID: &[u16] = &[
         b'S' as u16,
         b'a' as u16,
@@ -449,10 +449,17 @@ pub fn name_this_application_to_the_shell() {
         0,
     ];
     // SAFETY: the string is NUL-terminated UTF-16 with a static lifetime, and
-    // the call takes nothing else. A failure means the shell keeps deriving an
-    // id from the path, which is what it did before.
-    unsafe {
-        let _ =
-            windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(APP_ID.as_ptr());
+    // the call takes nothing else.
+    let result = unsafe {
+        windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(APP_ID.as_ptr())
+    };
+    if result < 0 {
+        // Not fatal: the shell falls back to deriving an id from the
+        // executable's path, which is what it did before. It is worth saying,
+        // because that fallback is the one with the stale icon in it.
+        return Err(format!(
+            "the shell refused this application's identity: 0x{result:08X}"
+        ));
     }
+    Ok(())
 }

@@ -386,6 +386,12 @@ impl WorkerState {
 
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
+    // Asked by the release check, which otherwise has no way to find out what a
+    // packaged worker speaks short of driving a whole handshake.
+    if std::env::args().any(|argument| argument == "--protocol-version") {
+        println!("{PROTOCOL_VERSION}");
+        return Ok(());
+    }
     let state = Arc::new(Mutex::new(WorkerState::new()?));
     // Its own lock, not the worker's. A translation out on the network holds
     // this one for as long as the walk takes; nothing else in the worker should
@@ -757,6 +763,11 @@ fn translate_request(
     // `TranslationLanguage::default()`, which is English. So an English
     // selection was sent to DeepL to be translated from English into English,
     // and the result claimed to be exactly that.
+    // Nothing to translate is refused here rather than sent to a service, which
+    // would spend an allowance to be told the same thing.
+    if text.trim().is_empty() {
+        anyhow::bail!("there is no text to translate");
+    }
     let (source, target) = resolve_direction(&text, source_language, target_language)?;
 
     // The list decides first, and the local engine is one row in it. When it is

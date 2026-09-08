@@ -58,6 +58,12 @@ const fn previews_allowed(requested: bool) -> bool {
 
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
+    // Asked by the release check, which otherwise has no way to find out what a
+    // packaged worker speaks short of driving a whole handshake.
+    if env::args().any(|argument| argument == "--protocol-version") {
+        println!("{PROTOCOL_VERSION}");
+        return Ok(());
+    }
     if env::args().nth(1).as_deref() == Some("--transcribe-wav") {
         return transcribe_wav_diagnostic();
     }

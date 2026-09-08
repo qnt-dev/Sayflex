@@ -5,7 +5,7 @@
 //! The key itself never passes through here in either direction: it goes
 //! straight to the worker, and comes back only as a masked tail.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use rust_protocol::{
     RequestId, SpeechWorkerCommand, TranscriptionProviderEntry, TranslationProviderEntry,
@@ -14,7 +14,7 @@ use rust_protocol::{
 use slint::{ModelRc, VecModel};
 
 use crate::{
-    AppState, ProviderRow, SettingsWindow, set_indicator_status,
+    AppState, PendingCredential, ProviderRow, SettingsWindow, set_indicator_status,
     settings_document::save_settings,
     settings_projection::{
         chain_positions, departure_badge, departures, privacy_claim, provider_row,
@@ -147,6 +147,88 @@ pub(crate) fn check_translation_provider_configuration(
     ))
 }
 
+/// How long a key save waits for the worker to say what happened to it.
+///
+/// The write is DPAPI, in another process, and normally answers in
+/// milliseconds. A worker that dies mid-write answers nothing at all, and a
+/// form left waiting on that is a form holding a key that will never be
+/// stored, with no way for the user to know.
+const CREDENTIAL_ACK_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Ends key saves that will never be answered.
+///
+/// Called when a worker is seen to have died or restarted, and on a timer, so
+/// that a form waiting on a dead worker is released with a reason rather than
+/// left holding what the user typed.
+pub(crate) fn expire_pending_credentials(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    reason: &str,
+) {
+    let expired: Vec<PendingCredential> = {
+        let mut app = state.borrow_mut();
+        let overdue: Vec<RequestId> = app
+            .pending_credentials
+            .iter()
+            .filter(|(_, pending)| pending.sent.elapsed() >= CREDENTIAL_ACK_DEADLINE)
+            .map(|(id, _)| *id)
+            .collect();
+        overdue
+            .into_iter()
+            .filter_map(|id| app.pending_credentials.remove(&id))
+            .collect()
+    };
+    for pending in expired {
+        rust_app_core::diagnostics::log_line(&format!(
+            "credential_store operation=expired provider={} reason={reason}",
+            pending.display_name
+        ));
+        if let Some(settings) = settings.upgrade() {
+            settings.set_provider_problem(
+                format!("The worker did not answer: {reason}. The key was not stored.").into(),
+            );
+            settings.set_provider_problem_for(pending.row_id.clone().into());
+            // The form stays open holding what was typed, so it can be sent
+            // again without retyping the key.
+            settings.set_provider_editing(pending.row_id.into());
+        }
+        set_status_problem(
+            settings,
+            &format!("{} did not confirm the key.", pending.display_name),
+        );
+    }
+}
+
+/// Ends every key save a particular worker owed an answer to.
+///
+/// A restarted worker has forgotten the operation, so its answer is never
+/// coming.
+pub(crate) fn abandon_pending_credentials(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    reason: &str,
+) {
+    let abandoned: Vec<PendingCredential> = state
+        .borrow_mut()
+        .pending_credentials
+        .drain()
+        .map(|(_, pending)| pending)
+        .collect();
+    for pending in abandoned {
+        rust_app_core::diagnostics::log_line(&format!(
+            "credential_store operation=abandoned provider={} reason={reason}",
+            pending.display_name
+        ));
+        if let Some(settings) = settings.upgrade() {
+            settings.set_provider_problem(
+                format!("The worker restarted before the key was stored ({reason}).").into(),
+            );
+            settings.set_provider_problem_for(pending.row_id.clone().into());
+            settings.set_provider_editing(pending.row_id.into());
+        }
+    }
+}
+
 /// Acts on a worker's answer to one key save.
 ///
 /// This is where the form finally closes, the second field is written, and the
@@ -188,6 +270,26 @@ pub(crate) fn settle_credential(
 
     // Stored. Only now is the second field written, and only now does the form
     // close.
+    //
+    // A removal carries no second field and must not clear the one on the row:
+    // an Azure region or a custom endpoint is a setting the user typed and did
+    // not ask to lose. `Forget key` forgets the key.
+    if pending.forget {
+        if let Some(settings) = settings.upgrade() {
+            settings.set_provider_problem("".into());
+            settings.set_provider_problem_for("".into());
+            settings.set_provider_editing("".into());
+        }
+        set_indicator_status(
+            settings,
+            &format!("The key for {} has been removed.", pending.display_name),
+        );
+        match kind {
+            Kind::Speech => apply_provider_chain(settings, state, workers),
+            Kind::Text => apply_translation_chain(settings, state, workers),
+        }
+        return;
+    }
     {
         let mut app = state.borrow_mut();
         match kind {

@@ -7,28 +7,27 @@ use std::{
 
 use slint::RenderingState;
 
-/// How long a presentation may wait for the frame that opens the gate.
+/// How long a presentation waits for its frame before giving up on it.
 ///
-/// The gate exists so the first frame is drawn before the window is uncloaked,
-/// which is what keeps a new overlay from flashing empty. It is an appearance
-/// optimisation, not a correctness requirement — and it cannot be guaranteed:
-/// a cloaked window is one the compositor may treat as occluded, and an
-/// occluded window is not asked to draw. That is a race, and it was observed
-/// losing: a translation finished in 364 ms and its window stayed cloaked for
-/// the rest of the session, because nothing in this file could leave
-/// `AwaitingFrame`.
+/// This is a safety net for a renderer that has genuinely stopped, not a
+/// deadline the normal path is expected to reach. It used to be 150 ms, and it
+/// used to *reveal the window anyway* — which is where the empty popup came
+/// from. Under load every one of four consecutive live translations passed
+/// 150 ms, was uncloaked by the watchdog, and showed the surface last rendered
+/// while the card was still fully transparent: the content was correct, saved
+/// to history, and never drawn.
 ///
-/// So the gate has a deadline. A frame normally lands within one or two
-/// refreshes; past this the overlay is shown regardless. The worst case is one
-/// frame of flash, which is a great deal better than silence.
-const FRAME_GATE: Duration = Duration::from_millis(150);
+/// So the deadline no longer reveals. Nothing is shown that has not been drawn,
+/// and if the frame never comes the presentation fails where it can be seen and
+/// logged instead of succeeding into an empty rectangle.
+const FRAME_DEADLINE: Duration = Duration::from_millis(2_500);
 
-/// How soon a dropped redraw request is asked for again.
+/// How often a frame that has not arrived is asked for again.
 ///
-/// A request issued while the window is still settling after a move can be
-/// coalesced away. Asking once more costs nothing when the frame already
-/// arrived — the ticket is no longer waiting — and saves the flash when it did
-/// not.
+/// A frame normally lands within one or two refreshes — seven milliseconds on
+/// an idle machine. Under load it can take much longer, and a request issued
+/// while the window is still settling after a move can be coalesced away
+/// entirely, so it is asked for again on this cadence until it comes.
 const REDRAW_RETRY: Duration = Duration::from_millis(40);
 
 thread_local! {
@@ -80,6 +79,16 @@ enum PresentationPhase {
 struct PresentationState {
     phase: PresentationPhase,
     next_generation: u64,
+    /// Whether what the window has been told to show is worth showing.
+    ///
+    /// The presenter cannot read the surface, but it can know whether the owner
+    /// has put anything on it. A frame drawn while this is false is a frame of
+    /// nothing, and revealing on it is what produced the empty popup.
+    content_ready: bool,
+    /// Bumped every time the content changes. The only purpose is diagnostic —
+    /// it is what the log means by `content=`, so a frame can be tied to the
+    /// text it drew.
+    content_revision: u64,
 }
 
 impl Default for PresentationState {
@@ -87,6 +96,8 @@ impl Default for PresentationState {
         Self {
             phase: PresentationPhase::Detached,
             next_generation: 1,
+            content_ready: false,
+            content_revision: 0,
         }
     }
 }
@@ -147,18 +158,29 @@ impl PresentationState {
         let PresentationPhase::AwaitingFrame(ticket) = self.phase else {
             return None;
         };
+        // A frame drawn before the owner had anything to draw is a frame of
+        // nothing. Promoting it is exactly how an empty window got revealed.
+        if !self.content_ready {
+            return None;
+        }
         self.phase = PresentationPhase::RevealQueued(ticket);
         Some(ticket)
     }
 
-    /// The watchdog's counterpart to `frame_rendered`: promotes the ticket
-    /// only if it is still the one waiting, so a frame that landed first wins.
-    fn frame_rendered_by_deadline(&mut self, ticket: PresentationTicket) -> bool {
-        if self.phase != PresentationPhase::AwaitingFrame(ticket) {
-            return false;
-        }
-        self.phase = PresentationPhase::RevealQueued(ticket);
-        true
+    /// Records what the window has been told to show.
+    ///
+    /// Returns the ticket that is waiting for a frame, if one is: content that
+    /// changes mid-wait is a normal thing — a `Completed` arriving while the
+    /// `Partial` is still being drawn — and it means the frame that eventually
+    /// lands must be a new one.
+    fn content_changed(&mut self, ready: bool) -> (u64, Option<PresentationTicket>) {
+        self.content_ready = ready;
+        self.content_revision = self.content_revision.saturating_add(1);
+        let waiting = match self.phase {
+            PresentationPhase::AwaitingFrame(ticket) => Some(ticket),
+            _ => None,
+        };
+        (self.content_revision, waiting)
     }
 
     fn can_reveal(&self, ticket: PresentationTicket) -> bool {
@@ -215,7 +237,6 @@ pub(crate) struct OverlayPresenter {
     rendered_frame_callback: Arc<Mutex<Option<RenderedFrameCallback>>>,
     /// Held here as well as in the rendering notifier, because the watchdog
     /// completes the same transition and owes the same notification.
-    on_presented: Option<PresentedCallback>,
     name: &'static str,
     contract: OverlayContract,
 }
@@ -231,7 +252,7 @@ impl OverlayPresenter {
         let render_state = Arc::clone(&state);
         let rendered_frame_callback = Arc::new(Mutex::new(None::<RenderedFrameCallback>));
         let render_callback = Arc::clone(&rendered_frame_callback);
-        let callback = on_presented.clone();
+        let callback = on_presented;
         window
             .set_rendering_notifier(move |rendering_state, _graphics_api| {
                 if !matches!(rendering_state, RenderingState::AfterRendering) {
@@ -247,10 +268,24 @@ impl OverlayPresenter {
                         "{name} transition=failed stage=queue_frame_callback error={error}"
                     ));
                 }
-                let ticket = render_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .frame_rendered();
+                let ticket = {
+                    let mut state = render_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // Every frame is recorded with the phase it arrived in.
+                    // Without this there was no way to tell a frame that came
+                    // and was ignored from a frame that never came, and the two
+                    // want opposite fixes.
+                    let phase = state.phase;
+                    let revision = state.content_revision;
+                    let ready = state.content_ready;
+                    let ticket = state.frame_rendered();
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "{name} frame=rendered phase={phase:?} content={revision} ready={ready} accepted={}",
+                        ticket.is_some()
+                    ));
+                    ticket
+                };
                 let Some(ticket) = ticket else {
                     return;
                 };
@@ -285,7 +320,6 @@ impl OverlayPresenter {
         Ok(Self {
             state,
             rendered_frame_callback,
-            on_presented,
             name,
             contract,
         })
@@ -378,29 +412,32 @@ impl OverlayPresenter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .await_frame(ticket)?;
         window.request_redraw();
+        rust_app_core::diagnostics::log_line(&format!(
+            "{} transition=awaiting_frame generation={} hwnd={}",
+            self.name, ticket.generation, ticket.window_handle
+        ));
         self.arm_watchdog(ticket);
         Ok(())
     }
 
-    /// Show the overlay anyway if the frame the gate waits for never lands.
+    /// Keeps asking for the frame, and gives up rather than showing nothing.
     ///
-    /// Without this the overlay has a state it cannot leave: cloaked until a
-    /// frame arrives, and not drawn because it is cloaked.
+    /// This used to reveal the window when the frame was late, which is where
+    /// the empty popup came from: the surface it uncloaked was the one rendered
+    /// while the card was still transparent. It now nudges the renderer until
+    /// the frame comes, and on the hard deadline fails the presentation instead
+    /// of succeeding into an empty rectangle.
     fn arm_watchdog(&self, ticket: PresentationTicket) {
-        let state = Arc::clone(&self.state);
-        let callback = self.on_presented.clone();
         let name = self.name;
-        let contract = self.contract;
 
-        // One more request for the frame, early, before the deadline that
-        // shows the window without one. Measured over a session, thirty-five
-        // presentations in thirty-seven got their frame from the first
-        // request; this is for the other two.
-        let retry = slint::Timer::default();
-        let retry_state = Arc::clone(&state);
-        retry.start(slint::TimerMode::SingleShot, REDRAW_RETRY, move || {
+        // Ask again, on a cadence, for as long as the frame has not arrived. A
+        // request issued while the window is still settling after a move can be
+        // coalesced away, and a busy event loop can simply be late.
+        let nudge = slint::Timer::default();
+        let nudge_state = Arc::clone(&self.state);
+        nudge.start(slint::TimerMode::Repeated, REDRAW_RETRY, move || {
             let still_waiting = matches!(
-                retry_state
+                nudge_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .phase,
@@ -413,38 +450,64 @@ impl OverlayPresenter {
             }
         });
         REDRAW_RETRIES.with_borrow_mut(|timers| {
-            timers.insert(ticket.window_handle, retry);
+            timers.insert(ticket.window_handle, nudge);
         });
 
+        let state = Arc::clone(&self.state);
+        let contract = self.contract;
         let timer = slint::Timer::default();
-        timer.start(slint::TimerMode::SingleShot, FRAME_GATE, move || {
-            // The frame may have arrived while this was queued; only a ticket
-            // still waiting is overdue.
-            let overdue = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .frame_rendered_by_deadline(ticket);
+        timer.start(slint::TimerMode::SingleShot, FRAME_DEADLINE, move || {
+            let overdue = matches!(
+                state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .phase,
+                PresentationPhase::AwaitingFrame(waiting) if waiting == ticket
+            );
             if !overdue {
                 return;
             }
+            // Nothing was ever drawn for this presentation. Showing the window
+            // now would show whatever was on it before, which is nothing.
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancel(ticket);
+            let _ = reconcile_contract(contract, ticket.window_handle);
+            let _ = rust_platform_windows::conceal_overlay_window(ticket.window_handle);
             rust_app_core::diagnostics::log_line(&format!(
-                "{name} transition=frame_timeout generation={} hwnd={} after_ms={}",
+                "{name} transition=failed generation={} hwnd={} stage=frame_deadline after_ms={}",
                 ticket.generation,
                 ticket.window_handle,
-                FRAME_GATE.as_millis()
+                FRAME_DEADLINE.as_millis()
             ));
-            reveal_revealable(
-                &state,
-                name,
-                contract,
-                ticket,
-                &callback,
-                Some("frame_timeout"),
-            );
         });
         FRAME_WATCHDOGS.with_borrow_mut(|timers| {
             timers.insert(ticket.window_handle, timer);
         });
+    }
+
+    /// Records what the window has been told to show, and re-arms if a frame
+    /// for the previous content was already being waited on.
+    ///
+    /// The owner calls this every time it changes the overlay's content. A
+    /// `Completed` that lands while the `Partial` is still being drawn is the
+    /// ordinary case, and it must produce a new frame rather than let the old
+    /// wait be satisfied by a drawing of the old text.
+    pub(crate) fn content_changed(&self, window: &slint::Window, ready: bool) {
+        let (revision, waiting) = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .content_changed(ready);
+        rust_app_core::diagnostics::log_line(&format!(
+            "{} content=changed revision={revision} ready={ready} rearmed={}",
+            self.name,
+            waiting.is_some()
+        ));
+        if waiting.is_some() {
+            window.request_redraw();
+        }
     }
 
     pub(crate) fn after_next_frame(
@@ -642,6 +705,8 @@ mod tests {
         let ticket = state.begin_prepare().unwrap();
 
         assert!(!state.can_reveal(ticket));
+        state.content_changed(true);
+        state.content_changed(true);
         state.await_frame(ticket).unwrap();
         assert_eq!(state.frame_rendered(), Some(ticket));
         assert!(state.can_reveal(ticket));
@@ -654,6 +719,8 @@ mod tests {
         let mut state = PresentationState::default();
         state.attach(42).unwrap();
         let ticket = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.content_changed(true);
         state.await_frame(ticket).unwrap();
         assert_eq!(state.frame_rendered(), Some(ticket));
 
@@ -668,6 +735,8 @@ mod tests {
         let mut state = PresentationState::default();
         state.attach(42).unwrap();
         let first = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.content_changed(true);
         state.await_frame(first).unwrap();
         assert_eq!(state.frame_rendered(), Some(first));
         assert!(state.complete_reveal(first));
@@ -676,54 +745,6 @@ mod tests {
         assert_ne!(refresh.generation, first.generation);
         assert_eq!(refresh.window_handle, first.window_handle);
         assert_eq!(state.phase, PresentationPhase::Preparing(refresh));
-    }
-
-    #[test]
-    fn a_frame_that_never_arrives_still_reveals_the_overlay() {
-        // The failure this replaces: a translation finished in 364 ms, its
-        // window was cloaked to await the first frame, the frame never came
-        // because a cloaked window may be treated as occluded, and the overlay
-        // stayed hidden for the rest of the session.
-        let mut state = PresentationState::default();
-        state.attach(42).unwrap();
-        let ticket = state.begin_prepare().unwrap();
-        state.await_frame(ticket).unwrap();
-
-        assert!(state.frame_rendered_by_deadline(ticket));
-        assert!(state.can_reveal(ticket));
-        assert!(state.complete_reveal(ticket));
-        assert_eq!(state.phase, PresentationPhase::Presented(ticket));
-    }
-
-    #[test]
-    fn a_deadline_that_loses_the_race_to_the_frame_changes_nothing() {
-        let mut state = PresentationState::default();
-        state.attach(42).unwrap();
-        let ticket = state.begin_prepare().unwrap();
-        state.await_frame(ticket).unwrap();
-
-        assert_eq!(state.frame_rendered(), Some(ticket));
-        // The watchdog fires a moment later and must not disturb the reveal
-        // the frame already queued.
-        assert!(!state.frame_rendered_by_deadline(ticket));
-        assert!(state.can_reveal(ticket));
-    }
-
-    #[test]
-    fn a_deadline_from_a_superseded_presentation_is_ignored() {
-        let mut state = PresentationState::default();
-        state.attach(42).unwrap();
-        let first = state.begin_prepare().unwrap();
-        state.await_frame(first).unwrap();
-        assert!(state.frame_rendered_by_deadline(first));
-        assert!(state.complete_reveal(first));
-
-        let second = state.begin_refresh().unwrap();
-        state.await_frame(second).unwrap();
-        // The first presentation's watchdog is still in flight; it must not
-        // reveal the second one on the first one's behalf.
-        assert!(!state.frame_rendered_by_deadline(first));
-        assert_eq!(state.phase, PresentationPhase::AwaitingFrame(second));
     }
 
     #[test]
@@ -751,42 +772,52 @@ mod tests {
             "two previews must not share the slot their watchdog is filed under"
         );
 
-        // Timing one out leaves the other exactly where it was.
-        assert!(first.frame_rendered_by_deadline(first_ticket));
+        // Giving up on one leaves the other exactly where it was.
+        first.content_changed(true);
+        assert_eq!(first.frame_rendered(), Some(first_ticket));
         assert_eq!(
             second.phase,
             PresentationPhase::AwaitingFrame(second_ticket),
             "the second window is still waiting for its own frame"
         );
-        assert!(second.frame_rendered_by_deadline(second_ticket));
+        second.content_changed(true);
+        assert_eq!(second.frame_rendered(), Some(second_ticket));
     }
 
     #[test]
     fn no_phase_waits_for_a_frame_without_a_way_out() {
-        // Every phase that holds a ticket can be left: by a frame, by the
-        // deadline, by cancellation or by retirement. `AwaitingFrame` used to
-        // be reachable with only the first of those, which is what made the
-        // overlay's hidden state permanent.
+        // Every phase that holds a ticket can be left: by a frame with content
+        // on it, by cancellation, or by retirement. `AwaitingFrame` used to be
+        // reachable with only the first of those, which is what made the
+        // overlay's hidden state permanent — and then the way out that was
+        // added revealed the window without a frame, which is what made it
+        // empty.
         let mut state = PresentationState::default();
         state.attach(42).unwrap();
         let ticket = state.begin_prepare().unwrap();
         state.await_frame(ticket).unwrap();
 
-        let mut by_deadline = PresentationState {
+        let mut by_frame = PresentationState {
             phase: state.phase,
             next_generation: state.next_generation,
+            content_ready: true,
+            content_revision: 1,
         };
-        assert!(by_deadline.frame_rendered_by_deadline(ticket));
+        assert_eq!(by_frame.frame_rendered(), Some(ticket));
 
         let mut by_cancel = PresentationState {
             phase: PresentationPhase::AwaitingFrame(ticket),
             next_generation: state.next_generation,
+            content_ready: false,
+            content_revision: 0,
         };
         assert_eq!(by_cancel.cancel(ticket), Some(42));
 
         let mut by_retire = PresentationState {
             phase: PresentationPhase::AwaitingFrame(ticket),
             next_generation: state.next_generation,
+            content_ready: false,
+            content_revision: 0,
         };
         assert!(by_retire.retire().is_some());
     }
@@ -796,6 +827,7 @@ mod tests {
         let mut state = PresentationState::default();
         state.attach(42).unwrap();
         let ticket = state.begin_prepare().unwrap();
+        state.content_changed(true);
         state.await_frame(ticket).unwrap();
 
         assert_eq!(state.frame_rendered(), Some(ticket));
@@ -811,5 +843,125 @@ mod tests {
         let _ticket = state.begin_prepare().unwrap();
         assert!(state.begin_prepare().is_err());
         assert!(state.begin_refresh().is_err());
+    }
+}
+
+#[cfg(test)]
+mod content_gate_tests {
+    use super::{PresentationPhase, PresentationState};
+
+    /// A state machine attached to a window, with nothing on that window yet.
+    fn parked() -> PresentationState {
+        let mut state = PresentationState::default();
+        state.attach(4242).unwrap();
+        state
+    }
+
+    #[test]
+    fn a_frame_drawn_before_there_was_anything_to_draw_reveals_nothing() {
+        // The defect this replaces, exactly: the card is transparent until the
+        // owner has content for it, the first frame is drawn in that state, and
+        // promoting it uncloaked an empty rectangle over the user's text.
+        let mut state = parked();
+        let ticket = state.begin_prepare().unwrap();
+        // Nothing has been put on the window: this is the state a first show
+        // starts in, with the card still fully transparent.
+        state.await_frame(ticket).unwrap();
+
+        assert_eq!(
+            state.frame_rendered(),
+            None,
+            "an empty surface is not a presentation"
+        );
+        assert_eq!(state.phase, PresentationPhase::AwaitingFrame(ticket));
+    }
+
+    #[test]
+    fn a_frame_drawn_with_content_is_the_one_that_reveals() {
+        let mut state = parked();
+        let ticket = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.content_changed(true);
+        state.await_frame(ticket).unwrap();
+
+        assert_eq!(state.frame_rendered(), Some(ticket));
+        assert_eq!(state.phase, PresentationPhase::RevealQueued(ticket));
+    }
+
+    #[test]
+    fn a_final_result_arriving_before_the_first_frame_re_arms_the_same_show() {
+        // `Completed` lands while the `Partial` is still being drawn. It must
+        // be a normal transition — the frame that eventually reveals the window
+        // has to be one drawn with the final text.
+        let mut state = parked();
+        let ticket = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(ticket).unwrap();
+
+        let (revision, waiting) = state.content_changed(true);
+
+        assert_eq!(
+            waiting,
+            Some(ticket),
+            "the show in flight is told to redraw"
+        );
+        assert_eq!(revision, 2);
+        assert_eq!(state.frame_rendered(), Some(ticket));
+    }
+
+    #[test]
+    fn a_final_result_that_is_empty_holds_the_window_back() {
+        let mut state = parked();
+        let ticket = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(ticket).unwrap();
+        state.content_changed(false);
+
+        assert_eq!(
+            state.frame_rendered(),
+            None,
+            "an emptied card must not be shown"
+        );
+    }
+
+    #[test]
+    fn a_deadline_that_finds_nothing_drawn_parks_instead_of_revealing() {
+        // What the watchdog now does. It used to promote the ticket and
+        // uncloak; the only thing on the window was the transparent card.
+        let mut state = parked();
+        let ticket = state.begin_prepare().unwrap();
+        state.await_frame(ticket).unwrap();
+
+        let window = state.cancel(ticket);
+
+        assert_eq!(window, Some(4242));
+        assert_eq!(
+            state.phase,
+            PresentationPhase::Parked {
+                window_handle: 4242
+            },
+            "a presentation with no frame ends where it started, not on screen"
+        );
+    }
+
+    #[test]
+    fn an_older_show_cannot_reveal_over_a_newer_one() {
+        let mut state = parked();
+        let first = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(first).unwrap();
+        // The user translates again before the first one is on screen.
+        state.cancel(first);
+        let second = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(second).unwrap();
+
+        assert!(second.generation() > first.generation());
+        assert!(
+            !state.complete_reveal(first),
+            "the abandoned show cannot finish"
+        );
+        assert_eq!(state.frame_rendered(), Some(second));
+        assert!(state.complete_reveal(second));
     }
 }

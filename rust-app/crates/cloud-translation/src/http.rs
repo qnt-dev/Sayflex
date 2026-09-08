@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_answer_moves_on_and_a_truly_empty_one_stops() {
+    fn a_broken_answer_and_an_empty_one_are_told_apart_and_both_move_on() {
         // The failure this replaces: any 200 that could not be read became
         // `Empty`, and `Empty` ends the walk — so one login page from a captive
         // proxy meant Azure, Google and the local engine were never asked.
@@ -161,10 +161,14 @@ mod tests {
         }
 
         let empty = outcome(200, "{\"translations\":[{\"text\":\"\"}]}").unwrap_err();
-        assert_eq!(empty, ProviderFailure::Empty);
+        assert_eq!(
+            empty,
+            ProviderFailure::Empty,
+            "a parsed answer carrying no text is not the same as an unreadable one"
+        );
         assert!(
-            !empty.should_fail_over(),
-            "a service that read the text and had nothing speaks for the rest"
+            empty.should_fail_over(),
+            "and it is still this service failing, so the next one is asked"
         );
     }
 

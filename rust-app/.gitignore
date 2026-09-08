@@ -3,3 +3,7 @@
 /.vscode/
 *.pdb
 
+# Screenshots taken while checking the running application by hand. They are
+# evidence for one session, not sources: four of them were committed by
+# accident.
+/*.png

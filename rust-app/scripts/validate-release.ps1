@@ -62,9 +62,61 @@ $files = foreach ($name in $required) {
 }
 
 $files | Format-Table -AutoSize
-# Deliberately not called validation. Nothing here is compared against a
-# reference, nothing is signed, and no binary is executed: this checks that the
-# expected files are present, that the backend manifest names what it should,
-# and prints each file's SHA-256 so a release can be identified afterwards.
-Write-Host 'Universal release file set and backend manifest are present. Hashes above are a record, not a check against a reference.'
-Write-Host 'Nothing here runs a binary: install the package and do the smoke test before shipping it.'
+
+$failures = New-Object System.Collections.Generic.List[string]
+
+# 1. Every executable carries the version this release claims.
+$expectedVersion = (
+    Select-String -Path (Join-Path $rustRoot 'Cargo.toml') -Pattern '^version = "(.+)"' |
+        Select-Object -First 1
+).Matches[0].Groups[1].Value
+foreach ($name in $required) {
+    if (-not $name.EndsWith('.exe')) { continue }
+    $info = (Get-Item -LiteralPath (Join-Path $appRoot $name)).VersionInfo
+    if ($info.ProductVersion -ne $expectedVersion) {
+        $failures.Add("$name reports version $($info.ProductVersion), not $expectedVersion")
+    }
+}
+
+# 2. The installed set matches the staged set, hash for hash. A sidecar that is
+#    only printed proves nothing; this is the comparison the wording used to
+#    claim and did not do.
+$installed = Join-Path $env:LOCALAPPDATA 'Programs\SayFlex'
+if (Test-Path -LiteralPath $installed) {
+    foreach ($row in $files) {
+        $there = Join-Path $installed $row.File
+        if (-not (Test-Path -LiteralPath $there)) {
+            $failures.Add("$($row.File) is staged but not installed")
+            continue
+        }
+        $hash = (Get-FileHash -LiteralPath $there -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($hash -ne $row.SHA256) {
+            $failures.Add("$($row.File) installed is not the staged build")
+        }
+    }
+} else {
+    Write-Host 'No installed copy to compare against; install the package and run this again.'
+}
+
+# 3. Every worker agrees with the desktop about the protocol. A handshake that
+#    only happens at run time is a handshake nobody checks before shipping.
+$protocol = (
+    Select-String -Path (Join-Path $rustRoot 'crates\protocol\src\lib.rs') `
+        -Pattern 'PROTOCOL_VERSION: u32 = (\d+)' |
+        Select-Object -First 1
+).Matches[0].Groups[1].Value
+foreach ($worker in @('SayFlex.Speech.Cpu.exe', 'SayFlex.Translation.exe')) {
+    $path = Join-Path $appRoot $worker
+    $handshake = & $path --protocol-version 2>&1
+    if ($LASTEXITCODE -ne 0 -or "$handshake".Trim() -ne $protocol) {
+        $failures.Add("$worker answers '$handshake' for the protocol, not $protocol")
+    }
+}
+
+if ($failures.Count -gt 0) {
+    $failures | ForEach-Object { Write-Host "FAILED: $_" }
+    throw "Release validation failed with $($failures.Count) problem(s)."
+}
+
+Write-Host "SayFlex $expectedVersion validated: file set, backend manifest, versions, installed hashes and protocol $protocol."
+Write-Host 'This does not replace the smoke test: dictate and translate with the installed build before shipping it.'
