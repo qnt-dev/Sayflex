@@ -63,6 +63,10 @@ pub(crate) fn sync_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<Ref
         )
     }));
     settings.set_model_rows(ModelRc::new(VecModel::from(rows)));
+    // The list and the claim above it come from the same facts, so they are
+    // refreshed together: a note saying a model is downloading, next to a list
+    // showing it installed, is the window disagreeing with itself.
+    sync_overview(&settings, &state);
     settings.set_translation_model_name(
         state
             .translation_models
@@ -147,6 +151,27 @@ pub(crate) fn sync_action_settings(
         .into(),
     );
     settings.set_history_enabled(state.history_enabled);
+    settings.set_output_mode(
+        match state.output_mode {
+            SpeechOutputMode::OriginalLanguage => "original",
+            SpeechOutputMode::TranslateToEnglish => "english",
+        }
+        .into(),
+    );
+    settings.set_output_mode_label(
+        match state.output_mode {
+            SpeechOutputMode::OriginalLanguage => "Original language",
+            SpeechOutputMode::TranslateToEnglish => "Translate to English",
+        }
+        .into(),
+    );
+    settings.set_output_mode_locked(
+        state
+            .models
+            .iter()
+            .find(|model| model.catalog_id == state.selected_model_id)
+            .is_some_and(|model| !model.supports_speech_translation),
+    );
     settings.set_dictation_subtitle(
         if state.speech_ready {
             "Local speech · ready"
@@ -363,6 +388,33 @@ fn hotkeys_summary(state: &AppState) -> String {
     }
 }
 
+/// Whether anything is actually coming down the wire.
+///
+/// Not "is the map non-empty": an entry for a model that is already on disk is
+/// a leftover from the last progress report, and Overview announcing a download
+/// that finished before the window opened is exactly the kind of claim this
+/// page must not make.
+fn downloading_now(state: &AppState) -> bool {
+    state.downloads.keys().any(|catalog_id| {
+        let installed = |installed: bool| !installed;
+        state
+            .models
+            .iter()
+            .find(|model| &model.catalog_id == catalog_id)
+            .map(|model| installed(model.installed))
+            .or_else(|| {
+                state
+                    .translation_models
+                    .iter()
+                    .find(|model| &model.catalog_id == catalog_id)
+                    .map(|model| installed(model.installed))
+            })
+            // An id the catalogue does not know is one the worker is still
+            // fetching; it cannot be installed if it is not listed.
+            .unwrap_or(true)
+    })
+}
+
 /// The claim, the statement and the facts on Overview.
 fn sync_overview(settings: &SettingsWindow, state: &AppState) {
     let leaves = audio_can_leave_device(&state.transcription_chain, |id| {
@@ -407,7 +459,7 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
         );
         settings.set_overview_note_action("Install one".into());
         settings.set_overview_note_signal(true);
-    } else if !state.downloads.is_empty() {
+    } else if downloading_now(state) {
         settings
             .set_overview_note("A model is downloading. It resumes if it is interrupted.".into());
         settings.set_overview_note_action("Details".into());
@@ -548,12 +600,29 @@ pub(crate) fn sync_output_mode(
     state: &Rc<RefCell<AppState>>,
 ) {
     if let Some(settings) = settings.upgrade() {
-        settings.set_output_mode_label(
-            match state.borrow().output_mode {
-                SpeechOutputMode::OriginalLanguage => "Output: original language",
-                SpeechOutputMode::TranslateToEnglish => "Output: translate to English",
+        let state = state.borrow();
+        settings.set_output_mode(
+            match state.output_mode {
+                SpeechOutputMode::OriginalLanguage => "original",
+                SpeechOutputMode::TranslateToEnglish => "english",
             }
             .into(),
+        );
+        settings.set_output_mode_label(
+            match state.output_mode {
+                SpeechOutputMode::OriginalLanguage => "Original language",
+                SpeechOutputMode::TranslateToEnglish => "Translate to English",
+            }
+            .into(),
+        );
+        // Whether the choice can be made at all belongs with the choice, so the
+        // menu can grey it and say why rather than refusing after the click.
+        settings.set_output_mode_locked(
+            state
+                .models
+                .iter()
+                .find(|model| model.catalog_id == state.selected_model_id)
+                .is_some_and(|model| !model.supports_speech_translation),
         );
     }
 }

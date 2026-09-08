@@ -380,6 +380,9 @@ struct AppState {
     /// exactly as long as a download runs, so an entry here is the same fact
     /// as "this row is downloading" and the two cannot disagree.
     downloads: HashMap<String, settings_projection::Download>,
+    // Invariant: an id is in `downloads` only between a progress report and the
+    // next thing the worker says about that id. `finish_download` is the only
+    // way out, and every terminal event calls it.
     /// The ordered transcription list as the worker reports it, for Settings.
     transcription_providers: Vec<TranscriptionProviderStatus>,
     /// The same list as configured and persisted, which is what is sent to the
@@ -2265,9 +2268,9 @@ fn handle_speech_event(
             set_indicator_status(settings, &format!("Installing {catalog_id}…"));
         }
         SpeechWorkerEvent::ModelInstalled { catalog_id, .. } => {
+            finish_download(state, &catalog_id);
             {
                 let mut state = state.borrow_mut();
-                state.downloads.remove(&catalog_id);
                 if let Some(model) = state
                     .models
                     .iter_mut()
@@ -2285,6 +2288,7 @@ fn handle_speech_event(
             warmup_duration_ms,
             ..
         } => {
+            finish_download(state, &catalog_id);
             let active = match workers.mark_speech_backend_ready(&backend) {
                 Ok(active) => active,
                 Err(error) => {
@@ -2348,6 +2352,7 @@ fn handle_speech_event(
             ));
         }
         SpeechWorkerEvent::ModelSelected { catalog_id } => {
+            finish_download(state, &catalog_id);
             {
                 let mut state = state.borrow_mut();
                 state.selected_model_id.clone_from(&catalog_id);
@@ -2776,9 +2781,9 @@ fn handle_translation_event(
         TranslationWorkerEvent::ModelInstalled {
             catalog_id, tier, ..
         } => {
+            finish_download(state, &catalog_id);
             {
                 let mut state = state.borrow_mut();
-                state.downloads.remove(&catalog_id);
                 state.selected_translation_tier = Some(tier);
                 for model in &mut state.translation_models {
                     if model.catalog_id == catalog_id {
@@ -2796,6 +2801,11 @@ fn handle_translation_event(
             tier,
             load_duration_ms,
         } => {
+            // This is the one that was missing. A model already on disk is
+            // reported to 100% and then handed over as ready, never installed,
+            // so its row stayed at "100 %" with a Cancel button for the rest of
+            // the session and Overview announced a download that was over.
+            finish_download(state, &catalog_id);
             rust_app_core::diagnostics::log_line(&format!(
                 "translation_model state=ready catalog_id={catalog_id} tier={tier:?} load_ms={load_duration_ms}"
             ));
@@ -3402,6 +3412,15 @@ fn native_window_handle(window: &slint::winit_030::winit::window::Window) -> Opt
 
 fn short_id(session_id: SessionId) -> String {
     session_id.to_string().chars().take(8).collect()
+}
+
+/// Ends a download, whatever ended it.
+///
+/// The worker has several ways of saying "this model is no longer coming down
+/// the wire": installed, ready, selected, or failed. Clearing on only one of
+/// them leaves the row claiming to be busy forever.
+fn finish_download(state: &Rc<RefCell<AppState>>, catalog_id: &str) -> bool {
+    state.borrow_mut().downloads.remove(catalog_id).is_some()
 }
 
 fn unix_ms() -> u64 {

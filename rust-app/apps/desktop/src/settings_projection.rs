@@ -132,6 +132,12 @@ fn model_progress(
     selected: bool,
     download: Option<Download>,
 ) -> (String, &'static str, &'static str, f32) {
+    // A model on disk is not coming down the wire, whatever the last progress
+    // report said. The lifecycle already clears the entry on every terminal
+    // event; this is the rule stated where the row is drawn, so that forgetting
+    // one of those events costs a stale entry rather than a row stuck at
+    // "100 %" with a Cancel button that cancels nothing.
+    let download = download.filter(|_| !installed);
     if let Some(download) = download {
         return (
             format!("{} %", download.percent()),
@@ -198,9 +204,10 @@ pub(crate) fn provider_row(
     ProviderRow {
         id: entry.id.clone().into(),
         title: provider_display_name(&entry.id).into(),
-        // When the worker has something to say about why this row cannot run,
-        // that is the most useful line the row can carry.
-        detail: if detail.is_empty() {
+        // The worker's sentence when it says more than the state column
+        // already does. "Switched off" in both places is a row saying one
+        // thing twice and losing the line that told you what the service is.
+        detail: if detail.is_empty() || detail == state {
             provider_detail(entry, status)
         } else {
             detail
@@ -397,6 +404,36 @@ mod tests {
     }
 
     #[test]
+    fn a_row_does_not_say_the_same_thing_twice() {
+        // The worker words a disabled row as "Switched off", which is exactly
+        // what the state column says. The detail line is then wasted on a
+        // repetition instead of telling you what the service is.
+        let chain = [entry("groq", false)];
+        let mut status = keyed("groq", 0);
+        status.enabled = false;
+        status.available = false;
+        status.detail = "Switched off".to_owned();
+        let (local, usable) = chain_positions(&chain, |_| true);
+        let row = provider_row(&chain[0], Some(&status), 0, local, usable);
+
+        assert_eq!(row.state, "Switched off");
+        assert_ne!(row.detail, "Switched off");
+        assert!(row.detail.contains("2 000 requests a day"));
+    }
+
+    #[test]
+    fn a_reason_the_state_column_abbreviates_is_kept() {
+        let chain = [entry("groq", true)];
+        let mut status = keyed("groq", 0);
+        status.detail = "Key refused: the service rejected this token".to_owned();
+        let (local, usable) = chain_positions(&chain, |_| true);
+        let row = provider_row(&chain[0], Some(&status), 0, local, usable);
+
+        assert_eq!(row.state, "Key refused");
+        assert_eq!(row.detail, "Key refused: the service rejected this token");
+    }
+
+    #[test]
     fn a_row_with_no_key_says_so_rather_than_that_it_is_unreachable() {
         // Both are true of this row. "No key stored" is the one the user can
         // act on, and it is the reason that would still hold if the row moved.
@@ -454,6 +491,26 @@ mod tests {
             ("43 %", "working", "Cancel")
         );
         assert!((progress - 0.43).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_model_on_disk_is_never_shown_as_downloading() {
+        // The failure this replaces: a translation model that was already
+        // installed got reported to 100% and then handed over as ready rather
+        // than installed, so its row offered Cancel for the rest of the
+        // session and Overview announced a download that was over before the
+        // window opened.
+        let finished = Download {
+            downloaded_bytes: 100,
+            total_bytes: 100,
+        };
+        let (state, tone, action, progress) = model_progress(true, false, Some(finished));
+
+        assert_eq!(
+            (state.as_str(), tone, action),
+            ("Installed", "resting", "Use")
+        );
+        assert!((progress - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]
