@@ -6,11 +6,18 @@
 import { ListView } from "std-widgets.slint";
 import { Sheet } from "sheet.slint";
 import { ModelRow, ProviderRow, HistoryRow } from "rows.slint";
-import { RowAction, ConfirmAction, Toggle, Field, FieldNote, MenuButton, MenuOption } from "controls.slint";
+import { RowAction, ConfirmAction, Toggle, Field, FieldNote, MenuButton, MenuOption, ScrollRail } from "controls.slint";
 import { ListHead, ListRow, Note, GroupLabel, PageLede } from "parts.slint";
 
 // ── Models ───────────────────────────────────────────────
 export component ModelsPage inherits VerticalLayout {
+    /// How far past the page's own right edge the rail sits.
+    ///
+    /// A scrollbar belongs at the edge of the window, not tucked against the
+    /// end of the text: the shell knows how much padding stands between the two
+    /// and passes it in, because a page cannot ask the window anything.
+    in property <length> rail-overhang: 0px;
+
     in property <[ModelRow]> rows;
     in property <string> summary;
     // Identified by catalog id rather than by row number: one list holding two
@@ -28,44 +35,75 @@ export component ModelsPage inherits VerticalLayout {
         claim: root.summary;
     }
 
-    ListView {
+    // The list scrolls, so it says so. A list cut off at the bottom
+    // edge with nothing on it reads as a list that ends there, which
+    // is how rows below the fold go unread.
+    Rectangle {
         vertical-stretch: 1;
 
-        for row[index] in root.rows : VerticalLayout {
-            spacing: 0px;
+        list := ListView {
+            width: 100%;
+            height: 100%;
+            // The widget's own scrollbar appears only while the pointer is
+            // over it, which is no use for saying there is more below, and it
+            // is drawn in the widget style rather than this one. It also keeps
+            // a strip of the list's width for itself whether it is showing or
+            // not, which is what pushed the rail in off the window's edge.
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
-            if index == 0 || root.rows[index - 1].section != row.section : GroupLabel {
-                text: row.section;
-                height: index == 0 ? 26px : 38px;
-                vertical-alignment: bottom;
-            }
+            for row[index] in root.rows : VerticalLayout {
+                spacing: 0px;
 
-            ListRow {
-                title: row.title;
-                detail: row.detail;
-                tag: row.size;
-                state-text: row.state;
-                tone: row.tone;
-                show-progress: row.progress > 0;
-                progress: row.progress;
+                if index == 0 || root.rows[index - 1].section != row.section : GroupLabel {
+                    text: row.section;
+                    height: index == 0 ? 26px : 38px;
+                    vertical-alignment: bottom;
+                }
 
-                if row.action != "" : RowAction {
-                    label: row.action;
-                    clicked => {
-                        if (row.action == "Cancel") {
-                            root.cancel-install(row.catalog-id);
-                        } else {
-                            root.choose(row.catalog-id);
+                ListRow {
+                    title: row.title;
+                    detail: row.detail;
+                    tag: row.size;
+                    state-text: row.state;
+                    tone: row.tone;
+                    show-progress: row.progress > 0;
+                    progress: row.progress;
+
+                    if row.action != "" : RowAction {
+                        label: row.action;
+                        clicked => {
+                            if (row.action == "Cancel") {
+                                root.cancel-install(row.catalog-id);
+                            } else {
+                                root.choose(row.catalog-id);
+                            }
                         }
                     }
                 }
             }
+    }
+
+        ScrollRail {
+            x: parent.width + root.rail-overhang - 5px;
+            y: 0;
+            track: list.height;
+            content: list.viewport-height;
+            shown: list.height;
+            offset: -list.viewport-y;
+            scrolled(next) => { list.viewport-y = -next; }
         }
     }
 }
 
 // ── Providers ────────────────────────────────────────────
 export component ProvidersPage inherits VerticalLayout {
+    /// How far past the page's own right edge the rail sits.
+    ///
+    /// A scrollbar belongs at the edge of the window, not tucked against the
+    /// end of the text: the shell knows how much padding stands between the two
+    /// and passes it in, because a page cannot ask the window anything.
+    in property <length> rail-overhang: 0px;
+
     in property <[ProviderRow]> rows;
     in property <bool> audio-leaves-device: false;
     in property <string> claim;
@@ -85,135 +123,179 @@ export component ProvidersPage inherits VerticalLayout {
 
     ListHead {
         index: "05 / 08";
-        title: "Transcription order";
-        lede: "Top first. The next is tried when the one above cannot take the recording: out of quota, rate limited, unreachable, key refused, or it turned the request down. This computer ends the walk.";
+        title: "Provider order";
+        lede: "Two lists, kept apart. Top first in each: the next is tried when the one above cannot take the work — out of quota, rate limited, unreachable, key refused, or it turned the request down. This computer ends the walk.";
         claim: root.claim;
         claim-signal: root.audio-leaves-device;
     }
 
     // An open key form makes a row three times its height, so the list has to
     // be able to scroll even with six services in it.
-    ListView {
+    // The list scrolls, so it says so. A list cut off at the bottom
+    // edge with nothing on it reads as a list that ends there, which
+    // is how rows below the fold go unread.
+    Rectangle {
         vertical-stretch: 1;
 
-        for row[index] in root.rows : VerticalLayout {
-            spacing: 0px;
+        list := ListView {
+            width: 100%;
+            height: 100%;
+            // The widget's own scrollbar appears only while the pointer is
+            // over it, which is no use for saying there is more below, and it
+            // is drawn in the widget style rather than this one. It also keeps
+            // a strip of the list's width for itself whether it is showing or
+            // not, which is what pushed the rail in off the window's edge.
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
-            ListRow {
-                title: row.title;
-                detail: row.detail;
-                state-text: row.state;
-                tone: row.tone;
-                controls-width: 208px;
-                orderable: true;
-                can-rise: index > 0;
-                can-fall: index < root.rows.length - 1;
-                moved(places) => {
-                    root.move-provider(index, clamp(index + places, 0, root.rows.length - 1));
+            for row[index] in root.rows : VerticalLayout {
+                spacing: 0px;
+
+                // Speech and text are two separate orders with separate keys and
+                // separate allowances, drawn as one list so they scroll together.
+                if index == 0 || root.rows[index - 1].section != row.section : GroupLabel {
+                    text: row.section == "SPEECH"
+                        ? "SPEECH — WHAT TRANSCRIBES A RECORDING"
+                        : "TEXT — WHAT TRANSLATES A SELECTION";
+                    // One height for every heading. A height that varied with the
+                    // row's index made the list's own estimate of how tall an item
+                    // is wrong, and the first heading was scrolled out of sight
+                    // before anything had been scrolled.
+                    height: 34px;
                 }
 
-                Toggle {
-                    checked: row.enabled;
-                    on-label: "On";
-                    off-label: "Off";
-                    toggled(next) => { root.toggle-provider(index); }
-                }
+                ListRow {
+                    title: row.title;
+                    detail: row.detail;
+                    state-text: row.state;
+                    tone: row.tone;
+                    controls-width: 208px;
+                    orderable: true;
+                    can-rise: index > 0;
+                    can-fall: index < root.rows.length - 1;
+                    moved(places) => {
+                        root.move-provider(index, clamp(index + places, 0, root.rows.length - 1));
+                    }
 
-                if row.needs-key : RowAction {
-                    label: row.key-hint == "" ? "Add key" : "Replace key";
-                    clicked => {
-                        root.editing = root.editing == row.id ? "" : row.id;
+                    Toggle {
+                        checked: row.enabled;
+                        on-label: "On";
+                        off-label: "Off";
+                        toggled(next) => { root.toggle-provider(index); }
+                    }
+
+                    if row.needs-key : RowAction {
+                        label: row.key-hint == "" ? "Add key" : "Replace key";
+                        clicked => {
+                            root.editing = root.editing == row.id ? "" : row.id;
+                        }
                     }
                 }
-            }
 
-            // The form opens in the row it belongs to. There are no modal dialogs
-            // here: a question that covers the thing it is about is asked in the
-            // wrong place.
-            if root.editing == row.id : Rectangle {
-                height: editor.preferred-height + 22px;
+                // The form opens in the row it belongs to. There are no modal dialogs
+                // here: a question that covers the thing it is about is asked in the
+                // wrong place.
+                if root.editing == row.id : Rectangle {
+                    height: editor.preferred-height + 22px;
 
-                editor := VerticalLayout {
-                    padding-left: 34px;
-                    padding-bottom: 18px;
-                    padding-top: 4px;
-                    spacing: 9px;
-
-                    GroupLabel { text: row.key-hint == "" ? "API KEY" : "REPLACE THE KEY"; }
-                    key := Field {
-                        width: 340px;
-                        placeholder: "Paste the key";
-                        masked: true;
-                    }
-
-                    if row.field-label != "" : GroupLabel { text: row.field-label; }
-                    extra := Field {
-                        width: 340px;
-                        // Kept in the tree rather than behind an `if`, so Save
-                        // can read it. Reached only through Enter before, which
-                        // meant typing a region and pressing Save sent the key
-                        // and dropped the region on the floor.
-                        visible: row.field-label != "";
-                        height: row.field-label == "" ? 0px : 30px;
-                        placeholder: row.field-label == "Endpoint"
-                            ? "https://speech.example.com/v1"
-                            : "";
-                        value: row.field-value;
-                    }
-
-                    FieldNote {
-                        width: 460px;
-                        text: "Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters.";
-                    }
-
-                    if root.problem != "" && root.problem-for == row.id : FieldNote {
-                        width: 460px;
-                        problem: true;
-                        text: root.problem;
-                    }
-
-                    HorizontalLayout {
+                    editor := VerticalLayout {
+                        padding-left: 34px;
+                        padding-bottom: 18px;
+                        padding-top: 4px;
                         spacing: 9px;
-                        alignment: start;
-                        RowAction {
-                            label: "Save";
-                            clicked => {
-                                // One call. Every rule — a key that is only
-                                // spaces, a missing region, an endpoint that is
-                                // not HTTPS — is decided by the one owner in
-                                // Rust, which either stores both fields together
-                                // or stores neither and says why. The form stays
-                                // open until it hears that it succeeded.
-                                root.save-provider(row.id, key.value, extra.value);
-                            }
+
+                        GroupLabel { text: row.key-hint == "" ? "API KEY" : "REPLACE THE KEY"; }
+                        key := Field {
+                            width: 340px;
+                            placeholder: "Paste the key";
+                            masked: true;
                         }
-                        RowAction {
-                            label: "Cancel";
-                            clicked => {
-                                key.value = "";
-                                root.problem = "";
-                                root.problem-for = "";
-                                root.editing = "";
-                            }
+
+                        if row.field-label != "" : GroupLabel { text: row.field-label; }
+                        extra := Field {
+                            width: 340px;
+                            // Kept in the tree rather than behind an `if`, so Save
+                            // can read it. Reached only through Enter before, which
+                            // meant typing a region and pressing Save sent the key
+                            // and dropped the region on the floor.
+                            visible: row.field-label != "";
+                            height: row.field-label == "" ? 0px : 30px;
+                            placeholder: row.field-label == "Endpoint"
+                                ? "https://speech.example.com/v1"
+                                : "";
+                            value: row.field-value;
                         }
-                        if row.key-hint != "" : ConfirmAction {
-                            label: "Remove key";
-                            question: "Remove the stored key?";
-                            confirmed => {
-                                root.forget-provider-key(row.id);
-                                root.editing = "";
+
+                        FieldNote {
+                            width: 460px;
+                            text: "Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters.";
+                        }
+
+                        if root.problem != "" && root.problem-for == row.id : FieldNote {
+                            width: 460px;
+                            problem: true;
+                            text: root.problem;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 9px;
+                            alignment: start;
+                            RowAction {
+                                label: "Save";
+                                clicked => {
+                                    // One call. Every rule — a key that is only
+                                    // spaces, a missing region, an endpoint that is
+                                    // not HTTPS — is decided by the one owner in
+                                    // Rust, which either stores both fields together
+                                    // or stores neither and says why. The form stays
+                                    // open until it hears that it succeeded.
+                                    root.save-provider(row.id, key.value, extra.value);
+                                }
+                            }
+                            RowAction {
+                                label: "Cancel";
+                                clicked => {
+                                    key.value = "";
+                                    root.problem = "";
+                                    root.problem-for = "";
+                                    root.editing = "";
+                                }
+                            }
+                            if row.key-hint != "" : ConfirmAction {
+                                label: "Remove key";
+                                question: "Remove the stored key?";
+                                confirmed => {
+                                    root.forget-provider-key(row.id);
+                                    root.editing = "";
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
+    }
+
+        ScrollRail {
+            x: parent.width + root.rail-overhang - 5px;
+            y: 0;
+            track: list.height;
+            content: list.viewport-height;
+            shown: list.height;
+            offset: -list.viewport-y;
+            scrolled(next) => { list.viewport-y = -next; }
+        }
     }
 }
 
 // ── History ──────────────────────────────────────────────
 export component HistoryPage inherits VerticalLayout {
+    /// How far past the page's own right edge the rail sits.
+    ///
+    /// A scrollbar belongs at the edge of the window, not tucked against the
+    /// end of the text: the shell knows how much padding stands between the two
+    /// and passes it in, because a page cannot ask the window anything.
+    in property <length> rail-overhang: 0px;
+
     in property <[HistoryRow]> rows;
     in property <bool> keeping: true;
     in property <string> scope;
@@ -274,20 +356,44 @@ export component HistoryPage inherits VerticalLayout {
         }
     }
 
-    ListView {
+    // The list scrolls, so it says so. A list cut off at the bottom
+    // edge with nothing on it reads as a list that ends there, which
+    // is how rows below the fold go unread.
+    Rectangle {
         vertical-stretch: 1;
 
-        for row[index] in root.rows : ListRow {
-            title: row.text;
-            detail: row.detail;
-            state-text: row.origin == "remote" ? "Sent to a service" : "On this device";
-            tone: row.origin == "remote" ? "refused" : "resting";
+        list := ListView {
+            width: 100%;
+            height: 100%;
+            // The widget's own scrollbar appears only while the pointer is
+            // over it, which is no use for saying there is more below, and it
+            // is drawn in the widget style rather than this one. It also keeps
+            // a strip of the list's width for itself whether it is showing or
+            // not, which is what pushed the rail in off the window's edge.
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
-            RowAction {
-                label: "Copy";
-                clicked => { root.copy-history(index); }
+            for row[index] in root.rows : ListRow {
+                title: row.text;
+                detail: row.detail;
+                state-text: row.origin == "remote" ? "Sent to a service" : "On this device";
+                tone: row.origin == "remote" ? "refused" : "resting";
+
+                RowAction {
+                    label: "Copy";
+                    clicked => { root.copy-history(index); }
+                }
             }
-        }
 
+    }
+
+        ScrollRail {
+            x: parent.width + root.rail-overhang - 5px;
+            y: 0;
+            track: list.height;
+            content: list.viewport-height;
+            shown: list.height;
+            offset: -list.viewport-y;
+            scrolled(next) => { list.viewport-y = -next; }
+        }
     }
 }

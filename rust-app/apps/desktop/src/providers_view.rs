@@ -7,13 +7,16 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use rust_protocol::{SpeechWorkerCommand, TranscriptionProviderEntry};
+use rust_protocol::{
+    SpeechWorkerCommand, TranscriptionProviderEntry, TranslationProviderEntry,
+    TranslationWorkerCommand,
+};
 use slint::{ModelRc, VecModel};
 
 use crate::{
     AppState, ProviderRow, SettingsWindow, set_indicator_status,
     settings_document::save_settings,
-    settings_projection::{chain_positions, privacy_claim, provider_row},
+    settings_projection::{chain_positions, privacy_claim, provider_row, translation_provider_row},
     worker_supervisor::Workers,
 };
 
@@ -138,6 +141,80 @@ pub(crate) fn check_provider_configuration(
     ))
 }
 
+/// Checks one translation provider's configuration before any of it is stored.
+///
+/// The same contract as the transcription form and deliberately its own
+/// function: the two lists ask for different things. Nothing here takes an
+/// endpoint, so there is no address to insist is HTTPS; Azure is the only one
+/// that needs a second field, and it needs it.
+pub(crate) fn check_translation_provider_configuration(
+    provider_id: &str,
+    secret: &str,
+    extra: &str,
+) -> Result<(String, Option<String>), SaveRefused> {
+    let secret = secret.trim();
+    let extra = extra.trim();
+
+    if secret.is_empty() {
+        return Err(SaveRefused(
+            "A key is needed. To remove the one already stored, use Remove key.".to_owned(),
+        ));
+    }
+    if provider_id == "azure" && extra.is_empty() {
+        return Err(SaveRefused(
+            "Region is needed as well as the key.".to_owned(),
+        ));
+    }
+
+    Ok((
+        secret.to_owned(),
+        (!extra.is_empty()).then(|| extra.to_owned()),
+    ))
+}
+
+/// Which of the two lists a row belongs to.
+///
+/// Both lists have a row for Azure and a row for this computer, and they are
+/// different services with different keys and different allowances. Every
+/// callback the interface raises carries this so nothing acts on the wrong one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Speech,
+    Text,
+}
+
+/// Reads back the prefix the projection put on a row id.
+pub(crate) fn split_row_id(id: &str) -> Option<(Kind, &str)> {
+    match id.split_once(':') {
+        Some(("speech", rest)) => Some((Kind::Speech, rest)),
+        Some(("text", rest)) => Some((Kind::Text, rest)),
+        _ => None,
+    }
+}
+
+/// Which list a position in the drawn list falls in, and where in that list.
+///
+/// The two are drawn as one list so they scroll together, so the index a row
+/// reports is an index into the pair of them.
+pub(crate) fn locate(state: &AppState, index: usize) -> Option<(Kind, usize)> {
+    let speech = state.transcription_chain.len();
+    if index < speech {
+        return Some((Kind::Speech, index));
+    }
+    let text = index - speech;
+    (text < state.translation_chain.len()).then_some((Kind::Text, text))
+}
+
+/// What to call a row in a message to the user.
+///
+/// The two lists both have Azure, and they are not the same Azure.
+pub(crate) fn row_display_name(kind: Kind, id: &str) -> String {
+    match kind {
+        Kind::Speech => provider_display_name(id),
+        Kind::Text => crate::settings_projection::translation_provider_display_name(id),
+    }
+}
+
 pub(crate) fn sync_providers(
     settings: &slint::Weak<SettingsWindow>,
     state: &Rc<RefCell<AppState>>,
@@ -152,11 +229,17 @@ pub(crate) fn sync_providers(
             .iter()
             .any(|status| status.id == id && status.has_credential)
     };
+    let has_text_credential = |id: &str| {
+        state
+            .translation_providers
+            .iter()
+            .any(|status| status.id == id && status.has_credential)
+    };
     // Where the walk starts and where it stops, worked out once for the whole
     // list: a row cannot say "in use" while another row says the same.
     let (first_local, first_usable) = chain_positions(&state.transcription_chain, has_credential);
 
-    let rows: Vec<ProviderRow> = state
+    let mut rows: Vec<ProviderRow> = state
         .transcription_chain
         .iter()
         .enumerate()
@@ -169,13 +252,78 @@ pub(crate) fn sync_providers(
         })
         .collect();
 
+    let (text_local, text_usable) =
+        text_chain_positions(&state.translation_chain, has_text_credential);
+    rows.extend(
+        state
+            .translation_chain
+            .iter()
+            .enumerate()
+            .map(|(position, entry)| {
+                let status = state
+                    .translation_providers
+                    .iter()
+                    .find(|status| status.id == entry.id);
+                translation_provider_row(entry, status, position, text_local, text_usable)
+            }),
+    );
+
     let leaves = audio_can_leave_device(&state.transcription_chain, has_credential);
-    settings.set_remote_transcription_enabled(leaves);
+    let text_leaves = text_can_leave_device(&state.translation_chain, has_text_credential);
+    settings.set_remote_transcription_enabled(leaves || text_leaves);
     settings.set_provider_claim(
         privacy_claim(&state.transcription_chain, leaves, has_credential).into(),
     );
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
     settings.set_provider_rows(ModelRc::new(VecModel::from(rows)));
+}
+
+/// Where the translation walk starts and where it stops.
+///
+/// The same question `chain_positions` answers for transcription, asked of the
+/// other list. Its own function rather than a generic one: the two lists hold
+/// different entry types and share nothing but the shape of the answer.
+fn text_chain_positions(
+    chain: &[TranslationProviderEntry],
+    has_credential: impl Fn(&str) -> bool,
+) -> (Option<usize>, Option<usize>) {
+    let mut first_local = None;
+    let mut first_usable = None;
+    for (position, entry) in chain.iter().enumerate() {
+        if !entry.enabled {
+            continue;
+        }
+        if entry.id == "local" {
+            first_local.get_or_insert(position);
+            first_usable.get_or_insert(position);
+            break;
+        }
+        if has_credential(&entry.id) {
+            first_usable.get_or_insert(position);
+        }
+    }
+    (first_local, first_usable)
+}
+
+/// Whether this arrangement can send text off the machine.
+///
+/// The same reading the worker does, so the claim on Overview and the walk the
+/// worker performs cannot disagree: the first switched-on row decides, and a
+/// local engine anywhere above a service means nothing below it is asked.
+pub(crate) fn text_can_leave_device(
+    chain: &[TranslationProviderEntry],
+    has_credential: impl Fn(&str) -> bool,
+) -> bool {
+    chain
+        .iter()
+        .filter(|entry| entry.enabled)
+        .find_map(|entry| {
+            if entry.id == "local" {
+                return Some(false);
+            }
+            has_credential(&entry.id).then_some(true)
+        })
+        .unwrap_or(false)
 }
 
 /// Sends the arranged list to the worker and writes it to settings.
@@ -197,6 +345,120 @@ pub(crate) fn apply_provider_chain(
     }
     let _ = save_settings(&state.borrow());
     sync_providers(settings, state);
+}
+
+/// Sends the arranged translation list to the worker and writes it to settings.
+pub(crate) fn apply_translation_chain(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Workers,
+) {
+    let providers = state.borrow().translation_chain.clone();
+    if let Err(error) = workers
+        .translation
+        .send(&TranslationWorkerCommand::SetTranslationProviders { providers })
+    {
+        set_indicator_status(
+            settings,
+            &format!("The translation order could not be applied: {error}"),
+        );
+        return;
+    }
+    let _ = save_settings(&state.borrow());
+    sync_providers(settings, state);
+}
+
+#[cfg(test)]
+mod translation_provider_tests {
+    use rust_protocol::TranslationProviderEntry;
+
+    use super::{
+        Kind, SaveRefused, check_translation_provider_configuration, split_row_id,
+        text_can_leave_device, text_chain_positions,
+    };
+
+    fn entry(id: &str, enabled: bool) -> TranslationProviderEntry {
+        TranslationProviderEntry {
+            id: id.to_owned(),
+            enabled,
+            region: None,
+        }
+    }
+
+    #[test]
+    fn a_row_id_says_which_list_it_came_from() {
+        // Both lists have an azure and a local. Without the prefix, storing a
+        // DeepL-page key for Azure would reach the speech service instead.
+        assert_eq!(split_row_id("speech:azure"), Some((Kind::Speech, "azure")));
+        assert_eq!(split_row_id("text:azure"), Some((Kind::Text, "azure")));
+        assert_eq!(split_row_id("azure"), None);
+        assert_eq!(split_row_id("other:azure"), None);
+    }
+
+    #[test]
+    fn text_leaves_the_machine_only_when_a_keyed_service_is_reached_first() {
+        let keyed = |id: &str| id != "unkeyed";
+
+        assert!(text_can_leave_device(
+            &[entry("deepl", true), entry("local", true)],
+            keyed
+        ));
+        assert!(
+            !text_can_leave_device(&[entry("local", true), entry("deepl", true)], keyed),
+            "the walk stops at the local engine, so nothing under it is asked"
+        );
+        assert!(
+            !text_can_leave_device(&[entry("unkeyed", true), entry("local", true)], keyed),
+            "a service with no key is never asked, so it sends nothing"
+        );
+        assert!(
+            !text_can_leave_device(&[entry("deepl", false)], keyed),
+            "a row that is switched off sends nothing"
+        );
+    }
+
+    #[test]
+    fn the_first_row_that_can_run_is_the_one_marked_in_use() {
+        let keyed = |id: &str| id != "unkeyed";
+        let (local, usable) = text_chain_positions(
+            &[
+                entry("unkeyed", true),
+                entry("deepl", true),
+                entry("local", true),
+            ],
+            keyed,
+        );
+
+        assert_eq!(
+            usable,
+            Some(1),
+            "the keyed service above the engine is used"
+        );
+        assert_eq!(local, Some(2));
+    }
+
+    #[test]
+    fn a_key_of_nothing_but_spaces_is_refused_rather_than_treated_as_a_deletion() {
+        assert_eq!(
+            check_translation_provider_configuration("deepl", "   ", ""),
+            Err(SaveRefused(
+                "A key is needed. To remove the one already stored, use Remove key.".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn azure_needs_its_region_and_nothing_else_does() {
+        assert!(check_translation_provider_configuration("azure", "key", "").is_err());
+        assert_eq!(
+            check_translation_provider_configuration("azure", " key ", " westeurope "),
+            Ok(("key".to_owned(), Some("westeurope".to_owned())))
+        );
+        assert_eq!(
+            check_translation_provider_configuration("deepl", "key", ""),
+            Ok(("key".to_owned(), None))
+        );
+    }
 }
 
 #[cfg(test)]

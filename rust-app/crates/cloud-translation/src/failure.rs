@@ -297,7 +297,12 @@ mod tests {
         );
         assert!(matches!(restricted, ProviderFailure::Misconfigured(_)));
 
-        let dead = classify_response(ProviderId::GOOGLE, 403, None, "The caller does not have permission");
+        let dead = classify_response(
+            ProviderId::GOOGLE,
+            403,
+            None,
+            "The caller does not have permission",
+        );
         assert!(matches!(dead, ProviderFailure::Credential(_)));
     }
 

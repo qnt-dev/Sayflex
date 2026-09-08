@@ -7,7 +7,7 @@
 import { ListView } from "std-widgets.slint";
 import { Sheet } from "sheet.slint";
 import { HotkeyRow } from "rows.slint";
-import { RowAction, Toggle, Stepper, MenuButton, MenuOption } from "controls.slint";
+import { RowAction, Toggle, Stepper, MenuButton, MenuOption, ScrollRail } from "controls.slint";
 import { ListHead, FormRow, ListRow, Note, GroupLabel, PageLede } from "parts.slint";
 
 // ── Translation ──────────────────────────────────────────
@@ -139,6 +139,13 @@ export component TranslationPage inherits VerticalLayout {
 
 // ── Hotkeys ──────────────────────────────────────────────
 export component HotkeysPage inherits VerticalLayout {
+    /// How far past the page's own right edge the rail sits.
+    ///
+    /// A scrollbar belongs at the edge of the window, not tucked against the
+    /// end of the text: the shell knows how much padding stands between the two
+    /// and passes it in, because a page cannot ask the window anything.
+    in property <length> rail-overhang: 0px;
+
     in property <[HotkeyRow]> rows;
     in property <string> summary;
     in property <bool> summary-signal: false;
@@ -158,59 +165,83 @@ export component HotkeysPage inherits VerticalLayout {
     // The commands are a list, and a list belongs in a ListView: a page that
     // reports a taller minimum than its neighbours makes the window resize
     // itself as you walk through the navigation.
-    ListView {
+    // The list scrolls, so it says so. A list cut off at the bottom
+    // edge with nothing on it reads as a list that ends there, which
+    // is how rows below the fold go unread.
+    Rectangle {
         vertical-stretch: 1;
 
-        for row[index] in root.rows : VerticalLayout {
-            spacing: 0px;
+        list := ListView {
+            width: 100%;
+            height: 100%;
+            // The widget's own scrollbar appears only while the pointer is
+            // over it, which is no use for saying there is more below, and it
+            // is drawn in the widget style rather than this one. It also keeps
+            // a strip of the list's width for itself whether it is showing or
+            // not, which is what pushed the rail in off the window's edge.
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
-            ListRow {
-                lead: row.keys;
-                title: row.name;
-                detail: row.detail;
-                tone: row.tone;
-                controls-width: 186px;
+            for row[index] in root.rows : VerticalLayout {
+                spacing: 0px;
 
-                Toggle {
-                    checked: row.enabled;
-                    on-label: "On";
-                    off-label: "Off";
-                    toggled(next) => { root.toggle-row(index, next); }
+                ListRow {
+                    lead: row.keys;
+                    title: row.name;
+                    detail: row.detail;
+                    tone: row.tone;
+                    controls-width: 186px;
+
+                    Toggle {
+                        checked: row.enabled;
+                        on-label: "On";
+                        off-label: "Off";
+                        toggled(next) => { root.toggle-row(index, next); }
+                    }
+
+                    // The combination itself is fixed in this build. The button says
+                    // so rather than being absent, because a page that silently omits
+                    // the thing its design promised is a page that has been quietly
+                    // reduced.
+                    RowAction {
+                        label: "Change";
+                        enabled: row.locked-reason == "";
+                        reason: row.locked-reason;
+                    }
                 }
 
-                // The combination itself is fixed in this build. The button says
-                // so rather than being absent, because a page that silently omits
-                // the thing its design promised is a page that has been quietly
-                // reduced.
-                RowAction {
-                    label: "Change";
-                    enabled: row.locked-reason == "";
-                    reason: row.locked-reason;
+                if row.mode != "" && row.enabled : HorizontalLayout {
+                    height: 42px;
+                    padding-left: 110px;
+                    padding-bottom: 10px;
+                    alignment: start;
+                    spacing: 12px;
+                    GroupLabel {
+                        text: "DOES";
+                        vertical-alignment: center;
+                    }
+                    MenuButton {
+                        compact: true;
+                        text: row.mode-value;
+                        value: row.mode-key;
+                        options: [
+                            { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
+                            { value: "palette", label: "Always ask", note: "Shows the palette every time" },
+                        ];
+                        chosen(value) => { root.set-mode(row.mode, value); }
+                    }
                 }
             }
 
-            if row.mode != "" && row.enabled : HorizontalLayout {
-                height: 42px;
-                padding-left: 110px;
-                padding-bottom: 10px;
-                alignment: start;
-                spacing: 12px;
-                GroupLabel {
-                    text: "DOES";
-                    vertical-alignment: center;
-                }
-                MenuButton {
-                    compact: true;
-                    text: row.mode-value;
-                    value: row.mode-key;
-                    options: [
-                        { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
-                        { value: "palette", label: "Always ask", note: "Shows the palette every time" },
-                    ];
-                    chosen(value) => { root.set-mode(row.mode, value); }
-                }
-            }
+    }
+
+        ScrollRail {
+            x: parent.width + root.rail-overhang - 5px;
+            y: 0;
+            track: list.height;
+            content: list.viewport-height;
+            shown: list.height;
+            offset: -list.viewport-y;
+            scrolled(next) => { list.viewport-y = -next; }
         }
-
     }
 }

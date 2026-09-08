@@ -4635,6 +4635,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-cloud-translation"
+version = "0.5.27"
+dependencies = [
+ "reqwest",
+ "rust-app-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "rust-model-manager"
 version = "0.5.27"
 dependencies = [
@@ -4881,6 +4892,7 @@ version = "0.5.27"
 dependencies = [
  "anyhow",
  "rust-app-core",
+ "rust-cloud-translation",
  "rust-model-manager",
  "rust-platform-windows",
  "rust-protocol",

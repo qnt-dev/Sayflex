@@ -8,7 +8,7 @@
 import { Sheet } from "sheet.slint";
 import { Fact } from "parts.slint";
 import { ModelRow, ProviderRow, HistoryRow, HotkeyRow } from "rows.slint";
-import { RowAction } from "controls.slint";
+import { RowAction, ScrollRail } from "controls.slint";
 import { ModelsPage, ProvidersPage, HistoryPage } from "pages_lists.slint";
 import { TranslationPage, HotkeysPage } from "pages_forms.slint";
 import { OverviewPage, DictationPage, VisualsPage } from "pages_instruments.slint";
@@ -347,6 +347,8 @@ export component SettingsWindow inherits Window {
                 }
 
                 if root.active-page == 3 : ModelsPage {
+                    // The rail belongs at the window edge, not beside the text.
+                    rail-overhang: Sheet.rail-overhang;
                     rows: root.model-rows;
                     summary: root.models-summary;
                     choose(catalog-id) => { root.choose-model(catalog-id); }
@@ -354,6 +356,8 @@ export component SettingsWindow inherits Window {
                 }
 
                 if root.active-page == 4 : ProvidersPage {
+                    // The rail belongs at the window edge, not beside the text.
+                    rail-overhang: Sheet.rail-overhang;
                     rows: root.provider-rows;
                     audio-leaves-device: root.remote-transcription-enabled;
                     claim: root.provider-claim;
@@ -383,6 +387,8 @@ export component SettingsWindow inherits Window {
                 }
 
                 if root.active-page == 6 : HistoryPage {
+                    // The rail belongs at the window edge, not beside the text.
+                    rail-overhang: Sheet.rail-overhang;
                     rows: root.history-rows;
                     keeping: root.history-enabled;
                     scope: root.history-scope;
@@ -393,6 +399,8 @@ export component SettingsWindow inherits Window {
                 }
 
                 if root.active-page == 7 : HotkeysPage {
+                    // The rail belongs at the window edge, not beside the text.
+                    rail-overhang: Sheet.rail-overhang;
                     rows: root.hotkey-rows;
                     summary: root.hotkeys-summary;
                     summary-signal: root.hotkeys-summary-signal;
@@ -403,77 +411,28 @@ export component SettingsWindow inherits Window {
         }
         }
 
-            // Rails, so that a window smaller than the workspace says so. They
-            // appear only when there is something to reach, are drawn in the
-            // same graphite as everything else, and can be dragged — a wheel
-            // reaches the vertical one, and nothing but a drag reaches the
-            // horizontal one.
-            if work.viewport-height > work.height : Rectangle {
+            // Rails, so that a window smaller than the workspace says so.
+            // They appear only when there is somewhere to go, are drawn in the
+            // same graphite as everything else, and can be dragged.
+            ScrollRail {
                 x: parent.width - 9px;
-                width: 5px;
-                height: work.height;
                 y: 0;
-
-                v-thumb := Rectangle {
-                    width: 100%;
-                    y: -work.viewport-y / work.viewport-height * parent.height;
-                    height: max(30px, work.height / work.viewport-height * parent.height);
-                    background: Sheet.muted;
-                    opacity: v-grip.pressed ? 0.85 : (v-grip.has-hover ? 0.6 : 0.34);
-                }
-
-                v-grip := TouchArea {
-                    property <length> from;
-                    mouse-cursor: default;
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down) {
-                            self.from = work.viewport-y;
-                        }
-                    }
-                    moved => {
-                        work.viewport-y = clamp(
-                            self.from
-                                - (self.mouse-y - self.pressed-y)
-                                    * (work.viewport-height / work.height),
-                            work.height - work.viewport-height,
-                            0px,
-                        );
-                    }
-                }
+                track: work.height;
+                content: work.viewport-height;
+                shown: work.height;
+                offset: -work.viewport-y;
+                scrolled(next) => { work.viewport-y = -next; }
             }
 
-            if work.viewport-width > work.width : Rectangle {
-                y: parent.height - 9px;
-                height: 5px;
-                width: work.width;
+            ScrollRail {
+                horizontal: true;
                 x: 0;
-
-                h-thumb := Rectangle {
-                    height: 100%;
-                    x: -work.viewport-x / work.viewport-width * parent.width;
-                    width: max(30px, work.width / work.viewport-width * parent.width);
-                    background: Sheet.muted;
-                    opacity: h-grip.pressed ? 0.85 : (h-grip.has-hover ? 0.6 : 0.34);
-                }
-
-                h-grip := TouchArea {
-                    property <length> from;
-                    mouse-cursor: default;
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down) {
-                            self.from = work.viewport-x;
-                        }
-                    }
-                    moved => {
-                        work.viewport-x = clamp(
-                            self.from
-                                - (self.mouse-x - self.pressed-x)
-                                    * (work.viewport-width / work.width),
-                            work.width - work.viewport-width,
-                            0px,
-                        );
-                    }
-                }
+                y: parent.height - 9px;
+                track: work.width;
+                content: work.viewport-width;
+                shown: work.width;
+                offset: -work.viewport-x;
+                scrolled(next) => { work.viewport-x = -next; }
             }
         }
 

@@ -25,8 +25,9 @@ use crate::{
     native_window_handle,
     overlay_presenter::OverlayPresenter,
     providers_view::{
-        SaveRefused, apply_provider_chain, audio_can_leave_device, check_provider_configuration,
-        provider_display_name, set_provider_field_value, sync_providers,
+        Kind, SaveRefused, apply_provider_chain, apply_translation_chain, audio_can_leave_device,
+        check_provider_configuration, check_translation_provider_configuration, locate,
+        row_display_name, set_provider_field_value, split_row_id, sync_providers,
     },
     settings_document::save_settings,
     settings_projection::{
@@ -1110,19 +1111,38 @@ pub(crate) fn wire_settings(
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         settings.on_move_provider(move |from, to| {
-            {
+            // The two lists are drawn as one, so both ends of a move have to
+            // land in the same list: dragging a speech provider into the
+            // translation order would be arranging a list it is not in.
+            let moved = {
                 let mut state = state.borrow_mut();
                 let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
                     return;
                 };
-                if from >= state.transcription_chain.len() {
+                let (Some((kind, from)), Some((to_kind, to))) =
+                    (locate(&state, from), locate(&state, to))
+                else {
+                    return;
+                };
+                if kind != to_kind {
                     return;
                 }
-                let to = to.min(state.transcription_chain.len() - 1);
-                let entry = state.transcription_chain.remove(from);
-                state.transcription_chain.insert(to, entry);
+                match kind {
+                    Kind::Speech => {
+                        let entry = state.transcription_chain.remove(from);
+                        state.transcription_chain.insert(to, entry);
+                    }
+                    Kind::Text => {
+                        let entry = state.translation_chain.remove(from);
+                        state.translation_chain.insert(to, entry);
+                    }
+                }
+                kind
+            };
+            match moved {
+                Kind::Speech => apply_provider_chain(&settings_weak, &state, &workers),
+                Kind::Text => apply_translation_chain(&settings_weak, &state, &workers),
             }
-            apply_provider_chain(&settings_weak, &state, &workers);
         });
     }
     {
@@ -1130,19 +1150,36 @@ pub(crate) fn wire_settings(
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         settings.on_toggle_provider(move |index| {
-            {
+            let toggled = {
                 let mut state = state.borrow_mut();
-                let Some(entry) = usize::try_from(index)
+                let Some((kind, position)) = usize::try_from(index)
                     .ok()
-                    .and_then(|index| state.transcription_chain.get_mut(index))
+                    .and_then(|index| locate(&state, index))
                 else {
                     return;
                 };
                 // Switching a service off keeps its place and its key. Only the
                 // order and this switch decide what is used.
-                entry.enabled = !entry.enabled;
+                let enabled = match kind {
+                    Kind::Speech => state
+                        .transcription_chain
+                        .get_mut(position)
+                        .map(|entry| &mut entry.enabled),
+                    Kind::Text => state
+                        .translation_chain
+                        .get_mut(position)
+                        .map(|entry| &mut entry.enabled),
+                };
+                let Some(enabled) = enabled else {
+                    return;
+                };
+                *enabled = !*enabled;
+                kind
+            };
+            match toggled {
+                Kind::Speech => apply_provider_chain(&settings_weak, &state, &workers),
+                Kind::Text => apply_translation_chain(&settings_weak, &state, &workers),
             }
-            apply_provider_chain(&settings_weak, &state, &workers);
         });
     }
     {
@@ -1191,15 +1228,27 @@ pub(crate) fn wire_settings(
         // previous version called two callbacks in a row, so an endpoint that
         // was rejected still had its key stored and the form closed as though
         // it had worked.
-        settings.on_save_provider(move |provider_id, secret, extra| {
-            let provider_id = provider_id.to_string();
-            let checked = check_provider_configuration(&provider_id, &secret, &extra);
+        settings.on_save_provider(move |row_id, secret, extra| {
+            let row_id = row_id.to_string();
+            // Which list this row is in, and which service inside it. The two
+            // lists both have an `azure` and a `local`, so a bare id would let
+            // a translation key be stored against the speech service.
+            let Some((kind, provider_id)) = split_row_id(&row_id) else {
+                return;
+            };
+            let provider_id = provider_id.to_owned();
+            let checked = match kind {
+                Kind::Speech => check_provider_configuration(&provider_id, &secret, &extra),
+                Kind::Text => {
+                    check_translation_provider_configuration(&provider_id, &secret, &extra)
+                }
+            };
             let (secret, extra) = match checked {
                 Ok(values) => values,
                 Err(SaveRefused(reason)) => {
                     if let Some(settings) = settings_weak.upgrade() {
                         settings.set_provider_problem(reason.into());
-                        settings.set_provider_problem_for(provider_id.clone().into());
+                        settings.set_provider_problem_for(row_id.clone().into());
                     }
                     return;
                 }
@@ -1211,24 +1260,46 @@ pub(crate) fn wire_settings(
             // order would leave a key addressed to the wrong place.
             {
                 let mut state = state.borrow_mut();
-                if let Some(entry) = state
-                    .transcription_chain
-                    .iter_mut()
-                    .find(|entry| entry.id == provider_id)
-                {
-                    set_provider_field_value(entry, extra.clone().unwrap_or_default());
+                match kind {
+                    Kind::Speech => {
+                        if let Some(entry) = state
+                            .transcription_chain
+                            .iter_mut()
+                            .find(|entry| entry.id == provider_id)
+                        {
+                            set_provider_field_value(entry, extra.clone().unwrap_or_default());
+                        }
+                    }
+                    Kind::Text => {
+                        if let Some(entry) = state
+                            .translation_chain
+                            .iter_mut()
+                            .find(|entry| entry.id == provider_id)
+                        {
+                            let region = extra.clone().unwrap_or_default();
+                            entry.region = (!region.is_empty()).then_some(region);
+                        }
+                    }
                 }
             }
             let _ = save_settings(&state.borrow());
 
             // The key goes to the worker, which owns the encrypted store. It is
             // never written to settings and never read back for display.
-            let sent = workers
-                .speech
-                .send(&SpeechWorkerCommand::SetProviderCredential {
-                    provider_id: provider_id.clone(),
-                    secret: Some(secret),
-                });
+            let sent = match kind {
+                Kind::Speech => workers
+                    .speech
+                    .send(&SpeechWorkerCommand::SetProviderCredential {
+                        provider_id: provider_id.clone(),
+                        secret: Some(secret),
+                    }),
+                Kind::Text => workers.translation.send(
+                    &TranslationWorkerCommand::SetTranslationProviderCredential {
+                        provider_id: provider_id.clone(),
+                        secret: Some(secret),
+                    },
+                ),
+            };
             if let Some(settings) = settings_weak.upgrade() {
                 settings.set_provider_problem("".into());
                 settings.set_provider_problem_for("".into());
@@ -1241,7 +1312,7 @@ pub(crate) fn wire_settings(
                     &settings_weak,
                     &format!(
                         "Storing the key for {}…",
-                        provider_display_name(&provider_id)
+                        row_display_name(kind, &provider_id)
                     ),
                 ),
                 Err(error) => set_status_problem(
@@ -1249,7 +1320,10 @@ pub(crate) fn wire_settings(
                     &format!("The key could not be stored: {error}"),
                 ),
             }
-            apply_provider_chain(&settings_weak, &state, &workers);
+            match kind {
+                Kind::Speech => apply_provider_chain(&settings_weak, &state, &workers),
+                Kind::Text => apply_translation_chain(&settings_weak, &state, &workers),
+            }
         });
     }
     {
@@ -1259,20 +1333,32 @@ pub(crate) fn wire_settings(
         // Deleting a key stays its own command, asked for in place. It is the
         // only path that clears one, which is why an empty Save is refused
         // rather than quietly treated as a deletion.
-        settings.on_forget_provider_key(move |provider_id| {
-            let provider_id = provider_id.to_string();
-            let sent = workers
-                .speech
-                .send(&SpeechWorkerCommand::SetProviderCredential {
-                    provider_id: provider_id.clone(),
-                    secret: None,
-                });
+        settings.on_forget_provider_key(move |row_id| {
+            let row_id = row_id.to_string();
+            let Some((kind, provider_id)) = split_row_id(&row_id) else {
+                return;
+            };
+            let provider_id = provider_id.to_owned();
+            let sent = match kind {
+                Kind::Speech => workers
+                    .speech
+                    .send(&SpeechWorkerCommand::SetProviderCredential {
+                        provider_id: provider_id.clone(),
+                        secret: None,
+                    }),
+                Kind::Text => workers.translation.send(
+                    &TranslationWorkerCommand::SetTranslationProviderCredential {
+                        provider_id: provider_id.clone(),
+                        secret: None,
+                    },
+                ),
+            };
             match sent {
                 Ok(()) => set_indicator_status(
                     &settings_weak,
                     &format!(
                         "Removing the key for {}…",
-                        provider_display_name(&provider_id)
+                        row_display_name(kind, &provider_id)
                     ),
                 ),
                 Err(error) => set_status_problem(

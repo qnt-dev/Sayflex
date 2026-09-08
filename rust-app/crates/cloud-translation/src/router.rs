@@ -71,6 +71,19 @@ pub enum RouteOutcome {
     Exhausted { attempts: Vec<Attempt> },
 }
 
+/// The translation being asked for.
+///
+/// The three of these travel together through every provider in the walk, and
+/// naming them once is clearer than repeating a text, an optional source and a
+/// target down the call chain.
+#[derive(Debug, Clone, Copy)]
+pub struct Translation<'a> {
+    pub text: &'a str,
+    /// `None` asks the service to detect it, which all three can do.
+    pub source: Option<&'a str>,
+    pub target: &'a str,
+}
+
 pub struct Router {
     chain: Chain,
     ledger: Ledger,
@@ -109,14 +122,17 @@ impl Router {
     /// missing key never becomes a failed request against somebody's quota.
     pub fn translate(
         &mut self,
-        text: &str,
-        source: Option<&str>,
-        target: &str,
+        asked: Translation<'_>,
         started: Instant,
         secret_for: &impl Fn(&ProviderId) -> Option<String>,
         executor: &impl RequestExecutor,
         cancel: &impl CancelSignal,
     ) -> RouteOutcome {
+        let Translation {
+            text,
+            source,
+            target,
+        } = asked;
         let candidates = self.chain.candidates(&self.ledger, started, |id| {
             !id.needs_credential() || secret_for(id).is_some()
         });
@@ -232,12 +248,9 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{AttemptOutcome, RequestExecutor, RouteOutcome, Router};
+    use super::{AttemptOutcome, RequestExecutor, RouteOutcome, Router, Translation};
     use crate::{
-        ProviderEntry, ProviderId,
-        chain::Chain,
-        failure::ProviderFailure,
-        request::RequestPlan,
+        ProviderEntry, ProviderId, chain::Chain, failure::ProviderFailure, request::RequestPlan,
     };
 
     struct Scripted {
@@ -255,7 +268,11 @@ mod tests {
     }
 
     impl RequestExecutor for Scripted {
-        fn execute(&self, plan: &RequestPlan, _budget: Duration) -> Result<String, ProviderFailure> {
+        fn execute(
+            &self,
+            plan: &RequestPlan,
+            _budget: Duration,
+        ) -> Result<String, ProviderFailure> {
             self.seen.borrow_mut().push(plan.url.clone());
             if self.answers.borrow().is_empty() {
                 return Err(ProviderFailure::Unavailable("no answer scripted".into()));
@@ -282,13 +299,19 @@ mod tests {
 
     #[test]
     fn the_first_service_that_answers_ends_the_walk() {
-        let mut router = Router::new(chain(&[ProviderId::DEEPL, ProviderId::GOOGLE, ProviderId::LOCAL]));
+        let mut router = Router::new(chain(&[
+            ProviderId::DEEPL,
+            ProviderId::GOOGLE,
+            ProviderId::LOCAL,
+        ]));
         let executor = Scripted::new(vec![Ok("привет".to_owned())]);
 
         let outcome = router.translate(
-            "hello",
-            Some("en"),
-            "ru",
+            Translation {
+                text: "hello",
+                source: Some("en"),
+                target: "ru",
+            },
             Instant::now(),
             &key,
             &executor,
@@ -296,7 +319,11 @@ mod tests {
         );
 
         match outcome {
-            RouteOutcome::Translated { provider, text, attempts } => {
+            RouteOutcome::Translated {
+                provider,
+                text,
+                attempts,
+            } => {
                 assert_eq!(provider.as_str(), ProviderId::DEEPL);
                 assert_eq!(text, "привет");
                 assert!(attempts.is_empty());
@@ -308,16 +335,22 @@ mod tests {
 
     #[test]
     fn a_spent_allowance_moves_on_to_the_next_service() {
-        let mut router = Router::new(chain(&[ProviderId::DEEPL, ProviderId::GOOGLE, ProviderId::LOCAL]));
+        let mut router = Router::new(chain(&[
+            ProviderId::DEEPL,
+            ProviderId::GOOGLE,
+            ProviderId::LOCAL,
+        ]));
         let executor = Scripted::new(vec![
             Err(ProviderFailure::QuotaExhausted { retry_after: None }),
             Ok("привет".to_owned()),
         ]);
 
         let outcome = router.translate(
-            "hello",
-            Some("en"),
-            "ru",
+            Translation {
+                text: "hello",
+                source: Some("en"),
+                target: "ru",
+            },
             Instant::now(),
             &key,
             &executor,
@@ -325,7 +358,9 @@ mod tests {
         );
 
         match outcome {
-            RouteOutcome::Translated { provider, attempts, .. } => {
+            RouteOutcome::Translated {
+                provider, attempts, ..
+            } => {
                 assert_eq!(provider.as_str(), ProviderId::GOOGLE);
                 assert_eq!(attempts.len(), 1);
             }
@@ -341,9 +376,11 @@ mod tests {
         let executor = Scripted::new(vec![Ok("never asked".to_owned())]);
 
         let outcome = router.translate(
-            "hello",
-            None,
-            "ru",
+            Translation {
+                text: "hello",
+                source: None,
+                target: "ru",
+            },
             Instant::now(),
             &key,
             &executor,
@@ -356,13 +393,19 @@ mod tests {
 
     #[test]
     fn an_empty_answer_stops_the_walk_rather_than_asking_everyone_for_the_same_nothing() {
-        let mut router = Router::new(chain(&[ProviderId::DEEPL, ProviderId::GOOGLE, ProviderId::LOCAL]));
+        let mut router = Router::new(chain(&[
+            ProviderId::DEEPL,
+            ProviderId::GOOGLE,
+            ProviderId::LOCAL,
+        ]));
         let executor = Scripted::new(vec![Err(ProviderFailure::Empty)]);
 
         let outcome = router.translate(
-            "   ",
-            None,
-            "ru",
+            Translation {
+                text: "   ",
+                source: None,
+                target: "ru",
+            },
             Instant::now(),
             &key,
             &executor,
@@ -390,9 +433,11 @@ mod tests {
         let executor = Scripted::new(vec![Ok("привет".to_owned())]);
 
         let outcome = router.translate(
-            "hello",
-            None,
-            "ru",
+            Translation {
+                text: "hello",
+                source: None,
+                target: "ru",
+            },
             Instant::now(),
             &key,
             &executor,
@@ -400,7 +445,9 @@ mod tests {
         );
 
         match outcome {
-            RouteOutcome::Translated { provider, attempts, .. } => {
+            RouteOutcome::Translated {
+                provider, attempts, ..
+            } => {
                 assert_eq!(provider.as_str(), ProviderId::GOOGLE);
                 assert!(matches!(
                     attempts[0].outcome,
@@ -422,9 +469,11 @@ mod tests {
         let executor = Scripted::new(vec![Ok("never asked".to_owned())]);
 
         let outcome = router.translate(
-            "hello",
-            None,
-            "ru",
+            Translation {
+                text: "hello",
+                source: None,
+                target: "ru",
+            },
             Instant::now(),
             &key,
             &executor,
@@ -436,22 +485,36 @@ mod tests {
     }
 
     #[test]
-    fn a_deadline_already_past_asks_nobody() {
+    fn a_deadline_already_past_asks_nobody_and_falls_back_to_the_local_engine() {
+        // The local engine is always in the list, even when the stored order
+        // does not mention it, so a walk with no time left does not end in
+        // nothing — it ends where it would have ended anyway, one step sooner.
         let mut router = Router::new(chain(&[ProviderId::DEEPL, ProviderId::GOOGLE]));
         let executor = Scripted::new(vec![Ok("too late".to_owned())]);
         let long_ago = Instant::now() - super::TOTAL_DEADLINE - Duration::from_secs(1);
 
-        let outcome = router.translate("hello", None, "ru", long_ago, &key, &executor, &|| false);
+        let outcome = router.translate(
+            Translation {
+                text: "hello",
+                source: None,
+                target: "ru",
+            },
+            long_ago,
+            &key,
+            &executor,
+            &|| false,
+        );
 
         match outcome {
-            RouteOutcome::Exhausted { attempts } => {
+            RouteOutcome::UseLocalEngine { attempts } => {
                 assert!(
                     attempts
                         .iter()
-                        .all(|attempt| matches!(attempt.outcome, AttemptOutcome::Skipped(_)))
+                        .all(|attempt| matches!(attempt.outcome, AttemptOutcome::Skipped(_))),
+                    "every service was skipped rather than asked: {attempts:?}"
                 );
             }
-            other => panic!("expected nothing to be asked, got {other:?}"),
+            other => panic!("expected the walk to hand back to the local engine, got {other:?}"),
         }
         assert!(executor.seen.borrow().is_empty());
     }

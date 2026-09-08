@@ -33,12 +33,25 @@ export component PageTitle inherits Text {
     letter-spacing: -0.7px;
 }
 
-export component PageLede inherits Text {
-    color: Sheet.muted;
-    font-size: Sheet.detail-size;
-    wrap: word-wrap;
-    // A sentence should not decide how wide the window opens.
-    max-width: 660px;
+/// A paragraph under a page title, held to a readable measure.
+///
+/// The measure is the text's, not the page's. It used to be a `max-width` on
+/// the Text itself, which in a vertical layout is a constraint on the layout:
+/// every page carrying a lede was 660 wide however wide its column was, so the
+/// lists stopped 36 pixels short of where the page ends and the scrollbar drawn
+/// at their edge sat in the middle of the margin. The spacer takes the
+/// difference instead.
+export component PageLede inherits HorizontalLayout {
+    in property <string> text;
+
+    Text {
+        text: root.text;
+        color: Sheet.muted;
+        font-size: Sheet.detail-size;
+        wrap: word-wrap;
+        max-width: 660px;
+    }
+    Rectangle { horizontal-stretch: 1; }
 }
 
 // ── the claim in the corner of a page ────────────────────

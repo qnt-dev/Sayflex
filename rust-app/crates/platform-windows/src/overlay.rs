@@ -308,6 +308,7 @@ fn configure_overlay_window_impl(
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
     }
+    dress_icon(hwnd);
     apply_overlay_contract(hwnd, use_backdrop)?;
 
     // SAFETY: All pointers refer to initialized buffers for the duration of
@@ -684,6 +685,7 @@ pub fn configure_action_window(window_handle: u64) -> Result<(), String> {
     if hwnd.is_null() {
         return Err("action window handle is not available".to_owned());
     }
+    dress_icon(hwnd);
     // An action window must accept mouse clicks without becoming foreground.
     // Keeping the editor foreground preserves both its selection and the
     // immutable target captured before the palette was shown.
@@ -1117,6 +1119,12 @@ const APPLICATION_ICON: u16 = 1;
 /// however many times the executable was rebuilt. Setting both sizes from the
 /// icon compiled into this binary means the button shows what is actually
 /// shipping, with no cache in the way.
+///
+/// Every window gets it, overlays included. The taskbar groups this process
+/// into one button and takes the icon from whichever window it decides
+/// represents the group; leaving the overlays without one meant the group could
+/// still be represented by a window that had nothing to offer, and the stale
+/// copy won again.
 ///
 /// A window keeps the handles it is given here for as long as it lives, and the
 /// process owns them until it exits; they are loaded from a resource rather

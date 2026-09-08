@@ -525,3 +525,82 @@ export component MenuButton inherits Rectangle {
         }
     }
 }
+
+// A scrollbar for anything that scrolls.
+//
+// Slint's Flickable and ListView both scroll silently: they take the wheel and
+// they take a drag, and neither draws anything to say there is more. A list cut
+// off at the bottom edge with no mark on it reads as a list that ends there.
+//
+// Bind it to the thing it reports on:
+//
+//     ScrollRail {
+//         content: list.viewport-height;
+//         shown: list.height;
+//         offset: -list.viewport-y;
+//         scrolled(next) => { list.viewport-y = -next; }
+//     }
+//
+// It shows itself only when there is somewhere to go, and it can be dragged.
+export component ScrollRail inherits Rectangle {
+    /// How long the content is along the axis this rail runs on.
+    in property <length> content;
+    /// How much of it is on screen.
+    in property <length> shown;
+    /// How far down, or across, the view currently is. Always positive, unlike
+    /// a Flickable's own viewport-x/y.
+    in property <length> offset;
+    in property <bool> horizontal: false;
+    callback scrolled(length);
+
+    /// How much of the thumb is left to travel once the minimum size has eaten
+    /// into it. Kept as one expression so the thumb and the drag agree.
+    property <length> reach: max(0px, root.content - root.shown);
+
+    /// How long the rail is. The use site knows, because it knows the thing
+    /// being scrolled; the component cannot ask its parent for it.
+    in property <length> track;
+
+    visible: root.reach > 0px;
+    background: transparent;
+    width: root.horizontal ? root.track : 5px;
+    height: root.horizontal ? 5px : root.track;
+
+    thumb := Rectangle {
+        x: root.horizontal
+            ? (root.reach > 0px ? root.offset / root.content * parent.width : 0px)
+            : 0px;
+        y: root.horizontal
+            ? 0px
+            : (root.reach > 0px ? root.offset / root.content * parent.height : 0px);
+        width: root.horizontal
+            ? max(30px, root.shown / root.content * parent.width)
+            : parent.width;
+        height: root.horizontal
+            ? parent.height
+            : max(30px, root.shown / root.content * parent.height);
+        background: Sheet.muted;
+        opacity: grip.pressed ? 0.85 : (grip.has-hover ? 0.6 : 0.34);
+    }
+
+    grip := TouchArea {
+        property <length> from;
+        mouse-cursor: default;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                self.from = root.offset;
+            }
+        }
+        moved => {
+            root.scrolled(clamp(
+                self.from
+                    + (root.horizontal
+                        ? (self.mouse-x - self.pressed-x)
+                        : (self.mouse-y - self.pressed-y))
+                        * (root.content / root.shown),
+                0px,
+                root.reach,
+            ));
+        }
+    }
+}

@@ -6,7 +6,7 @@ use uuid::Uuid;
 // Version 15 adds the ordered list of transcription providers: the local
 // engine and any network services the user has keys for.
 // All packaged processes must agree on this schema before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -190,6 +190,40 @@ pub struct TranscriptionProviderStatus {
     pub credential_hint: Option<String>,
 }
 
+/// One row of the user's ordered translation list.
+///
+/// Deliberately not the transcription list, and deliberately not a reuse of
+/// [`TranscriptionProviderEntry`]. A key for Azure Translator is not a key for
+/// Azure Speech, the free allowances are counted separately, and somebody who
+/// is willing to send audio to a service is not thereby willing to send the
+/// contents of their documents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationProviderEntry {
+    pub id: String,
+    pub enabled: bool,
+    /// The Azure resource's region. Nothing else needs one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+}
+
+/// What the worker knows about one translation row, for Settings to display.
+///
+/// A key never travels in this direction: `credential_hint` is a masked tail,
+/// enough to recognise which key is stored and useless for anything else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationProviderStatus {
+    pub id: String,
+    pub position: usize,
+    /// The row's own switch, independent of whether it can run right now.
+    pub enabled: bool,
+    pub available: bool,
+    /// Why it is unavailable, in words meant for the user. Empty when it is.
+    pub detail: String,
+    pub has_credential: bool,
+    #[serde(default)]
+    pub credential_hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TextActionIntent {
@@ -252,7 +286,13 @@ pub struct TranslationResult {
     pub translated_text: String,
     pub source_language: TranslationLanguage,
     pub target_language: TranslationLanguage,
-    pub tier: TranslationTier,
+    /// The local model that produced it. `None` when a service did, which is
+    /// the case `provider` names.
+    #[serde(default)]
+    pub tier: Option<TranslationTier>,
+    /// The service that produced it, when one did. `None` means the machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub processing_duration_ms: u64,
     #[serde(default)]
     pub first_token_duration_ms: u64,
@@ -448,6 +488,16 @@ pub enum TranslationWorkerCommand {
     Cancel {
         request_id: RequestId,
     },
+    /// Replaces the ordered translation list.
+    SetTranslationProviders {
+        providers: Vec<TranslationProviderEntry>,
+    },
+    /// Stores or clears the key for one translation provider. `None` clears it.
+    SetTranslationProviderCredential {
+        provider_id: String,
+        secret: Option<String>,
+    },
+    GetTranslationProviders,
     GetHistory {
         limit: usize,
     },
@@ -508,8 +558,24 @@ pub enum TranslationWorkerEvent {
     History {
         entries: Vec<TranslationHistoryEntry>,
     },
+    /// The ordered list with each row's availability, after any change.
+    TranslationProviders {
+        statuses: Vec<TranslationProviderStatus>,
+    },
+    /// A text was translated by a network service rather than locally.
+    TranslatedRemotely {
+        request_id: RequestId,
+        provider_id: String,
+    },
     Failed {
         request_id: Option<RequestId>,
+        /// The model the failure belongs to, when it belongs to one.
+        ///
+        /// Without it a download that died of a network fault left its row
+        /// offering a Cancel that cancelled nothing, because the desktop had to
+        /// guess which install had just ended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalog_id: Option<String>,
         code: String,
         message: String,
         retryable: bool,
@@ -824,7 +890,8 @@ mod tests {
                 translated_text: "привет".to_owned(),
                 source_language: TranslationLanguage::English,
                 target_language: TranslationLanguage::Russian,
-                tier: TranslationTier::Tiny,
+                tier: Some(TranslationTier::Tiny),
+                provider: None,
                 processing_duration_ms: 12,
                 first_token_duration_ms: 4,
                 backend_request_count: 1,

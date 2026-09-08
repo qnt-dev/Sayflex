@@ -11,6 +11,10 @@ use crate::{ProviderEntry, ProviderId};
 /// A request built for one provider, and how to read its answer back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestPlan {
+    /// Who this is for. The transport does not care, but the reader of the
+    /// answer does: the three services disagree about what a 403 means, and
+    /// telling them apart needs to know which one replied.
+    pub provider: ProviderId,
     pub url: String,
     /// Header name and value. The key travels here for two of the three; for
     /// Google it is in the query string, because that is the only form the v2
@@ -84,6 +88,7 @@ fn plan_deepl(secret: &str, text: &str, source: Option<&str>, target: &str) -> R
         body["source_lang"] = Value::String(deepl_language(source));
     }
     RequestPlan {
+        provider: ProviderId::new(ProviderId::DEEPL),
         url: format!("{host}/v2/translate"),
         headers: vec![
             (
@@ -131,16 +136,11 @@ fn plan_azure(
         url.push_str(&format!("&from={source}"));
     }
     Ok(RequestPlan {
+        provider: ProviderId::new(ProviderId::AZURE),
         url,
         headers: vec![
-            (
-                "Ocp-Apim-Subscription-Key".to_owned(),
-                secret.to_owned(),
-            ),
-            (
-                "Ocp-Apim-Subscription-Region".to_owned(),
-                region.to_owned(),
-            ),
+            ("Ocp-Apim-Subscription-Key".to_owned(), secret.to_owned()),
+            ("Ocp-Apim-Subscription-Region".to_owned(), region.to_owned()),
             ("Content-Type".to_owned(), "application/json".to_owned()),
         ],
         body: json!([{ "Text": text }]).to_string(),
@@ -163,6 +163,7 @@ fn plan_google(secret: &str, text: &str, source: Option<&str>, target: &str) -> 
         body["source"] = Value::String(source.to_owned());
     }
     RequestPlan {
+        provider: ProviderId::new(ProviderId::GOOGLE),
         url: format!(
             "https://translation.googleapis.com/language/translate/v2?key={}",
             urlencode(secret)
@@ -247,9 +248,9 @@ mod tests {
         assert!(plan.body.contains("\"target_lang\":\"EN-GB\""));
         assert!(plan.body.contains("\"source_lang\":\"RU\""));
         assert!(
-            plan.headers
-                .iter()
-                .any(|(name, value)| name == "Authorization" && value.starts_with("DeepL-Auth-Key "))
+            plan.headers.iter().any(
+                |(name, value)| name == "Authorization" && value.starts_with("DeepL-Auth-Key ")
+            )
         );
     }
 
@@ -288,17 +289,17 @@ mod tests {
         assert!(plan.url.contains("to=ru"));
         assert!(plan.url.contains("from=en"));
         assert!(
-            plan.headers.iter().any(|(name, value)| name
-                == "Ocp-Apim-Subscription-Region"
-                && value == "westeurope"),
+            plan.headers.iter().any(
+                |(name, value)| name == "Ocp-Apim-Subscription-Region" && value == "westeurope"
+            ),
             "the region is trimmed, because a pasted value usually is not"
         );
     }
 
     #[test]
     fn a_google_key_is_escaped_into_the_query_string() {
-        let plan = plan_request(&entry(ProviderId::GOOGLE), "abc 123&x", "hello", None, "ru")
-            .unwrap();
+        let plan =
+            plan_request(&entry(ProviderId::GOOGLE), "abc 123&x", "hello", None, "ru").unwrap();
 
         assert!(plan.url.contains("key=abc%20123%26x"));
         assert!(
@@ -310,11 +311,17 @@ mod tests {
     #[test]
     fn each_service_is_read_out_of_its_own_shape() {
         assert_eq!(
-            read_translation(ResponseShape::DeepL, r#"{"translations":[{"text":"привет"}]}"#),
+            read_translation(
+                ResponseShape::DeepL,
+                r#"{"translations":[{"text":"привет"}]}"#
+            ),
             Some("привет".to_owned())
         );
         assert_eq!(
-            read_translation(ResponseShape::Azure, r#"[{"translations":[{"text":"привет"}]}]"#),
+            read_translation(
+                ResponseShape::Azure,
+                r#"[{"translations":[{"text":"привет"}]}]"#
+            ),
             Some("привет".to_owned())
         );
         assert_eq!(
@@ -332,7 +339,10 @@ mod tests {
             read_translation(ResponseShape::DeepL, r#"{"translations":[{"text":"   "}]}"#),
             None
         );
-        assert_eq!(read_translation(ResponseShape::DeepL, "not json at all"), None);
+        assert_eq!(
+            read_translation(ResponseShape::DeepL, "not json at all"),
+            None
+        );
     }
 
     #[test]

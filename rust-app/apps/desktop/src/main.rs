@@ -29,8 +29,8 @@ use rust_protocol::{
     InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId, SpeechOutputMode,
     SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript,
     TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationHistoryEntry,
-    TranslationModelSummary, TranslationResult, TranslationTier, TranslationWorkerCommand,
-    TranslationWorkerEvent,
+    TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
+    TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize};
 use settings_document::{SavedSettings, data_root, load_settings, save_settings};
@@ -388,6 +388,11 @@ struct AppState {
     /// The same list as configured and persisted, which is what is sent to the
     /// worker and written back to settings.
     transcription_chain: Vec<TranscriptionProviderEntry>,
+    /// The translation list, kept apart from the transcription one all the way
+    /// down: a key for Azure Translator is not a key for Azure Speech, and
+    /// somebody willing to send audio is not thereby willing to send documents.
+    translation_providers: Vec<TranslationProviderStatus>,
+    translation_chain: Vec<TranslationProviderEntry>,
 }
 
 impl AppState {
@@ -440,6 +445,8 @@ impl AppState {
             downloads: HashMap::new(),
             transcription_providers: Vec::new(),
             transcription_chain: saved_settings.transcription_providers.clone(),
+            translation_providers: Vec::new(),
+            translation_chain: saved_settings.translation_providers.clone(),
             history_enabled: saved_settings.history_enabled,
         }
     }
@@ -728,6 +735,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             keep_warm: saved_settings.translation_keep_warm,
             history_enabled: saved_settings.history_enabled,
         })?;
+    if !saved_settings.translation_providers.is_empty() {
+        workers
+            .translation
+            .send(&TranslationWorkerCommand::SetTranslationProviders {
+                providers: saved_settings.translation_providers.clone(),
+            })?;
+    }
+    workers
+        .translation
+        .send(&TranslationWorkerCommand::GetTranslationProviders)?;
 
     wire_settings(
         &settings,
@@ -2108,11 +2125,8 @@ fn show_selection_translation_preview(
         preview.set_prepared(false);
         preview.invoke_reset_scroll();
         if slot.attached.get()
-            && let Err(error) = present_translation_preview(
-                preview,
-                translation_preview_presenter,
-                Some(target),
-            )
+            && let Err(error) =
+                present_translation_preview(preview, translation_preview_presenter, Some(target))
         {
             preview.set_request_id("".into());
             rust_app_core::diagnostics::log_line(&format!(
@@ -2979,6 +2993,41 @@ fn handle_translation_event(
                 state,
                 workers,
             );
+        }
+        TranslationWorkerEvent::TranslationProviders { statuses } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_providers count={} available={}",
+                statuses.len(),
+                statuses.iter().filter(|status| status.available).count()
+            ));
+            {
+                let mut state = state.borrow_mut();
+                if state.translation_chain.is_empty() {
+                    // Never arranged: adopt the worker's own order so the list
+                    // has something to show and the first change persists.
+                    state.translation_chain = statuses
+                        .iter()
+                        .map(|status| TranslationProviderEntry {
+                            id: status.id.clone(),
+                            enabled: status.enabled,
+                            region: None,
+                        })
+                        .collect();
+                }
+                state.translation_providers = statuses;
+            }
+            sync_providers(settings, state);
+        }
+        TranslationWorkerEvent::TranslatedRemotely {
+            request_id,
+            provider_id,
+        } => {
+            // Where the words came from is worth stating plainly: the text left
+            // the machine for this one.
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation request={request_id} provider={provider_id}"
+            ));
+            set_indicator_status(settings, &format!("Translated by {provider_id}."));
         }
         TranslationWorkerEvent::Cancelled { request_id } => {
             let pending = {

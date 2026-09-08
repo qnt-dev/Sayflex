@@ -7,7 +7,9 @@
 
 use std::{error::Error, fs, path::PathBuf};
 
-use rust_protocol::{SpeechOutputMode, TranscriptionProviderEntry, TranslationTier};
+use rust_protocol::{
+    SpeechOutputMode, TranscriptionProviderEntry, TranslationProviderEntry, TranslationTier,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -54,6 +56,7 @@ pub(crate) struct SavedSettings {
     /// The user's ordered transcription list. Empty means "never configured",
     /// and the worker keeps its own default of the local engine first.
     pub(crate) transcription_providers: Vec<TranscriptionProviderEntry>,
+    pub(crate) translation_providers: Vec<TranslationProviderEntry>,
 }
 
 impl Default for SavedSettings {
@@ -78,6 +81,7 @@ impl Default for SavedSettings {
             translation_delivery: TranslationDelivery::default(),
             history_enabled: true,
             transcription_providers: Vec::new(),
+            translation_providers: Vec::new(),
         }
     }
 }
@@ -183,6 +187,11 @@ impl<'de> Deserialize<'de> for SavedSettings {
             "transcription_providers",
             &mut settings.transcription_providers,
         );
+        read(
+            &document,
+            "translation_providers",
+            &mut settings.translation_providers,
+        );
         Ok(settings)
     }
 }
@@ -209,6 +218,7 @@ impl SavedSettings {
             translation_delivery: state.translation_delivery,
             history_enabled: state.history_enabled,
             transcription_providers: state.transcription_chain.clone(),
+            translation_providers: state.translation_chain.clone(),
         }
     }
 

@@ -12,7 +12,7 @@
 
 use rust_protocol::{
     HistoryEntry, ModelSummary, TranscriptionProviderEntry, TranscriptionProviderStatus,
-    TranslationModelSummary,
+    TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
 };
 
 use crate::{HistoryRow, ModelRow, ProviderRow, providers_view::provider_display_name};
@@ -177,32 +177,19 @@ pub(crate) fn provider_row(
         .unwrap_or_default();
     let unavailable_reason = !detail.is_empty();
 
-    // The state column is short words, because it is a column: a sentence
-    // there either elides to nothing useful or pushes the row's controls off
-    // the edge. The worker's own sentence goes on the detail line, where there
-    // is room for it and where the eye is already reading.
-    let (state, tone) = if !entry.enabled {
-        ("Switched off", tone::OFF)
-    } else if entry.id != "local" && !has_credential {
-        ("No key stored", tone::OFF)
-    } else if unavailable_reason {
-        if detail.starts_with("Key refused") {
-            ("Key refused", tone::REFUSED)
-        } else if detail.contains("available again") {
-            ("Cooling down", tone::WORKING)
-        } else {
-            ("Unavailable", tone::WORKING)
-        }
-    } else if unreachable {
-        ("Never reached", tone::OFF)
-    } else if first_usable == Some(position) {
-        ("In use", tone::ACTIVE)
-    } else {
-        ("Standing by", tone::RESTING)
-    };
+    let (state, tone) = row_state(
+        entry.enabled,
+        &entry.id,
+        has_credential,
+        &detail,
+        unreachable,
+        first_usable == Some(position),
+    );
+    let _ = unavailable_reason;
 
     ProviderRow {
-        id: entry.id.clone().into(),
+        id: qualified_row_id("speech", &entry.id).into(),
+        section: "SPEECH".into(),
         title: provider_display_name(&entry.id).into(),
         // The worker's sentence when it says more than the state column
         // already does. "Switched off" in both places is a row saying one
@@ -225,6 +212,140 @@ pub(crate) fn provider_row(
         state: state.into(),
         tone: tone.into(),
         unreachable,
+    }
+}
+
+/// The two short words a row shows in its state column, and their tone.
+///
+/// The column is short words because it is a column: a sentence there either
+/// elides to nothing useful or pushes the row's controls off the edge. The
+/// worker's own sentence goes on the detail line, where there is room for it
+/// and where the eye is already reading.
+///
+/// Shared by both lists, because a row is a row: whether it is a service that
+/// transcribes or one that translates changes nothing about what "cooling down"
+/// looks like.
+fn row_state(
+    enabled: bool,
+    id: &str,
+    has_credential: bool,
+    detail: &str,
+    unreachable: bool,
+    in_use: bool,
+) -> (&'static str, &'static str) {
+    if !enabled {
+        ("Switched off", tone::OFF)
+    } else if id != "local" && !has_credential {
+        ("No key stored", tone::OFF)
+    } else if !detail.is_empty() {
+        if detail.starts_with("Key refused") {
+            ("Key refused", tone::REFUSED)
+        } else if detail.contains("available again") || detail.starts_with("Waiting") {
+            ("Cooling down", tone::WORKING)
+        } else {
+            ("Unavailable", tone::WORKING)
+        }
+    } else if unreachable {
+        ("Never reached", tone::OFF)
+    } else if in_use {
+        ("In use", tone::ACTIVE)
+    } else {
+        ("Standing by", tone::RESTING)
+    }
+}
+
+/// Both lists have a row called `azure` and a row called `local`, and the two
+/// mean different services with different keys. A callback that carried the
+/// bare id would act on whichever of them it found first, which is how a key
+/// for one service ends up stored against the other.
+pub(crate) fn qualified_row_id(kind: &str, id: &str) -> String {
+    format!("{kind}:{id}")
+}
+
+/// One row of the translation order.
+pub(crate) fn translation_provider_row(
+    entry: &TranslationProviderEntry,
+    status: Option<&TranslationProviderStatus>,
+    position: usize,
+    first_local: Option<usize>,
+    first_usable: Option<usize>,
+) -> ProviderRow {
+    let unreachable = first_local.is_some_and(|local| position > local);
+    let has_credential = status.is_some_and(|status| status.has_credential);
+    let detail = status
+        .map(|status| status.detail.clone())
+        .unwrap_or_default();
+    let (state, tone) = row_state(
+        entry.enabled,
+        &entry.id,
+        has_credential,
+        &detail,
+        unreachable,
+        first_usable == Some(position),
+    );
+
+    ProviderRow {
+        id: qualified_row_id("text", &entry.id).into(),
+        section: "TEXT".into(),
+        title: translation_provider_display_name(&entry.id).into(),
+        detail: if detail.is_empty() || detail == state {
+            translation_provider_detail(entry, status)
+        } else {
+            detail
+        }
+        .into(),
+        enabled: entry.enabled,
+        available: status.is_some_and(|status| status.available),
+        needs_key: entry.id != "local",
+        key_hint: status
+            .and_then(|status| status.credential_hint.clone())
+            .unwrap_or_default()
+            .into(),
+        field_label: if entry.id == "azure" { "Region" } else { "" }.into(),
+        field_value: entry.region.clone().unwrap_or_default().into(),
+        state: state.into(),
+        tone: tone.into(),
+        unreachable,
+    }
+}
+
+pub(crate) fn translation_provider_display_name(id: &str) -> String {
+    match id {
+        "local" => "This computer".to_owned(),
+        "deepl" => "DeepL".to_owned(),
+        "azure" => "Microsoft Azure Translator".to_owned(),
+        "google" => "Google Cloud Translation".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// What the service is, plus the masked tail of the key if one is stored.
+///
+/// The free allowance each one publishes, because that is the thing a person
+/// choosing between them actually wants to know. No counter of what is left:
+/// nothing here is told, and a number this window invents is a number it then
+/// has to defend.
+fn translation_provider_detail(
+    entry: &TranslationProviderEntry,
+    status: Option<&TranslationProviderStatus>,
+) -> String {
+    let about = match entry.id.as_str() {
+        "local" => "Runs on this computer · nothing leaves it",
+        "deepl" => "Free tier: 500 000 characters a month",
+        "azure" => "Free tier F0: 2 million characters a month · needs a region",
+        "google" => "Free tier: 500 000 characters a month",
+        _ => "This build does not know this service",
+    };
+    match status.and_then(|status| status.credential_hint.as_deref()) {
+        Some(hint) if !hint.is_empty() => {
+            let extra = entry
+                .region
+                .as_deref()
+                .filter(|region| !region.is_empty())
+                .map_or_else(String::new, |region| format!(" · {region}"));
+            format!("Key {hint}{extra} · {about}")
+        }
+        _ => about.to_owned(),
     }
 }
 

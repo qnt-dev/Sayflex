@@ -9,6 +9,7 @@ license.workspace = true
 anyhow = "1.0.100"
 
 rust-app-core = { version = "0.5.27", path = "../../crates/app-core" }
+rust-cloud-translation = { version = "0.5.27", path = "../../crates/cloud-translation" }
 rust-model-manager = { version = "0.5.27", path = "../../crates/model-manager" }
 rust-platform-windows = { version = "0.5.27", path = "../../crates/platform-windows" }
 rust-protocol = { version = "0.5.27", path = "../../crates/protocol" }

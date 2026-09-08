@@ -31,7 +31,13 @@ export struct ModelRow {
 
 // One entry in the transcription order.
 export struct ProviderRow {
+    // Prefixed with which list this row belongs to — speech or text — because
+    // both lists have an `azure` and a `local`, and they are different services
+    // with different keys.
     id: string,
+    // The heading this row sits under. Rows arrive in one list and are grouped
+    // by this, the same way the model list groups speech and translation.
+    section: string,
     title: string,
     detail: string,
     enabled: bool,

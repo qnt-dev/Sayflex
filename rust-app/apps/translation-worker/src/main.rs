@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod history;
+mod providers;
 mod runtime;
 
 use std::{
@@ -27,6 +28,8 @@ use rust_protocol::{
 use rust_translation_engine::{
     TranslationCancelled, TranslationCatalog, TranslationEngine, TranslationPackDescriptor,
 };
+
+use crate::providers::{Providers, Routed};
 
 #[derive(Clone)]
 struct EventWriter {
@@ -109,6 +112,7 @@ impl TranslationCoordinator {
                 } else if let Err(error) = result {
                     let _ = writer.send(&TranslationWorkerEvent::Failed {
                         request_id: Some(request_id),
+                        catalog_id: None,
                         code: if state.selected_tier.is_some() {
                             "translation_failed"
                         } else {
@@ -203,12 +207,25 @@ impl InstallActor {
                     // A cancellation raised while nothing was installing must
                     // not cancel this operation.
                     worker_cancellation.reset();
+                    // Read before the command is consumed: a failure has to say
+                    // which row it belongs to, and after this the command is
+                    // gone.
+                    let installing = installing_tier(&command);
                     if let Err(error) = run_install(command, &state, &writer) {
                         let cancelled = error
                             .downcast_ref::<ModelInstallError>()
                             .is_some_and(|error| matches!(error, ModelInstallError::Cancelled));
                         let _ = writer.send(&TranslationWorkerEvent::Failed {
                             request_id: None,
+                            // The row that was installing gets its own failure,
+                            // so it can stop offering a Cancel for a download
+                            // that is already over.
+                            catalog_id: installing.and_then(|tier| {
+                                recover_lock(&state)
+                                    .pack(tier)
+                                    .ok()
+                                    .map(|pack| pack.id.clone())
+                            }),
                             code: if cancelled {
                                 "model_install_cancelled".to_owned()
                             } else {
@@ -249,6 +266,7 @@ struct WorkerState {
     locale: String,
     history: TranslationHistory,
     history_enabled: bool,
+    providers: Providers,
 }
 
 impl WorkerState {
@@ -263,6 +281,7 @@ impl WorkerState {
             keep_warm: true,
             engine: None,
             locale: system_language(),
+            providers: Providers::new(root.join("translation-credentials.dat")),
             history: TranslationHistory::load(root.join("translation-history.json")),
             history_enabled: true,
         })
@@ -376,6 +395,7 @@ fn main() -> Result<()> {
             Err(error) => {
                 writer.send(&TranslationWorkerEvent::Failed {
                     request_id: None,
+                    catalog_id: None,
                     code: "invalid_command".to_owned(),
                     message: error.to_string(),
                     retryable: false,
@@ -396,6 +416,7 @@ fn main() -> Result<()> {
         ) {
             writer.send(&TranslationWorkerEvent::Failed {
                 request_id: None,
+                catalog_id: None,
                 code: "translation_worker".to_owned(),
                 message: format!("{error:#}"),
                 retryable: true,
@@ -462,6 +483,40 @@ fn handle_command(
         TranslationWorkerCommand::Cancel { request_id } => {
             coordinator.cancel(request_id);
         }
+        TranslationWorkerCommand::SetTranslationProviders { providers } => {
+            let mut state = recover_lock(&state);
+            state.providers.set_entries(&providers);
+            writer.send(&TranslationWorkerEvent::TranslationProviders {
+                statuses: state.providers.statuses(),
+            })?;
+        }
+        TranslationWorkerCommand::SetTranslationProviderCredential {
+            provider_id,
+            secret,
+        } => {
+            let mut state = recover_lock(&state);
+            if let Err(error) = state
+                .providers
+                .set_credential(&provider_id, secret.as_deref())
+            {
+                writer.send(&TranslationWorkerEvent::Failed {
+                    request_id: None,
+                    catalog_id: None,
+                    code: "credential_store".to_owned(),
+                    message: format!("The key could not be stored: {error}"),
+                    retryable: false,
+                })?;
+            }
+            writer.send(&TranslationWorkerEvent::TranslationProviders {
+                statuses: state.providers.statuses(),
+            })?;
+        }
+        TranslationWorkerCommand::GetTranslationProviders => {
+            let state = recover_lock(&state);
+            writer.send(&TranslationWorkerEvent::TranslationProviders {
+                statuses: state.providers.statuses(),
+            })?;
+        }
         TranslationWorkerCommand::GetHistory { limit } => {
             let state = recover_lock(&state);
             writer.send(&TranslationWorkerEvent::History {
@@ -486,6 +541,21 @@ fn handle_command(
 
 /// Runs one installation command. Called only from the installer thread, which
 /// is why it may hold the worker lock for minutes.
+/// Which model an install command is about, when it is about one.
+///
+/// A failure has to name the row it belongs to. Without it the desktop guessed
+/// from whatever happened to be downloading, and a download that died of a
+/// network fault left its row offering a Cancel for something already over.
+const fn installing_tier(command: &InstallCommand) -> Option<TranslationTier> {
+    match command {
+        InstallCommand::Initialize { selected_tier, .. } => *selected_tier,
+        InstallCommand::EnsureModel { tier } | InstallCommand::SelectTier { tier, .. } => {
+            Some(*tier)
+        }
+        InstallCommand::Shutdown => None,
+    }
+}
+
 fn run_install(
     command: InstallCommand,
     state: &Arc<Mutex<WorkerState>>,
@@ -610,8 +680,57 @@ fn translate_request(
     target_language: Option<TranslationLanguage>,
     is_current: impl Fn() -> bool,
 ) -> Result<()> {
-    let tier = state.ensure_engine(writer)?;
     let started = Instant::now();
+    // The list decides first, and the local engine is one row in it. When it is
+    // the only row switched on — the default — this costs one comparison and
+    // the request goes straight down the path it always did, without so much as
+    // building a client.
+    if state.providers.routing_required() {
+        let source = source_language.map(TranslationLanguage::code);
+        let target = target_language.unwrap_or_default().code();
+        match state
+            .providers
+            .translate(&text, source, target, &is_current)
+        {
+            Routed::Translated {
+                provider,
+                text: translated,
+            } => {
+                writer.send(&TranslationWorkerEvent::TranslatedRemotely {
+                    request_id,
+                    provider_id: provider.clone(),
+                })?;
+                return finish(
+                    state,
+                    writer,
+                    TranslationResult {
+                        request_id,
+                        source_text: text,
+                        translated_text: translated,
+                        source_language: source_language.unwrap_or_default(),
+                        target_language: target_language.unwrap_or_default(),
+                        tier: None,
+                        provider: Some(provider),
+                        processing_duration_ms: elapsed_ms(started),
+                        first_token_duration_ms: 0,
+                        backend_request_count: 1,
+                        tokenize_duration_ms: 0,
+                        chunk_count: 1,
+                    },
+                );
+            }
+            Routed::Cancelled => return Err(TranslationCancelled.into()),
+            Routed::Exhausted { detail } => {
+                // Nobody in the list could answer, and the local engine was not
+                // in it or was switched off. Saying which service said what is
+                // the only way the user can fix it.
+                return Err(anyhow::anyhow!(detail));
+            }
+            // The walk reached the local engine. Below is what it does.
+            Routed::UseLocalEngine => {}
+        }
+    }
+    let tier = state.ensure_engine(writer)?;
     let mut last_partial_at = None;
     let mut last_partial_text = String::new();
     let output = state
@@ -662,13 +781,23 @@ fn translate_request(
         translated_text: output.text,
         source_language: output.source_language,
         target_language: output.target_language,
-        tier,
-        processing_duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        tier: Some(tier),
+        provider: None,
+        processing_duration_ms: elapsed_ms(started),
         first_token_duration_ms: output.first_token_duration_ms,
         backend_request_count: output.backend_request_count,
         tokenize_duration_ms: output.tokenize_duration_ms,
         chunk_count: output.chunk_count,
     };
+    finish(state, writer, result)
+}
+
+/// Records a finished translation and tells the desktop about it.
+///
+/// Shared by both paths so that a translation from a service is kept, reported
+/// and counted exactly like one from the machine — the only difference being
+/// what the result says about where it came from.
+fn finish(state: &mut WorkerState, writer: &EventWriter, result: TranslationResult) -> Result<()> {
     let created_unix_ms = unix_ms();
     if state.history_enabled {
         state.history.push(TranslationHistoryEntry {
@@ -684,6 +813,10 @@ fn translate_request(
         state.engine = None;
     }
     Ok(())
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn data_root() -> PathBuf {

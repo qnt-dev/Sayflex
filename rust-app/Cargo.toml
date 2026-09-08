@@ -7,6 +7,7 @@ members = [
     "apps/translation-worker",
     "crates/app-core",
     "crates/cloud-speech",
+    "crates/cloud-translation",
     "crates/model-manager",
     "crates/platform-windows",
     "crates/protocol",

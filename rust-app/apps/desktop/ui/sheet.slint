@@ -63,4 +63,12 @@ export global Sheet {
     out property <length> workspace-min-width:
         root.workspace-pad * 2 + root.nav-width + root.workspace-gap + root.page-min-width;
     out property <length> workspace-min-height: 30px + root.page-min-height;
+
+    // How far the window's right edge is from the right edge of a list.
+    //
+    // A scrollbar belongs at the edge of the window rather than tucked against
+    // the end of the text, and the only thing standing between the two is the
+    // workspace's own padding. Nine of it is left, so the rail sits the same
+    // distance from the edge as the workspace's own.
+    out property <length> rail-overhang: root.workspace-pad - 9px;
 }

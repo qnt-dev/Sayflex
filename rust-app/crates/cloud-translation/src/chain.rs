@@ -109,6 +109,14 @@ pub struct ProviderStatus {
     pub unavailable: Option<Unavailable>,
 }
 
+impl ProviderStatus {
+    /// Whether this row would be asked right now.
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        self.unavailable.is_none()
+    }
+}
+
 /// The user's ordered list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chain {
@@ -149,6 +157,29 @@ impl Chain {
 
     pub fn set_entries(&mut self, entries: Vec<ProviderEntry>) {
         *self = Self::new(entries);
+    }
+
+    /// Whether the walk has to happen at all.
+    ///
+    /// It does not when the local engine is switched on and no configured
+    /// service sits anywhere in the list: then the worker translates directly
+    /// and never builds a request. Asked of the configuration rather than of
+    /// the ledger, because an answer that changed as cooldowns came and went
+    /// would send the worker down the direct path at the exact moment a
+    /// recovered service should have been tried again.
+    #[must_use]
+    pub fn routing_required(&self, has_credential: impl Fn(&ProviderId) -> bool) -> bool {
+        let local_enabled = self
+            .entries
+            .iter()
+            .any(|entry| entry.id.is_local() && entry.enabled);
+        let service_configured = self.entries.iter().any(|entry| {
+            entry.enabled
+                && entry.id.is_known()
+                && !entry.id.is_local()
+                && has_credential(&entry.id)
+        });
+        service_configured || !local_enabled
     }
 
     /// Adds any provider this build knows and the stored list did not mention,
@@ -316,7 +347,12 @@ mod tests {
 
         // Storing a new key is a new fact about it.
         ledger.forget(&ProviderId::new(ProviderId::DEEPL));
-        assert_eq!(chain.candidates(&ledger, now, |id| keyed(id.as_str())).len(), 2);
+        assert_eq!(
+            chain
+                .candidates(&ledger, now, |id| keyed(id.as_str()))
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -350,10 +386,17 @@ mod tests {
             now,
         );
 
-        assert_eq!(chain.candidates(&ledger, now, |id| keyed(id.as_str())).len(), 1);
         assert_eq!(
             chain
-                .candidates(&ledger, now + Duration::from_secs(601), |id| keyed(id.as_str()))
+                .candidates(&ledger, now, |id| keyed(id.as_str()))
+                .len(),
+            1
+        );
+        assert_eq!(
+            chain
+                .candidates(&ledger, now + Duration::from_secs(601), |id| keyed(
+                    id.as_str()
+                ))
                 .len(),
             2
         );
@@ -375,12 +418,35 @@ mod tests {
     }
 
     #[test]
+    fn the_walk_is_skipped_when_only_the_local_engine_is_configured() {
+        let local_only = Chain::new(vec![ProviderEntry {
+            id: ProviderId::local(),
+            enabled: true,
+            region: None,
+        }]);
+
+        assert!(
+            !local_only.routing_required(|_| false),
+            "nothing to walk to, so the worker translates directly"
+        );
+        let mut with_service = local_only;
+        with_service.set_enabled(&ProviderId::new(ProviderId::DEEPL), true);
+        assert!(
+            with_service.routing_required(|id| !id.is_local()),
+            "a service that is switched on and keyed means the walk decides"
+        );
+    }
+
+    #[test]
     fn a_list_read_from_an_older_file_gains_the_providers_it_never_heard_of() {
         let chain = Chain::new(vec![ProviderEntry::new(ProviderId::local())]);
 
         for known in ProviderId::KNOWN {
             assert!(
-                chain.entries().iter().any(|entry| entry.id.as_str() == known),
+                chain
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.id.as_str() == known),
                 "{known} should have been added, switched off"
             );
         }
