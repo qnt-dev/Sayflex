@@ -316,7 +316,9 @@ pub(crate) fn run_indicator_preview(
             }
         }
         if let Some(indicator) = indicator.upgrade() {
-            animation_for_timer.borrow_mut().tick(&[&indicator]);
+            animation_for_timer
+                .borrow_mut()
+                .tick(std::slice::from_ref(&indicator));
         }
     });
     slint::run_event_loop()?;

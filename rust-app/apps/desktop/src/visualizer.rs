@@ -469,7 +469,7 @@ impl IndicatorAnimation {
         self.flow_voice_impulse = 0.0;
     }
 
-    pub(crate) fn tick(&mut self, indicators: &[&RecordingIndicator]) {
+    pub(crate) fn tick(&mut self, indicators: &[RecordingIndicator]) {
         if self.mode == IndicatorMode::Hidden
             || self.last_frame.elapsed() < INDICATOR_FRAME_INTERVAL
         {

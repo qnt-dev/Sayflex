@@ -19,21 +19,27 @@ use crate::{Fact, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow};
 /// Which page to open, from `--settings-preview=4`. Looking at one page at a
 /// time is how a page gets looked at.
 pub(crate) fn requested_page() -> i32 {
-    std::env::args()
+    let asked = std::env::args()
         .find_map(|argument| {
             argument
                 .strip_prefix("--settings-preview=")
                 .and_then(|value| value.parse::<i32>().ok())
         })
         .unwrap_or(0)
-        .clamp(0, 7)
+        // 8 is History again, with nothing in it — the state most people see
+        // first, and the one easiest to leave undrawn.
+        .clamp(0, 8);
+    if asked == 8 { HISTORY_PAGE } else { asked }
 }
+
+/// Where History sits in the navigation.
+const HISTORY_PAGE: i32 = 6;
 
 pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.SettingsPreview")?;
     let settings = SettingsWindow::new()?;
-    settings.set_app_version("0.5.27".into());
+    settings.set_app_version(env!("CARGO_PKG_VERSION").into());
     settings.set_today(rust_platform_windows::local_date_line().into());
     settings.set_runtime_status("SYSTEM READY".into());
     settings.set_active_page(requested_page());
@@ -527,6 +533,13 @@ fn fill_visuals(settings: &SettingsWindow) {
 }
 
 fn fill_history(settings: &SettingsWindow) {
+    // `--settings-preview=8` shows the page with nothing on it: the state most
+    // people see first, and the one easiest to leave undrawn.
+    if std::env::args().any(|argument| argument == "--settings-preview=8") {
+        settings.set_history_scope("Nothing kept yet".into());
+        settings.set_history_rows(ModelRc::new(VecModel::from(Vec::new())));
+        return;
+    }
     settings.set_history_scope("12 kept \u{b7} 3 went to a service".into());
     settings.set_history_rows(ModelRc::new(VecModel::from(vec![
         HistoryRow {

@@ -861,13 +861,16 @@ fn start_indicator_animation(
 ) -> Timer {
     let timer = Timer::default();
     let indicator_animation = Rc::clone(indicator_animation);
+    // One buffer, refilled. This ran sixty times a second on the same thread
+    // that draws the interface and handles its events, and allocated two
+    // vectors every time round: one for the upgraded handles and one holding
+    // references into the first.
+    let live = RefCell::new(Vec::with_capacity(indicators.len()));
     timer.start(TimerMode::Repeated, INDICATOR_FRAME_INTERVAL, move || {
-        let live_indicators = indicators
-            .iter()
-            .filter_map(slint::Weak::upgrade)
-            .collect::<Vec<_>>();
-        let references = live_indicators.iter().collect::<Vec<_>>();
-        indicator_animation.borrow_mut().tick(&references);
+        let mut live = live.borrow_mut();
+        live.clear();
+        live.extend(indicators.iter().filter_map(slint::Weak::upgrade));
+        indicator_animation.borrow_mut().tick(&live);
     });
     timer
 }

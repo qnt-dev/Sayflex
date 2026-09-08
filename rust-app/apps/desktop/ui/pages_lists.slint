@@ -305,6 +305,10 @@ export component HistoryPage inherits VerticalLayout {
     in property <[HistoryRow]> rows;
     in property <bool> keeping: true;
     in property <string> scope;
+    /// The combination that starts a dictation, named rather than described:
+    /// an empty page that tells you what to press is a page that can be acted
+    /// on.
+    in property <string> hotkey: "Ctrl + Alt + Space";
     callback set-keeping(bool);
     callback clear-history();
     callback refresh-history();
@@ -343,30 +347,112 @@ export component HistoryPage inherits VerticalLayout {
         }
     }
 
-    if root.rows.length == 0 : VerticalLayout {
-        padding-top: 26px;
-        spacing: 10px;
-        alignment: start;
-        Text {
-            text: root.keeping
-                ? "Nothing has been dictated yet."
-                : "History is switched off, so nothing is being kept.";
-            color: Sheet.ink;
-            font-size: Sheet.body-size;
-            font-weight: 650;
-        }
-        PageLede {
-            text: root.keeping
-                ? "Hold the dictate combination anywhere in Windows and the transcript appears here."
-                : "Switch it on above and dictations from then on will be kept.";
-        }
-    }
-
     // The list scrolls, so it says so. A list cut off at the bottom
     // edge with nothing on it reads as a list that ends there, which
     // is how rows below the fold go unread.
     Rectangle {
         vertical-stretch: 1;
+
+        // Nothing kept yet, drawn as the shape of what will be.
+        //
+        // Two lines of loose text under a heading is what an empty page looks
+        // like when nobody decided what it should look like: it reads as the
+        // page having failed to load. This says what will be here, how to put
+        // something here, and — in three greyed rows — what it will look like
+        // when it is.
+        if root.rows.length == 0 : Rectangle {
+            width: 100%;
+            height: 100%;
+
+            empty := VerticalLayout {
+                y: 30px;
+                width: min(parent.width, 520px);
+                height: self.preferred-height;
+                spacing: 0px;
+
+                Rectangle {
+                    height: 1px;
+                    background: Sheet.hairline;
+                }
+
+                VerticalLayout {
+                    padding-top: 22px;
+                    padding-bottom: 24px;
+                    padding-left: 22px;
+                    padding-right: 22px;
+                    spacing: 9px;
+
+                    Text {
+                        text: root.keeping ? "Nothing kept yet" : "History is switched off";
+                        color: Sheet.ink;
+                        font-size: 15px;
+                        font-weight: 650;
+                    }
+                    Text {
+                        text: root.keeping
+                            ? "Every dictation you finish is written here — the words, how long the audio ran, how long it took, and whether it was transcribed on this machine or by a service. It stays on this device and nowhere else."
+                            : "Nothing is being written to disk. Insert-last still works for the newest dictation, which is held in memory until SayFlex closes.";
+                        color: Sheet.muted;
+                        font-size: Sheet.detail-size;
+                        wrap: word-wrap;
+                    }
+
+                    Rectangle { height: 6px; }
+
+                    // The shape of a row, three times, at rest.
+                    for ghost in [0.30, 0.20, 0.13] : Rectangle {
+                        height: 34px;
+                        opacity: ghost;
+
+                        Rectangle {
+                            x: 0;
+                            y: 4px;
+                            width: parent.width * 0.62;
+                            height: 9px;
+                            background: Sheet.ink;
+                        }
+                        Rectangle {
+                            x: 0;
+                            y: 19px;
+                            width: parent.width * 0.38;
+                            height: 7px;
+                            background: Sheet.muted;
+                        }
+                        Rectangle {
+                            x: parent.width - 54px;
+                            y: 6px;
+                            width: 54px;
+                            height: 20px;
+                            border-width: 1px;
+                            border-color: Sheet.hairline;
+                            background: transparent;
+                        }
+                    }
+
+                    Rectangle { height: 8px; }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Rectangle {
+                            width: 9px;
+                            height: 9px;
+                            y: 3px;
+                            background: root.keeping ? Sheet.signal : Sheet.hairline;
+                        }
+                        Text {
+                            text: root.keeping
+                                ? "Hold " + root.hotkey + " anywhere in Windows to start one."
+                                : "Switch it on above and dictations from then on are kept.";
+                            color: Sheet.ink;
+                            font-size: Sheet.detail-size;
+                            font-weight: 600;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
 
         list := ListView {
             width: 100%;

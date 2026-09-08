@@ -401,6 +401,7 @@ export component SettingsWindow inherits Window {
                 }
 
                 if root.active-page == 6 : HistoryPage {
+                    hotkey: root.dictate-hotkey;
                     // The rail belongs at the window edge, not beside the text.
                     rail-overhang: Sheet.rail-overhang;
                     rows: root.history-rows;
