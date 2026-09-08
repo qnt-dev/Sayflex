@@ -11,10 +11,10 @@ use windows_sys::Win32::{
         DwmEnableBlurBehindWindow, DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute,
     },
     Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
-        CreateRectRgn, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
-        InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
-        ReleaseDC, SRCCOPY, SelectObject,
+        BI_RGB, BITMAPINFO, BitBlt, CAPTUREBLT, ClientToScreen, CreateCompatibleDC,
+        CreateDIBSection, CreateRectRgn, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC,
+        GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+        MonitorFromWindow, ReleaseDC, SRCCOPY, SelectObject,
     },
     System::{
         LibraryLoader::{GetModuleHandleW, GetProcAddress},
@@ -23,12 +23,15 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
         WindowsAndMessaging::{
-            GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
-            GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible,
-            SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_CAPTION,
-            WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
-            WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+            GUITHREADINFO, GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetForegroundWindow,
+            GetGUIThreadInfo, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+            GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG, ICON_SMALL,
+            IMAGE_ICON, IsWindowVisible, LR_DEFAULTCOLOR, LoadImageW, SM_CXICON, SM_CXSMICON,
+            SM_CYICON, SM_CYSMICON, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
+            SetWindowPos, ShowWindow, WM_SETICON, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
+            WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -721,6 +724,164 @@ pub fn prepare_action_window(window_handle: u64) -> Result<(), String> {
     prepare_interactive_window(window_handle)
 }
 
+/// Places the translation preview next to the text it is translating.
+///
+/// The old version put it at the cursor, on whatever monitor the cursor
+/// happened to be over. With the text on one screen and the pointer on
+/// another — which is where a pointer usually is after a keyboard shortcut —
+/// the translation opened on the wrong screen, and to the user it had not
+/// opened at all.
+///
+/// Three places to anchor to, best first:
+///
+/// 1. the caret in the target application, which is where the user is looking;
+/// 2. the target window, which is at least on the right screen;
+/// 3. the pointer, which is only right by coincidence.
+pub fn configure_translation_window_for_target(
+    window_handle: u64,
+    target_window_handle: u64,
+    target_thread_id: u32,
+) -> Result<(), String> {
+    configure_action_window(window_handle)?;
+    let hwnd = window_handle as usize as HWND;
+    apply_translation_window_contract(hwnd);
+
+    let anchor = caret_anchor(target_thread_id)
+        .or_else(|| window_anchor(target_window_handle))
+        .or_else(cursor_anchor);
+    let Some(anchor) = anchor else {
+        return Ok(());
+    };
+    place_near(hwnd, anchor)
+}
+
+/// Where the caret is on screen, if the target thread has one.
+///
+/// `GetGUIThreadInfo` gives it in the client coordinates of whichever window
+/// owns it, so it has to be mapped out. A thread with no caret — a browser, a
+/// canvas — reports an empty rectangle, and that is not an anchor.
+fn caret_anchor(thread_id: u32) -> Option<POINT> {
+    if thread_id == 0 {
+        return None;
+    }
+    // SAFETY: the struct is initialised with its own size, which is what the
+    // call requires, and is only read afterwards.
+    unsafe {
+        let mut info = GUITHREADINFO {
+            cbSize: size_of::<GUITHREADINFO>() as u32,
+            ..std::mem::zeroed()
+        };
+        if GetGUIThreadInfo(thread_id, &raw mut info) == 0 {
+            return None;
+        }
+        let caret = info.rcCaret;
+        if caret.right <= caret.left && caret.bottom <= caret.top {
+            return None;
+        }
+        let mut point = POINT {
+            x: caret.left,
+            y: caret.bottom,
+        };
+        if !info.hwndCaret.is_null() && ClientToScreen(info.hwndCaret, &raw mut point) == 0 {
+            return None;
+        }
+        Some(point)
+    }
+}
+
+/// The top-left of the target window, which is at least on the right screen.
+fn window_anchor(target_window_handle: u64) -> Option<POINT> {
+    if target_window_handle == 0 {
+        return None;
+    }
+    let target = target_window_handle as usize as HWND;
+    // SAFETY: the rectangle is written by the call and read after it succeeds.
+    unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(target, &mut rect) == 0 {
+            return None;
+        }
+        Some(POINT {
+            x: rect.left + 24,
+            y: rect.top + 24,
+        })
+    }
+}
+
+fn cursor_anchor() -> Option<POINT> {
+    // SAFETY: the point is written by the call.
+    unsafe {
+        let mut cursor = POINT::default();
+        (GetCursorPos(&mut cursor) != 0).then_some(cursor)
+    }
+}
+
+/// Puts the window just below and right of an anchor, kept inside the work area
+/// of whichever monitor the anchor is on.
+fn place_near(hwnd: HWND, anchor: POINT) -> Result<(), String> {
+    // SAFETY: every buffer is initialised before use and the handles belong to
+    // this process.
+    unsafe {
+        let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
+            return Ok(());
+        }
+        let mut monitor_info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        let mut window_rect = RECT::default();
+        if GetMonitorInfoW(monitor, &mut monitor_info) == 0
+            || GetWindowRect(hwnd, &mut window_rect) == 0
+        {
+            return Ok(());
+        }
+        let (x, y) = offer_position(
+            anchor,
+            window_rect.right - window_rect.left,
+            window_rect.bottom - window_rect.top,
+            monitor_info.rcWork,
+        );
+        if SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            return Err("SetWindowPos failed for translation window".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Where to put a window of this size next to an anchor, without letting it
+/// leave the monitor's work area.
+///
+/// Separated from the Win32 around it because the arithmetic is the part that
+/// goes wrong: a window wider than the work area used to produce a maximum
+/// below the minimum, which `clamp` panics on.
+fn offer_position(anchor: POINT, width: i32, height: i32, work: RECT) -> (i32, i32) {
+    const GAP_X: i32 = 18;
+    const GAP_Y: i32 = 22;
+    const MARGIN: i32 = 8;
+
+    let left = work.left + MARGIN;
+    let top = work.top + MARGIN;
+    let x = (anchor.x + GAP_X).clamp(left, (work.right - width - MARGIN).max(left));
+    let y = (anchor.y + GAP_Y).clamp(top, (work.bottom - height - MARGIN).max(top));
+    (x, y)
+}
+
+/// Places the preview with nothing to go on but the pointer.
+///
+/// Kept for the paths that have no target — the translator window opened from
+/// Settings, and the preview modes.
 pub fn configure_translation_window(window_handle: u64) -> Result<(), String> {
     configure_action_window(window_handle)?;
     let hwnd = window_handle as usize as HWND;
@@ -941,7 +1102,51 @@ pub fn configure_standard_window(window_handle: u64) -> Result<(), String> {
         }
     }
     dress_caption(hwnd);
+    dress_icon(hwnd);
     Ok(())
+}
+
+/// The resource id `winresource` gives the icon it embeds from `build.rs`.
+const APPLICATION_ICON: u16 = 1;
+
+/// Hands the window its own icon at both sizes Windows asks for.
+///
+/// Slint sets only the small icon, so `WM_GETICON` with `ICON_BIG` answered
+/// zero and the taskbar fell back to Explorer's cached copy of the executable's
+/// icon — which was the yellow mark from before the redesign and stayed yellow
+/// however many times the executable was rebuilt. Setting both sizes from the
+/// icon compiled into this binary means the button shows what is actually
+/// shipping, with no cache in the way.
+///
+/// A window keeps the handles it is given here for as long as it lives, and the
+/// process owns them until it exits; they are loaded from a resource rather
+/// than created, so there is nothing to destroy.
+fn dress_icon(hwnd: HWND) {
+    // SAFETY: the module handle is this executable's, the resource id is the
+    // one `build.rs` embeds, and the metrics calls take no pointers.
+    unsafe {
+        let module = GetModuleHandleW(null_mut());
+        if module.is_null() {
+            return;
+        }
+        for (which, cx, cy) in [
+            (ICON_BIG, SM_CXICON, SM_CYICON),
+            (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
+        ] {
+            let icon = LoadImageW(
+                module,
+                APPLICATION_ICON as usize as *const u16,
+                IMAGE_ICON,
+                GetSystemMetrics(cx),
+                GetSystemMetrics(cy),
+                LR_DEFAULTCOLOR,
+            );
+            if icon.is_null() {
+                continue;
+            }
+            SendMessageW(hwnd, WM_SETICON, which as usize, icon as isize);
+        }
+    }
 }
 
 /// Paints the title bar in the window's own material.
@@ -1140,5 +1345,68 @@ mod backdrop_tests {
         assert!(pixels[4] > 0);
         assert!(pixels[2 * 4] < u8::MAX);
         assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX));
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::{POINT, RECT, offer_position};
+
+    /// A second monitor to the right of the first, as Windows lays them out.
+    fn second_screen() -> RECT {
+        RECT {
+            left: 3840,
+            top: 0,
+            right: 7680,
+            bottom: 2160,
+        }
+    }
+
+    #[test]
+    fn a_window_is_placed_beside_its_anchor() {
+        let anchor = POINT { x: 4000, y: 500 };
+        let (x, y) = offer_position(anchor, 400, 200, second_screen());
+
+        assert_eq!((x, y), (4018, 522));
+    }
+
+    #[test]
+    fn an_anchor_near_the_edge_pulls_the_window_back_onto_the_screen() {
+        // The caret at the far right of a monitor would otherwise put the
+        // preview half onto the next one, or off the desktop entirely.
+        let anchor = POINT { x: 7600, y: 2100 };
+        let (x, y) = offer_position(anchor, 400, 200, second_screen());
+
+        assert_eq!(x, 7680 - 400 - 8);
+        assert_eq!(y, 2160 - 200 - 8);
+    }
+
+    #[test]
+    fn a_window_larger_than_the_screen_is_pinned_rather_than_panicking() {
+        // `clamp` panics when the maximum is below the minimum, which is what a
+        // window wider than the work area produces.
+        let anchor = POINT { x: 4000, y: 500 };
+        let (x, y) = offer_position(anchor, 9000, 9000, second_screen());
+
+        assert_eq!((x, y), (3848, 8));
+    }
+
+    #[test]
+    fn an_anchor_on_one_screen_never_places_the_window_on_another() {
+        // The failure this replaces: the text was at x=52 on the first monitor
+        // and the translation opened at x=6319 on the third, because the
+        // placement followed the pointer.
+        let first = RECT {
+            left: 0,
+            top: 0,
+            right: 3840,
+            bottom: 2160,
+        };
+        let (x, _) = offer_position(POINT { x: 52, y: 400 }, 400, 200, first);
+
+        assert!(
+            (first.left..first.right).contains(&x),
+            "the window stayed on the monitor its anchor was on"
+        );
     }
 }

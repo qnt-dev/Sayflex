@@ -30,6 +30,22 @@ use rust_protocol::{
 use speculation::SpeculationScheduler;
 use transcription::TranscriptionCommand;
 
+/// Whether this build can run a speculative pass without the final one paying
+/// for it.
+///
+/// There is one inference actor. On a GPU a speculative pass over the
+/// uncommitted tail finishes in a fraction of a second, so the final job that
+/// queues behind it waits for almost nothing and the preview is free. On the
+/// CPU build the same pass takes seconds, and the final job — the one whose
+/// text actually gets typed — waits for every one of them: a dictation that
+/// should have taken a hundred seconds took a hundred and ninety-five, and the
+/// difference was entirely previews nobody read.
+///
+/// So the CPU build does not speculate, whatever the setting asks for. The
+/// setting still governs the accelerated builds, where it costs what it says
+/// it costs.
+const SPECULATION_IS_AFFORDABLE: bool = cfg!(any(feature = "cuda", feature = "vulkan"));
+
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
     if env::args().nth(1).as_deref() == Some("--transcribe-wav") {
@@ -181,7 +197,7 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
         inference.clone(),
     )?;
     let mut output_mode = SpeechOutputMode::OriginalLanguage;
-    let mut fast_release_previews = true;
+    let mut fast_release_previews = SPECULATION_IS_AFFORDABLE;
 
     let stdin = io::stdin();
     for line in BufReader::new(stdin.lock()).lines() {
@@ -213,7 +229,8 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                     enabled: history_enabled,
                 });
                 output_mode = requested_output_mode;
-                fast_release_previews = requested_fast_release_previews;
+                fast_release_previews =
+                    requested_fast_release_previews && SPECULATION_IS_AFFORDABLE;
                 let selected_model_id = if catalog.find(&requested).is_some() {
                     requested
                 } else {

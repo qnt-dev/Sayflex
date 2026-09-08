@@ -44,4 +44,23 @@ export global Sheet {
     out property <length> row-height: 56px;
     out property <length> gutter: 22px;
     out property <length> nav-width: 238px;
+
+    // ── the size the workspace is drawn at ──
+    //
+    // Every page is composed against these two numbers: the widest page needs
+    // 592 for its own columns, and the tallest needs 474 between the topline
+    // and the footer. The workspace never lays out smaller than this — below
+    // it, it scrolls — so a page is never asked to draw itself into less room
+    // than it was designed for, and nothing is ever cut off the bottom or the
+    // right.
+    //
+    // 40 of padding on each side, the nav column, and 30 between them make up
+    // the rest of the width.
+    out property <length> page-min-width: 592px;
+    out property <length> page-min-height: 474px;
+    out property <length> workspace-pad: 40px;
+    out property <length> workspace-gap: 30px;
+    out property <length> workspace-min-width:
+        root.workspace-pad * 2 + root.nav-width + root.workspace-gap + root.page-min-width;
+    out property <length> workspace-min-height: 30px + root.page-min-height;
 }

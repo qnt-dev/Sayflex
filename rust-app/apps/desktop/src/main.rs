@@ -2111,7 +2111,7 @@ fn show_selection_translation_preview(
             && let Err(error) = present_translation_preview(
                 preview,
                 translation_preview_presenter,
-                Some(target.window_handle),
+                Some(target),
             )
         {
             preview.set_request_id("".into());
@@ -2139,12 +2139,24 @@ fn show_selection_translation_preview(
 fn present_translation_preview(
     preview: &TranslationPreview,
     presenter: &OverlayPresenter,
-    target_window_handle: Option<u64>,
+    target: Option<TargetSnapshot>,
 ) -> Result<(), String> {
     let ticket = presenter.begin_prepare()?;
     let handle = slint_window_handle(preview.window())
         .ok_or_else(|| "native translation-preview HWND is unavailable".to_owned())?;
-    if let Err(error) = rust_platform_windows::configure_translation_window(handle) {
+    // Placed by the text it is translating, not by the pointer. The snapshot
+    // was already here, used only to hand focus back; it also knows which
+    // screen the user is looking at, which is the thing the placement was
+    // guessing at and getting wrong across monitors.
+    let placed = match &target {
+        Some(target) => rust_platform_windows::configure_translation_window_for_target(
+            handle,
+            target.window_handle,
+            target.thread_id,
+        ),
+        None => rust_platform_windows::configure_translation_window(handle),
+    };
+    if let Err(error) = placed {
         presenter.abort_prepare(preview.window(), ticket, "configure", &error);
         return Err(error);
     }
@@ -2155,7 +2167,7 @@ fn present_translation_preview(
         presenter.abort_prepare(preview.window(), ticket, "await_frame", &error);
         return Err(error);
     }
-    if let Some(target_window_handle) = target_window_handle
+    if let Some(target_window_handle) = target.map(|target| target.window_handle)
         && let Err(error) = rust_platform_windows::restore_target_if_our_action_window_activated(
             target_window_handle,
         )

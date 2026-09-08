@@ -29,12 +29,12 @@ pub use overlay::{
     cloak_overlay_window, conceal_overlay_window, configure_action_window,
     configure_action_window_for_target, configure_blue_glass_overlay_window,
     configure_overlay_window, configure_standard_window, configure_translation_window,
-    configure_transparent_overlay_window, disable_translation_live_backdrop,
-    enable_translation_live_backdrop, prepare_action_window, prepare_blue_glass_overlay_window,
-    prepare_overlay_window, prepare_translation_window, prepare_transparent_overlay_window,
-    primary_pointer_button_is_down, reconcile_interactive_overlay_window_contract,
-    reconcile_overlay_window_contract, request_repaint,
-    restore_target_if_our_action_window_activated, reveal_overlay_window,
+    configure_translation_window_for_target, configure_transparent_overlay_window,
+    disable_translation_live_backdrop, enable_translation_live_backdrop, prepare_action_window,
+    prepare_blue_glass_overlay_window, prepare_overlay_window, prepare_translation_window,
+    prepare_transparent_overlay_window, primary_pointer_button_is_down,
+    reconcile_interactive_overlay_window_contract, reconcile_overlay_window_contract,
+    request_repaint, restore_target_if_our_action_window_activated, reveal_overlay_window,
     verify_interactive_overlay_window_contract, verify_overlay_window_contract,
 };
 #[cfg(windows)]
@@ -205,6 +205,15 @@ pub fn prepare_action_window(_window_handle: u64) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn configure_translation_window(_window_handle: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn configure_translation_window_for_target(
+    _window_handle: u64,
+    _target_window_handle: u64,
+    _target_thread_id: u32,
+) -> Result<(), String> {
     Ok(())
 }
 

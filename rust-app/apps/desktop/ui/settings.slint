@@ -1,10 +1,9 @@
 // The settings window.
 //
-// The shell is three rows that never scroll — topline, workspace, footer — and
-// the workspace is the only thing that gives. A column whose content can
-// outgrow the window scrolls on its own; the window itself has a floor of
-// 940×640, below which the third column and the footer would simply leave the
-// screen.
+// The shell is three rows: topline, workspace, footer. The topline and the
+// footer are a fixed height and always fit; the workspace takes the rest and
+// scrolls when the rest is less than a page needs, which is what lets the
+// window be dragged to any size without anything being cut off.
 
 import { Sheet } from "sheet.slint";
 import { Fact } from "parts.slint";
@@ -58,13 +57,12 @@ component NavItem inherits Rectangle {
 export component SettingsWindow inherits Window {
     title: "SayFlex";
     icon: @image-url("../assets/tray-icon.svg");
-    // The floor every page is drawn to fit. Below it the two-column workspace
-    // has nowhere left to give and there is no outer scroll to fall back on,
-    // so the window refuses to go smaller rather than cutting the footer off.
-    // The window opens at whatever the tallest page needs, which is a little
-    // above this.
-    min-width: 940px;
-    min-height: 640px;
+    // Small enough to be worth dragging to. The pages are still drawn at the
+    // size they were designed for; the workspace scrolls to whatever is left,
+    // so this number decides how small the window may get and nothing else.
+    // The topline and the footer are the only parts that must always fit.
+    min-width: 520px;
+    min-height: 300px;
     // Without these the window opens at whatever the current page happens to
     // need and changes size when the page does, which is the interface moving
     // under the pointer.
@@ -227,12 +225,33 @@ export component SettingsWindow inherits Window {
         }
 
         // ── workspace ──
-        HorizontalLayout {
+        //
+        // The pages are drawn at a fixed size and do not reflow, so a window
+        // smaller than that size has to do something with the difference. It
+        // used to cut it off: the declared floor of 940x640 was below what the
+        // layout actually needed, so at the floor the footer sat on top of the
+        // last rows and the bottom of the page was simply gone, while the
+        // window refused to shrink more than sixty pixels before stopping.
+        //
+        // Now the workspace is always laid out at its own size and scrolls when
+        // the window is smaller. Nothing is ever cut off, and the window is free
+        // to be as small as the person using it wants.
+        Rectangle {
             vertical-stretch: 1;
-            padding-left: 40px;
-            padding-right: 40px;
+
+        work := Flickable {
+            width: 100%;
+            height: 100%;
+            viewport-width: max(self.width, Sheet.workspace-min-width);
+            viewport-height: max(self.height, Sheet.workspace-min-height);
+
+        HorizontalLayout {
+            width: parent.viewport-width;
+            height: parent.viewport-height;
+            padding-left: Sheet.workspace-pad;
+            padding-right: Sheet.workspace-pad;
             padding-top: 30px;
-            spacing: 30px;
+            spacing: Sheet.workspace-gap;
 
             VerticalLayout {
                 width: Sheet.nav-width;
@@ -259,17 +278,17 @@ export component SettingsWindow inherits Window {
 
             // The page fills the column. Pages whose rows can outgrow it put
             // those rows in a ListView, which scrolls; the rest are drawn to
-            // fit the 940x640 floor this window declares.
+            // the one size in `Sheet`.
             //
-            // The floor is stated here rather than left to whichever page is
-            // open, because a window that reports a different minimum for each
-            // page is a window that resizes itself as you walk through it —
+            // That size is stated here rather than left to whichever page is
+            // open, because a column that reports a different minimum for each
+            // page makes the workspace change size as you walk through it —
             // 720 tall on Dictation, 640 on Providers, jumping under the
-            // pointer. 474 is what the floor leaves between the topline and
-            // the footer.
+            // pointer.
             page := VerticalLayout {
                 horizontal-stretch: 1;
-                min-height: 474px;
+                min-width: Sheet.page-min-width;
+                min-height: Sheet.page-min-height;
                 spacing: 0px;
 
                 if root.active-page == 0 : OverviewPage {
@@ -379,6 +398,81 @@ export component SettingsWindow inherits Window {
                     summary-signal: root.hotkeys-summary-signal;
                     toggle-row(index, next) => { root.set-hotkey-enabled(index, next); }
                     set-mode(menu, value) => { root.set-text-action-mode(value); }
+                }
+            }
+        }
+        }
+
+            // Rails, so that a window smaller than the workspace says so. They
+            // appear only when there is something to reach, are drawn in the
+            // same graphite as everything else, and can be dragged — a wheel
+            // reaches the vertical one, and nothing but a drag reaches the
+            // horizontal one.
+            if work.viewport-height > work.height : Rectangle {
+                x: parent.width - 9px;
+                width: 5px;
+                height: work.height;
+                y: 0;
+
+                v-thumb := Rectangle {
+                    width: 100%;
+                    y: -work.viewport-y / work.viewport-height * parent.height;
+                    height: max(30px, work.height / work.viewport-height * parent.height);
+                    background: Sheet.muted;
+                    opacity: v-grip.pressed ? 0.85 : (v-grip.has-hover ? 0.6 : 0.34);
+                }
+
+                v-grip := TouchArea {
+                    property <length> from;
+                    mouse-cursor: default;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down) {
+                            self.from = work.viewport-y;
+                        }
+                    }
+                    moved => {
+                        work.viewport-y = clamp(
+                            self.from
+                                - (self.mouse-y - self.pressed-y)
+                                    * (work.viewport-height / work.height),
+                            work.height - work.viewport-height,
+                            0px,
+                        );
+                    }
+                }
+            }
+
+            if work.viewport-width > work.width : Rectangle {
+                y: parent.height - 9px;
+                height: 5px;
+                width: work.width;
+                x: 0;
+
+                h-thumb := Rectangle {
+                    height: 100%;
+                    x: -work.viewport-x / work.viewport-width * parent.width;
+                    width: max(30px, work.width / work.viewport-width * parent.width);
+                    background: Sheet.muted;
+                    opacity: h-grip.pressed ? 0.85 : (h-grip.has-hover ? 0.6 : 0.34);
+                }
+
+                h-grip := TouchArea {
+                    property <length> from;
+                    mouse-cursor: default;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down) {
+                            self.from = work.viewport-x;
+                        }
+                    }
+                    moved => {
+                        work.viewport-x = clamp(
+                            self.from
+                                - (self.mouse-x - self.pressed-x)
+                                    * (work.viewport-width / work.width),
+                            work.width - work.viewport-width,
+                            0px,
+                        );
+                    }
                 }
             }
         }

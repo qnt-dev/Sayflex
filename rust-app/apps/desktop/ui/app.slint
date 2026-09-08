@@ -40,6 +40,18 @@ global Theme {
     out property <brush> red-soft: #d85c5c1c;
     out property <brush> acrylic: #101114e8;
     out property <brush> glass: #0c0e12c4;
+
+    // ── the trace, and the one accent ──
+    //
+    // The overlay was drawn in #FFD400 from before the redesign, which is the
+    // one colour the rest of the product no longer has anywhere. The mark sets
+    // the rule the overlay now follows: on a dark ground the waveform is the
+    // same off-white as the bars in the icon, and the single warm accent is
+    // reserved for the one element that reports state — the disc — which is the
+    // corner square of the mark doing the same job.
+    out property <brush> trace: #f5f5f2;
+    out property <brush> trace-highlight: #ffffff;
+    out property <brush> signal: #b8501c;
 }
 
 component ActionButton inherits Rectangle {
@@ -162,9 +174,14 @@ export component RecordingIndicator inherits Window {
     in property <float> visual-opacity: 1;
     in-out property <bool> prepared: false;
 
+    // The pill the trace is drawn on is the same square the mark is: the
+    // redesign's ink, with one shade above it for the edge. It was two greys
+    // left over from before the redesign, a little browner and a little
+    // lighter, which read as a different product to the icon beside it in the
+    // taskbar.
     Rectangle {
         border-radius: root.visualizer-style >= 4 ? 18px : 10px;
-        background: root.visualizer-style >= 4 ? transparent : #2c2f31;
+        background: root.visualizer-style >= 4 ? transparent : #23262b;
         opacity: root.prepared ? root.visual-opacity : 0;
         transform-origin: { x: self.width / 2, y: self.height / 2 };
         transform-scale: root.visual-scale;
@@ -175,7 +192,7 @@ export component RecordingIndicator inherits Window {
             width: parent.width - (root.visualizer-style >= 4 ? 0px : 6px);
             height: parent.height - (root.visualizer-style >= 4 ? 0px : 6px);
             border-radius: root.visualizer-style >= 4 ? 16px : 7px;
-            background: root.visualizer-style >= 4 ? transparent : #272727;
+            background: root.visualizer-style >= 4 ? transparent : #111317;
 
             if root.visualizer-style == 5 : Image {
                 source: root.flow-sphere-frame;
@@ -263,7 +280,7 @@ export component RecordingIndicator inherits Window {
                             background: line.color-index == 0
                                 ? #ef5048
                                 : line.color-index == 1
-                                    ? #ffd24a
+                                    ? Theme.signal
                                     : #ece9e1;
                             opacity: line.glow * 0.2;
                         }
@@ -277,7 +294,7 @@ export component RecordingIndicator inherits Window {
                             background: line.color-index == 0
                                 ? #ef5048
                                 : line.color-index == 1
-                                    ? #ffd24a
+                                    ? Theme.signal
                                     : #ece9e1;
                             opacity: line.opacity;
                         }
@@ -305,7 +322,7 @@ export component RecordingIndicator inherits Window {
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
                         border-radius: self.width / 2;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.orb-glow * 0.34;
                     }
 
@@ -315,7 +332,7 @@ export component RecordingIndicator inherits Window {
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
                         border-radius: self.width / 2;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity;
 
                         Rectangle {
@@ -324,7 +341,7 @@ export component RecordingIndicator inherits Window {
                             x: parent.width * 0.24;
                             y: parent.height * 0.18;
                             border-radius: self.width / 2;
-                            background: #fff4a3;
+                            background: Theme.trace-highlight;
                             opacity: 0.52;
                         }
                     }
@@ -349,7 +366,7 @@ export component RecordingIndicator inherits Window {
                                 width: 2px;
                                 height: bar-height * 1px;
                                 border-radius: 1px;
-                                background: #ffd400;
+                                background: Theme.trace;
                                 opacity: root.signal-opacity;
                             }
                         }
@@ -369,7 +386,7 @@ export component RecordingIndicator inherits Window {
                         viewbox-width: 56;
                         viewbox-height: 19;
                         fill: transparent;
-                        stroke: #ffd400;
+                        stroke: Theme.trace;
                         stroke-width: 2.2px;
                         stroke-line-cap: round;
                         stroke-line-join: round;
@@ -406,7 +423,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-edge-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity * 0.58;
                     }
                     Rectangle {
@@ -415,7 +432,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-outer-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity * 0.72;
                     }
                     Rectangle {
@@ -424,7 +441,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-middle-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity * 0.86;
                     }
                     Rectangle {
@@ -433,7 +450,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-inner-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity;
                     }
                     Rectangle {
@@ -442,7 +459,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-near-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity * 0.94;
                     }
 
@@ -452,7 +469,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-near-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity * 0.94;
                     }
                     Rectangle {
@@ -461,7 +478,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-inner-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity;
                     }
                     Rectangle {
@@ -470,7 +487,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-middle-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity * 0.86;
                     }
                     Rectangle {
@@ -479,7 +496,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-outer-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity * 0.72;
                     }
                     Rectangle {
@@ -488,12 +505,19 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: root.mic-edge-height * 1px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: root.signal-opacity * 0.58;
                     }
 
                     // Capsule and short stem only: the reference's stand and
                     // horizontal base deliberately do not belong in the overlay.
+                    //
+                    // The capsule is an outline over whatever the overlay is
+                    // sitting on. It used to be filled with its own dark grey,
+                    // a shade off the panel behind it, which turned the
+                    // microphone into a boxed chip with a frame around it
+                    // instead of a mark drawn in the same trace as the bars
+                    // either side of it.
                     Rectangle {
                         x: 33px;
                         y: 0px;
@@ -501,8 +525,8 @@ export component RecordingIndicator inherits Window {
                         height: 15px;
                         border-radius: 5px;
                         border-width: 1px;
-                        border-color: #ffd400;
-                        background: #171819;
+                        border-color: Theme.trace;
+                        background: transparent;
 
                         Rectangle {
                             x: 3px;
@@ -510,7 +534,7 @@ export component RecordingIndicator inherits Window {
                             width: 6px;
                             height: 1px;
                             border-radius: 0.5px;
-                            background: #ffd400;
+                            background: Theme.trace;
                             opacity: 0.78;
                         }
                         Rectangle {
@@ -519,7 +543,7 @@ export component RecordingIndicator inherits Window {
                             width: 6px;
                             height: 1px;
                             border-radius: 0.5px;
-                            background: #ffd400;
+                            background: Theme.trace;
                             opacity: 0.78;
                         }
                         Rectangle {
@@ -528,7 +552,7 @@ export component RecordingIndicator inherits Window {
                             width: 6px;
                             height: 1px;
                             border-radius: 0.5px;
-                            background: #ffd400;
+                            background: Theme.trace;
                             opacity: 0.78;
                         }
                     }
@@ -538,7 +562,7 @@ export component RecordingIndicator inherits Window {
                         width: 2px;
                         height: 4px;
                         border-radius: 1px;
-                        background: #ffd400;
+                        background: Theme.trace;
                         opacity: 0.92;
                     }
                 }
@@ -636,7 +660,7 @@ export component RecordingIndicator inherits Window {
                         width: 18px;
                         height: 18px;
                         border-radius: 6px;
-                        background: #ffd400;
+                        background: Theme.signal;
                         opacity: root.disc-opacity;
 
                         Rectangle {
