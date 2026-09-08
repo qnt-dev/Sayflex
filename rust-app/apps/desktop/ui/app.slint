@@ -926,6 +926,18 @@ export component TranslationPreview inherits Window {
     in-out property <float> card-width: 252;
     in property <image> glass-backdrop;
     in-out property <float> original-card-height: 96;
+    /// What the original actually needs, measured rather than estimated.
+    ///
+    /// The height was worked out in Rust from a fixed forty-eight characters a
+    /// line against a card that is usually three hundred and fifty wide, so the
+    /// last line of the original came out clipped. This is measured at the
+    /// width the card is really drawn at, plus the 19 above the text and the 13
+    /// below it.
+    ///
+    /// A separate element because the one the card uses lives inside an `if`
+    /// and cannot be reached from here. It draws nothing.
+    out property <float> original-content-height:
+        (measure-original.preferred-height + 32px) / 1px;
     out property <float> dual-content-height:
         max(20px, dual-stack.preferred-height + 4px) / 1px;
     out property <float> result-content-height:
@@ -955,6 +967,19 @@ export component TranslationPreview inherits Window {
                 min(0px, result-scroll.viewport-y + (delta / 120) * 48px)
             );
         }
+    }
+
+    // Measures the original; never seen.
+    measure-original := Text {
+        visible: false;
+        x: 0;
+        y: 0;
+        height: 0px;
+        width: root.card-width * 1px - 38px;
+        text: root.source-text;
+        font-size: 13px;
+        font-weight: 460;
+        wrap: word-wrap;
     }
 
     if root.view-mode == 1: original-card := Rectangle {

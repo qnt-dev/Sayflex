@@ -393,7 +393,21 @@ pub(crate) fn configure_slint_translation_resize(
             );
             window.set_resizable(resizable);
         })
-        .ok_or_else(|| "translation window is not backed by winit".to_owned())
+        .ok_or_else(|| "translation window is not backed by winit".to_owned())?;
+
+    // winit rewrites the whole extended style when resizability changes, which
+    // takes WS_EX_TOOLWINDOW and WS_EX_NOACTIVATE with it and hands the window
+    // WS_EX_APPWINDOW instead — a popup that would appear in the taskbar and in
+    // Alt+Tab, and that takes focus from what the user is reading. A parked slot
+    // was found in exactly that state; a presented one was only ever saved by
+    // the presentation re-applying the contract afterwards.
+    let Some(handle) = slint_window_handle(preview.window()) else {
+        return Err("translation window handle is not available".to_owned());
+    };
+    // The styles only. `prepare_translation_window` would also cloak and park
+    // the window, which is right for a slot being made ready and wrong here —
+    // this runs on pin, and pinning a preview made it vanish.
+    rust_platform_windows::configure_action_window(handle)
 }
 
 pub(crate) fn begin_slint_window_resize(window: &slint::Window, edge: i32) -> Result<(), String> {
@@ -551,6 +565,13 @@ pub(crate) fn apply_translation_preview_layout(
     preview.set_card_width(translation_preview_card_width(result_text));
     if preview.get_pinned() {
         return;
+    }
+    // The original's card, measured at the width it is actually drawn at. It
+    // was estimated from a fixed forty-eight characters a line against a card
+    // that is usually wider than that, and the last line came out clipped.
+    let measured = preview.get_original_content_height();
+    if measured > 0.0 {
+        preview.set_original_card_height(measured.clamp(48.0, 240.0));
     }
     // Read after the width and the content are set, so the card has been laid
     // out with them. `main-card-height` is Slint's own measurement of the
