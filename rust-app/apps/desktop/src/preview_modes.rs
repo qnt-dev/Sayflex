@@ -454,11 +454,19 @@ pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
                 0 => {
                     if let Some(hwnd) = crate::slint_window_handle(preview.window()) {
                         handle.set(hwnd);
+                        // This applies the overlay contract *and cloaks the
+                        // window*. The first attempt at this probe stopped
+                        // here and called the next interval "not cloaked",
+                        // which measured the cloaked case twice and proved
+                        // nothing.
                         let _ = rust_platform_windows::prepare_translation_window(hwnd);
+                        let _ = rust_platform_windows::reveal_overlay_window(hwnd);
                     }
                 }
                 2 => {
-                    // Off the desktop, visible, not cloaked.
+                    // Off the desktop, visible, and demonstrably not cloaked.
+                    let cloaked = rust_platform_windows::overlay_window_is_cloaked(handle.get());
+                    println!("staging_probe interval=visible cloaked={cloaked:?}");
                     preview.set_translated_text("staged".into());
                     preview.set_prepared(true);
                     staged_before.set(frames.get());
@@ -467,6 +475,8 @@ pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
                 14 => {
                     staged.set(frames.get() - staged_before.get());
                     let _ = rust_platform_windows::cloak_overlay_window(handle.get());
+                    let cloaked = rust_platform_windows::overlay_window_is_cloaked(handle.get());
+                    println!("staging_probe interval=cloaked cloaked={cloaked:?}");
                     preview.set_translated_text("cloaked".into());
                     cloaked_before.set(frames.get());
                     preview.window().request_redraw();
@@ -567,6 +577,11 @@ pub(crate) fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<
             apply_translation_preview_layout(&preview, "", text);
             preview.set_translated_text(text.into());
             preview.set_prepared(false);
+            // The contract this probe exists to exercise: a presenter that has
+            // not been told there is content will not accept a frame. Without
+            // this the probe could never show its window, which would have made
+            // it useless exactly when it was needed.
+            presenter.content_changed(preview.window(), !text.is_empty());
             let ticket = match presenter_for_timer.begin_prepare() {
                 Ok(ticket) => ticket,
                 Err(error) => {

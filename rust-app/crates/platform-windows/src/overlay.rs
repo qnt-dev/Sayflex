@@ -587,6 +587,16 @@ fn set_overlay_cloaked(hwnd: HWND, cloaked: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the compositor is currently hiding this window.
+///
+/// Public so that a probe can state which case it is measuring rather than
+/// assume it: the first attempt at the staging probe called an interval
+/// "not cloaked" when `prepare_translation_window` had cloaked it, measured the
+/// same case twice, and was reported as proof of something it had not tested.
+pub fn overlay_window_is_cloaked(window_handle: u64) -> Result<bool, String> {
+    overlay_window_is_app_cloaked(window_handle)
+}
+
 fn overlay_window_is_app_cloaked(window_handle: u64) -> Result<bool, String> {
     let hwnd = window_handle as usize as HWND;
     if hwnd.is_null() {

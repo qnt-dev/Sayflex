@@ -163,6 +163,7 @@ const CREDENTIAL_ACK_DEADLINE: Duration = Duration::from_secs(10);
 pub(crate) fn expire_pending_credentials(
     settings: &slint::Weak<SettingsWindow>,
     state: &Rc<RefCell<AppState>>,
+    workers: &Workers,
     reason: &str,
 ) {
     let expired: Vec<PendingCredential> = {
@@ -180,12 +181,21 @@ pub(crate) fn expire_pending_credentials(
     };
     for pending in expired {
         rust_app_core::diagnostics::log_line(&format!(
-            "credential_store operation=expired provider={} reason={reason}",
+            "credential_store operation=unknown provider={} reason={reason}",
             pending.display_name
         ));
         if let Some(settings) = settings.upgrade() {
+            // Deliberately not "the key was not stored". Silence does not say
+            // that: the worker may have written it and then died, or simply be
+            // late. The row reports what is actually in the store as soon as the
+            // worker is heard from, and that is the thing to point at.
             settings.set_provider_problem(
-                format!("The worker did not answer: {reason}. The key was not stored.").into(),
+                format!(
+                    "No answer from the worker ({reason}), so whether the key was stored is \
+                     not known yet. The row shows what is really there once it answers, and \
+                     sending again is safe."
+                )
+                .into(),
             );
             settings.set_provider_problem_for(pending.row_id.clone().into());
             // The form stays open holding what was typed, so it can be sent
@@ -197,31 +207,59 @@ pub(crate) fn expire_pending_credentials(
             &format!("{} did not confirm the key.", pending.display_name),
         );
     }
+    // Ask both stores what they actually hold, so the row settles the question
+    // the silence left open.
+    let _ = workers
+        .speech
+        .send(&SpeechWorkerCommand::GetTranscriptionProviders);
+    let _ = workers
+        .translation
+        .send(&TranslationWorkerCommand::GetTranslationProviders);
 }
 
-/// Ends every key save a particular worker owed an answer to.
+/// Ends the key saves one worker owed an answer to.
 ///
 /// A restarted worker has forgotten the operation, so its answer is never
 /// coming.
 pub(crate) fn abandon_pending_credentials(
     settings: &slint::Weak<SettingsWindow>,
     state: &Rc<RefCell<AppState>>,
+    kind: Kind,
     reason: &str,
 ) {
-    let abandoned: Vec<PendingCredential> = state
-        .borrow_mut()
-        .pending_credentials
-        .drain()
-        .map(|(_, pending)| pending)
-        .collect();
+    // Only the operations this worker owed. Draining the whole map meant a
+    // speech worker falling over cancelled a translation key the user was in
+    // the middle of storing, and the other way round.
+    let abandoned: Vec<PendingCredential> = {
+        let mut app = state.borrow_mut();
+        let theirs: Vec<RequestId> = app
+            .pending_credentials
+            .iter()
+            .filter(|(_, pending)| {
+                split_row_id(&pending.row_id).is_some_and(|(owner, _)| owner == kind)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        theirs
+            .into_iter()
+            .filter_map(|id| app.pending_credentials.remove(&id))
+            .collect()
+    };
     for pending in abandoned {
         rust_app_core::diagnostics::log_line(&format!(
             "credential_store operation=abandoned provider={} reason={reason}",
             pending.display_name
         ));
         if let Some(settings) = settings.upgrade() {
+            // Not "the key was not stored": the worker may have written it and
+            // then died. The row reports what is really in the store once it is
+            // back, and that is what to point at.
             settings.set_provider_problem(
-                format!("The worker restarted before the key was stored ({reason}).").into(),
+                format!(
+                    "The worker stopped before it said what happened to the key ({reason}). \
+                     The row shows what is really stored once it is back."
+                )
+                .into(),
             );
             settings.set_provider_problem_for(pending.row_id.clone().into());
             settings.set_provider_editing(pending.row_id.into());

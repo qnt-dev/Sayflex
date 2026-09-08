@@ -789,11 +789,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         let settings = settings.as_weak();
         let state = Rc::clone(&state);
+        let workers = Rc::clone(&workers);
         credential_watch.start(
             TimerMode::Repeated,
             std::time::Duration::from_secs(2),
             move || {
-                providers_view::expire_pending_credentials(&settings, &state, "no answer in time");
+                providers_view::expire_pending_credentials(
+                    &settings,
+                    &state,
+                    &workers,
+                    "no answer in time",
+                );
             },
         );
     }
@@ -1167,11 +1173,21 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             // A worker that has fallen over owes answers it will never send.
             // A key save waiting on one of them would otherwise hold the form
             // open forever with no reason shown.
-            providers_view::abandon_pending_credentials(
-                &runtime.settings,
-                &runtime.state,
-                "the worker stopped",
-            );
+            // Only the operations this worker owed. A speech worker falling
+            // over says nothing about a translation key in flight.
+            let owner = match kind {
+                WorkerKind::Speech => Some(providers_view::Kind::Speech),
+                WorkerKind::Translation => Some(providers_view::Kind::Text),
+                _ => None,
+            };
+            if let Some(owner) = owner {
+                providers_view::abandon_pending_credentials(
+                    &runtime.settings,
+                    &runtime.state,
+                    owner,
+                    "the worker stopped",
+                );
+            }
             runtime.indicator_animation.borrow_mut().stop();
             runtime.recording_overlays.retire_all("worker_error");
             if let Some(settings) = runtime.settings.upgrade() {

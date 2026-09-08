@@ -70,11 +70,22 @@ $files | Format-Table -AutoSize
 
 $failures = New-Object System.Collections.Generic.List[string]
 
+
 # 1. Every executable carries the version this release claims.
-$expectedVersion = (
+# From the built desktop, not from Cargo.toml: the question is what this
+# package says it is, and a source file cannot answer that about a binary that
+# may have been built before the number moved.
+$expectedVersion = (Get-Item -LiteralPath (Join-Path $appRoot 'SayFlex.exe')).VersionInfo.ProductVersion
+if ([string]::IsNullOrWhiteSpace($expectedVersion)) {
+    throw 'SayFlex.exe carries no version; the package cannot be identified.'
+}
+$sourceVersion = (
     Select-String -Path (Join-Path $rustRoot 'Cargo.toml') -Pattern '^version = "(.+)"' |
         Select-Object -First 1
 ).Matches[0].Groups[1].Value
+if ($expectedVersion -ne $sourceVersion) {
+    $failures.Add("SayFlex.exe is $expectedVersion but the workspace says $sourceVersion")
+}
 foreach ($name in $required) {
     if (-not $name.EndsWith('.exe')) { continue }
     $info = (Get-Item -LiteralPath (Join-Path $appRoot $name)).VersionInfo
@@ -115,7 +126,14 @@ $protocol = (
         -Pattern 'PROTOCOL_VERSION: u32 = (\d+)' |
         Select-Object -First 1
 ).Matches[0].Groups[1].Value
-foreach ($worker in @('SayFlex.Speech.Cpu.exe', 'SayFlex.Translation.exe')) {
+# Every process that speaks the protocol, not two of them: a CUDA worker that
+# disagrees is exactly as broken as a CPU one, and it is the one that runs.
+foreach ($worker in @(
+    'SayFlex.Speech.Cpu.exe',
+    'SayFlex.Speech.Cuda.exe',
+    'SayFlex.Speech.Vulkan.exe',
+    'SayFlex.Translation.exe'
+)) {
     $path = Join-Path $appRoot $worker
     # Started rather than called, so its output is read from a file: a native
     # process's stdout captured through the pipeline came back empty here, and
@@ -123,7 +141,13 @@ foreach ($worker in @('SayFlex.Speech.Cpu.exe', 'SayFlex.Translation.exe')) {
     $out = [System.IO.Path]::GetTempFileName()
     try {
         $run = Start-Process -FilePath $path -ArgumentList '--protocol-version' `
-            -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out
+            -NoNewWindow -PassThru -RedirectStandardOutput $out
+        # A worker that hangs must not hang the release check with it.
+        if (-not $run.WaitForExit(20000)) {
+            $run.Kill()
+            $failures.Add("$worker did not answer within 20 seconds")
+            continue
+        }
         $answer = (Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue)
         $answer = "$answer".Trim()
         if ($run.ExitCode -ne 0 -or $answer -ne $protocol) {
@@ -134,10 +158,39 @@ foreach ($worker in @('SayFlex.Speech.Cpu.exe', 'SayFlex.Translation.exe')) {
     }
 }
 
+# 4. The installer's own checksum matches the sidecar shipped beside it. A
+#    sidecar nobody compares is a sidecar that proves nothing.
+$installer = Get-ChildItem -LiteralPath (Join-Path $rustRoot 'dist') -Filter 'SayFlex-*-setup.exe' `
+    -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if ($installer) {
+    $sidecar = "$($installer.FullName).sha256"
+    if (-not (Test-Path -LiteralPath $sidecar)) {
+        $failures.Add("$($installer.Name) has no .sha256 beside it")
+    } else {
+        $recorded = ((Get-Content -LiteralPath $sidecar -Raw) -split '\s+')[0].ToLowerInvariant()
+        $actual = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($recorded -ne $actual) {
+            $failures.Add("$($installer.Name) does not match its .sha256")
+        }
+        if ($installer.Name -notlike "*-$expectedVersion-*") {
+            $failures.Add("$($installer.Name) is not the $expectedVersion installer")
+        }
+    }
+} else {
+    Write-Host 'No installer built yet; run build-installer.ps1 and check again.'
+}
+
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Host "FAILED: $_" }
     throw "Release validation failed with $($failures.Count) problem(s)."
 }
 
-Write-Host "SayFlex $expectedVersion validated: file set, backend manifest, versions, installed hashes and protocol $protocol."
-Write-Host 'This does not replace the smoke test: dictate and translate with the installed build before shipping it.'
+$checked = @('file set', 'backend manifest', 'versions', "protocol $protocol", 'installer checksum')
+if ($Installed) { $checked += 'installed hashes' }
+Write-Host "SayFlex $expectedVersion checked: $($checked -join ', ')."
+if (-not $Installed) {
+    Write-Host 'The installed copy was not compared: install the package and run this again with -Installed.'
+}
+Write-Host 'None of this replaces the smoke test: dictate and translate with the installed build before shipping it.'

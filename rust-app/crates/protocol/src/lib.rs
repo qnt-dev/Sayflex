@@ -1026,79 +1026,222 @@ pub fn speech_event_name(event: &SpeechWorkerEvent) -> &'static str {
 }
 
 #[cfg(test)]
-mod schema_version_tests {
-    use super::{PROTOCOL_VERSION, speech_event_name, translation_event_name};
+mod wire_schema_tests {
+    //! The shape of every message, pinned to the version number.
+    //!
+    //! Protocol 16 described two different schemas: an event was added under it
+    //! and removed under it again, and both builds introduced themselves as 16.
+    //! A list of variant names would not have caught that on its own — it has to
+    //! be a list nobody can change without the number moving.
+    //!
+    //! So this is the whole wire surface: every variant of every message, with
+    //! the fields it carries, written down as one fingerprint. Renaming a
+    //! variant, adding or removing a field, or changing what serde calls it all
+    //! fail here, and the only way to make them pass is to say which version the
+    //! new shape belongs to.
 
-    /// Every name this version puts on the wire, in order.
-    ///
-    /// Version 16 was used twice — an event added under it, then removed under
-    /// it again — so two incompatible schemas introduced themselves with the
-    /// same number and the handshake let them through. Changing either list
-    /// without changing `PROTOCOL_VERSION` fails here.
-    const TRANSLATION_EVENTS: &[&str] = &[
-        "ready",
-        "model_download_progress",
-        "model_installed",
-        "model_ready",
-        "model_selected",
-        "partial",
-        "completed",
-        "cancelled",
-        "history",
-        "translation_providers",
-        "credential_saved",
-        "failed",
-    ];
+    use serde_json::{Value, json};
 
-    const SPEECH_EVENTS: &[&str] = &[
-        "ready",
-        "model_download_progress",
-        "model_installed",
-        "model_ready",
-        "model_selected",
-        "listening",
-        "audio_level",
-        "processing",
-        "completed",
-        "cancelled",
-        "history",
-        "transcription_providers",
-        "credential_saved",
-        "transcribed_remotely",
-        "failed",
-    ];
+    use super::*;
 
-    #[test]
-    fn the_schema_on_the_wire_is_the_one_this_version_describes() {
-        assert_eq!(
-            PROTOCOL_VERSION, 17,
-            "the two lists below belong to protocol 17: change all three or none"
-        );
-        assert_eq!(TRANSLATION_EVENTS.len(), 12);
-        assert_eq!(SPEECH_EVENTS.len(), 15);
+    /// One message's name and the fields it puts on the wire, sorted.
+    fn shape(value: &Value) -> String {
+        let name = value["type"].as_str().unwrap_or("<untagged>");
+        let mut fields: Vec<&str> = value
+            .get("payload")
+            .and_then(Value::as_object)
+            .map(|payload| payload.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        fields.sort_unstable();
+        format!("{name}({})", fields.join(","))
+    }
+
+    fn fingerprint(messages: &[Value]) -> Vec<String> {
+        let mut shapes: Vec<String> = messages.iter().map(shape).collect();
+        shapes.sort();
+        shapes
+    }
+
+    /// One of every translation event, filled in enough to serialise.
+    fn translation_events() -> Vec<Value> {
+        let request_id = RequestId::new();
+        let result = TranslationResult {
+            request_id,
+            source_text: String::new(),
+            translated_text: String::new(),
+            source_language: TranslationLanguage::English,
+            target_language: TranslationLanguage::Russian,
+            tier: None,
+            provider: None,
+            processing_duration_ms: 0,
+            first_token_duration_ms: 0,
+            backend_request_count: 0,
+            tokenize_duration_ms: 0,
+            chunk_count: 0,
+        };
+        [
+            TranslationWorkerEvent::Ready {
+                protocol_version: PROTOCOL_VERSION,
+                selected_tier: None,
+                models: Vec::new(),
+            },
+            TranslationWorkerEvent::ModelDownloadProgress {
+                catalog_id: String::new(),
+                downloaded_bytes: 0,
+                total_bytes: 0,
+            },
+            TranslationWorkerEvent::ModelInstalled {
+                catalog_id: String::new(),
+                tier: TranslationTier::Tiny,
+                path: String::new(),
+            },
+            TranslationWorkerEvent::ModelReady {
+                catalog_id: String::new(),
+                tier: TranslationTier::Tiny,
+                load_duration_ms: 0,
+            },
+            TranslationWorkerEvent::ModelSelected {
+                tier: TranslationTier::Tiny,
+            },
+            TranslationWorkerEvent::Partial {
+                request_id,
+                translated_text: String::new(),
+                first_token_duration_ms: 0,
+                tokenize_duration_ms: 0,
+                chunk_index: 0,
+                chunk_count: 0,
+            },
+            TranslationWorkerEvent::Completed {
+                result,
+                created_unix_ms: 0,
+            },
+            TranslationWorkerEvent::Cancelled { request_id },
+            TranslationWorkerEvent::History {
+                entries: Vec::new(),
+            },
+            TranslationWorkerEvent::TranslationProviders {
+                statuses: Vec::new(),
+            },
+            TranslationWorkerEvent::CredentialSaved {
+                operation_id: request_id,
+                provider_id: String::new(),
+                error: String::new(),
+            },
+            TranslationWorkerEvent::Failed {
+                request_id: None,
+                catalog_id: None,
+                code: String::new(),
+                message: String::new(),
+                retryable: false,
+            },
+        ]
+        .iter()
+        .map(|event| serde_json::to_value(event).unwrap())
+        .collect()
+    }
+
+    fn translation_commands() -> Vec<Value> {
+        let request_id = RequestId::new();
+        [
+            TranslationWorkerCommand::Initialize {
+                selected_tier: None,
+                keep_warm: false,
+                history_enabled: false,
+            },
+            TranslationWorkerCommand::EnsureModel {
+                tier: TranslationTier::Tiny,
+            },
+            TranslationWorkerCommand::CancelModelInstall,
+            TranslationWorkerCommand::SelectTier {
+                tier: TranslationTier::Tiny,
+                keep_warm: false,
+            },
+            TranslationWorkerCommand::Translate {
+                request_id,
+                text: String::new(),
+                source_language: None,
+                target_language: None,
+            },
+            TranslationWorkerCommand::Cancel { request_id },
+            TranslationWorkerCommand::SetTranslationProviders {
+                providers: Vec::new(),
+            },
+            TranslationWorkerCommand::SetTranslationProviderCredential {
+                operation_id: request_id,
+                provider_id: String::new(),
+                secret: None,
+            },
+            TranslationWorkerCommand::GetTranslationProviders,
+            TranslationWorkerCommand::GetHistory { limit: 0 },
+            TranslationWorkerCommand::SetHistoryEnabled { enabled: false },
+            TranslationWorkerCommand::ClearHistory,
+            TranslationWorkerCommand::Shutdown,
+        ]
+        .iter()
+        .map(|command| serde_json::to_value(command).unwrap())
+        .collect()
     }
 
     #[test]
-    fn the_name_on_the_wire_is_the_name_the_schema_lists() {
-        // `translation_event_name` and `speech_event_name` are exhaustive
-        // matches, so a variant cannot be added or removed without touching
-        // them, and they cannot disagree with what serde writes.
-        let cancelled = super::TranslationWorkerEvent::Cancelled {
-            request_id: super::RequestId::new(),
-        };
-        assert_eq!(translation_event_name(&cancelled), "cancelled");
+    fn the_translation_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            serde_json::to_value(&cancelled).unwrap()["type"],
-            translation_event_name(&cancelled)
+            PROTOCOL_VERSION, 17,
+            "the shapes below were written for protocol 17"
         );
+        assert_eq!(
+            fingerprint(&translation_events()),
+            vec![
+                "cancelled(request_id)",
+                "completed(created_unix_ms,result)",
+                "credential_saved(error,operation_id,provider_id)",
+                "failed(code,message,request_id,retryable)",
+                "history(entries)",
+                "model_download_progress(catalog_id,downloaded_bytes,total_bytes)",
+                "model_installed(catalog_id,path,tier)",
+                "model_ready(catalog_id,load_duration_ms,tier)",
+                "model_selected(tier)",
+                "partial(chunk_count,chunk_index,first_token_duration_ms,request_id,\
+tokenize_duration_ms,translated_text)",
+                "ready(models,protocol_version,selected_tier)",
+                "translation_providers(statuses)",
+            ]
+        );
+        assert_eq!(
+            fingerprint(&translation_commands()),
+            vec![
+                "cancel(request_id)",
+                "cancel_model_install()",
+                "clear_history()",
+                "ensure_model(tier)",
+                "get_history(limit)",
+                "get_translation_providers()",
+                "initialize(history_enabled,keep_warm,selected_tier)",
+                "select_tier(keep_warm,tier)",
+                "set_history_enabled(enabled)",
+                "set_translation_provider_credential(operation_id,provider_id,secret)",
+                "set_translation_providers(providers)",
+                "shutdown()",
+                "translate(request_id,source_language,target_language,text)",
+            ]
+        );
+    }
 
-        let listening = super::SpeechWorkerEvent::Listening {
-            session_id: super::SessionId::new(),
-        };
-        assert_eq!(speech_event_name(&listening), "listening");
-        assert_eq!(
-            serde_json::to_value(&listening).unwrap()["type"],
-            speech_event_name(&listening)
-        );
+    #[test]
+    fn a_result_carries_the_fields_the_desktop_reads() {
+        // The payload of a message matters as much as its name: `provider` is
+        // what tells the window a translation came from a service rather than
+        // from this machine, and it was added without the version moving.
+        let result = json!({
+            "request_id": RequestId::new(),
+            "source_text": "",
+            "translated_text": "",
+            "source_language": "english",
+            "target_language": "russian",
+            "processing_duration_ms": 0,
+        });
+        let parsed: TranslationResult = serde_json::from_value(result).unwrap();
+
+        assert_eq!(parsed.tier, None);
+        assert_eq!(parsed.provider, None);
     }
 }

@@ -1,7 +1,10 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -250,14 +253,30 @@ impl OverlayPresenter {
     ) -> Result<Self, String> {
         let state = Arc::new(Mutex::new(PresentationState::default()));
         let render_state = Arc::clone(&state);
+        // Read when the renderer starts a frame, reported when it finishes it.
+        // Reading the revision only at `AfterRendering` says what was current
+        // when the callback ran, not what the frame contains — and the two
+        // differ exactly when it matters, because content set during a render
+        // is in the next frame, not this one.
+        let drawing_revision = Arc::new(AtomicU64::new(0));
+        let started_revision = Arc::clone(&drawing_revision);
         let rendered_frame_callback = Arc::new(Mutex::new(None::<RenderedFrameCallback>));
         let render_callback = Arc::clone(&rendered_frame_callback);
         let callback = on_presented;
         window
             .set_rendering_notifier(move |rendering_state, _graphics_api| {
+                if matches!(rendering_state, RenderingState::BeforeRendering) {
+                    let revision = render_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .content_revision;
+                    started_revision.store(revision, Ordering::Release);
+                    return;
+                }
                 if !matches!(rendering_state, RenderingState::AfterRendering) {
                     return;
                 }
+                let drawn = started_revision.load(Ordering::Acquire);
                 if let Some(callback) = render_callback
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -277,11 +296,19 @@ impl OverlayPresenter {
                     // and was ignored from a frame that never came, and the two
                     // want opposite fixes.
                     let phase = state.phase;
-                    let revision = state.content_revision;
+                    let current = state.content_revision;
                     let ready = state.content_ready;
-                    let ticket = state.frame_rendered();
+                    // A frame that began before the latest content change does
+                    // not carry it. Accepting it would reveal the window on a
+                    // drawing of the previous text.
+                    let ticket = if drawn == current {
+                        state.frame_rendered()
+                    } else {
+                        None
+                    };
                     rust_app_core::diagnostics::log_line(&format!(
-                        "{name} frame=rendered phase={phase:?} content={revision} ready={ready} accepted={}",
+                        "{name} frame=rendered phase={phase:?} drew={drawn} current={current} \
+                         ready={ready} accepted={}",
                         ticket.is_some()
                     ));
                     ticket
@@ -473,6 +500,11 @@ impl OverlayPresenter {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .cancel(ticket);
+            // Both timers go, including the repeating one asking for the frame.
+            // Without this it kept waking every forty milliseconds to check a
+            // ticket that had already been given up on, until the next show
+            // replaced it.
+            disarm_watchdog(ticket.window_handle);
             let _ = reconcile_contract(contract, ticket.window_handle);
             let _ = rust_platform_windows::conceal_overlay_window(ticket.window_handle);
             rust_app_core::diagnostics::log_line(&format!(

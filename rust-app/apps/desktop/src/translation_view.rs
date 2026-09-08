@@ -203,6 +203,15 @@ pub(crate) fn wire_translation_preview(preview: &TranslationPreview, presenter: 
             let Some(preview) = preview_weak.upgrade() else {
                 return;
             };
+            // Showing the original alongside is more content, and the window
+            // has to make room for it. This only reconfigured the resize edges
+            // of a pinned window, so switching to ORIG or DUAL with a long
+            // original left it cut off.
+            apply_translation_preview_layout(
+                &preview,
+                &preview.get_source_text(),
+                &preview.get_translated_text(),
+            );
             if preview.get_pinned()
                 && let Err(error) = configure_slint_translation_resize(&preview, true)
             {
@@ -520,22 +529,64 @@ pub(crate) fn translation_preview_layout(
         _ => 480.0,
     };
 
-    // The character measure the text actually wraps at, from the card's own
-    // width less its padding, at roughly six pixels a character for the
-    // thirteen-point face the card is drawn in.
-    let characters_per_line = f32::floor((card_width - 28.0) / 6.4).max(12.0) as usize;
+    // The character measure the text wraps at, from the card's own width less
+    // its padding. This is an estimate and says so: Slint will not report the
+    // shaped width of a string from here. It is wrong by a factor of two for a
+    // line of full-width CJK — one character, two columns — so the measure is
+    // doubled when the text is mostly wide, and the clamp at the end is what
+    // stops any remaining error from putting the window off the screen.
+    const AVERAGE_GLYPH: f32 = 6.4;
+    const LINE: f32 = 17.0;
+    // The toolbar, the padding above and below it, and the card's own margin.
+    const CHROME: f32 = 61.0;
+
+    let wide = result_text.chars().filter(|glyph| is_wide(*glyph)).count() * 2
+        > result_text.chars().count().max(1);
+    let measure = if wide {
+        AVERAGE_GLYPH * 2.0
+    } else {
+        AVERAGE_GLYPH
+    };
+    let characters_per_line = f32::floor((card_width - 28.0) / measure).max(8.0) as usize;
+
     let result_lines = estimated_wrapped_lines(result_text, characters_per_line).clamp(1, 14);
-    // 17 a line, 30 for the toolbar above and 22 of padding.
-    let mut window_height = result_lines as f32 * 17.0 + 61.0;
-    if view_mode == 1 {
-        let source_lines = estimated_wrapped_lines(source_text, characters_per_line).clamp(1, 7);
-        window_height += source_lines as f32 * 17.0 + 28.0;
+    let source_lines = estimated_wrapped_lines(source_text, characters_per_line).clamp(1, 7);
+    let mut window_height = result_lines as f32 * LINE + CHROME;
+    match view_mode {
+        // The original in its own card underneath.
+        1 => window_height += source_lines as f32 * LINE + 28.0,
+        // Interleaved: every line of the result is paired with a line of the
+        // original, so the content is both. This was not accounted for at all,
+        // and a long original in DUAL was cut off.
+        2 => window_height += source_lines as f32 * LINE + 12.0,
+        _ => {}
     }
 
     TranslationPreviewLayout {
         card_width,
         window_height: window_height.clamp(96.0, 640.0),
     }
+}
+
+/// Whether a glyph takes two columns rather than one.
+///
+/// Enough of the ranges to catch the scripts where one character per glyph
+/// width is out by a factor of two: CJK, kana, Hangul and the full-width forms.
+const fn is_wide(glyph: char) -> bool {
+    matches!(glyph as u32,
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F9FF
+            | 0x20000..=0x3FFFD)
 }
 
 /// Sizes the window to the text and tells the card how wide it is.
@@ -794,12 +845,30 @@ mod adaptive_popup_tests {
 
     #[test]
     fn showing_the_original_alongside_makes_room_for_it() {
-        let result_only =
-            translation_preview_layout("A fairly long original sentence", "Перевод", 0);
-        let with_original =
-            translation_preview_layout("A fairly long original sentence", "Перевод", 1);
+        let source = "A fairly long original sentence that wraps across several lines                       when it is shown underneath the translation";
+        let result_only = translation_preview_layout(source, "Перевод", 0);
+        let with_original = translation_preview_layout(source, "Перевод", 1);
+        // DUAL pairs every line with its original and was not accounted for at
+        // all: a long original in that mode was simply cut off.
+        let interleaved = translation_preview_layout(source, "Перевод", 2);
 
         assert!(with_original.window_height > result_only.window_height);
+        assert!(interleaved.window_height > result_only.window_height);
+    }
+
+    #[test]
+    fn a_line_of_wide_glyphs_gets_the_room_it_occupies() {
+        // One character per glyph width is out by a factor of two for CJK, so
+        // the card was sized for half the lines the text needs.
+        let latin = translation_preview_layout("source", &"a".repeat(120), 0);
+        let wide = translation_preview_layout("source", &"漢".repeat(120), 0);
+
+        assert!(
+            wide.window_height > latin.window_height,
+            "latin {} vs wide {}",
+            latin.window_height,
+            wide.window_height
+        );
     }
 
     #[test]
