@@ -149,6 +149,10 @@ foreach ($worker in @(
     try {
         $run = Start-Process -FilePath $path -ArgumentList '--protocol-version' `
             -NoNewWindow -PassThru -RedirectStandardOutput $out
+        # Touching the handle makes PowerShell keep it, without which ExitCode
+        # comes back empty after a timed WaitForExit and every worker was
+        # reported as answering wrongly while answering correctly.
+        $null = $run.Handle
         # A worker that hangs must not hang the release check with it.
         if (-not $run.WaitForExit(20000)) {
             $run.Kill()
