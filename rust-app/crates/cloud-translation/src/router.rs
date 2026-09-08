@@ -256,6 +256,9 @@ mod tests {
     struct Scripted {
         answers: RefCell<Vec<Result<String, ProviderFailure>>>,
         seen: RefCell<Vec<String>>,
+        /// The bodies that would have left the machine, in order. A test that
+        /// only counts requests cannot tell a correct one from a wrong one.
+        bodies: RefCell<Vec<String>>,
     }
 
     impl Scripted {
@@ -263,6 +266,7 @@ mod tests {
             Self {
                 answers: RefCell::new(answers),
                 seen: RefCell::new(Vec::new()),
+                bodies: RefCell::new(Vec::new()),
             }
         }
     }
@@ -274,6 +278,7 @@ mod tests {
             _budget: Duration,
         ) -> Result<String, ProviderFailure> {
             self.seen.borrow_mut().push(plan.url.clone());
+            self.bodies.borrow_mut().push(plan.body.clone());
             if self.answers.borrow().is_empty() {
                 return Err(ProviderFailure::Unavailable("no answer scripted".into()));
             }
@@ -295,6 +300,51 @@ mod tests {
 
     fn key(_id: &ProviderId) -> Option<String> {
         Some("279a2e9d-83b3-c416-7e2d-f721593e42a0:fx".to_owned())
+    }
+
+    #[test]
+    fn the_walk_sends_the_direction_it_was_given_and_no_other() {
+        // Through the router itself, not around it. The desktop names neither
+        // language for any selection; the worker resolves the pair and hands it
+        // here, and this is what the service then receives. It used to receive
+        // a request to translate English into English.
+        for (text, source, target, expect_source, expect_target) in [
+            (
+                "The quick brown fox",
+                "en",
+                "ru",
+                "\"source_lang\":\"EN\"",
+                "\"target_lang\":\"RU\"",
+            ),
+            (
+                "Проверка связи",
+                "ru",
+                "en",
+                "\"source_lang\":\"RU\"",
+                "\"target_lang\":\"EN-GB\"",
+            ),
+        ] {
+            let mut router = Router::new(chain(&[ProviderId::DEEPL, ProviderId::LOCAL]));
+            let executor = Scripted::new(vec![Ok("answered".to_owned())]);
+
+            let outcome = router.translate(
+                Translation {
+                    text,
+                    source: Some(source),
+                    target,
+                },
+                Instant::now(),
+                &key,
+                &executor,
+                &|| false,
+            );
+
+            assert!(matches!(outcome, RouteOutcome::Translated { .. }));
+            let bodies = executor.bodies.borrow();
+            let body = bodies.first().expect("one request went out");
+            assert!(body.contains(expect_source), "{text}: {body}");
+            assert!(body.contains(expect_target), "{text}: {body}");
+        }
     }
 
     #[test]

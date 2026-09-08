@@ -768,7 +768,16 @@ fn translate_request(
     // translation that is out on the network must not stop a model finishing
     // its install or the history being read.
     let routed = {
+        // Waiting for the lock is itself a wait: a walk already out on the
+        // network holds it until the service it is talking to answers or its
+        // six seconds run out. Whoever waited behind it may have been
+        // superseded in the meantime — the user typed again, or cancelled — and
+        // there is no reason to spend somebody's allowance on a translation
+        // nobody is waiting for any more.
         let mut providers = recover_lock(providers);
+        if !is_current() {
+            return Err(TranslationCancelled.into());
+        }
         providers
             .routing_required()
             .then(|| providers.translate(&text, Some(source.code()), target.code(), &is_current))

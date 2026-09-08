@@ -27,7 +27,7 @@ RestartApplications=no
 AppMutex=Local\Keyboop.UI
 UninstallDisplayIcon={app}\{#AppExeName}
 SetupLogging=yes
-SetupIconFile=..\resources\icons\keyboop.ico
+SetupIconFile=..\resources\icons\sayflex.ico
 
 [Tasks]
 Name: "autostart"; Description: "Запускать Keyboop вместе с Windows"; Flags: unchecked
