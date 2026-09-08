@@ -410,3 +410,49 @@ pub fn local_date_line() -> String {
 pub fn local_date_line() -> String {
     String::new()
 }
+
+/// Names this process to the shell.
+///
+/// The taskbar does not ask a window what it looks like. It resolves an
+/// application identity — the AppUserModelID — and looks the icon up against
+/// that, in a cache Explorer keeps and does not invalidate when an executable
+/// changes. Without an explicit id, Windows derives one from the executable's
+/// path, so SayFlex inherited the cache entry written when that path first
+/// appeared: the yellow mark from before the redesign, which survived every
+/// rebuild, a reinstall, `ie4uinit -show`, the window icon being set at both
+/// sizes and the window class icon being set as well.
+///
+/// An explicit id is a new identity with nothing cached against it, so the
+/// shell has to ask. It is also what makes the taskbar group this application's
+/// windows together and what a pinned shortcut has to carry to be recognised as
+/// the same application — the installer sets the same string on its shortcuts.
+///
+/// Called before any window exists, because the shell reads it when the first
+/// one is created.
+pub fn name_this_application_to_the_shell() {
+    const APP_ID: &[u16] = &[
+        b'S' as u16,
+        b'a' as u16,
+        b'y' as u16,
+        b'F' as u16,
+        b'l' as u16,
+        b'e' as u16,
+        b'x' as u16,
+        b'.' as u16,
+        b'D' as u16,
+        b'e' as u16,
+        b's' as u16,
+        b'k' as u16,
+        b't' as u16,
+        b'o' as u16,
+        b'p' as u16,
+        0,
+    ];
+    // SAFETY: the string is NUL-terminated UTF-16 with a static lifetime, and
+    // the call takes nothing else. A failure means the shell keeps deriving an
+    // id from the path, which is what it did before.
+    unsafe {
+        let _ =
+            windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(APP_ID.as_ptr());
+    }
+}

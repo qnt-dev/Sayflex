@@ -529,6 +529,10 @@ impl AppState {
 fn main() -> Result<(), Box<dyn Error>> {
     rust_platform_windows::configure_process_error_mode();
     rust_platform_windows::configure_safe_dll_search()?;
+    // Before any window: the shell reads the application's identity when the
+    // first one appears, and the taskbar's icon follows that identity rather
+    // than the window.
+    rust_platform_windows::name_this_application_to_the_shell();
     let startup_gate = Arc::new(StartupSessionGate::new());
     let session_event_router = Arc::new(SessionEventRouter::new(Arc::clone(&startup_gate)));
     let session_router_for_monitor = Arc::clone(&session_event_router);

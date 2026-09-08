@@ -50,9 +50,12 @@ Type: filesandordirs; Name: "{app}\pet-assets"
 Source: "..\dist\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\SayFlex"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\SayFlex"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\SayFlex"; Filename: "{app}\{#AppExeName}"; Parameters: "--background"; Tasks: autostart
+; The same identity the application declares for itself. A shortcut without it
+; is a different application as far as the taskbar is concerned, so pinning one
+; would leave a second button beside the running one.
+Name: "{group}\SayFlex"; Filename: "{app}\{#AppExeName}"; AppUserModelID: "SayFlex.Desktop"
+Name: "{autodesktop}\SayFlex"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; AppUserModelID: "SayFlex.Desktop"
+Name: "{userstartup}\SayFlex"; Filename: "{app}\{#AppExeName}"; Parameters: "--background"; Tasks: autostart; AppUserModelID: "SayFlex.Desktop"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch SayFlex"; Flags: nowait postinstall skipifsilent
