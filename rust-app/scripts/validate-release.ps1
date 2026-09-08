@@ -62,4 +62,9 @@ $files = foreach ($name in $required) {
 }
 
 $files | Format-Table -AutoSize
-Write-Host 'Universal release file set, backend manifest and SHA-256 validation passed.'
+# Deliberately not called validation. Nothing here is compared against a
+# reference, nothing is signed, and no binary is executed: this checks that the
+# expected files are present, that the backend manifest names what it should,
+# and prints each file's SHA-256 so a release can be identified afterwards.
+Write-Host 'Universal release file set and backend manifest are present. Hashes above are a record, not a check against a reference.'
+Write-Host 'Nothing here runs a binary: install the package and do the smoke test before shipping it.'

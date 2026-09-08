@@ -393,6 +393,26 @@ struct AppState {
     /// somebody willing to send audio is not thereby willing to send documents.
     translation_providers: Vec<TranslationProviderStatus>,
     translation_chain: Vec<TranslationProviderEntry>,
+    /// Key saves that have been sent and not yet answered.
+    ///
+    /// A successful `send` puts bytes in a pipe; the store is written later, in
+    /// another process, and can fail. Until this existed the window closed the
+    /// form, threw away what the user had typed, and wrote the second field to
+    /// disk on the strength of the pipe having accepted the message.
+    pending_credentials: HashMap<RequestId, PendingCredential>,
+}
+
+/// One key save the window is waiting to hear about.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingCredential {
+    /// The row it belongs to, prefixed with its list.
+    pub(crate) row_id: String,
+    /// The second field, held here until the key is known to be stored. It is
+    /// settings rather than a secret, and writing it before the key landed left
+    /// rows configured for a service they had no key for.
+    pub(crate) extra: Option<String>,
+    /// What to call the service when telling the user how it went.
+    pub(crate) display_name: String,
 }
 
 impl AppState {
@@ -447,6 +467,7 @@ impl AppState {
             transcription_chain: saved_settings.transcription_providers.clone(),
             translation_providers: Vec::new(),
             translation_chain: saved_settings.translation_providers.clone(),
+            pending_credentials: HashMap::new(),
             history_enabled: saved_settings.history_enabled,
         }
     }
@@ -2536,6 +2557,20 @@ delivery={} target_pid={}",
                 HistoryUpdate::Unchanged => {}
             }
         }
+        SpeechWorkerEvent::CredentialSaved {
+            operation_id,
+            provider_id,
+            error,
+        } => {
+            providers_view::settle_credential(
+                settings,
+                state,
+                workers,
+                operation_id,
+                &provider_id,
+                &error,
+            );
+        }
         SpeechWorkerEvent::TranscriptionProviders { statuses } => {
             rust_app_core::diagnostics::log_line(&format!(
                 "transcription_providers count={} available={}",
@@ -2995,6 +3030,20 @@ fn handle_translation_event(
                 translator,
                 state,
                 workers,
+            );
+        }
+        TranslationWorkerEvent::CredentialSaved {
+            operation_id,
+            provider_id,
+            error,
+        } => {
+            providers_view::settle_credential(
+                settings,
+                state,
+                workers,
+                operation_id,
+                &provider_id,
+                &error,
             );
         }
         TranslationWorkerEvent::TranslationProviders { statuses } => {

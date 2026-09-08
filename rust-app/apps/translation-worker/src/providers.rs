@@ -118,7 +118,24 @@ impl Providers {
         is_current: &impl Fn() -> bool,
     ) -> Routed {
         let Some(executor) = self.executor.as_ref() else {
-            return Routed::UseLocalEngine;
+            // No HTTP client could be built at all — a broken TLS store, no
+            // memory. Falling through to the local engine regardless of the
+            // list was an override of the user's own arrangement: somebody who
+            // switched the local engine off did so on purpose.
+            return if self
+                .router
+                .chain()
+                .entries()
+                .iter()
+                .any(|entry| entry.enabled && entry.id.is_local())
+            {
+                Routed::UseLocalEngine
+            } else {
+                Routed::Exhausted {
+                    detail: "No network client could be created, and the local engine is                              switched off in the translation order."
+                        .to_owned(),
+                }
+            };
         };
         let credentials = &self.credentials;
         let outcome = self.router.translate(

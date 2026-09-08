@@ -7,6 +7,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+
+# One publish at a time.
+#
+# Every run wipes target\publish-cpu, target\publish-cuda, C:\sf-build\v and
+# dist\app before it starts. A second run therefore destroys the first one's
+# work in progress, and both fail — which is exactly what happened, twice, and
+# is not something an operator should have to remember. The mutex is held for
+# the life of the process and released however it exits.
+$publishMutex = New-Object System.Threading.Mutex($false, 'Global\SayFlex.Publish')
+if (-not $publishMutex.WaitOne(0)) {
+    throw (
+        'Another SayFlex publish is already running. ' +
+        'They share their build and staging directories, so a second one would destroy the first.'
+    )
+}
 $output = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'dist\app'))
 $profile = $Configuration.ToLowerInvariant()
 $cpuTarget = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'target\publish-cpu'))
@@ -233,6 +248,8 @@ try {
     }
 }
 finally {
+    $publishMutex.ReleaseMutex()
+    $publishMutex.Dispose()
     $env:CUDA_PATH = $previousCudaPath
     $env:VULKAN_SDK = $previousVulkanSdk
     $env:CMAKE_CUDA_ARCHITECTURES = $previousCudaArchitectures

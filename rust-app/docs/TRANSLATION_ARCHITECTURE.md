@@ -3,10 +3,16 @@
 ## Product contract
 
 - Translation is optional and disabled until the user enables it.
+- Translation runs on this machine by default. Settings → Providers holds a
+  second, separate ordered list in which DeepL, Azure Translator and Google
+  Cloud Translation can be placed above the local engine. Every row is off until
+  the user switches it on and supplies a key, and the list itself is what
+  decides whether text leaves the machine — the claim the window makes is read
+  from it rather than from a separate setting.
 - No translation model is bundled, preinstalled, or downloaded automatically.
 - The system locale only marks a relevant model as recommended. English
   systems do not receive a default recommendation.
-- `Ctrl+Alt+T` captures selected text once, translates immediately, and opens a
+- `Ctrl+Alt+F` captures selected text once, translates immediately, and opens a
   compact preview without an intermediate command palette.
 - The preview can copy the result or replace the original selected text.
 - `Ctrl+Alt+K` remains the dedicated keyboard-layout correction shortcut.

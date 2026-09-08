@@ -329,10 +329,12 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                 transcription.send(TranscriptionCommand::SetProviders(providers));
             }
             SpeechWorkerCommand::SetProviderCredential {
+                operation_id,
                 provider_id,
                 secret,
             } => {
                 transcription.send(TranscriptionCommand::SetCredential {
+                    operation_id,
                     provider_id,
                     secret,
                 });

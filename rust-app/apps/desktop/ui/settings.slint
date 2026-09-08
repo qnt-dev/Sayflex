@@ -116,6 +116,8 @@ export component SettingsWindow inherits Window {
     in property <bool> output-mode-locked: false;
     in-out property <string> release-mode: "fastest";
     in-out property <string> release-mode-label: "Fastest";
+    in property <bool> release-mode-locked: false;
+    in property <string> release-mode-note: "";
     in-out property <bool> history-enabled: true;
     in property <string> dictate-hotkey: "Ctrl + Alt + Space";
 
@@ -329,6 +331,8 @@ export component SettingsWindow inherits Window {
                     output-locked: root.output-mode-locked;
                     release-mode: root.release-mode-label;
                     release-mode-value: root.release-mode;
+                    release-mode-locked: root.release-mode-locked;
+                    release-mode-note: root.release-mode-note;
                     keeping-history: root.history-enabled;
                     hotkey: root.dictate-hotkey;
                     select-backend(index) => { root.select-speech-backend(index); }

@@ -512,19 +512,19 @@ fn handle_command(
             })?;
         }
         TranslationWorkerCommand::SetTranslationProviderCredential {
+            operation_id,
             provider_id,
             secret,
         } => {
             let mut providers = recover_lock(providers);
-            if let Err(error) = providers.set_credential(&provider_id, secret.as_deref()) {
-                writer.send(&TranslationWorkerEvent::Failed {
-                    request_id: None,
-                    catalog_id: None,
-                    code: "credential_store".to_owned(),
-                    message: format!("The key could not be stored: {error}"),
-                    retryable: false,
-                })?;
-            }
+            let outcome = providers.set_credential(&provider_id, secret.as_deref());
+            // Answered either way, because a window is waiting on it and a
+            // silence is indistinguishable from a success.
+            writer.send(&TranslationWorkerEvent::CredentialSaved {
+                operation_id,
+                provider_id: provider_id.clone(),
+                error: outcome.err().unwrap_or_default(),
+            })?;
             writer.send(&TranslationWorkerEvent::TranslationProviders {
                 statuses: providers.statuses(),
             })?;
@@ -1040,6 +1040,78 @@ mod direction_tests {
                 "told the service the text is {source}: {}",
                 plan.body
             );
+        }
+    }
+
+    #[test]
+    fn nothing_named_reaches_the_service_as_the_right_direction() {
+        // The whole path the defect lived on, in one test: the desktop names
+        // neither language, the worker resolves the pair, the router walks the
+        // list, and this is the body the service receives. The two halves were
+        // covered separately and the join between them was not.
+        use rust_cloud_translation::{
+            Chain, ProviderEntry, ProviderFailure, ProviderId, RequestExecutor, RequestPlan,
+            RouteOutcome, Router, Translation,
+        };
+        use std::cell::RefCell;
+
+        struct Capture(RefCell<Vec<String>>);
+        impl RequestExecutor for Capture {
+            fn execute(
+                &self,
+                plan: &RequestPlan,
+                _budget: std::time::Duration,
+            ) -> Result<String, ProviderFailure> {
+                self.0.borrow_mut().push(plan.body.clone());
+                Ok("answered".to_owned())
+            }
+        }
+
+        for (text, expect_source, expect_target) in [
+            (
+                "The quick brown fox",
+                "\"source_lang\":\"EN\"",
+                "\"target_lang\":\"RU\"",
+            ),
+            (
+                "Проверка связи",
+                "\"source_lang\":\"RU\"",
+                "\"target_lang\":\"EN-GB\"",
+            ),
+        ] {
+            // Exactly what `TranslationWorkerCommand::Translate` carries for a
+            // selection: no languages at all.
+            let (source, target) = resolve_direction(text, None, None).unwrap();
+
+            let mut router = Router::new(Chain::new(vec![
+                ProviderEntry::new(ProviderId::new(ProviderId::DEEPL)),
+                ProviderEntry::new(ProviderId::local()),
+            ]));
+            router
+                .chain_mut()
+                .set_enabled(&ProviderId::new(ProviderId::DEEPL), true);
+            let executor = Capture(RefCell::new(Vec::new()));
+
+            let outcome = router.translate(
+                Translation {
+                    text,
+                    source: Some(source.code()),
+                    target: target.code(),
+                },
+                std::time::Instant::now(),
+                &|_: &ProviderId| Some("key".to_owned()),
+                &executor,
+                &|| false,
+            );
+
+            assert!(
+                matches!(outcome, RouteOutcome::Translated { .. }),
+                "{text}: {outcome:?}"
+            );
+            let bodies = executor.0.borrow();
+            let body = bodies.first().expect("one request went out");
+            assert!(body.contains(expect_source), "{text}: {body}");
+            assert!(body.contains(expect_target), "{text}: {body}");
         }
     }
 

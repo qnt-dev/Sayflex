@@ -23,15 +23,15 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
         WindowsAndMessaging::{
-            GUITHREADINFO, GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetForegroundWindow,
-            GetGUIThreadInfo, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-            GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG, ICON_SMALL,
-            IMAGE_ICON, IsWindowVisible, LR_DEFAULTCOLOR, LoadImageW, SM_CXICON, SM_CXSMICON,
-            SM_CYICON, SM_CYSMICON, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-            SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-            SetWindowPos, ShowWindow, WM_SETICON, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
-            WS_SYSMENU, WS_THICKFRAME,
+            GCLP_HICON, GCLP_HICONSM, GUITHREADINFO, GWL_EXSTYLE, GWL_STYLE, GetCursorPos,
+            GetForegroundWindow, GetGUIThreadInfo, GetSystemMetrics, GetWindowLongPtrW,
+            GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG,
+            ICON_SMALL, IMAGE_ICON, IsWindowVisible, LR_DEFAULTCOLOR, LoadImageW, SM_CXICON,
+            SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetClassLongPtrW,
+            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_SETICON,
+            WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -1130,10 +1130,30 @@ const APPLICATION_ICON: u16 = 1;
 /// process owns them until it exits; they are loaded from a resource rather
 /// than created, so there is nothing to destroy.
 fn dress_icon(hwnd: HWND) {
-    for (which, icon) in [
-        (ICON_BIG, application_icon(true)),
-        (ICON_SMALL, application_icon(false)),
-    ] {
+    let large = application_icon(true);
+    let small = application_icon(false);
+
+    // The window class as well as the window.
+    //
+    // The taskbar does not always ask the window. Where a button represents a
+    // group rather than one window it resolves the icon from the class, and
+    // failing that from the executable — which Explorer keeps a cached copy of,
+    // keyed by path. That cache still held the yellow mark from before the
+    // redesign, and no number of rebuilds displaced it. Setting the class icon
+    // as well leaves nothing for the cache to answer.
+    //
+    // SAFETY: the window belongs to this process, and both handles are the
+    // process-lifetime ones from `application_icon`.
+    unsafe {
+        if large != 0 {
+            SetClassLongPtrW(hwnd, GCLP_HICON, large);
+        }
+        if small != 0 {
+            SetClassLongPtrW(hwnd, GCLP_HICONSM, small);
+        }
+    }
+
+    for (which, icon) in [(ICON_BIG, large), (ICON_SMALL, small)] {
         if icon == 0 {
             continue;
         }
@@ -1153,9 +1173,15 @@ fn dress_icon(hwnd: HWND) {
 /// so each reconfiguration — and the overlays are reconfigured constantly —
 /// leaked two icons.
 ///
-/// Returned as an `isize` because that is what `WM_SETICON` takes and because
-/// a raw `HICON` is not `Send`, which a `OnceLock` requires. The handles are
-/// only ever passed straight back to Win32.
+/// Loaded without `LR_SHARED`, so these two handles do belong to this process
+/// and would have to be destroyed — except that they are wanted until it exits,
+/// and Windows reclaims them then. Two handles for the life of the application
+/// is the point: the leak this replaces created a fresh pair on every window
+/// configuration, and the overlays are reconfigured constantly.
+///
+/// Returned as an `isize` because that is what `WM_SETICON` takes and because a
+/// raw `HICON` is not `Send`, which a `OnceLock` requires. The handles are only
+/// ever passed straight back to Win32.
 fn application_icon(large: bool) -> isize {
     static LARGE: OnceLock<isize> = OnceLock::new();
     static SMALL: OnceLock<isize> = OnceLock::new();

@@ -94,6 +94,10 @@ export component DictationPage inherits HorizontalLayout {
     in property <bool> output-locked: false;
     in property <string> release-mode;
     in property <string> release-mode-value;
+    /// Whether the release mode can be chosen at all. The CPU engine ignores
+    /// it, so on the CPU the control says why instead of pretending.
+    in property <bool> release-mode-locked: false;
+    in property <string> release-mode-note;
     in property <bool> keeping-history: true;
     in property <string> hotkey;
 
@@ -241,10 +245,18 @@ export component DictationPage inherits HorizontalLayout {
             text: root.release-mode;
             value: root.release-mode-value;
             options: [
-                { value: "fastest", label: "Fastest", note: "Prepares results during natural pauses" },
+                {
+                    value: "fastest",
+                    label: "Fastest",
+                    note: "Prepares results during natural pauses",
+                    reason: root.release-mode-locked ? root.release-mode-note : "",
+                },
                 { value: "efficient", label: "Efficient", note: "Less GPU and battery, slightly slower" },
             ];
             chosen(value) => { root.set-release-mode(value); }
+        }
+        if root.release-mode-note != "" : SideNote {
+            text: root.release-mode-note;
         }
 
         GroupLabel { text: "HISTORY"; height: 30px; }

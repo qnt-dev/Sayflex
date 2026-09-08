@@ -434,17 +434,27 @@ impl Departures {
 /// Both pages read it from here so the window cannot say two different things
 /// about the same arrangement.
 pub(crate) fn privacy_claim(leaving: &Departures) -> String {
-    if !leaving.can_transcribe {
-        return "Nothing can transcribe right now".to_owned();
-    }
-    match (leaving.audio_to.as_deref(), leaving.text_to.as_deref()) {
-        (None, None) => "Audio and text stay on this device".to_owned(),
-        (Some(audio), None) => format!("Audio leaves this device for {audio}"),
-        (None, Some(text)) => format!("Text leaves this device for {text}"),
-        (Some(audio), Some(text)) if audio == text => {
+    // Composed from two independent facts rather than short-circuited on the
+    // first. It used to return "Nothing can transcribe right now" and stop, so
+    // an arrangement with no usable speech provider and DeepL switched on put
+    // that line above a badge reading TEXT LEAVES DEVICE — the two elements
+    // this function exists to keep in step, out of step.
+    match (
+        leaving.can_transcribe,
+        leaving.audio_to.as_deref(),
+        leaving.text_to.as_deref(),
+    ) {
+        (false, _, None) => "Nothing can transcribe right now".to_owned(),
+        (false, _, Some(text)) => {
+            format!("Nothing can transcribe · text leaves this device for {text}")
+        }
+        (true, None, None) => "Audio and text stay on this device".to_owned(),
+        (true, Some(audio), None) => format!("Audio leaves this device for {audio}"),
+        (true, None, Some(text)) => format!("Text leaves this device for {text}"),
+        (true, Some(audio), Some(text)) if audio == text => {
             format!("Audio and text leave this device for {audio}")
         }
-        (Some(audio), Some(text)) => format!("Audio leaves for {audio}, text for {text}"),
+        (true, Some(audio), Some(text)) => format!("Audio leaves for {audio}, text for {text}"),
     }
 }
 
@@ -706,6 +716,26 @@ mod tests {
         assert_eq!(departure_badge(&leaving), "TEXT LEAVES DEVICE");
         assert!(!leaving.audio_leaves());
         assert!(leaving.text_leaves());
+    }
+
+    #[test]
+    fn a_speech_list_that_cannot_run_does_not_hide_text_that_can() {
+        // The failure this replaces: the claim answered "Nothing can transcribe
+        // right now" and stopped, while the badge underneath it — reading the
+        // same two lists — said TEXT LEAVES DEVICE.
+        let leaving = departures(
+            &[entry("groq", true)],
+            |_| false,
+            &[text_entry("deepl", true), text_entry("local", true)],
+            |_| true,
+        );
+
+        assert!(!leaving.can_transcribe);
+        assert_eq!(
+            privacy_claim(&leaving),
+            "Nothing can transcribe · text leaves this device for DeepL"
+        );
+        assert_eq!(departure_badge(&leaving), "TEXT LEAVES DEVICE");
     }
 
     #[test]

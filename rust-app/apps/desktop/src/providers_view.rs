@@ -8,7 +8,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use rust_protocol::{
-    SpeechWorkerCommand, TranscriptionProviderEntry, TranslationProviderEntry,
+    RequestId, SpeechWorkerCommand, TranscriptionProviderEntry, TranslationProviderEntry,
     TranslationWorkerCommand,
 };
 use slint::{ModelRc, VecModel};
@@ -20,6 +20,7 @@ use crate::{
         chain_positions, departure_badge, departures, privacy_claim, provider_row,
         translation_provider_row,
     },
+    settings_view::set_status_problem,
     worker_supervisor::Workers,
 };
 
@@ -144,6 +145,87 @@ pub(crate) fn check_translation_provider_configuration(
         secret.to_owned(),
         (!extra.is_empty()).then(|| extra.to_owned()),
     ))
+}
+
+/// Acts on a worker's answer to one key save.
+///
+/// This is where the form finally closes, the second field is written, and the
+/// user is told. All three used to happen the moment the command reached the
+/// pipe — so a store that then refused the key left the row configured for a
+/// service it had no key for, the form shut over the value the user had typed,
+/// and a generic failure on the status line that named no operation.
+pub(crate) fn settle_credential(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Workers,
+    operation_id: RequestId,
+    provider_id: &str,
+    error: &str,
+) {
+    let Some(pending) = state.borrow_mut().pending_credentials.remove(&operation_id) else {
+        // Not ours, or already settled. Saying nothing is right: another window
+        // or an earlier attempt owns it.
+        return;
+    };
+    let Some((kind, _)) = split_row_id(&pending.row_id) else {
+        return;
+    };
+
+    if !error.is_empty() {
+        // The form stays open, holding what was typed, with the store's own
+        // words under it.
+        if let Some(settings) = settings.upgrade() {
+            settings.set_provider_problem(format!("The key was not stored: {error}").into());
+            settings.set_provider_problem_for(pending.row_id.clone().into());
+            settings.set_provider_editing(pending.row_id.into());
+        }
+        set_status_problem(
+            settings,
+            &format!("{} did not accept the key.", pending.display_name),
+        );
+        return;
+    }
+
+    // Stored. Only now is the second field written, and only now does the form
+    // close.
+    {
+        let mut app = state.borrow_mut();
+        match kind {
+            Kind::Speech => {
+                if let Some(entry) = app
+                    .transcription_chain
+                    .iter_mut()
+                    .find(|entry| entry.id == provider_id)
+                {
+                    set_provider_field_value(entry, pending.extra.clone().unwrap_or_default());
+                }
+            }
+            Kind::Text => {
+                if let Some(entry) = app
+                    .translation_chain
+                    .iter_mut()
+                    .find(|entry| entry.id == provider_id)
+                {
+                    entry.region = pending.extra.clone().filter(|value| !value.is_empty());
+                }
+            }
+        }
+    }
+    let _ = save_settings(&state.borrow());
+
+    if let Some(settings) = settings.upgrade() {
+        settings.set_provider_problem("".into());
+        settings.set_provider_problem_for("".into());
+        settings.set_provider_editing("".into());
+    }
+    set_indicator_status(
+        settings,
+        &format!("The key for {} is stored.", pending.display_name),
+    );
+    match kind {
+        Kind::Speech => apply_provider_chain(settings, state, workers),
+        Kind::Text => apply_translation_chain(settings, state, workers),
+    }
 }
 
 /// Which of the two lists a row belongs to.

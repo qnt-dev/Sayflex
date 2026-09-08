@@ -28,7 +28,9 @@ pub use chain::{Chain, Ledger, ProviderStatus, Unavailable};
 pub use failure::{ProviderFailure, classify_response, redact_secret};
 pub use http::{DEFAULT_TIMEOUT, HttpExecutor};
 pub use provider::{ProviderEntry, ProviderId};
-pub use request::{PlanError, RequestPlan, ResponseShape, plan_request, read_translation};
+pub use request::{
+    PlanError, ReadAnswer, RequestPlan, ResponseShape, plan_request, read_answer, read_translation,
+};
 pub use router::{
     Attempt, AttemptOutcome, CancelSignal, PER_PROVIDER_LIMIT, RequestExecutor, RouteOutcome,
     Router, TOTAL_DEADLINE, Translation,

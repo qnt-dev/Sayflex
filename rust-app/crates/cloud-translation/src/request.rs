@@ -236,6 +236,52 @@ fn urlencode(value: &str) -> String {
 ///
 /// An answer that parses but carries nothing is not an error to pass down the
 /// list: the same nothing would come back from everyone.
+/// What was in a service's answer.
+///
+/// Three outcomes, not two. An answer that could not be parsed at all — a proxy
+/// login page, a WAF block, a schema the service changed — is not the same as a
+/// service saying it has no translation for this text, and treating them alike
+/// meant one broken reply from DeepL stopped the walk before Azure, Google or
+/// the local engine were asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadAnswer {
+    Translated(String),
+    /// Parsed, understood, and carrying no text.
+    Empty,
+    /// Not the shape this service is supposed to answer in.
+    Malformed(String),
+}
+
+/// Reads a service's answer, saying which of the three it is.
+pub fn read_answer(shape: ResponseShape, body: &str) -> ReadAnswer {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return ReadAnswer::Malformed("the answer was not JSON".to_owned());
+    };
+    let found = match shape {
+        ResponseShape::DeepL => value
+            .get("translations")
+            .and_then(|value| value.get(0))
+            .and_then(|value| value.get("text")),
+        ResponseShape::Azure => value
+            .get(0)
+            .and_then(|value| value.get("translations"))
+            .and_then(|value| value.get(0))
+            .and_then(|value| value.get("text")),
+        ResponseShape::Google => value
+            .get("data")
+            .and_then(|value| value.get("translations"))
+            .and_then(|value| value.get(0))
+            .and_then(|value| value.get("translatedText")),
+    };
+    match found.and_then(Value::as_str) {
+        None => ReadAnswer::Malformed(
+            "the answer did not carry a translation where this service puts one".to_owned(),
+        ),
+        Some(text) if text.trim().is_empty() => ReadAnswer::Empty,
+        Some(text) => ReadAnswer::Translated(text.to_owned()),
+    }
+}
+
 pub fn read_translation(shape: ResponseShape, body: &str) -> Option<String> {
     let value: Value = serde_json::from_str(body).ok()?;
     let text = match shape {

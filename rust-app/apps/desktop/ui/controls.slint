@@ -562,9 +562,12 @@ export component ScrollRail inherits Rectangle {
     /// track as its scale ran ahead of the content and the thumb's own position
     /// drifted from where the view actually was. Both now divide by the travel
     /// the thumb really has.
+    // Held to a minimum so it stays grabbable, and to the track so it cannot
+    // exceed the rail it runs in: on a very short list the minimum was the
+    // larger of the two and the thumb hung off the end.
     property <length> thumb-length: root.content <= 0px
         ? root.track
-        : max(30px, min(root.track, root.shown / root.content * root.track));
+        : min(root.track, max(min(30px, root.track), root.shown / root.content * root.track));
     property <length> thumb-travel: max(1px, root.track - root.thumb-length);
     property <length> thumb-at: root.reach <= 0px
         ? 0px

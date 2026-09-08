@@ -31,7 +31,7 @@ use rust_cloud_speech::{
 };
 use rust_platform_windows::credentials::DpapiCipher;
 use rust_protocol::{
-    SessionId, SpeechOutputMode, SpeechWorkerEvent, Transcript, TranscriptionLatency,
+    RequestId, SessionId, SpeechOutputMode, SpeechWorkerEvent, Transcript, TranscriptionLatency,
     TranscriptionProviderEntry, TranscriptionProviderStatus,
 };
 
@@ -42,6 +42,10 @@ pub enum TranscriptionCommand {
     SetProviders(Vec<TranscriptionProviderEntry>),
     /// Stores or clears one key.
     SetCredential {
+        /// Named so the window that is waiting can recognise the answer. The
+        /// write happens here, on another thread in another process, long
+        /// after the command was put in the pipe.
+        operation_id: RequestId,
         provider_id: String,
         secret: Option<String>,
     },
@@ -224,6 +228,7 @@ impl State {
                 self.report_status();
             }
             TranscriptionCommand::SetCredential {
+                operation_id,
                 provider_id,
                 secret,
             } => {
@@ -231,6 +236,17 @@ impl State {
                     Some(secret) => self.credentials.set(&provider_id, &secret),
                     None => self.credentials.remove(&provider_id),
                 };
+                // Answered either way, because a window is waiting on it and a
+                // silence is indistinguishable from a success.
+                let _ = self.events.send(SpeechWorkerEvent::CredentialSaved {
+                    operation_id,
+                    provider_id: provider_id.clone(),
+                    error: result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                });
                 match result {
                     Ok(()) => {
                         // A key the user has just corrected deserves another

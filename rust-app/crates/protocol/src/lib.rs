@@ -6,7 +6,16 @@ use uuid::Uuid;
 // Version 15 adds the ordered list of transcription providers: the local
 // engine and any network services the user has keys for.
 // All packaged processes must agree on this schema before exchanging commands.
-pub const PROTOCOL_VERSION: u32 = 16;
+/// The shape of every message in this file, as one number.
+///
+/// It goes up whenever the shape changes — a field added, a variant removed, a
+/// meaning altered — and not once per release. Version 16 was used twice: an
+/// event was added under it and then removed under it again, so two
+/// incompatible schemas both introduced themselves as 16 and shook hands
+/// happily. A desktop and a worker from those two builds would have agreed they
+/// understood each other and then quietly disagreed about where a translation
+/// came from.
+pub const PROTOCOL_VERSION: u32 = 17;
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -494,6 +503,7 @@ pub enum TranslationWorkerCommand {
     },
     /// Stores or clears the key for one translation provider. `None` clears it.
     SetTranslationProviderCredential {
+        operation_id: RequestId,
         provider_id: String,
         secret: Option<String>,
     },
@@ -562,6 +572,13 @@ pub enum TranslationWorkerEvent {
     TranslationProviders {
         statuses: Vec<TranslationProviderStatus>,
     },
+    /// The key named by this operation is in the store, or is not.
+    CredentialSaved {
+        operation_id: RequestId,
+        provider_id: String,
+        /// Empty when it worked. The store's own words when it did not.
+        error: String,
+    },
     Failed {
         request_id: Option<RequestId>,
         /// The model the failure belongs to, when it belongs to one.
@@ -611,6 +628,15 @@ pub enum SpeechWorkerCommand {
     },
     /// Stores or clears the key for one provider. `None` clears it.
     SetProviderCredential {
+        /// Names this particular save so its answer can be recognised.
+        ///
+        /// A successful `send` only means the pipe took the bytes. The store is
+        /// written later, on another process, and it can fail — a profile
+        /// copied from another Windows account cannot be decrypted, a disk can
+        /// be full. Without an id the desktop had no way to tell whether the
+        /// generic failure that came back was about this key, so it closed the
+        /// form and threw away what the user had typed.
+        operation_id: RequestId,
         provider_id: String,
         secret: Option<String>,
     },
@@ -682,6 +708,16 @@ pub enum SpeechWorkerEvent {
     /// The ordered list with each row's availability, after any change.
     TranscriptionProviders {
         statuses: Vec<TranscriptionProviderStatus>,
+    },
+    /// The key named by this operation is in the store, or is not.
+    ///
+    /// Sent for every `SetProviderCredential`, whichever way it went, so the
+    /// form that is waiting always hears something.
+    CredentialSaved {
+        operation_id: RequestId,
+        provider_id: String,
+        /// Empty when it worked. The store's own words when it did not.
+        error: String,
     },
     /// A recording was transcribed by a network service rather than locally.
     /// Carried separately from the transcript so history and the interface can
@@ -940,5 +976,61 @@ mod tests {
             serde_json::from_str::<InputHostEvent>(&json).unwrap(),
             input_released
         );
+    }
+}
+
+#[cfg(test)]
+mod schema_version_tests {
+    use super::{PROTOCOL_VERSION, TranslationWorkerEvent};
+
+    /// The shape of this build's schema, as a set of names.
+    ///
+    /// Not a hash of the file: comments and formatting change constantly and
+    /// mean nothing on the wire. This is the list of variants a peer would have
+    /// to understand, and it is written down so that removing one without
+    /// touching the version number fails here rather than in the field.
+    const TRANSLATION_EVENTS: &[&str] = &[
+        "ready",
+        "model_download_progress",
+        "model_installed",
+        "model_ready",
+        "model_selected",
+        "partial",
+        "completed",
+        "cancelled",
+        "history",
+        "translation_providers",
+        "credential_saved",
+        "failed",
+    ];
+
+    fn variant_name(event: &TranslationWorkerEvent) -> String {
+        serde_json::to_value(event).unwrap()["type"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn the_translation_schema_is_the_one_this_version_describes() {
+        // Version 16 was used twice — an event added under it, then removed
+        // under it — so two incompatible schemas introduced themselves with the
+        // same number and the handshake let them through. Changing the set of
+        // events below without changing PROTOCOL_VERSION now fails here.
+        assert_eq!(
+            PROTOCOL_VERSION, 17,
+            "the schema listed here belongs to protocol 17;              change both or neither"
+        );
+        assert_eq!(
+            variant_name(&TranslationWorkerEvent::Cancelled {
+                request_id: crate::RequestId::new(),
+            }),
+            "cancelled"
+        );
+        assert!(
+            !TRANSLATION_EVENTS.contains(&"translated_remotely"),
+            "the event removed in protocol 17 must not come back without another bump"
+        );
+        assert_eq!(TRANSLATION_EVENTS.len(), 12);
     }
 }

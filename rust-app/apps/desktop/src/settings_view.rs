@@ -18,16 +18,16 @@ use slint::{
 
 use crate::{
     ActionPalette, AppState, AppTray, Fact, HISTORY_LIMIT, HistoryRow, HotkeyRow,
-    MAX_TRANSLATION_BLUR_RADIUS, ModelRow, PendingSelection, PendingTranslation, RecordingOverlays,
-    SelectionChooser, SelectionTranslationRequest, SettingsWindow, TextActionMode,
-    TranslationDelivery, TranslationOrigin, TranslatorWindow, begin_selection_translation,
-    configure_standard_app_window, dispatch_or_defer_selection_replacement, flow_sphere,
-    native_window_handle,
+    MAX_TRANSLATION_BLUR_RADIUS, ModelRow, PendingCredential, PendingSelection, PendingTranslation,
+    RecordingOverlays, SelectionChooser, SelectionTranslationRequest, SettingsWindow,
+    TextActionMode, TranslationDelivery, TranslationOrigin, TranslatorWindow,
+    begin_selection_translation, configure_standard_app_window,
+    dispatch_or_defer_selection_replacement, flow_sphere, native_window_handle,
     overlay_presenter::OverlayPresenter,
     providers_view::{
         Kind, SaveRefused, apply_provider_chain, apply_translation_chain,
         check_provider_configuration, check_translation_provider_configuration, locate,
-        row_display_name, set_provider_field_value, split_row_id, sync_providers,
+        row_display_name, split_row_id, sync_providers,
     },
     settings_document::save_settings,
     settings_projection::{
@@ -145,19 +145,22 @@ pub(crate) fn sync_action_settings(
             )
             .into(),
     );
-    settings.set_release_mode(
-        if state.fast_release_previews {
-            "fastest"
+    // Fastest costs nothing worth having on a GPU and costs the final result
+    // its own runtime on the CPU, where there is one inference actor and every
+    // preview is time the transcript waits. The worker refuses it there, so the
+    // page must not go on offering it: a control that reports a setting the
+    // program ignores is a control that lies about the product.
+    let previews_possible =
+        state.speech_backend_active != Some(crate::speech_backend::SpeechBackend::Cpu);
+    let previews_on = state.fast_release_previews && previews_possible;
+    settings.set_release_mode(if previews_on { "fastest" } else { "efficient" }.into());
+    settings.set_release_mode_label(if previews_on { "Fastest" } else { "Efficient" }.into());
+    settings.set_release_mode_locked(!previews_possible);
+    settings.set_release_mode_note(
+        if previews_possible {
+            ""
         } else {
-            "efficient"
-        }
-        .into(),
-    );
-    settings.set_release_mode_label(
-        if state.fast_release_previews {
-            "Fastest"
-        } else {
-            "Efficient"
+            "Not available on the CPU engine: one pass at a time, and a preview is time the transcript waits."
         }
         .into(),
     );
@@ -1261,30 +1264,42 @@ pub(crate) fn wire_settings(
                 }
             };
 
-            // The key goes first, because it is the half that can fail. The
-            // worker owns the encrypted store; the key is never written to
-            // settings and never read back for display.
-            //
-            // Writing the second field first — which is what this did — meant
-            // that an IPC failure left the row configured with an endpoint or a
-            // region and no key at all, saved to disk, with the form closed
-            // over it. Now nothing is written until the key is on its way, and
-            // if it is not, the form stays open holding what the user typed.
+            // Nothing is written and nothing closes until the worker says the
+            // key is in the store. A successful `send` only means the pipe took
+            // the bytes; the store is DPAPI, on another process, and it can
+            // refuse — a profile copied from another Windows account cannot be
+            // decrypted. This used to treat the pipe as the store: it saved the
+            // second field, closed the form, and discarded what the user had
+            // typed, and if the write then failed the row was left configured
+            // for a service it had no key for.
+            let operation_id = RequestId::new();
+            state.borrow_mut().pending_credentials.insert(
+                operation_id,
+                PendingCredential {
+                    row_id: row_id.clone(),
+                    extra: extra.clone(),
+                    display_name: row_display_name(kind, &provider_id),
+                },
+            );
+
             let sent = match kind {
                 Kind::Speech => workers
                     .speech
                     .send(&SpeechWorkerCommand::SetProviderCredential {
+                        operation_id,
                         provider_id: provider_id.clone(),
                         secret: Some(secret),
                     }),
                 Kind::Text => workers.translation.send(
                     &TranslationWorkerCommand::SetTranslationProviderCredential {
+                        operation_id,
                         provider_id: provider_id.clone(),
                         secret: Some(secret),
                     },
                 ),
             };
             if let Err(error) = sent {
+                state.borrow_mut().pending_credentials.remove(&operation_id);
                 if let Some(settings) = settings_weak.upgrade() {
                     settings.set_provider_problem(
                         format!("The key could not be sent to the worker: {error}").into(),
@@ -1294,43 +1309,8 @@ pub(crate) fn wire_settings(
                 return;
             }
 
-            {
-                let mut state = state.borrow_mut();
-                match kind {
-                    Kind::Speech => {
-                        if let Some(entry) = state
-                            .transcription_chain
-                            .iter_mut()
-                            .find(|entry| entry.id == provider_id)
-                        {
-                            set_provider_field_value(entry, extra.clone().unwrap_or_default());
-                        }
-                    }
-                    Kind::Text => {
-                        if let Some(entry) = state
-                            .translation_chain
-                            .iter_mut()
-                            .find(|entry| entry.id == provider_id)
-                        {
-                            let region = extra.clone().unwrap_or_default();
-                            entry.region = (!region.is_empty()).then_some(region);
-                        }
-                    }
-                }
-            }
-            let _ = save_settings(&state.borrow());
-
-            // The form closes now that both halves are away. It promised to and
-            // never did: `editing` was left set, so the row stayed open with a
-            // key field the user had already submitted still in it.
-            if let Some(settings) = settings_weak.upgrade() {
-                settings.set_provider_problem("".into());
-                settings.set_provider_problem_for("".into());
-                settings.set_provider_editing("".into());
-            }
-            // Deliberately not "stored": the write happens in the worker, and
-            // the row reports what is actually in the store once it answers.
-            // Claiming success here would be a guess.
+            // Deliberately not "stored": it is on its way. `settle_credential`
+            // says what happened when the worker answers.
             set_indicator_status(
                 &settings_weak,
                 &format!(
@@ -1338,10 +1318,6 @@ pub(crate) fn wire_settings(
                     row_display_name(kind, &provider_id)
                 ),
             );
-            match kind {
-                Kind::Speech => apply_provider_chain(&settings_weak, &state, &workers),
-                Kind::Text => apply_translation_chain(&settings_weak, &state, &workers),
-            }
         });
     }
     {
@@ -1357,20 +1333,36 @@ pub(crate) fn wire_settings(
                 return;
             };
             let provider_id = provider_id.to_owned();
+            // A removal is a store operation too, and answered the same way,
+            // so the row's key hint only disappears once it has actually gone.
+            let operation_id = RequestId::new();
+            state.borrow_mut().pending_credentials.insert(
+                operation_id,
+                PendingCredential {
+                    row_id: row_id.clone(),
+                    extra: None,
+                    display_name: row_display_name(kind, &provider_id),
+                },
+            );
             let sent = match kind {
                 Kind::Speech => workers
                     .speech
                     .send(&SpeechWorkerCommand::SetProviderCredential {
+                        operation_id,
                         provider_id: provider_id.clone(),
                         secret: None,
                     }),
                 Kind::Text => workers.translation.send(
                     &TranslationWorkerCommand::SetTranslationProviderCredential {
+                        operation_id,
                         provider_id: provider_id.clone(),
                         secret: None,
                     },
                 ),
             };
+            if sent.is_err() {
+                state.borrow_mut().pending_credentials.remove(&operation_id);
+            }
             match sent {
                 Ok(()) => set_indicator_status(
                     &settings_weak,

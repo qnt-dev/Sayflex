@@ -40,8 +40,10 @@ same-user threat model, are documented in [`SECURITY.md`](SECURITY.md).
   or failed recording does not hide the newest successfully completed text.
 - `Ctrl + Alt + K` captures selected text and offers explicit RU/EN keyboard
   layout candidates. Ordinary text is never changed automatically.
-- `Ctrl + Alt + F` captures selected text once, translates it locally, and
-  opens the compact preview immediately.
+- `Ctrl + Alt + F` captures selected text once, translates it, and opens the
+  compact preview immediately. It translates on this machine unless a
+  translation service has been put above the local engine in Settings →
+  Providers, which is off by default and needs a key you supply.
 
 Selected text is resolved through a bounded capability cascade: UI Automation
 `TextPattern`, synchronous `WM_COPY` for native edit controls, then the
@@ -107,7 +109,7 @@ prepared segments without unloading the already warmed model.
 cd .\rust-app
 cargo test --workspace
 .\scripts\publish.ps1
-.\scripts\build-installer.ps1 -Version 0.5.27 -SkipPublish
+.\scripts\build-installer.ps1 -SkipPublish
 ```
 
 The measured warm-path design and benchmark gate are documented in

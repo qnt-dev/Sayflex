@@ -2,7 +2,36 @@
 
 SayFlex is designed as a local desktop utility. Audio capture, speech
 recognition, layout conversion, and installed translation-model inference run
-on the user's machine.
+on the user's machine, and that is what a fresh installation does.
+
+## Two things can be sent to a network service, and neither is by default
+
+Settings holds two separate ordered lists of providers, and each is its own
+decision:
+
+- **Speech.** A recording can be transcribed by Groq, Cloudflare Workers AI,
+  Azure Speech, Deepgram or a custom OpenAI-compatible endpoint instead of by
+  the model on this machine.
+- **Text.** A selection can be translated by DeepL, Azure Translator or Google
+  Cloud Translation instead of by the engine on this machine.
+
+They are deliberately not one list and not one switch. A key for Azure
+Translator is not a key for Azure Speech, the free allowances are counted
+separately, and somebody willing to send a few seconds of audio to a service is
+not thereby willing to send the contents of their documents.
+
+Every row in both lists starts switched off and stays off until the user
+supplies a key. The local engine is a row in each list, and the walk stops the
+moment it reaches an enabled one — so anything placed below it is never asked.
+What the window claims about audio or text leaving the machine is computed from
+these lists themselves, not from a separate setting that could disagree with
+them.
+
+Keys are encrypted with Windows DPAPI in the current user's scope, kept in their
+own file rather than in `settings.json`, and never shown again after they are
+saved: a row displays only the last four characters. A custom speech endpoint
+must be HTTPS, because the key and the audio travel in the same request. Any key
+a service echoes back in an error is removed before that error reaches the log.
 
 ## Data handling
 

@@ -12,7 +12,7 @@ use reqwest::blocking::Client;
 
 use crate::{
     failure::{ProviderFailure, classify_response},
-    request::{RequestPlan, read_translation},
+    request::{ReadAnswer, RequestPlan, read_answer},
     router::RequestExecutor,
 };
 
@@ -71,25 +71,30 @@ impl RequestExecutor for HttpExecutor {
             .read_to_string(&mut body)
             .map_err(|error| ProviderFailure::Unavailable(error.to_string()))?;
 
-        if let Some(text) = read_translation(plan.shape, &body) {
-            return Ok(text);
+        // The status decides first. Reading the body for a translation before
+        // looking at the status meant a 500 whose body happened to fit the
+        // shape was accepted as a success, and — worse — that any unparseable
+        // 200 became `Empty`, which stops the walk: one proxy login page from
+        // DeepL and Azure, Google and the local engine were never asked.
+        if !(200..300).contains(&status) {
+            return Err(classify_response(
+                plan.provider.as_str(),
+                status,
+                retry_after,
+                &body,
+            ));
         }
-        // A service that answered successfully and handed back nothing has
-        // nothing to hand back. Asking the next one for the same text would
-        // spend another allowance on the same answer, which is why `Empty`
-        // stops the walk — and why it has to be reachable from here at all.
-        // Without this the reply became `Rejected` and the walk carried on,
-        // and the rule the router tests describe was one the product never
-        // reached.
-        if (200..300).contains(&status) {
-            return Err(ProviderFailure::Empty);
+        match read_answer(plan.shape, &body) {
+            ReadAnswer::Translated(text) => Ok(text),
+            // Parsed, understood, and carrying nothing. Only this stops the
+            // walk, because only this is the service telling us something true
+            // about the text rather than about itself.
+            ReadAnswer::Empty => Err(ProviderFailure::Empty),
+            // A success status wrapped around something this service does not
+            // answer in. That is the service being broken, not the text being
+            // untranslatable, so the next one is asked.
+            ReadAnswer::Malformed(detail) => Err(ProviderFailure::Unavailable(detail)),
         }
-        Err(classify_response(
-            plan.provider.as_str(),
-            status,
-            retry_after,
-            &body,
-        ))
     }
 }
 
@@ -115,6 +120,73 @@ mod tests {
     use std::time::Duration;
 
     use super::{DEFAULT_TIMEOUT, HttpExecutor, parse_retry_after};
+    use crate::{
+        ProviderFailure,
+        request::{ReadAnswer, ResponseShape, read_answer},
+    };
+
+    /// What `execute` decides once a reply is in hand.
+    ///
+    /// The socket is the only part of `execute` that cannot be exercised
+    /// without a network, so the decision it makes afterwards is written here
+    /// exactly as it is written there.
+    fn outcome(status: u16, body: &str) -> Result<String, ProviderFailure> {
+        if !(200..300).contains(&status) {
+            return Err(crate::failure::classify_response(
+                "deepl", status, None, body,
+            ));
+        }
+        match read_answer(ResponseShape::DeepL, body) {
+            ReadAnswer::Translated(text) => Ok(text),
+            ReadAnswer::Empty => Err(ProviderFailure::Empty),
+            ReadAnswer::Malformed(detail) => Err(ProviderFailure::Unavailable(detail)),
+        }
+    }
+
+    #[test]
+    fn a_broken_answer_moves_on_and_a_truly_empty_one_stops() {
+        // The failure this replaces: any 200 that could not be read became
+        // `Empty`, and `Empty` ends the walk — so one login page from a captive
+        // proxy meant Azure, Google and the local engine were never asked.
+        for broken in [
+            "<html><body>Sign in to your proxy</body></html>",
+            "{\"unexpected\":\"schema\"}",
+            "",
+        ] {
+            let failure = outcome(200, broken).unwrap_err();
+            assert!(
+                failure.should_fail_over(),
+                "a service answering nonsense must not stop the walk: {broken:?}"
+            );
+        }
+
+        let empty = outcome(200, "{\"translations\":[{\"text\":\"\"}]}").unwrap_err();
+        assert_eq!(empty, ProviderFailure::Empty);
+        assert!(
+            !empty.should_fail_over(),
+            "a service that read the text and had nothing speaks for the rest"
+        );
+    }
+
+    #[test]
+    fn a_failing_status_is_never_read_as_a_success() {
+        // A 500 whose body happens to fit the shape was accepted as a
+        // translation, because the body was read before the status.
+        let failure = outcome(500, "{\"translations\":[{\"text\":\"nonsense\"}]}").unwrap_err();
+
+        assert!(
+            !matches!(failure, ProviderFailure::Empty),
+            "a server error is a server error whatever its body says: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_answer_is_read() {
+        assert_eq!(
+            outcome(200, "{\"translations\":[{\"text\":\"привет\"}]}").unwrap(),
+            "привет"
+        );
+    }
 
     #[test]
     fn a_client_is_built_with_a_bounded_wait() {
