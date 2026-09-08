@@ -379,7 +379,11 @@ export component SettingsWindow inherits Window {
         Rectangle {
             height: 92px;
 
+            // A child of a Rectangle with a height but no y is centred, so this
+            // rule ran through the middle of the footer and struck out the
+            // brand mark. It belongs on the top edge.
             Rectangle {
+                y: 0;
                 height: 1px;
                 background: Sheet.hairline-faint;
             }

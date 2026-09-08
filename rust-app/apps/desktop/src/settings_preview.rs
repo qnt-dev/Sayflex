@@ -52,6 +52,10 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
         let _ = slint::quit_event_loop();
     });
     settings.show()?;
+    // The same native dressing the real window gets, so the preview shows the
+    // whole thing including its title bar rather than the page inside a piece
+    // of chrome that belongs to a different design.
+    crate::configure_standard_app_window(&settings, "Settings preview");
     slint::run_event_loop()?;
     Ok(())
 }

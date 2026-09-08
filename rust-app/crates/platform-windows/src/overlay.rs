@@ -921,8 +921,59 @@ pub fn configure_standard_window(window_handle: u64) -> Result<(), String> {
             return Err("SetWindowPos failed for standard window".to_owned());
         }
     }
+    dress_caption(hwnd);
     Ok(())
 }
+
+/// Paints the title bar in the window's own material.
+///
+/// A window drawn in graphite on warm grey paper, wearing whatever dark or
+/// light chrome Windows felt like, is two designs stacked on top of each other.
+/// These attributes arrive with Windows 11 build 22000; on anything older DWM
+/// refuses them and the caption stays as it was, which is why the results are
+/// deliberately not checked.
+fn dress_caption(hwnd: HWND) {
+    // The canvas, the ink and the hairline the interface itself uses. COLORREF
+    // is 0x00BBGGRR, so these read backwards from the hex in the stylesheet.
+    const CAPTION: u32 = 0x00C6_C2BF; // #bfc2c6
+    const TEXT: u32 = 0x0017_1311; // #111317
+    const BORDER: u32 = 0x00A5_A29F; // a shade under the canvas
+
+    // SAFETY: hwnd belongs to this process, and each call passes a u32 by
+    // reference with its own size, which is what these attributes expect.
+    unsafe {
+        for (attribute, value) in [
+            (DWMWA_CAPTION_COLOR, CAPTION),
+            (DWMWA_TEXT_COLOR, TEXT),
+            (DWMWA_BORDER_COLOR, BORDER),
+        ] {
+            let result = DwmSetWindowAttribute(
+                hwnd,
+                attribute,
+                (&raw const value).cast(),
+                size_of::<u32>() as u32,
+            );
+            if result < 0 {
+                eprintln!("caption attribute={attribute} rejected=0x{result:08X}");
+            }
+        }
+        // Light-mode chrome for the buttons DWM draws itself, so the minimise
+        // and close glyphs are ink on paper rather than white on paper.
+        let dark: i32 = 0;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&raw const dark).cast(),
+            size_of::<i32>() as u32,
+        );
+    }
+}
+
+/// Attributes that arrived with Windows 11 and are not in the `windows-sys`
+/// constant list this crate imports.
+const DWMWA_BORDER_COLOR: u32 = 34;
+const DWMWA_CAPTION_COLOR: u32 = 35;
+const DWMWA_TEXT_COLOR: u32 = 36;
 
 unsafe fn apply_transient_backdrop(hwnd: HWND) {
     // DWM system backdrops are available from Windows 11 build 22621. These

@@ -799,7 +799,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if !env::args().any(|argument| argument == "--background") {
         settings.show()?;
-        configure_standard_app_window(settings.window(), "Settings");
+        configure_standard_app_window(&settings, "Settings");
     }
     tray.show()?;
     slint::run_event_loop()?;
@@ -3224,12 +3224,46 @@ fn dispatch_or_defer_selection_replacement(
     }
 }
 
-fn configure_standard_app_window(window: &slint::Window, name: &str) {
-    if let Err(error) = slint_window_handle(window)
-        .ok_or_else(|| "native window handle is unavailable".to_owned())
-        .and_then(rust_platform_windows::configure_standard_window)
+/// Makes a window a normal application window, once it has one.
+///
+/// Slint creates the native window on the event loop, not inside `show()`, so
+/// asking for the handle on the next line always found nothing — and this
+/// function quietly did nothing at all, for every window it was called on. The
+/// taskbar entry, the z-order and the caption were left to whatever winit
+/// happened to set.
+///
+/// It waits for the window instead. `spawn_local` needs the event loop, which
+/// is where every caller already is.
+fn configure_standard_app_window<T>(component: &T, name: &'static str)
+where
+    T: ComponentHandle + 'static,
+{
+    let weak = component.as_weak();
+    if slint::spawn_local(async move {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let handle = component
+            .window()
+            .winit_window()
+            .await
+            .ok()
+            .as_deref()
+            .and_then(native_window_handle);
+        match handle {
+            Some(handle) => {
+                if let Err(error) = rust_platform_windows::configure_standard_window(handle) {
+                    eprintln!(
+                        "could not configure `{name}` as a standard application window: {error}"
+                    );
+                }
+            }
+            None => eprintln!("`{name}` never received a native window handle"),
+        }
+    })
+    .is_err()
     {
-        eprintln!("could not configure `{name}` as a standard application window: {error}");
+        eprintln!("could not schedule the native configuration of `{name}`");
     }
 }
 

@@ -5,7 +5,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Drawing.Common
+# PowerShell 7 ships the assembly as System.Drawing.Common; Windows PowerShell
+# 5.1 has it as System.Drawing. Either will do, so take whichever is there.
+try { Add-Type -AssemblyName System.Drawing.Common -ErrorAction Stop }
+catch { Add-Type -AssemblyName System.Drawing }
 
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
 [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
@@ -71,24 +74,21 @@ function New-IconFrame {
             -Y (12 * $scale) `
             -Width (232 * $scale) `
             -Height (232 * $scale) `
-            -Radius (48 * $scale)
+            -Radius (44 * $scale)
+        # Graphite ink, the same as the interface. A filled shape rather than a
+        # framed one: at sixteen pixels a stroke is a smudge.
         $shellBrush = [Drawing.SolidBrush]::new(
-            [Drawing.ColorTranslator]::FromHtml('#272727'))
-        $framePen = [Drawing.Pen]::new(
-            [Drawing.ColorTranslator]::FromHtml('#2C2F31'),
-            [Math]::Max(1, 12 * $scale))
+            [Drawing.ColorTranslator]::FromHtml('#111317'))
         try {
             $graphics.FillPath($shellBrush, $shell)
-            $graphics.DrawPath($framePen, $shell)
         }
         finally {
-            $framePen.Dispose()
             $shellBrush.Dispose()
             $shell.Dispose()
         }
 
         $signalBrush = [Drawing.SolidBrush]::new(
-            [Drawing.ColorTranslator]::FromHtml('#FFD400'))
+            [Drawing.ColorTranslator]::FromHtml('#F5F5F2'))
         $centres = @(64, 96, 128, 160, 192)
         $heights = @(58, 104, 140, 104, 58)
         try {
@@ -115,6 +115,20 @@ function New-IconFrame {
             $signalBrush.Dispose()
         }
 
+        $accentBrush = [Drawing.SolidBrush]::new(
+            [Drawing.ColorTranslator]::FromHtml('#B8501C'))
+        try {
+            $graphics.FillRectangle(
+                $accentBrush,
+                [float](186 * $scale),
+                [float](186 * $scale),
+                [float](26 * $scale),
+                [float](26 * $scale))
+        }
+        finally {
+            $accentBrush.Dispose()
+        }
+
         $stream = [IO.MemoryStream]::new()
         try {
             $bitmap.Save($stream, [Drawing.Imaging.ImageFormat]::Png)
@@ -138,7 +152,7 @@ $frames = foreach ($size in $sizes) {
     }
 }
 
-$iconPath = Join-Path $outputRoot 'keyboop.ico'
+$iconPath = Join-Path $outputRoot 'sayflex.ico'
 $file = [IO.File]::Create($iconPath)
 $writer = [IO.BinaryWriter]::new($file)
 try {
@@ -169,7 +183,7 @@ finally {
 }
 
 [IO.File]::WriteAllBytes(
-    (Join-Path $outputRoot 'keyboop-256.png'),
+    (Join-Path $outputRoot 'sayflex-256.png'),
     [byte[]]$frames[-1].Bytes)
 
 Write-Host "Generated $iconPath"

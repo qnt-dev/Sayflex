@@ -848,7 +848,7 @@ pub(crate) fn wire_settings(
         settings.on_open_translator(move || {
             if let Some(translator) = translator.upgrade() {
                 let _ = translator.show();
-                configure_standard_app_window(translator.window(), "Translator");
+                configure_standard_app_window(&translator, "Translator");
                 translator.window().request_redraw();
             }
         });
@@ -1413,7 +1413,7 @@ pub(crate) fn wire_tray(
         tray.on_open_settings(move || {
             if let Some(settings) = settings.upgrade() {
                 let _ = settings.show();
-                configure_standard_app_window(settings.window(), "Settings");
+                configure_standard_app_window(&settings, "Settings");
                 settings.window().request_redraw();
             }
         });
@@ -1423,7 +1423,7 @@ pub(crate) fn wire_tray(
         tray.on_open_translator(move || {
             if let Some(translator) = translator.upgrade() {
                 let _ = translator.show();
-                configure_standard_app_window(translator.window(), "Translator");
+                configure_standard_app_window(&translator, "Translator");
                 translator.window().request_redraw();
             }
         });
