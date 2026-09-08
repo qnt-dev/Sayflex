@@ -16,7 +16,10 @@ use slint::{ModelRc, VecModel};
 use crate::{
     AppState, ProviderRow, SettingsWindow, set_indicator_status,
     settings_document::save_settings,
-    settings_projection::{chain_positions, privacy_claim, provider_row, translation_provider_row},
+    settings_projection::{
+        chain_positions, departure_badge, departures, privacy_claim, provider_row,
+        translation_provider_row,
+    },
     worker_supervisor::Workers,
 };
 
@@ -58,35 +61,6 @@ pub(crate) fn set_provider_field_value(entry: &mut TranscriptionProviderEntry, v
         "cloudflare" | "azure" => entry.account = value,
         _ => {}
     }
-}
-
-/// Whether this arrangement can send a recording off the machine.
-///
-/// Every claim in the interface about audio staying here rests on this, so it
-/// walks the list the way the router walks it rather than asking whether a
-/// service is switched on somewhere. `Router::transcribe` returns
-/// `UseLocalEngine` at the first local candidate and stops, so a keyed service
-/// below an enabled local engine is never consulted: it must not make the
-/// interface announce that audio is leaving.
-///
-/// Momentary availability is deliberately not consulted. A service that is
-/// cooling down will be used again within the hour, and a privacy claim that
-/// flickers with a quota counter teaches the user to ignore it.
-pub(crate) fn audio_can_leave_device(
-    chain: &[TranscriptionProviderEntry],
-    has_credential: impl Fn(&str) -> bool,
-) -> bool {
-    chain
-        .iter()
-        .filter(|entry| entry.enabled)
-        .find_map(|entry| {
-            if entry.id == "local" {
-                // The walk ends here; nothing below is reached.
-                return Some(false);
-            }
-            has_credential(&entry.id).then_some(true)
-        })
-        .unwrap_or(false)
 }
 
 /// Why a provider's configuration was refused.
@@ -145,10 +119,15 @@ pub(crate) fn check_provider_configuration(
 ///
 /// The same contract as the transcription form and deliberately its own
 /// function: the two lists ask for different things. Nothing here takes an
-/// endpoint, so there is no address to insist is HTTPS; Azure is the only one
-/// that needs a second field, and it needs it.
+/// endpoint, so there is no address to insist is HTTPS.
+///
+/// Azure's region is offered and not demanded. A global Translator resource
+/// does not have one and works without it; a regional or multi-service resource
+/// does and fails without it. Which of the two a key belongs to is not
+/// something this window can see, so refusing an empty region locked out every
+/// person holding a global key.
 pub(crate) fn check_translation_provider_configuration(
-    provider_id: &str,
+    _provider_id: &str,
     secret: &str,
     extra: &str,
 ) -> Result<(String, Option<String>), SaveRefused> {
@@ -158,11 +137,6 @@ pub(crate) fn check_translation_provider_configuration(
     if secret.is_empty() {
         return Err(SaveRefused(
             "A key is needed. To remove the one already stored, use Remove key.".to_owned(),
-        ));
-    }
-    if provider_id == "azure" && extra.is_empty() {
-        return Err(SaveRefused(
-            "Region is needed as well as the key.".to_owned(),
         ));
     }
 
@@ -268,12 +242,16 @@ pub(crate) fn sync_providers(
             }),
     );
 
-    let leaves = audio_can_leave_device(&state.transcription_chain, has_credential);
-    let text_leaves = text_can_leave_device(&state.translation_chain, has_text_credential);
-    settings.set_remote_transcription_enabled(leaves || text_leaves);
-    settings.set_provider_claim(
-        privacy_claim(&state.transcription_chain, leaves, has_credential).into(),
+    let leaving = departures(
+        &state.transcription_chain,
+        has_credential,
+        &state.translation_chain,
+        has_text_credential,
     );
+    settings.set_audio_leaves_device(leaving.audio_leaves());
+    settings.set_text_leaves_device(leaving.text_leaves());
+    settings.set_departure_badge(departure_badge(&leaving).into());
+    settings.set_provider_claim(privacy_claim(&leaving).into());
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
     settings.set_provider_rows(ModelRc::new(VecModel::from(rows)));
 }
@@ -303,27 +281,6 @@ fn text_chain_positions(
         }
     }
     (first_local, first_usable)
-}
-
-/// Whether this arrangement can send text off the machine.
-///
-/// The same reading the worker does, so the claim on Overview and the walk the
-/// worker performs cannot disagree: the first switched-on row decides, and a
-/// local engine anywhere above a service means nothing below it is asked.
-pub(crate) fn text_can_leave_device(
-    chain: &[TranslationProviderEntry],
-    has_credential: impl Fn(&str) -> bool,
-) -> bool {
-    chain
-        .iter()
-        .filter(|entry| entry.enabled)
-        .find_map(|entry| {
-            if entry.id == "local" {
-                return Some(false);
-            }
-            has_credential(&entry.id).then_some(true)
-        })
-        .unwrap_or(false)
 }
 
 /// Sends the arranged list to the worker and writes it to settings.
@@ -374,8 +331,9 @@ mod translation_provider_tests {
 
     use super::{
         Kind, SaveRefused, check_translation_provider_configuration, split_row_id,
-        text_can_leave_device, text_chain_positions,
+        text_chain_positions,
     };
+    use crate::settings_projection::departures;
 
     fn entry(id: &str, enabled: bool) -> TranslationProviderEntry {
         TranslationProviderEntry {
@@ -399,20 +357,26 @@ mod translation_provider_tests {
     fn text_leaves_the_machine_only_when_a_keyed_service_is_reached_first() {
         let keyed = |id: &str| id != "unkeyed";
 
-        assert!(text_can_leave_device(
-            &[entry("deepl", true), entry("local", true)],
-            keyed
-        ));
-        assert!(
-            !text_can_leave_device(&[entry("local", true), entry("deepl", true)], keyed),
+        let leaves =
+            |chain: &[TranslationProviderEntry]| departures(&[], |_| false, chain, keyed).text_to;
+
+        assert_eq!(
+            leaves(&[entry("deepl", true), entry("local", true)]),
+            Some("DeepL".to_owned())
+        );
+        assert_eq!(
+            leaves(&[entry("local", true), entry("deepl", true)]),
+            None,
             "the walk stops at the local engine, so nothing under it is asked"
         );
-        assert!(
-            !text_can_leave_device(&[entry("unkeyed", true), entry("local", true)], keyed),
+        assert_eq!(
+            leaves(&[entry("unkeyed", true), entry("local", true)]),
+            None,
             "a service with no key is never asked, so it sends nothing"
         );
-        assert!(
-            !text_can_leave_device(&[entry("deepl", false)], keyed),
+        assert_eq!(
+            leaves(&[entry("deepl", false)]),
+            None,
             "a row that is switched off sends nothing"
         );
     }
@@ -448,8 +412,13 @@ mod translation_provider_tests {
     }
 
     #[test]
-    fn azure_needs_its_region_and_nothing_else_does() {
-        assert!(check_translation_provider_configuration("azure", "key", "").is_err());
+    fn azures_region_is_offered_and_not_demanded() {
+        // A global Translator resource has no region and works without one.
+        // Demanding it locked out everyone holding a global key.
+        assert_eq!(
+            check_translation_provider_configuration("azure", "key", ""),
+            Ok(("key".to_owned(), None))
+        );
         assert_eq!(
             check_translation_provider_configuration("azure", " key ", " westeurope "),
             Ok(("key".to_owned(), Some("westeurope".to_owned())))
@@ -465,9 +434,20 @@ mod translation_provider_tests {
 mod transcription_provider_tests {
     use rust_protocol::TranscriptionProviderEntry;
 
+    use crate::settings_projection::departures;
+
+    /// Which service a recording would reach, if any. The one function that
+    /// answers this now also names it, so the tests read the name.
+    fn audio_departure(
+        chain: &[TranscriptionProviderEntry],
+        keyed: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        departures(chain, keyed, &[], |_| false).audio_to
+    }
+
     use super::{
-        audio_can_leave_device, check_provider_configuration, provider_display_name,
-        provider_field_label, provider_field_value, set_provider_field_value,
+        check_provider_configuration, provider_display_name, provider_field_label,
+        provider_field_value, set_provider_field_value,
     };
 
     fn entry(id: &str) -> TranscriptionProviderEntry {
@@ -588,19 +568,19 @@ mod transcription_provider_tests {
         // The router stops at the local engine, so Groq here is never asked,
         // and the interface must not say the recording is leaving.
         let rows = chain(&[("local", true), ("groq", true)]);
-        assert!(!audio_can_leave_device(&rows, |id| id == "groq"));
+        assert!(audio_departure(&rows, |id| id == "groq").is_none());
     }
 
     #[test]
     fn a_keyed_service_above_the_local_engine_does_send_audio_out() {
         let rows = chain(&[("groq", true), ("local", true)]);
-        assert!(audio_can_leave_device(&rows, |id| id == "groq"));
+        assert!(audio_departure(&rows, |id| id == "groq").is_some());
     }
 
     #[test]
     fn a_service_without_a_key_is_not_a_service() {
         let rows = chain(&[("groq", true), ("local", true)]);
-        assert!(!audio_can_leave_device(&rows, |_| false));
+        assert!(audio_departure(&rows, |_| false).is_none());
     }
 
     #[test]
@@ -608,13 +588,13 @@ mod transcription_provider_tests {
         // Switching the local engine off is how a user says "always use a
         // service", and the row below it is then genuinely reached.
         let rows = chain(&[("local", false), ("groq", true)]);
-        assert!(audio_can_leave_device(&rows, |id| id == "groq"));
+        assert!(audio_departure(&rows, |id| id == "groq").is_some());
     }
 
     #[test]
     fn an_empty_or_silent_chain_claims_nothing() {
-        assert!(!audio_can_leave_device(&[], |_| true));
+        assert!(audio_departure(&[], |_| true).is_none());
         let off = chain(&[("groq", false), ("local", false)]);
-        assert!(!audio_can_leave_device(&off, |_| true));
+        assert!(audio_departure(&off, |_| true).is_none());
     }
 }

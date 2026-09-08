@@ -25,13 +25,14 @@ use crate::{
     native_window_handle,
     overlay_presenter::OverlayPresenter,
     providers_view::{
-        Kind, SaveRefused, apply_provider_chain, apply_translation_chain, audio_can_leave_device,
+        Kind, SaveRefused, apply_provider_chain, apply_translation_chain,
         check_provider_configuration, check_translation_provider_configuration, locate,
         row_display_name, set_provider_field_value, split_row_id, sync_providers,
     },
     settings_document::save_settings,
     settings_projection::{
-        history_row, privacy_claim, speech_model_row, tone, translation_model_row,
+        departure_badge, departures, history_row, privacy_claim, speech_model_row, tone,
+        translation_model_row,
     },
     slint_window_handle,
     speech_backend::SpeechBackendPreference,
@@ -432,22 +433,28 @@ fn downloading_now(state: &AppState) -> bool {
 
 /// The claim, the statement and the facts on Overview.
 fn sync_overview(settings: &SettingsWindow, state: &AppState) {
-    let leaves = audio_can_leave_device(&state.transcription_chain, |id| {
+    let keyed = |id: &str| {
         state
             .transcription_providers
             .iter()
             .any(|status| status.id == id && status.has_credential)
-    });
-    settings.set_remote_transcription_enabled(leaves);
-    settings.set_provider_claim(
-        privacy_claim(&state.transcription_chain, leaves, |id| {
-            state
-                .transcription_providers
-                .iter()
-                .any(|status| status.id == id && status.has_credential)
-        })
-        .into(),
+    };
+    let text_keyed = |id: &str| {
+        state
+            .translation_providers
+            .iter()
+            .any(|status| status.id == id && status.has_credential)
+    };
+    let leaving = departures(
+        &state.transcription_chain,
+        keyed,
+        &state.translation_chain,
+        text_keyed,
     );
+    settings.set_audio_leaves_device(leaving.audio_leaves());
+    settings.set_text_leaves_device(leaving.text_leaves());
+    settings.set_departure_badge(departure_badge(&leaving).into());
+    settings.set_provider_claim(privacy_claim(&leaving).into());
 
     let installed_speech = state.models.iter().any(|model| model.installed);
     let (statement, sub) = if !installed_speech {
@@ -1254,10 +1261,39 @@ pub(crate) fn wire_settings(
                 }
             };
 
-            // The second field is settings, and is written first: if the key
-            // then fails to reach the worker, the row is configured but
-            // keyless, which the interface already knows how to say. The other
-            // order would leave a key addressed to the wrong place.
+            // The key goes first, because it is the half that can fail. The
+            // worker owns the encrypted store; the key is never written to
+            // settings and never read back for display.
+            //
+            // Writing the second field first — which is what this did — meant
+            // that an IPC failure left the row configured with an endpoint or a
+            // region and no key at all, saved to disk, with the form closed
+            // over it. Now nothing is written until the key is on its way, and
+            // if it is not, the form stays open holding what the user typed.
+            let sent = match kind {
+                Kind::Speech => workers
+                    .speech
+                    .send(&SpeechWorkerCommand::SetProviderCredential {
+                        provider_id: provider_id.clone(),
+                        secret: Some(secret),
+                    }),
+                Kind::Text => workers.translation.send(
+                    &TranslationWorkerCommand::SetTranslationProviderCredential {
+                        provider_id: provider_id.clone(),
+                        secret: Some(secret),
+                    },
+                ),
+            };
+            if let Err(error) = sent {
+                if let Some(settings) = settings_weak.upgrade() {
+                    settings.set_provider_problem(
+                        format!("The key could not be sent to the worker: {error}").into(),
+                    );
+                    settings.set_provider_problem_for(row_id.clone().into());
+                }
+                return;
+            }
+
             {
                 let mut state = state.borrow_mut();
                 match kind {
@@ -1284,42 +1320,24 @@ pub(crate) fn wire_settings(
             }
             let _ = save_settings(&state.borrow());
 
-            // The key goes to the worker, which owns the encrypted store. It is
-            // never written to settings and never read back for display.
-            let sent = match kind {
-                Kind::Speech => workers
-                    .speech
-                    .send(&SpeechWorkerCommand::SetProviderCredential {
-                        provider_id: provider_id.clone(),
-                        secret: Some(secret),
-                    }),
-                Kind::Text => workers.translation.send(
-                    &TranslationWorkerCommand::SetTranslationProviderCredential {
-                        provider_id: provider_id.clone(),
-                        secret: Some(secret),
-                    },
-                ),
-            };
+            // The form closes now that both halves are away. It promised to and
+            // never did: `editing` was left set, so the row stayed open with a
+            // key field the user had already submitted still in it.
             if let Some(settings) = settings_weak.upgrade() {
                 settings.set_provider_problem("".into());
                 settings.set_provider_problem_for("".into());
+                settings.set_provider_editing("".into());
             }
-            match sent {
-                // Deliberately not "stored": the write happens in the worker,
-                // and the row reports what is actually in the store once it
-                // answers. Claiming success here would be a guess.
-                Ok(()) => set_indicator_status(
-                    &settings_weak,
-                    &format!(
-                        "Storing the key for {}…",
-                        row_display_name(kind, &provider_id)
-                    ),
+            // Deliberately not "stored": the write happens in the worker, and
+            // the row reports what is actually in the store once it answers.
+            // Claiming success here would be a guess.
+            set_indicator_status(
+                &settings_weak,
+                &format!(
+                    "Storing the key for {}…",
+                    row_display_name(kind, &provider_id)
                 ),
-                Err(error) => set_status_problem(
-                    &settings_weak,
-                    &format!("The key could not be stored: {error}"),
-                ),
-            }
+            );
             match kind {
                 Kind::Speech => apply_provider_chain(&settings_weak, &state, &workers),
                 Kind::Text => apply_translation_chain(&settings_weak, &state, &workers),

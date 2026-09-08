@@ -401,24 +401,113 @@ pub(crate) fn chain_positions(
     (first_local, first_usable)
 }
 
+/// What would leave this machine, and where it would go.
+///
+/// Two lists now, and two answers. One boolean and one sentence about audio
+/// could not tell the truth about both: an arrangement that sent every
+/// selection to DeepL and kept the recordings here said "Audio stays on this
+/// device", which was true and was not the whole of it, while the line along
+/// the bottom said AUDIO LEAVES DEVICE when only text did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Departures {
+    /// The service a recording would reach. `None` means it stays here.
+    pub audio_to: Option<String>,
+    /// The service a selection would reach. `None` means it stays here.
+    pub text_to: Option<String>,
+    /// Whether anything at all can transcribe. Nothing can when every row is
+    /// switched off or keyless, and that is worth saying before anything else.
+    pub can_transcribe: bool,
+}
+
+impl Departures {
+    pub(crate) const fn audio_leaves(&self) -> bool {
+        self.audio_to.is_some()
+    }
+
+    pub(crate) const fn text_leaves(&self) -> bool {
+        self.text_to.is_some()
+    }
+}
+
 /// The line in the corner of Overview and Providers.
 ///
 /// Both pages read it from here so the window cannot say two different things
-/// about the same list.
-pub(crate) fn privacy_claim(
-    chain: &[TranscriptionProviderEntry],
-    leaves_device: bool,
-    has_credential: impl Fn(&str) -> bool,
-) -> String {
-    let (_, first_usable) = chain_positions(chain, &has_credential);
-    match first_usable {
-        None => "Nothing can transcribe right now".to_owned(),
-        Some(_) if !leaves_device => "Audio stays on this device".to_owned(),
-        Some(index) => format!(
-            "Audio leaves this device for {}",
-            provider_display_name(&chain[index].id)
-        ),
+/// about the same arrangement.
+pub(crate) fn privacy_claim(leaving: &Departures) -> String {
+    if !leaving.can_transcribe {
+        return "Nothing can transcribe right now".to_owned();
     }
+    match (leaving.audio_to.as_deref(), leaving.text_to.as_deref()) {
+        (None, None) => "Audio and text stay on this device".to_owned(),
+        (Some(audio), None) => format!("Audio leaves this device for {audio}"),
+        (None, Some(text)) => format!("Text leaves this device for {text}"),
+        (Some(audio), Some(text)) if audio == text => {
+            format!("Audio and text leave this device for {audio}")
+        }
+        (Some(audio), Some(text)) => format!("Audio leaves for {audio}, text for {text}"),
+    }
+}
+
+/// The short line along the bottom of the window.
+///
+/// Three words at most, and never a claim the list does not support.
+pub(crate) fn departure_badge(leaving: &Departures) -> &'static str {
+    match (leaving.audio_leaves(), leaving.text_leaves()) {
+        (false, false) => "EVERYTHING STAYS HERE",
+        (true, false) => "AUDIO LEAVES DEVICE",
+        (false, true) => "TEXT LEAVES DEVICE",
+        (true, true) => "AUDIO AND TEXT LEAVE",
+    }
+}
+
+/// Works out both halves of the claim from the two lists themselves.
+///
+/// From the lists rather than from a setting, because the lists are what the
+/// two routers actually walk.
+pub(crate) fn departures(
+    speech: &[TranscriptionProviderEntry],
+    speech_keyed: impl Fn(&str) -> bool,
+    text: &[TranslationProviderEntry],
+    text_keyed: impl Fn(&str) -> bool,
+) -> Departures {
+    let (_, speech_usable) = chain_positions(speech, &speech_keyed);
+    let audio_to = speech_usable
+        .and_then(|index| speech.get(index))
+        .filter(|entry| entry.id != "local")
+        .map(|entry| provider_display_name(&entry.id));
+    let text_to = text
+        .iter()
+        .filter(|entry| entry.enabled)
+        .find(|entry| entry.id == "local" || text_keyed(&entry.id))
+        .filter(|entry| entry.id != "local")
+        .map(|entry| translation_provider_display_name(&entry.id));
+    Departures {
+        audio_to,
+        text_to,
+        can_transcribe: speech_usable.is_some(),
+    }
+}
+
+/// The short word for where a translation came from, for the status line.
+pub(crate) fn translation_origin(provider: Option<&str>) -> String {
+    provider.map_or_else(|| "local".to_owned(), translation_provider_display_name)
+}
+
+/// The sentence the indicator shows when a translation finishes.
+///
+/// Read from the result rather than from a separate announcement: the
+/// announcement arrived first and this sentence overwrote it, so every
+/// translation reported itself as local however far it had actually travelled.
+pub(crate) fn translation_completed_sentence(provider: Option<&str>) -> String {
+    provider.map_or_else(
+        || "Translation completed locally.".to_owned(),
+        |provider| {
+            format!(
+                "Translated by {}.",
+                translation_provider_display_name(provider)
+            )
+        },
+    )
 }
 
 /// One dictation in the history list.
@@ -463,9 +552,14 @@ pub(crate) fn history_row(entry: &HistoryEntry) -> HistoryRow {
 
 #[cfg(test)]
 mod tests {
-    use rust_protocol::{TranscriptionProviderEntry, TranscriptionProviderStatus};
+    use rust_protocol::{
+        TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationProviderEntry,
+    };
 
-    use super::{Download, chain_positions, model_progress, privacy_claim, provider_row, tone};
+    use super::{
+        Download, chain_positions, departure_badge, departures, model_progress, privacy_claim,
+        provider_row, tone,
+    };
 
     fn entry(id: &str, enabled: bool) -> TranscriptionProviderEntry {
         TranscriptionProviderEntry {
@@ -566,11 +660,25 @@ mod tests {
         assert_eq!(row.state, "No key stored");
     }
 
+    fn text_entry(id: &str, enabled: bool) -> TranslationProviderEntry {
+        TranslationProviderEntry {
+            id: id.to_owned(),
+            enabled,
+            region: None,
+        }
+    }
+
     #[test]
     fn the_claim_names_the_service_the_recording_actually_goes_to() {
         let chain = [entry("groq", true), entry("local", true)];
+        let local_text = [text_entry("local", true)];
         assert_eq!(
-            privacy_claim(&chain, true, |id| id == "groq"),
+            privacy_claim(&departures(
+                &chain,
+                |id| id == "groq",
+                &local_text,
+                |_| false
+            )),
             "Audio leaves this device for Groq"
         );
     }
@@ -579,9 +687,54 @@ mod tests {
     fn the_claim_says_nothing_can_transcribe_when_nothing_can() {
         let chain = [entry("groq", true), entry("local", false)];
         assert_eq!(
-            privacy_claim(&chain, false, |_| false),
+            privacy_claim(&departures(&chain, |_| false, &[], |_| false)),
             "Nothing can transcribe right now"
         );
+    }
+
+    #[test]
+    fn text_leaving_is_said_out_loud_even_when_audio_stays() {
+        // The failure this replaces: every selection went to DeepL, the corner
+        // of the window said "Audio stays on this device", and the line along
+        // the bottom said AUDIO LEAVES DEVICE. Neither was about text, and one
+        // of them was about the wrong thing entirely.
+        let local_speech = [entry("local", true)];
+        let deepl = [text_entry("deepl", true), text_entry("local", true)];
+        let leaving = departures(&local_speech, |_| false, &deepl, |_| true);
+
+        assert_eq!(privacy_claim(&leaving), "Text leaves this device for DeepL");
+        assert_eq!(departure_badge(&leaving), "TEXT LEAVES DEVICE");
+        assert!(!leaving.audio_leaves());
+        assert!(leaving.text_leaves());
+    }
+
+    #[test]
+    fn nothing_leaving_says_so_rather_than_saying_nothing() {
+        let leaving = departures(
+            &[entry("local", true)],
+            |_| false,
+            &[text_entry("local", true)],
+            |_| true,
+        );
+
+        assert_eq!(
+            privacy_claim(&leaving),
+            "Audio and text stay on this device"
+        );
+        assert_eq!(departure_badge(&leaving), "EVERYTHING STAYS HERE");
+    }
+
+    #[test]
+    fn two_services_are_both_named() {
+        let groq = [entry("groq", true), entry("local", true)];
+        let deepl = [text_entry("deepl", true), text_entry("local", true)];
+        let leaving = departures(&groq, |_| true, &deepl, |_| true);
+
+        assert_eq!(
+            privacy_claim(&leaving),
+            "Audio leaves for Groq, text for DeepL"
+        );
+        assert_eq!(departure_badge(&leaving), "AUDIO AND TEXT LEAVE");
     }
 
     #[test]

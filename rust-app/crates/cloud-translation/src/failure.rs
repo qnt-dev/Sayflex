@@ -18,8 +18,19 @@
 
 use std::time::Duration;
 
-/// An hour is long enough that a spent daily allowance is not hammered, and
-/// short enough that a monthly one comes back the moment the month turns.
+/// How long a service that says its allowance is spent is left alone, when it
+/// does not say for how long.
+///
+/// An hour, and no attempt to work out when the allowance actually resets.
+/// None of the three publishes that in a reply, and a guess would be a
+/// deliberate silence of unknown length. An hour is long enough not to hammer a
+/// spent daily allowance and short enough that a service which has recovered is
+/// tried again the same afternoon.
+///
+/// The ledger holding this is in memory: a restart forgets every cooldown and
+/// the next translation asks again. That is the cheap answer and, for a
+/// desktop application that is not restarted mid-sentence, an acceptable one —
+/// the cost of being wrong is one refused request.
 const DEFAULT_QUOTA_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
 /// A service that asks to be left alone for longer than this is telling us

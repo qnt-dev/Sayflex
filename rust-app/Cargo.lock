@@ -4614,7 +4614,7 @@ checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
 
 [[package]]
 name = "rust-app-core"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "rust-protocol",
  "serde",
@@ -4625,7 +4625,7 @@ dependencies = [
 
 [[package]]
 name = "rust-cloud-speech"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "reqwest",
  "rust-app-core",
@@ -4636,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "rust-cloud-translation"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "reqwest",
  "rust-app-core",
@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "rust-model-manager"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "reqwest",
  "rust-app-core",
@@ -4661,7 +4661,7 @@ dependencies = [
 
 [[package]]
 name = "rust-platform-windows"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "rust-app-core",
  "tempfile",
@@ -4670,7 +4670,7 @@ dependencies = [
 
 [[package]]
 name = "rust-protocol"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4679,7 +4679,7 @@ dependencies = [
 
 [[package]]
 name = "rust-speech-api"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "rust-protocol",
  "serde",
@@ -4688,7 +4688,7 @@ dependencies = [
 
 [[package]]
 name = "rust-translation-engine"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -4825,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-companion-renderer"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "pet_orb",
  "pet_particles",
@@ -4838,7 +4838,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-desktop"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "rust-app-core",
  "rust-platform-windows",
@@ -4853,7 +4853,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-input-host"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "rust-app-core",
  "rust-platform-windows",
@@ -4867,7 +4867,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-speech-worker"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4888,7 +4888,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-translation-worker"
-version = "0.5.27"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "rust-app-core",

@@ -81,7 +81,20 @@ export component SettingsWindow inherits Window {
     /// something that is merely happening. Set by the same code that writes the
     /// message, because only that code knows.
     in property <bool> status-is-a-problem: false;
-    in property <bool> remote-transcription-enabled: false;
+    /// Whether a recording would reach a service, and whether a selection
+    /// would. Two answers, because the two lists are separate and either can be
+    /// true on its own — one boolean said AUDIO LEAVES DEVICE when only the
+    /// text was going anywhere.
+    in property <bool> audio-leaves-device: false;
+    in property <bool> text-leaves-device: false;
+    /// The three words along the bottom, written where the lists are read.
+    /// Which provider row has its key form open, if any.
+    ///
+    /// On the window rather than only on the page, because the code that sends
+    /// the key is the only thing that knows the send succeeded — and until this
+    /// existed it had no way to close the form it had promised to close.
+    in-out property <string> provider-editing: "";
+    in property <string> departure-badge: "LOCAL · PRIVATE";
 
     // ── Overview ──
     in property <string> overview-statement: "Starting up";
@@ -295,7 +308,7 @@ export component SettingsWindow inherits Window {
                     statement: root.overview-statement;
                     sub: root.overview-sub;
                     claim: root.provider-claim;
-                    audio-leaves-device: root.remote-transcription-enabled;
+                    audio-leaves-device: root.audio-leaves-device || root.text-leaves-device;
                     facts: root.overview-facts;
                     note-text: root.overview-note;
                     note-action: root.overview-note-action;
@@ -358,8 +371,9 @@ export component SettingsWindow inherits Window {
                 if root.active-page == 4 : ProvidersPage {
                     // The rail belongs at the window edge, not beside the text.
                     rail-overhang: Sheet.rail-overhang;
+                    editing <=> root.provider-editing;
                     rows: root.provider-rows;
-                    audio-leaves-device: root.remote-transcription-enabled;
+                    audio-leaves-device: root.audio-leaves-device || root.text-leaves-device;
                     claim: root.provider-claim;
                     toggle-provider(index) => { root.toggle-provider(index); }
                     move-provider(from, to) => { root.move-provider(from, to); }
@@ -483,15 +497,16 @@ export component SettingsWindow inherits Window {
                 VerticalLayout {
                     alignment: end;
                     spacing: 5px;
+                    // The words come from the same reading of the two lists
+                    // that the claim in the corner does, so the bottom of the
+                    // window and the top of it cannot disagree.
+                    property <bool> anything-leaves:
+                        root.audio-leaves-device || root.text-leaves-device;
                     Text {
-                        text: root.remote-transcription-enabled
-                            ? "AUDIO LEAVES DEVICE"
-                            : "LOCAL · PRIVATE";
-                        color: root.remote-transcription-enabled
-                            ? Sheet.signal-text
-                            : Sheet.muted;
+                        text: parent.anything-leaves ? root.departure-badge : "LOCAL · PRIVATE";
+                        color: parent.anything-leaves ? Sheet.signal-text : Sheet.muted;
                         font-size: Sheet.label-size;
-                        font-weight: root.remote-transcription-enabled ? 700 : 400;
+                        font-weight: parent.anything-leaves ? 700 : 400;
                         letter-spacing: 1.6px;
                     }
                     Text {

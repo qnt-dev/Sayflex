@@ -27,6 +27,7 @@ use rust_protocol::{
 };
 use rust_translation_engine::{
     TranslationCancelled, TranslationCatalog, TranslationEngine, TranslationPackDescriptor,
+    detect_language,
 };
 
 use crate::providers::{Providers, Routed};
@@ -80,12 +81,16 @@ impl TranslationCoordinator {
     fn submit(
         &mut self,
         state: Arc<Mutex<WorkerState>>,
+        providers: Arc<Mutex<Providers>>,
         writer: EventWriter,
-        request_id: RequestId,
-        text: String,
-        source_language: Option<TranslationLanguage>,
-        target_language: Option<TranslationLanguage>,
+        asked: Asked,
     ) -> Result<()> {
+        let Asked {
+            request_id,
+            text,
+            source_language,
+            target_language,
+        } = asked;
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         *recover_lock(&self.current_request) = Some(request_id);
         let current_generation = Arc::clone(&self.generation);
@@ -93,14 +98,20 @@ impl TranslationCoordinator {
         let thread = thread::Builder::new()
             .name(format!("translation-{}", short_id(request_id)))
             .spawn(move || {
-                let mut state = recover_lock(&state);
+                // Deliberately not holding the worker's state here. The walk
+                // can spend twelve seconds on the network, and while it did,
+                // every other command — a model install, a history read, a
+                // change to the list itself — waited behind it on one mutex.
                 let result = translate_request(
-                    &mut state,
+                    &state,
+                    &providers,
                     &writer,
-                    request_id,
-                    text,
-                    source_language,
-                    target_language,
+                    Asked {
+                        request_id,
+                        text,
+                        source_language,
+                        target_language,
+                    },
                     || current_generation.load(Ordering::Acquire) == generation,
                 );
                 let cancelled = current_generation.load(Ordering::Acquire) != generation
@@ -110,17 +121,18 @@ impl TranslationCoordinator {
                 if cancelled {
                     let _ = writer.send(&TranslationWorkerEvent::Cancelled { request_id });
                 } else if let Err(error) = result {
+                    let has_model = recover_lock(&state).selected_tier.is_some();
                     let _ = writer.send(&TranslationWorkerEvent::Failed {
                         request_id: Some(request_id),
                         catalog_id: None,
-                        code: if state.selected_tier.is_some() {
+                        code: if has_model {
                             "translation_failed"
                         } else {
                             "model_required"
                         }
                         .to_owned(),
                         message: format!("{error:#}"),
-                        retryable: state.selected_tier.is_some(),
+                        retryable: has_model,
                     });
                 }
                 let mut active = recover_lock(&current_request);
@@ -266,7 +278,6 @@ struct WorkerState {
     locale: String,
     history: TranslationHistory,
     history_enabled: bool,
-    providers: Providers,
 }
 
 impl WorkerState {
@@ -281,7 +292,6 @@ impl WorkerState {
             keep_warm: true,
             engine: None,
             locale: system_language(),
-            providers: Providers::new(root.join("translation-credentials.dat")),
             history: TranslationHistory::load(root.join("translation-history.json")),
             history_enabled: true,
         })
@@ -377,6 +387,12 @@ impl WorkerState {
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
     let state = Arc::new(Mutex::new(WorkerState::new()?));
+    // Its own lock, not the worker's. A translation out on the network holds
+    // this one for as long as the walk takes; nothing else in the worker should
+    // have to wait for that.
+    let providers = Arc::new(Mutex::new(Providers::new(
+        data_root().join("translation-credentials.dat"),
+    )));
     // Taken before any installation can hold the lock: cancelling must not
     // have to wait for the operation it is cancelling.
     let cancellation = recover_lock(&state).fetcher.cancellation();
@@ -410,6 +426,7 @@ fn main() -> Result<()> {
         if let Err(error) = handle_command(
             command,
             Arc::clone(&state),
+            &providers,
             &writer,
             &mut coordinator,
             &installs,
@@ -436,6 +453,7 @@ fn main() -> Result<()> {
 fn handle_command(
     command: TranslationWorkerCommand,
     state: Arc<Mutex<WorkerState>>,
+    providers: &Arc<Mutex<Providers>>,
     writer: &EventWriter,
     coordinator: &mut TranslationCoordinator,
     installs: &InstallActor,
@@ -473,32 +491,32 @@ fn handle_command(
         } => {
             coordinator.submit(
                 state,
+                Arc::clone(providers),
                 writer.clone(),
-                request_id,
-                text,
-                source_language,
-                target_language,
+                Asked {
+                    request_id,
+                    text,
+                    source_language,
+                    target_language,
+                },
             )?;
         }
         TranslationWorkerCommand::Cancel { request_id } => {
             coordinator.cancel(request_id);
         }
-        TranslationWorkerCommand::SetTranslationProviders { providers } => {
-            let mut state = recover_lock(&state);
-            state.providers.set_entries(&providers);
+        TranslationWorkerCommand::SetTranslationProviders { providers: entries } => {
+            let mut providers = recover_lock(providers);
+            providers.set_entries(&entries);
             writer.send(&TranslationWorkerEvent::TranslationProviders {
-                statuses: state.providers.statuses(),
+                statuses: providers.statuses(),
             })?;
         }
         TranslationWorkerCommand::SetTranslationProviderCredential {
             provider_id,
             secret,
         } => {
-            let mut state = recover_lock(&state);
-            if let Err(error) = state
-                .providers
-                .set_credential(&provider_id, secret.as_deref())
-            {
+            let mut providers = recover_lock(providers);
+            if let Err(error) = providers.set_credential(&provider_id, secret.as_deref()) {
                 writer.send(&TranslationWorkerEvent::Failed {
                     request_id: None,
                     catalog_id: None,
@@ -508,13 +526,25 @@ fn handle_command(
                 })?;
             }
             writer.send(&TranslationWorkerEvent::TranslationProviders {
-                statuses: state.providers.statuses(),
+                statuses: providers.statuses(),
             })?;
         }
         TranslationWorkerCommand::GetTranslationProviders => {
-            let state = recover_lock(&state);
+            let mut providers = recover_lock(providers);
+            // A key file this account cannot decrypt is a thing the user has to
+            // be told about: it means the profile moved, every key is gone, and
+            // the rows will simply say they need one.
+            if let Some(trouble) = providers.recovery_message() {
+                writer.send(&TranslationWorkerEvent::Failed {
+                    request_id: None,
+                    catalog_id: None,
+                    code: "credential_store".to_owned(),
+                    message: trouble,
+                    retryable: false,
+                })?;
+            }
             writer.send(&TranslationWorkerEvent::TranslationProviders {
-                statuses: state.providers.statuses(),
+                statuses: providers.statuses(),
             })?;
         }
         TranslationWorkerCommand::GetHistory { limit } => {
@@ -671,44 +701,95 @@ fn choose_initial_tier(
     }
 }
 
-fn translate_request(
-    state: &mut WorkerState,
-    writer: &EventWriter,
+/// One translation the worker has been asked for.
+///
+/// The four of them travel together through the coordinator and into the
+/// request, which is clearer than four more parameters on two signatures that
+/// already carry a state, a list and a writer.
+struct Asked {
     request_id: RequestId,
     text: String,
+    /// `None` for either language means "read it from the text", which is what
+    /// the desktop sends for every selection.
     source_language: Option<TranslationLanguage>,
     target_language: Option<TranslationLanguage>,
+}
+
+/// The direction one request will actually be translated in.
+///
+/// The caller may name neither language, one, or both. Whatever it names, both
+/// paths must agree, and both must be told: the local engine would otherwise
+/// detect the language for itself while a service was told to translate English
+/// into English.
+fn resolve_direction(
+    text: &str,
+    source_language: Option<TranslationLanguage>,
+    target_language: Option<TranslationLanguage>,
+) -> Result<(TranslationLanguage, TranslationLanguage)> {
+    let source = source_language.unwrap_or_else(|| detect_language(text));
+    let target = target_language.unwrap_or_else(|| source.opposite());
+    if source == target {
+        anyhow::bail!("source and target languages are the same");
+    }
+    Ok((source, target))
+}
+
+fn translate_request(
+    state: &Arc<Mutex<WorkerState>>,
+    providers: &Arc<Mutex<Providers>>,
+    writer: &EventWriter,
+    asked: Asked,
     is_current: impl Fn() -> bool,
 ) -> Result<()> {
+    let Asked {
+        request_id,
+        text,
+        source_language,
+        target_language,
+    } = asked;
     let started = Instant::now();
+    // One direction, worked out once, used by whichever path takes the request.
+    //
+    // The desktop sends no languages at all: it does not know what the user
+    // selected, and the local engine has always read the text and translated
+    // into the other language. A service cannot do that for us — it is told
+    // what to translate into — and `None` was quietly becoming
+    // `TranslationLanguage::default()`, which is English. So an English
+    // selection was sent to DeepL to be translated from English into English,
+    // and the result claimed to be exactly that.
+    let (source, target) = resolve_direction(&text, source_language, target_language)?;
+
     // The list decides first, and the local engine is one row in it. When it is
     // the only row switched on — the default — this costs one comparison and
     // the request goes straight down the path it always did, without so much as
     // building a client.
-    if state.providers.routing_required() {
-        let source = source_language.map(TranslationLanguage::code);
-        let target = target_language.unwrap_or_default().code();
-        match state
-            .providers
-            .translate(&text, source, target, &is_current)
-        {
+    //
+    // Only the list is locked for the walk, never the worker's state: a
+    // translation that is out on the network must not stop a model finishing
+    // its install or the history being read.
+    let routed = {
+        let mut providers = recover_lock(providers);
+        providers
+            .routing_required()
+            .then(|| providers.translate(&text, Some(source.code()), target.code(), &is_current))
+    };
+    if let Some(routed) = routed {
+        match routed {
             Routed::Translated {
                 provider,
                 text: translated,
             } => {
-                writer.send(&TranslationWorkerEvent::TranslatedRemotely {
-                    request_id,
-                    provider_id: provider.clone(),
-                })?;
+                // The state is taken only to record the result, not for the
+                // walk that produced it.
                 return finish(
-                    state,
+                    &mut recover_lock(state),
                     writer,
                     TranslationResult {
                         request_id,
                         source_text: text,
                         translated_text: translated,
-                        source_language: source_language.unwrap_or_default(),
-                        target_language: target_language.unwrap_or_default(),
+                        source_language: source,
+                        target_language: target,
                         tier: None,
                         provider: Some(provider),
                         processing_duration_ms: elapsed_ms(started),
@@ -730,6 +811,9 @@ fn translate_request(
             Routed::UseLocalEngine => {}
         }
     }
+
+    // The engine, and only now the worker's state.
+    let state = &mut *recover_lock(state);
     let tier = state.ensure_engine(writer)?;
     let mut last_partial_at = None;
     let mut last_partial_text = String::new();
@@ -739,8 +823,8 @@ fn translate_request(
         .context("translation engine failed to initialize")?
         .translate_streaming(
             &text,
-            source_language,
-            target_language,
+            Some(source),
+            Some(target),
             &is_current,
             |partial, progress| {
                 if !is_current() {
@@ -886,5 +970,80 @@ mod selection_tests {
     #[test]
     fn leaves_translation_unselected_when_no_model_is_installed() {
         assert_eq!(choose_initial_tier(None, false, false), None);
+    }
+}
+
+#[cfg(test)]
+mod direction_tests {
+    use rust_protocol::TranslationLanguage;
+
+    use super::resolve_direction;
+
+    #[test]
+    fn a_request_that_names_nothing_is_read_from_the_text() {
+        // The failure this replaces: the desktop names neither language for
+        // every selection the user translates, and a service was therefore
+        // told to translate English into English.
+        assert_eq!(
+            resolve_direction("The quick brown fox", None, None).unwrap(),
+            (TranslationLanguage::English, TranslationLanguage::Russian)
+        );
+        assert_eq!(
+            resolve_direction("Проверка связи", None, None).unwrap(),
+            (TranslationLanguage::Russian, TranslationLanguage::English)
+        );
+    }
+
+    #[test]
+    fn a_named_source_still_decides_its_own_opposite() {
+        assert_eq!(
+            resolve_direction("anything", Some(TranslationLanguage::Russian), None).unwrap(),
+            (TranslationLanguage::Russian, TranslationLanguage::English)
+        );
+    }
+
+    #[test]
+    fn the_request_that_would_leave_the_machine_carries_the_right_direction() {
+        // Not a unit test of the arithmetic: this builds the request a service
+        // would actually receive, from exactly what the desktop sends for every
+        // selection — neither language named. It used to arrive asking for
+        // English into English.
+        use rust_cloud_translation::{ProviderEntry, ProviderId, plan_request};
+
+        let deepl = ProviderEntry::new(ProviderId::new(ProviderId::DEEPL));
+        // DeepL's own names: a plain language to read, a regional variant to
+        // write into.
+        for (text, source, target) in [
+            ("The quick brown fox", "EN", "RU"),
+            ("Проверка связи, это тестовая диктовка", "RU", "EN-GB"),
+        ] {
+            let (from, to) = resolve_direction(text, None, None).unwrap();
+            let plan = plan_request(&deepl, "key", text, Some(from.code()), to.code())
+                .expect("the plan is buildable");
+
+            assert!(
+                plan.body.contains(&format!("\"target_lang\":\"{target}\"")),
+                "asked {text:?} to become {target}: {}",
+                plan.body
+            );
+            assert!(
+                plan.body.contains(&format!("\"source_lang\":\"{source}\"")),
+                "told the service the text is {source}: {}",
+                plan.body
+            );
+        }
+    }
+
+    #[test]
+    fn a_direction_that_goes_nowhere_is_refused_rather_than_sent() {
+        assert!(
+            resolve_direction(
+                "anything",
+                Some(TranslationLanguage::English),
+                Some(TranslationLanguage::English),
+            )
+            .is_err(),
+            "translating a language into itself spends an allowance for nothing"
+        );
     }
 }

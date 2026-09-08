@@ -3018,17 +3018,6 @@ fn handle_translation_event(
             }
             sync_providers(settings, state);
         }
-        TranslationWorkerEvent::TranslatedRemotely {
-            request_id,
-            provider_id,
-        } => {
-            // Where the words came from is worth stating plainly: the text left
-            // the machine for this one.
-            rust_app_core::diagnostics::log_line(&format!(
-                "translation request={request_id} provider={provider_id}"
-            ));
-            set_indicator_status(settings, &format!("Translated by {provider_id}."));
-        }
         TranslationWorkerEvent::Cancelled { request_id } => {
             let pending = {
                 let mut app = state.borrow_mut();
@@ -3067,26 +3056,18 @@ fn handle_translation_event(
         }
         TranslationWorkerEvent::Failed {
             request_id,
+            catalog_id,
             code,
             message,
             ..
         } => {
-            // A failure with no request behind it did not come from a
-            // translation — every one of those carries its id — so it came from
-            // the install that was running. Ending it here stops the row
-            // offering a Cancel for a download that is already over.
-            //
-            // This is a guess the protocol should not make necessary:
-            // `Failed` needs the catalog id that `ModelDownloadProgress`
-            // already carries.
-            if request_id.is_none() {
-                let installing: Vec<String> = state.borrow().downloads.keys().cloned().collect();
-                if !installing.is_empty() {
-                    for catalog_id in installing {
-                        finish_download(state, &catalog_id);
-                    }
-                    sync_translation_models(settings, state);
-                }
+            // A download that has ended stops offering a Cancel. The worker
+            // names the row it belongs to, so exactly that row ends — this used
+            // to guess from whatever happened to be downloading, and ended all
+            // of them.
+            if let Some(catalog_id) = catalog_id.as_deref() {
+                finish_download(state, catalog_id);
+                sync_translation_models(settings, state);
             }
             if let Some(request_id) = request_id {
                 translation_previews
@@ -3150,13 +3131,18 @@ fn route_translation_result(
         pending.started.elapsed().as_millis(),
         unix_ms().saturating_sub(pending.request_started_unix_ms),
     ));
+    // Where the words came from, from the result itself. It used to be
+    // announced in its own event just before this one, and then overwritten
+    // here by a sentence that said "locally" whatever had happened.
+    let origin = settings_projection::translation_origin(result.provider.as_deref());
+    let completed = settings_projection::translation_completed_sentence(result.provider.as_deref());
     let completion_status = match pending.origin {
         TranslationOrigin::Translator => {
             if let Some(translator) = translator.upgrade() {
                 translator.set_result_text(result.translated_text.into());
                 translator.set_status_text(
                     format!(
-                        "{} → {} · {} ms · local",
+                        "{} → {} · {} ms · {origin}",
                         result.source_language.code().to_uppercase(),
                         result.target_language.code().to_uppercase(),
                         result.processing_duration_ms
@@ -3165,7 +3151,7 @@ fn route_translation_result(
                 );
                 translator.set_processing(false);
             }
-            "Translation completed locally.".to_owned()
+            completed
         }
         TranslationOrigin::Selection { target, delivery } => match delivery {
             TranslationDelivery::Preview => {
@@ -3181,7 +3167,7 @@ fn route_translation_result(
                     translation_previews,
                     true,
                 );
-                "Translation completed locally.".to_owned()
+                completed
             }
             TranslationDelivery::Replace => {
                 match dispatch_or_defer_selection_replacement(
@@ -3191,7 +3177,7 @@ fn route_translation_result(
                     target,
                     result.translated_text,
                 ) {
-                    ReplacementDispatch::Dispatched => "Translation completed locally.".to_owned(),
+                    ReplacementDispatch::Dispatched => completed,
                     ReplacementDispatch::Deferred => {
                         "Translation ready; waiting for the shortcut to be released.".to_owned()
                     }
@@ -3209,7 +3195,7 @@ fn route_translation_result(
                     request_id: result.request_id,
                     text: result.translated_text,
                 });
-                "Translation completed locally.".to_owned()
+                completed
             }
         },
     };

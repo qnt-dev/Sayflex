@@ -562,11 +562,6 @@ pub enum TranslationWorkerEvent {
     TranslationProviders {
         statuses: Vec<TranslationProviderStatus>,
     },
-    /// A text was translated by a network service rather than locally.
-    TranslatedRemotely {
-        request_id: RequestId,
-        provider_id: String,
-    },
     Failed {
         request_id: Option<RequestId>,
         /// The model the failure belongs to, when it belongs to one.

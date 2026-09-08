@@ -1,4 +1,4 @@
-use std::{ffi::c_void, mem::size_of, ptr::null_mut, slice};
+use std::{ffi::c_void, mem::size_of, ptr::null_mut, slice, sync::OnceLock};
 
 use crate::BlurredBackdrop;
 
@@ -1130,31 +1130,60 @@ const APPLICATION_ICON: u16 = 1;
 /// process owns them until it exits; they are loaded from a resource rather
 /// than created, so there is nothing to destroy.
 fn dress_icon(hwnd: HWND) {
-    // SAFETY: the module handle is this executable's, the resource id is the
-    // one `build.rs` embeds, and the metrics calls take no pointers.
-    unsafe {
-        let module = GetModuleHandleW(null_mut());
-        if module.is_null() {
-            return;
+    for (which, icon) in [
+        (ICON_BIG, application_icon(true)),
+        (ICON_SMALL, application_icon(false)),
+    ] {
+        if icon == 0 {
+            continue;
         }
-        for (which, cx, cy) in [
-            (ICON_BIG, SM_CXICON, SM_CYICON),
-            (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
-        ] {
-            let icon = LoadImageW(
+        // SAFETY: the window belongs to this process and the handle is one of
+        // the two the process owns for its lifetime.
+        unsafe {
+            SendMessageW(hwnd, WM_SETICON, which as usize, icon);
+        }
+    }
+}
+
+/// The process's own icon at one of the two sizes Windows asks for.
+///
+/// Loaded once each and kept for as long as the process runs. Every window is
+/// handed the same two handles: this used to load a fresh pair on every window
+/// configuration, without `LR_SHARED` and without ever calling `DestroyIcon`,
+/// so each reconfiguration — and the overlays are reconfigured constantly —
+/// leaked two icons.
+///
+/// Returned as an `isize` because that is what `WM_SETICON` takes and because
+/// a raw `HICON` is not `Send`, which a `OnceLock` requires. The handles are
+/// only ever passed straight back to Win32.
+fn application_icon(large: bool) -> isize {
+    static LARGE: OnceLock<isize> = OnceLock::new();
+    static SMALL: OnceLock<isize> = OnceLock::new();
+
+    let cell = if large { &LARGE } else { &SMALL };
+    *cell.get_or_init(|| {
+        let (cx, cy) = if large {
+            (SM_CXICON, SM_CYICON)
+        } else {
+            (SM_CXSMICON, SM_CYSMICON)
+        };
+        // SAFETY: the module handle is this executable's, the resource id is
+        // the one `build.rs` embeds, and the metrics calls take no pointers.
+        unsafe {
+            let module = GetModuleHandleW(null_mut());
+            if module.is_null() {
+                return 0;
+            }
+            LoadImageW(
                 module,
                 APPLICATION_ICON as usize as *const u16,
                 IMAGE_ICON,
                 GetSystemMetrics(cx),
                 GetSystemMetrics(cy),
                 LR_DEFAULTCOLOR,
-            );
-            if icon.is_null() {
-                continue;
-            }
-            SendMessageW(hwnd, WM_SETICON, which as usize, icon as isize);
+            ) as isize
         }
-    }
+    })
 }
 
 /// Paints the title bar in the window's own material.

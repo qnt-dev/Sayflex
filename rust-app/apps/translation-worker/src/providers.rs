@@ -51,6 +51,16 @@ impl Providers {
         }
     }
 
+    /// What the credential store could not read, once.
+    ///
+    /// A key file written on another Windows account, or copied with the
+    /// profile to another machine, is by design unreadable here. The store
+    /// notices and keeps the reason; nothing was collecting it, so every key
+    /// silently became no key and the rows just said they needed one.
+    pub fn recovery_message(&mut self) -> Option<String> {
+        self.credentials.take_recovery_message()
+    }
+
     pub fn set_entries(&mut self, entries: &[TranslationProviderEntry]) {
         let mut chain = Chain::new(entries.iter().map(to_entry).collect());
         // A build that knows a service the stored list has never seen still

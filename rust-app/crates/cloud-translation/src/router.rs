@@ -417,18 +417,14 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_region_takes_azure_out_without_spending_a_request() {
-        let mut router = Router::new(Chain::new(vec![
-            ProviderEntry {
-                id: ProviderId::new(ProviderId::AZURE),
-                enabled: true,
-                region: None,
-            },
-            ProviderEntry {
-                id: ProviderId::new(ProviderId::GOOGLE),
-                enabled: true,
-                region: None,
-            },
+    fn a_setting_the_service_needs_and_has_not_got_takes_it_out_without_a_request() {
+        // Azure's region is no longer one of these — a global resource has
+        // none — so this exercises the rule with a provider this build does not
+        // know, which is the other way a plan cannot be built.
+        let mut router = Router::new(chain(&[
+            "mystery-service",
+            ProviderId::GOOGLE,
+            ProviderId::LOCAL,
         ]));
         let executor = Scripted::new(vec![Ok("привет".to_owned())]);
 
@@ -449,17 +445,17 @@ mod tests {
                 provider, attempts, ..
             } => {
                 assert_eq!(provider.as_str(), ProviderId::GOOGLE);
-                assert!(matches!(
-                    attempts[0].outcome,
-                    AttemptOutcome::Failed(ProviderFailure::Misconfigured(_))
-                ));
+                assert!(
+                    attempts.is_empty(),
+                    "a row this build does not know is never a candidate: {attempts:?}"
+                );
             }
             other => panic!("expected Google to answer, got {other:?}"),
         }
         assert_eq!(
             executor.seen.borrow().len(),
             1,
-            "Azure was never sent a request it could not have answered"
+            "only the service that could be addressed was asked"
         );
     }
 

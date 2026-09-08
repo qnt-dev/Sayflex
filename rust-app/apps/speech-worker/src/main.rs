@@ -46,6 +46,16 @@ use transcription::TranscriptionCommand;
 /// it costs.
 const SPECULATION_IS_AFFORDABLE: bool = cfg!(any(feature = "cuda", feature = "vulkan"));
 
+/// Whether previews may run, given what the setting asks for.
+///
+/// Every path that changes the setting goes through here. Initialize did, and
+/// `SetFastReleasePreviews` did not, so the CPU build honoured the limit until
+/// the moment the user touched the switch in Settings and then ran the
+/// speculation anyway — the exact case the limit exists for.
+const fn previews_allowed(requested: bool) -> bool {
+    requested && SPECULATION_IS_AFFORDABLE
+}
+
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
     if env::args().nth(1).as_deref() == Some("--transcribe-wav") {
@@ -197,7 +207,7 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
         inference.clone(),
     )?;
     let mut output_mode = SpeechOutputMode::OriginalLanguage;
-    let mut fast_release_previews = SPECULATION_IS_AFFORDABLE;
+    let mut fast_release_previews = previews_allowed(true);
 
     let stdin = io::stdin();
     for line in BufReader::new(stdin.lock()).lines() {
@@ -229,8 +239,7 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                     enabled: history_enabled,
                 });
                 output_mode = requested_output_mode;
-                fast_release_previews =
-                    requested_fast_release_previews && SPECULATION_IS_AFFORDABLE;
+                fast_release_previews = previews_allowed(requested_fast_release_previews);
                 let selected_model_id = if catalog.find(&requested).is_some() {
                     requested
                 } else {
@@ -346,7 +355,7 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                 output_mode = requested;
             }
             SpeechWorkerCommand::SetFastReleasePreviews { enabled } => {
-                fast_release_previews = enabled;
+                fast_release_previews = previews_allowed(enabled);
             }
             SpeechWorkerCommand::GetHistory { limit } => {
                 let _ = history.send(HistoryCommand::Latest { limit });
@@ -465,4 +474,29 @@ pub(crate) fn unix_ms() -> u64 {
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod speculation_policy_tests {
+    use super::{SPECULATION_IS_AFFORDABLE, previews_allowed};
+
+    #[test]
+    fn the_setting_can_switch_previews_off_but_never_back_on_where_they_cost_too_much() {
+        assert!(!previews_allowed(false), "off is always off");
+        assert_eq!(
+            previews_allowed(true),
+            SPECULATION_IS_AFFORDABLE,
+            "asking for previews only gets them on a build that can afford them"
+        );
+    }
+
+    #[test]
+    fn the_cpu_build_never_speculates() {
+        if cfg!(not(any(feature = "cuda", feature = "vulkan"))) {
+            assert!(
+                !previews_allowed(true),
+                "one inference actor, and the final job waits behind every preview"
+            );
+        }
+    }
 }

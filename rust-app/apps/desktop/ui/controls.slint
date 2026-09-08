@@ -553,9 +553,22 @@ export component ScrollRail inherits Rectangle {
     in property <bool> horizontal: false;
     callback scrolled(length);
 
-    /// How much of the thumb is left to travel once the minimum size has eaten
-    /// into it. Kept as one expression so the thumb and the drag agree.
+    /// How far the content can be scrolled.
     property <length> reach: max(0px, root.content - root.shown);
+    /// How long the thumb is, and how far it can travel.
+    ///
+    /// The two are not independent: a thumb held to a minimum length has less
+    /// room to move than a proportional one, so a drag that used the whole
+    /// track as its scale ran ahead of the content and the thumb's own position
+    /// drifted from where the view actually was. Both now divide by the travel
+    /// the thumb really has.
+    property <length> thumb-length: root.content <= 0px
+        ? root.track
+        : max(30px, min(root.track, root.shown / root.content * root.track));
+    property <length> thumb-travel: max(1px, root.track - root.thumb-length);
+    property <length> thumb-at: root.reach <= 0px
+        ? 0px
+        : root.offset / root.reach * root.thumb-travel;
 
     /// How long the rail is. The use site knows, because it knows the thing
     /// being scrolled; the component cannot ask its parent for it.
@@ -567,18 +580,10 @@ export component ScrollRail inherits Rectangle {
     height: root.horizontal ? 5px : root.track;
 
     thumb := Rectangle {
-        x: root.horizontal
-            ? (root.reach > 0px ? root.offset / root.content * parent.width : 0px)
-            : 0px;
-        y: root.horizontal
-            ? 0px
-            : (root.reach > 0px ? root.offset / root.content * parent.height : 0px);
-        width: root.horizontal
-            ? max(30px, root.shown / root.content * parent.width)
-            : parent.width;
-        height: root.horizontal
-            ? parent.height
-            : max(30px, root.shown / root.content * parent.height);
+        x: root.horizontal ? root.thumb-at : 0px;
+        y: root.horizontal ? 0px : root.thumb-at;
+        width: root.horizontal ? root.thumb-length : parent.width;
+        height: root.horizontal ? parent.height : root.thumb-length;
         background: Sheet.muted;
         opacity: grip.pressed ? 0.85 : (grip.has-hover ? 0.6 : 0.34);
     }
@@ -592,12 +597,15 @@ export component ScrollRail inherits Rectangle {
             }
         }
         moved => {
+            // A pixel of thumb is `reach / thumb-travel` pixels of content.
+            // Dividing by the whole track instead made the view run ahead of
+            // the pointer whenever the thumb was at its minimum length.
             root.scrolled(clamp(
                 self.from
                     + (root.horizontal
                         ? (self.mouse-x - self.pressed-x)
                         : (self.mouse-y - self.pressed-y))
-                        * (root.content / root.shown),
+                        * (root.reach / root.thumb-travel),
                 0px,
                 root.reach,
             ));

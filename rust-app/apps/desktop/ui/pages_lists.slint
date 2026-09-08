@@ -170,8 +170,14 @@ export component ProvidersPage inherits VerticalLayout {
                     tone: row.tone;
                     controls-width: 208px;
                     orderable: true;
-                    can-rise: index > 0;
-                    can-fall: index < root.rows.length - 1;
+                    // A row can only move inside its own order. The two lists
+                    // are drawn as one, so the first row of Text sat under the
+                    // last row of Speech with an arrow pointing at it that Rust
+                    // then refused — a button that looked available and did
+                    // nothing.
+                    can-rise: index > 0 && root.rows[index - 1].section == row.section;
+                    can-fall: index < root.rows.length - 1
+                        && root.rows[index + 1].section == row.section;
                     moved(places) => {
                         root.move-provider(index, clamp(index + places, 0, root.rows.length - 1));
                     }

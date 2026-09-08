@@ -6,6 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rust-protocol = { version = "0.5.27", path = "../protocol" }
+rust-protocol = { version = "0.6.0", path = "../protocol" }
 serde.workspace = true
 thiserror.workspace = true

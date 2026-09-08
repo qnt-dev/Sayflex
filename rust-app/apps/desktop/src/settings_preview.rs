@@ -371,7 +371,9 @@ fn fill_models(settings: &SettingsWindow) {
 /// router will never reach.
 fn fill_providers(settings: &SettingsWindow) {
     settings.set_provider_claim("Audio leaves this device for Groq".into());
-    settings.set_remote_transcription_enabled(true);
+    settings.set_audio_leaves_device(true);
+    settings.set_text_leaves_device(false);
+    settings.set_departure_badge("AUDIO LEAVES DEVICE".into());
     settings.set_provider_rows(ModelRc::new(VecModel::from(vec![
         ProviderRow {
             section: "SPEECH".into(),

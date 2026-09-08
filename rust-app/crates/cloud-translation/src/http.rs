@@ -74,6 +74,16 @@ impl RequestExecutor for HttpExecutor {
         if let Some(text) = read_translation(plan.shape, &body) {
             return Ok(text);
         }
+        // A service that answered successfully and handed back nothing has
+        // nothing to hand back. Asking the next one for the same text would
+        // spend another allowance on the same answer, which is why `Empty`
+        // stops the walk — and why it has to be reachable from here at all.
+        // Without this the reply became `Rejected` and the walk carried on,
+        // and the rule the router tests describe was one the product never
+        // reached.
+        if (200..300).contains(&status) {
+            return Err(ProviderFailure::Empty);
+        }
         Err(classify_response(
             plan.provider.as_str(),
             status,

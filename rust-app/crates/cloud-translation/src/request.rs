@@ -9,7 +9,12 @@ use serde_json::{Value, json};
 use crate::{ProviderEntry, ProviderId};
 
 /// A request built for one provider, and how to read its answer back.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is written by hand and redacts. The derived one printed the
+/// Authorization header, the key Google carries in its query string, and the
+/// user's own text; nothing logged it, but a struct that spills all three the
+/// first time somebody adds a `{plan:?}` is a struct waiting to.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RequestPlan {
     /// Who this is for. The transport does not care, but the reader of the
     /// answer does: the three services disagree about what a 403 means, and
@@ -22,6 +27,25 @@ pub struct RequestPlan {
     pub headers: Vec<(String, String)>,
     pub body: String,
     pub shape: ResponseShape,
+}
+
+impl std::fmt::Debug for RequestPlan {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RequestPlan")
+            .field("provider", &self.provider)
+            .field("url", &redact_query(&self.url))
+            .field("headers", &self.headers.len())
+            .field("body_bytes", &self.body.len())
+            .field("shape", &self.shape)
+            .finish()
+    }
+}
+
+/// Drops a URL's query string, which is where Google's key travels.
+fn redact_query(url: &str) -> String {
+    url.split_once('?')
+        .map_or_else(|| url.to_owned(), |(head, _)| format!("{head}?…"))
 }
 
 /// Where the translated text sits in each service's answer.
@@ -82,10 +106,10 @@ fn plan_deepl(secret: &str, text: &str, source: Option<&str>, target: &str) -> R
     };
     let mut body = json!({
         "text": [text],
-        "target_lang": deepl_language(target),
+        "target_lang": deepl_target(target),
     });
     if let Some(source) = source {
-        body["source_lang"] = Value::String(deepl_language(source));
+        body["source_lang"] = Value::String(deepl_source(source));
     }
     RequestPlan {
         provider: ProviderId::new(ProviderId::DEEPL),
@@ -102,15 +126,26 @@ fn plan_deepl(secret: &str, text: &str, source: Option<&str>, target: &str) -> R
     }
 }
 
-/// DeepL takes upper case, and distinguishes British from American English on
-/// the way out. "EN" is accepted as a target but deprecated in favour of a
-/// variant, so pick one rather than let the service choose.
-fn deepl_language(code: &str) -> String {
+/// DeepL's name for a language it is asked to translate *into*.
+///
+/// Upper case, and a regional variant where one exists: plain "EN" is accepted
+/// as a target but deprecated in favour of "EN-GB" or "EN-US", so pick one
+/// rather than let the service choose.
+fn deepl_target(code: &str) -> String {
     match code.to_ascii_lowercase().as_str() {
         "en" => "EN-GB".to_owned(),
         "pt" => "PT-PT".to_owned(),
         other => other.to_ascii_uppercase(),
     }
+}
+
+/// DeepL's name for a language it is told the text already *is*.
+///
+/// The regional variants are targets only — `source_lang=EN-GB` is not a
+/// language DeepL knows, and the request is refused. One mapping was doing both
+/// jobs, so every English selection was announced as EN-GB and turned down.
+fn deepl_source(code: &str) -> String {
+    code.to_ascii_uppercase()
 }
 
 /// Azure carries the key and the region in headers, and the languages in the
@@ -127,22 +162,29 @@ fn plan_azure(
         .region
         .as_deref()
         .map(str::trim)
-        .filter(|region| !region.is_empty())
-        .ok_or(PlanError::MissingSetting("Region"))?;
+        .filter(|region| !region.is_empty());
     let mut url = format!(
         "https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&to={target}"
     );
     if let Some(source) = source {
         url.push_str(&format!("&from={source}"));
     }
+    // The region header is sent only when there is a region. A global
+    // Translator resource does not have one and is refused if it is sent an
+    // empty one; a regional or multi-service resource does and is refused
+    // without it. The user's own key decides which, and this carries whichever
+    // they gave.
+    let mut headers = vec![
+        ("Ocp-Apim-Subscription-Key".to_owned(), secret.to_owned()),
+        ("Content-Type".to_owned(), "application/json".to_owned()),
+    ];
+    if let Some(region) = region {
+        headers.push(("Ocp-Apim-Subscription-Region".to_owned(), region.to_owned()));
+    }
     Ok(RequestPlan {
         provider: ProviderId::new(ProviderId::AZURE),
         url,
-        headers: vec![
-            ("Ocp-Apim-Subscription-Key".to_owned(), secret.to_owned()),
-            ("Ocp-Apim-Subscription-Region".to_owned(), region.to_owned()),
-            ("Content-Type".to_owned(), "application/json".to_owned()),
-        ],
+        headers,
         body: json!([{ "Text": text }]).to_string(),
         shape: ResponseShape::Azure,
     })
@@ -231,6 +273,83 @@ mod tests {
     }
 
     #[test]
+    fn deepl_is_told_a_variant_to_translate_into_and_a_plain_language_it_is_reading() {
+        // `source_lang=EN-GB` is not a language DeepL knows and the request is
+        // refused; `target_lang=EN` is deprecated. One mapping cannot do both.
+        let plan = plan_request(
+            &entry(ProviderId::DEEPL),
+            "key",
+            "Проверка",
+            Some("ru"),
+            "en",
+        )
+        .unwrap();
+
+        assert!(
+            plan.body.contains("\"target_lang\":\"EN-GB\""),
+            "{}",
+            plan.body
+        );
+        assert!(
+            plan.body.contains("\"source_lang\":\"RU\""),
+            "{}",
+            plan.body
+        );
+
+        let outward = plan_request(
+            &entry(ProviderId::DEEPL),
+            "key",
+            "The quick brown fox",
+            Some("en"),
+            "ru",
+        )
+        .unwrap();
+
+        assert!(
+            outward.body.contains("\"source_lang\":\"EN\""),
+            "a source is named plainly: {}",
+            outward.body
+        );
+    }
+
+    #[test]
+    fn a_plan_prints_nothing_it_was_trusted_with() {
+        let mut azure = entry(ProviderId::AZURE);
+        azure.region = Some("westeurope".to_owned());
+        let printed = format!(
+            "{:?}",
+            plan_request(
+                &azure,
+                "super-secret-key",
+                "confidential sentence",
+                None,
+                "ru"
+            )
+            .unwrap()
+        );
+
+        assert!(!printed.contains("super-secret-key"), "{printed}");
+        assert!(!printed.contains("confidential sentence"), "{printed}");
+
+        let google = format!(
+            "{:?}",
+            plan_request(
+                &entry(ProviderId::GOOGLE),
+                "another-key",
+                "hello",
+                None,
+                "ru"
+            )
+            .unwrap()
+        );
+
+        assert!(
+            !google.contains("another-key"),
+            "Google's key rides in the query string: {google}"
+        );
+    }
+
+    #[test]
     fn a_free_deepl_key_goes_to_the_free_host() {
         // A free key sent to the paid host answers 403, which reads exactly
         // like a dead key. The key says which host it belongs to, so nobody has
@@ -273,11 +392,25 @@ mod tests {
     }
 
     #[test]
-    fn azure_refuses_to_be_addressed_without_a_region() {
-        let error = plan_request(&entry(ProviderId::AZURE), "key", "hello", None, "ru")
-            .expect_err("a request without a region would answer 403");
+    fn azure_without_a_region_is_addressed_without_the_header() {
+        // A global Translator resource has no region and is refused if it is
+        // sent an empty one. Demanding a region here refused those keys before
+        // they could be tried at all.
+        let plan = plan_request(&entry(ProviderId::AZURE), "key", "hello", None, "ru")
+            .expect("a global resource is addressed without a region");
 
-        assert_eq!(error, PlanError::MissingSetting("Region"));
+        assert!(
+            !plan
+                .headers
+                .iter()
+                .any(|(name, _)| name == "Ocp-Apim-Subscription-Region"),
+            "no region means no region header, not an empty one"
+        );
+        assert!(
+            plan.headers
+                .iter()
+                .any(|(name, value)| name == "Ocp-Apim-Subscription-Key" && value == "key")
+        );
     }
 
     #[test]
