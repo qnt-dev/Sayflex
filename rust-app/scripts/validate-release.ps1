@@ -1,6 +1,11 @@
 [CmdletBinding()]
 param(
     [string]$AppDirectory,
+    # The installer to check, by path. Never "the newest file in dist": that
+    # picked up the *previous* release — publish runs this before Inno Setup has
+    # produced anything — verified its old sidecar, and reported the installer
+    # checksum as checked while the one about to be built went unexamined.
+    [string]$InstallerPath,
     # Compare the installed copy against this staged one. Only meaningful after
     # installing: during a publish the installed copy is still the previous
     # release, so this would always fail.
@@ -132,7 +137,9 @@ foreach ($worker in @(
     'SayFlex.Speech.Cpu.exe',
     'SayFlex.Speech.Cuda.exe',
     'SayFlex.Speech.Vulkan.exe',
-    'SayFlex.Translation.exe'
+    'SayFlex.Translation.exe',
+    'SayFlex.InputHost.exe',
+    'SayFlex.Companion.exe'
 )) {
     $path = Join-Path $appRoot $worker
     # Started rather than called, so its output is read from a file: a native
@@ -160,26 +167,27 @@ foreach ($worker in @(
 
 # 4. The installer's own checksum matches the sidecar shipped beside it. A
 #    sidecar nobody compares is a sidecar that proves nothing.
-$installer = Get-ChildItem -LiteralPath (Join-Path $rustRoot 'dist') -Filter 'SayFlex-*-setup.exe' `
-    -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-if ($installer) {
-    $sidecar = "$($installer.FullName).sha256"
-    if (-not (Test-Path -LiteralPath $sidecar)) {
-        $failures.Add("$($installer.Name) has no .sha256 beside it")
+$installerChecked = $false
+if (-not [string]::IsNullOrWhiteSpace($InstallerPath)) {
+    $installerChecked = $true
+    if (-not (Test-Path -LiteralPath $InstallerPath)) {
+        $failures.Add("the installer named on the command line is not there: $InstallerPath")
     } else {
-        $recorded = ((Get-Content -LiteralPath $sidecar -Raw) -split '\s+')[0].ToLowerInvariant()
-        $actual = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($recorded -ne $actual) {
-            $failures.Add("$($installer.Name) does not match its .sha256")
-        }
-        if ($installer.Name -notlike "*-$expectedVersion-*") {
-            $failures.Add("$($installer.Name) is not the $expectedVersion installer")
+        $installer = Get-Item -LiteralPath $InstallerPath
+        $sidecar = "$($installer.FullName).sha256"
+        if (-not (Test-Path -LiteralPath $sidecar)) {
+            $failures.Add("$($installer.Name) has no .sha256 beside it")
+        } else {
+            $recorded = ((Get-Content -LiteralPath $sidecar -Raw) -split '\s+')[0].ToLowerInvariant()
+            $actual = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($recorded -ne $actual) {
+                $failures.Add("$($installer.Name) does not match its .sha256")
+            }
+            if ($installer.Name -notlike "*-$expectedVersion-*") {
+                $failures.Add("$($installer.Name) is not the $expectedVersion installer")
+            }
         }
     }
-} else {
-    Write-Host 'No installer built yet; run build-installer.ps1 and check again.'
 }
 
 if ($failures.Count -gt 0) {
@@ -187,9 +195,13 @@ if ($failures.Count -gt 0) {
     throw "Release validation failed with $($failures.Count) problem(s)."
 }
 
-$checked = @('file set', 'backend manifest', 'versions', "protocol $protocol", 'installer checksum')
+$checked = @('file set', 'backend manifest', 'versions', "protocol $protocol")
+if ($installerChecked) { $checked += 'installer checksum' }
 if ($Installed) { $checked += 'installed hashes' }
 Write-Host "SayFlex $expectedVersion checked: $($checked -join ', ')."
+if (-not $installerChecked) {
+    Write-Host 'No installer was named, so none was checked: pass -InstallerPath after building one.'
+}
 if (-not $Installed) {
     Write-Host 'The installed copy was not compared: install the package and run this again with -Installed.'
 }

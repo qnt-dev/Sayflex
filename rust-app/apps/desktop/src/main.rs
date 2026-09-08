@@ -2234,11 +2234,12 @@ fn show_selection_translation_preview(
                     );
                 }
             }
-            // Still on its way to the screen. The content above has already
-            // replaced the partial and `content_changed` has re-armed the frame
-            // it is waiting for, so the presentation in flight will show the
-            // final text. This used to be `if let Ok`, which threw the error
-            // away and left the window to be revealed with whatever it had.
+            // Still on its way to the screen. `content_changed` above has
+            // already re-armed the frame the show is waiting for — taking back
+            // a queued reveal if one had been scheduled for the partial — so the
+            // presentation in flight will land on the final text. This used to
+            // be `if let Ok`, which threw the error away and left the window to
+            // be revealed with whatever it had.
             Err(reason) => rust_app_core::diagnostics::log_line(&format!(
                 "translation_preview_overlay update=folded_into_pending request={request_id} \
                  final_len={} reason={reason}",

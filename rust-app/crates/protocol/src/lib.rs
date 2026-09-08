@@ -1031,58 +1031,138 @@ mod wire_schema_tests {
     //!
     //! Protocol 16 described two different schemas: an event was added under it
     //! and removed under it again, and both builds introduced themselves as 16.
-    //! A list of variant names would not have caught that on its own — it has to
-    //! be a list nobody can change without the number moving.
+    //! A list of variant names would not have caught that on its own, and
+    //! neither would a fingerprint of the top level — `provider` was added to
+    //! `TranslationResult`, which is nested inside `completed`, and nothing
+    //! noticed.
     //!
-    //! So this is the whole wire surface: every variant of every message, with
-    //! the fields it carries, written down as one fingerprint. Renaming a
-    //! variant, adding or removing a field, or changing what serde calls it all
-    //! fail here, and the only way to make them pass is to say which version the
-    //! new shape belongs to.
+    //! So this walks the whole value: every variant of every message on every
+    //! channel, and every field of every structure inside them, to whatever
+    //! depth they go. Renaming anything, adding or removing a field, or
+    //! changing what serde calls it fails here, and the only way to make it
+    //! pass is to say which version the new shape belongs to.
 
-    use serde_json::{Value, json};
+    use serde::Serialize;
+    use serde_json::Value;
 
     use super::*;
 
-    /// One message's name and the fields it puts on the wire, sorted.
-    fn shape(value: &Value) -> String {
-        let name = value["type"].as_str().unwrap_or("<untagged>");
-        let mut fields: Vec<&str> = value
-            .get("payload")
-            .and_then(Value::as_object)
-            .map(|payload| payload.keys().map(String::as_str).collect())
-            .unwrap_or_default();
-        fields.sort_unstable();
-        format!("{name}({})", fields.join(","))
+    /// Every path through a serialised value, sorted: `completed.result.tier`
+    /// and so on, with the leaves' types but not their contents.
+    fn paths(value: &Value, prefix: &str, into: &mut Vec<String>) {
+        match value {
+            Value::Object(fields) => {
+                for (name, child) in fields {
+                    let path = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{prefix}.{name}")
+                    };
+                    paths(child, &path, into);
+                }
+            }
+            // An array's shape is its element's shape. An empty one contributes
+            // the path itself, so a field cannot vanish unnoticed.
+            Value::Array(items) => match items.first() {
+                Some(first) => paths(first, &format!("{prefix}[]"), into),
+                None => into.push(format!("{prefix}[]")),
+            },
+            Value::Null => into.push(format!("{prefix}:null")),
+            Value::Bool(_) => into.push(format!("{prefix}:bool")),
+            Value::Number(_) => into.push(format!("{prefix}:number")),
+            Value::String(_) => into.push(format!("{prefix}:string")),
+        }
     }
 
-    fn fingerprint(messages: &[Value]) -> Vec<String> {
-        let mut shapes: Vec<String> = messages.iter().map(shape).collect();
-        shapes.sort();
-        shapes
+    fn fingerprint<T: Serialize>(messages: &[T]) -> Vec<String> {
+        let mut all = Vec::new();
+        for message in messages {
+            let value = serde_json::to_value(message).unwrap();
+            let name = value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("<untagged>")
+                .to_owned();
+            let mut fields = Vec::new();
+            match value.get("payload") {
+                Some(payload) => paths(payload, "", &mut fields),
+                None => fields.push("()".to_owned()),
+            }
+            fields.sort();
+            all.push(format!("{name}({})", fields.join(",")));
+        }
+        all.sort();
+        all
     }
 
-    /// One of every translation event, filled in enough to serialise.
-    fn translation_events() -> Vec<Value> {
-        let request_id = RequestId::new();
-        let result = TranslationResult {
-            request_id,
+    /// A fixture with every optional field filled in.
+    ///
+    /// `None` serialises to nothing where a field is skipped, so a fixture full
+    /// of `None` hides exactly the additions this is meant to catch — the
+    /// `catalog_id` added to `Failed` was invisible for that reason.
+    fn translation_result() -> TranslationResult {
+        TranslationResult {
+            request_id: RequestId::new(),
             source_text: String::new(),
             translated_text: String::new(),
             source_language: TranslationLanguage::English,
             target_language: TranslationLanguage::Russian,
-            tier: None,
-            provider: None,
+            tier: Some(TranslationTier::Tiny),
+            provider: Some(String::new()),
             processing_duration_ms: 0,
             first_token_duration_ms: 0,
             backend_request_count: 0,
             tokenize_duration_ms: 0,
             chunk_count: 0,
-        };
-        [
+        }
+    }
+
+    #[test]
+    fn the_wire_shape_belongs_to_this_version() {
+        assert_eq!(
+            PROTOCOL_VERSION, 17,
+            "every fingerprint below was written for protocol 17: if a shape \
+             changes, this number changes with it"
+        );
+    }
+
+    #[test]
+    fn a_translation_result_carries_every_field_the_desktop_reads() {
+        // Nested, and therefore the one the top-level fingerprint missed.
+        let mut fields = Vec::new();
+        paths(
+            &serde_json::to_value(translation_result()).unwrap(),
+            "",
+            &mut fields,
+        );
+        fields.sort();
+
+        assert_eq!(
+            fields,
+            vec![
+                "backend_request_count:number",
+                "chunk_count:number",
+                "first_token_duration_ms:number",
+                "processing_duration_ms:number",
+                "provider:string",
+                "request_id:string",
+                "source_language:string",
+                "source_text:string",
+                "target_language:string",
+                "tier:string",
+                "tokenize_duration_ms:number",
+                "translated_text:string",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_translation_events_have_the_shape_this_version_describes() {
+        let request_id = RequestId::new();
+        let shapes = fingerprint(&[
             TranslationWorkerEvent::Ready {
-                protocol_version: PROTOCOL_VERSION,
-                selected_tier: None,
+                protocol_version: 0,
+                selected_tier: Some(TranslationTier::Tiny),
                 models: Vec::new(),
             },
             TranslationWorkerEvent::ModelDownloadProgress {
@@ -1112,7 +1192,7 @@ mod wire_schema_tests {
                 chunk_count: 0,
             },
             TranslationWorkerEvent::Completed {
-                result,
+                result: translation_result(),
                 created_unix_ms: 0,
             },
             TranslationWorkerEvent::Cancelled { request_id },
@@ -1128,120 +1208,141 @@ mod wire_schema_tests {
                 error: String::new(),
             },
             TranslationWorkerEvent::Failed {
-                request_id: None,
-                catalog_id: None,
+                request_id: Some(request_id),
+                catalog_id: Some(String::new()),
                 code: String::new(),
                 message: String::new(),
                 retryable: false,
             },
-        ]
-        .iter()
-        .map(|event| serde_json::to_value(event).unwrap())
-        .collect()
+        ]);
+
+        assert_eq!(
+            shapes,
+            vec![
+                "cancelled(request_id:string)",
+                "completed(created_unix_ms:number,result.backend_request_count:number,\
+result.chunk_count:number,result.first_token_duration_ms:number,\
+result.processing_duration_ms:number,result.provider:string,result.request_id:string,\
+result.source_language:string,result.source_text:string,result.target_language:string,\
+result.tier:string,result.tokenize_duration_ms:number,result.translated_text:string)",
+                "credential_saved(error:string,operation_id:string,provider_id:string)",
+                "failed(catalog_id:string,code:string,message:string,request_id:string,\
+retryable:bool)",
+                "history(entries[])",
+                "model_download_progress(catalog_id:string,downloaded_bytes:number,\
+total_bytes:number)",
+                "model_installed(catalog_id:string,path:string,tier:string)",
+                "model_ready(catalog_id:string,load_duration_ms:number,tier:string)",
+                "model_selected(tier:string)",
+                "partial(chunk_count:number,chunk_index:number,first_token_duration_ms:number,\
+request_id:string,tokenize_duration_ms:number,translated_text:string)",
+                "ready(models[],protocol_version:number,selected_tier:string)",
+                "translation_providers(statuses[])",
+            ]
+        );
     }
 
-    fn translation_commands() -> Vec<Value> {
-        let request_id = RequestId::new();
-        [
-            TranslationWorkerCommand::Initialize {
-                selected_tier: None,
-                keep_warm: false,
-                history_enabled: false,
-            },
-            TranslationWorkerCommand::EnsureModel {
-                tier: TranslationTier::Tiny,
-            },
-            TranslationWorkerCommand::CancelModelInstall,
-            TranslationWorkerCommand::SelectTier {
-                tier: TranslationTier::Tiny,
-                keep_warm: false,
-            },
-            TranslationWorkerCommand::Translate {
-                request_id,
-                text: String::new(),
-                source_language: None,
-                target_language: None,
-            },
-            TranslationWorkerCommand::Cancel { request_id },
-            TranslationWorkerCommand::SetTranslationProviders {
-                providers: Vec::new(),
-            },
-            TranslationWorkerCommand::SetTranslationProviderCredential {
-                operation_id: request_id,
+    #[test]
+    fn the_speech_events_have_the_shape_this_version_describes() {
+        let session_id = SessionId::new();
+        let shapes = fingerprint(&[
+            SpeechWorkerEvent::Listening { session_id },
+            SpeechWorkerEvent::Cancelled { session_id },
+            SpeechWorkerEvent::CredentialSaved {
+                operation_id: RequestId::new(),
                 provider_id: String::new(),
-                secret: None,
+                error: String::new(),
             },
-            TranslationWorkerCommand::GetTranslationProviders,
-            TranslationWorkerCommand::GetHistory { limit: 0 },
-            TranslationWorkerCommand::SetHistoryEnabled { enabled: false },
-            TranslationWorkerCommand::ClearHistory,
-            TranslationWorkerCommand::Shutdown,
-        ]
-        .iter()
-        .map(|command| serde_json::to_value(command).unwrap())
-        .collect()
-    }
+            SpeechWorkerEvent::TranscribedRemotely {
+                session_id,
+                provider_id: String::new(),
+            },
+            SpeechWorkerEvent::TranscriptionProviders {
+                statuses: Vec::new(),
+            },
+            SpeechWorkerEvent::History {
+                entries: Vec::new(),
+            },
+        ]);
 
-    #[test]
-    fn the_translation_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 17,
-            "the shapes below were written for protocol 17"
-        );
-        assert_eq!(
-            fingerprint(&translation_events()),
+            shapes,
             vec![
-                "cancelled(request_id)",
-                "completed(created_unix_ms,result)",
-                "credential_saved(error,operation_id,provider_id)",
-                "failed(code,message,request_id,retryable)",
-                "history(entries)",
-                "model_download_progress(catalog_id,downloaded_bytes,total_bytes)",
-                "model_installed(catalog_id,path,tier)",
-                "model_ready(catalog_id,load_duration_ms,tier)",
-                "model_selected(tier)",
-                "partial(chunk_count,chunk_index,first_token_duration_ms,request_id,\
-tokenize_duration_ms,translated_text)",
-                "ready(models,protocol_version,selected_tier)",
-                "translation_providers(statuses)",
-            ]
-        );
-        assert_eq!(
-            fingerprint(&translation_commands()),
-            vec![
-                "cancel(request_id)",
-                "cancel_model_install()",
-                "clear_history()",
-                "ensure_model(tier)",
-                "get_history(limit)",
-                "get_translation_providers()",
-                "initialize(history_enabled,keep_warm,selected_tier)",
-                "select_tier(keep_warm,tier)",
-                "set_history_enabled(enabled)",
-                "set_translation_provider_credential(operation_id,provider_id,secret)",
-                "set_translation_providers(providers)",
-                "shutdown()",
-                "translate(request_id,source_language,target_language,text)",
+                "cancelled(session_id:string)",
+                "credential_saved(error:string,operation_id:string,provider_id:string)",
+                "history(entries[])",
+                "listening(session_id:string)",
+                "transcribed_remotely(provider_id:string,session_id:string)",
+                "transcription_providers(statuses[])",
             ]
         );
     }
 
     #[test]
-    fn a_result_carries_the_fields_the_desktop_reads() {
-        // The payload of a message matters as much as its name: `provider` is
-        // what tells the window a translation came from a service rather than
-        // from this machine, and it was added without the version moving.
-        let result = json!({
-            "request_id": RequestId::new(),
-            "source_text": "",
-            "translated_text": "",
-            "source_language": "english",
-            "target_language": "russian",
-            "processing_duration_ms": 0,
-        });
-        let parsed: TranslationResult = serde_json::from_value(result).unwrap();
+    fn the_structures_carried_inside_messages_have_their_own_shape() {
+        // `statuses`, `models` and `entries` are empty in the fixtures above,
+        // so the fingerprint sees only the field. These are the shapes they
+        // carry, checked directly.
+        let mut provider = Vec::new();
+        paths(
+            &serde_json::to_value(TranslationProviderStatus {
+                id: String::new(),
+                position: 0,
+                enabled: false,
+                available: false,
+                detail: String::new(),
+                has_credential: false,
+                credential_hint: Some(String::new()),
+            })
+            .unwrap(),
+            "",
+            &mut provider,
+        );
+        provider.sort();
+        assert_eq!(
+            provider,
+            vec![
+                "available:bool",
+                "credential_hint:string",
+                "detail:string",
+                "enabled:bool",
+                "has_credential:bool",
+                "id:string",
+                "position:number",
+            ]
+        );
 
-        assert_eq!(parsed.tier, None);
-        assert_eq!(parsed.provider, None);
+        let mut entry = Vec::new();
+        paths(
+            &serde_json::to_value(TranslationProviderEntry {
+                id: String::new(),
+                enabled: false,
+                region: Some(String::new()),
+            })
+            .unwrap(),
+            "",
+            &mut entry,
+        );
+        entry.sort();
+        assert_eq!(entry, vec!["enabled:bool", "id:string", "region:string"]);
+    }
+
+    #[test]
+    fn every_message_kind_is_covered_by_a_fingerprint() {
+        // The lists above are written by hand, so this is what makes leaving a
+        // variant out of them visible: the names come from the exhaustive
+        // matches, which do not compile until a new variant is named.
+        assert_eq!(
+            translation_event_name(&TranslationWorkerEvent::Cancelled {
+                request_id: RequestId::new()
+            }),
+            "cancelled"
+        );
+        assert_eq!(
+            speech_event_name(&SpeechWorkerEvent::Listening {
+                session_id: SessionId::new()
+            }),
+            "listening"
+        );
     }
 }

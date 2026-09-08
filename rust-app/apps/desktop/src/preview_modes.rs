@@ -6,7 +6,7 @@
 //! They exist for development and are reachable only from the command line.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     env,
     error::Error,
     io::{BufRead, BufReader},
@@ -411,6 +411,8 @@ pub(crate) fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dy
 pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire(r"Local\SayFlex.StagingProbe")?;
+    // So the measurement survives the terminal it was printed in.
+    let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "staging-probe");
     let preview = TranslationPreview::new()?;
     preview.set_prepared(false);
     preview
@@ -429,6 +431,9 @@ pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
         })
         .map_err(|error| format!("could not observe rendering: {error:?}"))?;
 
+    // What went wrong, if anything did. A probe that prints a number it could
+    // not measure is worse than one that fails.
+    let trouble: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let step = Rc::new(Cell::new(0u32));
     let staged_before = Rc::new(Cell::new(0u32));
     let staged = Rc::new(Cell::new(0u32));
@@ -438,6 +443,7 @@ pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
     let timer = slint::Timer::default();
     let preview_weak = preview.as_weak();
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(50), {
+        let trouble = Rc::clone(&trouble);
         let frames = Rc::clone(&frames);
         let step = Rc::clone(&step);
         let staged_before = Rc::clone(&staged_before);
@@ -452,21 +458,41 @@ pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
             step.set(now + 1);
             match now {
                 0 => {
-                    if let Some(hwnd) = crate::slint_window_handle(preview.window()) {
-                        handle.set(hwnd);
-                        // This applies the overlay contract *and cloaks the
-                        // window*. The first attempt at this probe stopped
-                        // here and called the next interval "not cloaked",
-                        // which measured the cloaked case twice and proved
-                        // nothing.
-                        let _ = rust_platform_windows::prepare_translation_window(hwnd);
-                        let _ = rust_platform_windows::reveal_overlay_window(hwnd);
+                    let Some(hwnd) = crate::slint_window_handle(preview.window()) else {
+                        fail(&trouble, "the window has no native handle");
+                        return;
+                    };
+                    handle.set(hwnd);
+                    // This applies the overlay contract *and cloaks the window*.
+                    // The first attempt at this probe stopped here and called
+                    // the next interval "not cloaked", which measured the
+                    // cloaked case twice and proved nothing. Every call is
+                    // checked now, because a probe that swallows its own errors
+                    // reports a number it did not measure.
+                    if let Err(error) = rust_platform_windows::prepare_translation_window(hwnd) {
+                        fail(&trouble, &format!("prepare failed: {error}"));
+                        return;
+                    }
+                    if let Err(error) = rust_platform_windows::reveal_overlay_window(hwnd) {
+                        fail(&trouble, &format!("reveal failed: {error}"));
                     }
                 }
                 2 => {
                     // Off the desktop, visible, and demonstrably not cloaked.
-                    let cloaked = rust_platform_windows::overlay_window_is_cloaked(handle.get());
-                    println!("staging_probe interval=visible cloaked={cloaked:?}");
+                    match rust_platform_windows::overlay_window_is_cloaked(handle.get()) {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            fail(
+                                &trouble,
+                                "the window was still cloaked in the visible interval",
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            fail(&trouble, &format!("cloak state unreadable: {error}"));
+                            return;
+                        }
+                    }
                     preview.set_translated_text("staged".into());
                     preview.set_prepared(true);
                     staged_before.set(frames.get());
@@ -474,9 +500,24 @@ pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
                 }
                 14 => {
                     staged.set(frames.get() - staged_before.get());
-                    let _ = rust_platform_windows::cloak_overlay_window(handle.get());
-                    let cloaked = rust_platform_windows::overlay_window_is_cloaked(handle.get());
-                    println!("staging_probe interval=cloaked cloaked={cloaked:?}");
+                    if let Err(error) = rust_platform_windows::cloak_overlay_window(handle.get()) {
+                        fail(&trouble, &format!("cloak failed: {error}"));
+                        return;
+                    }
+                    match rust_platform_windows::overlay_window_is_cloaked(handle.get()) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            fail(
+                                &trouble,
+                                "the window was not cloaked in the cloaked interval",
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            fail(&trouble, &format!("cloak state unreadable: {error}"));
+                            return;
+                        }
+                    }
                     preview.set_translated_text("cloaked".into());
                     cloaked_before.set(frames.get());
                     preview.window().request_redraw();
@@ -484,11 +525,22 @@ pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
                 26 => {
                     let cloaked = frames.get() - cloaked_before.get();
                     let _ = rust_platform_windows::reveal_overlay_window(handle.get());
-                    println!(
-                        "staging_probe off_desktop_visible_frames={} cloaked_frames={}",
-                        staged.get(),
-                        cloaked
+                    let line = format!(
+                        "staging_probe visible_cloaked=false visible_frames={} \
+                         cloaked_cloaked=true cloaked_frames={cloaked}",
+                        staged.get()
                     );
+                    println!("{line}");
+                    // Written where it can be read afterwards, so the result is
+                    // evidence rather than something that scrolled past.
+                    rust_app_core::diagnostics::log_line(&line);
+                    if staged.get() == 0 || cloaked == 0 {
+                        fail(
+                            &trouble,
+                            "a measurement of zero frames says nothing about either case",
+                        );
+                        return;
+                    }
                     let _ = slint::quit_event_loop();
                 }
                 _ => {}
@@ -497,7 +549,20 @@ pub(crate) fn run_staging_probe() -> Result<(), Box<dyn Error>> {
     });
 
     slint::run_event_loop()?;
+    // The log is written on its own thread; without this the process exits
+    // before the measurement reaches the file, which is the one place it is
+    // any use afterwards.
+    let _ = rust_app_core::diagnostics::flush();
+    if let Some(reason) = trouble.borrow().clone() {
+        return Err(format!("staging_probe failed: {reason}").into());
+    }
     Ok(())
+}
+
+/// Records why the probe cannot answer, and stops it.
+fn fail(trouble: &Rc<RefCell<Option<String>>>, reason: &str) {
+    *trouble.borrow_mut() = Some(reason.to_owned());
+    let _ = slint::quit_event_loop();
 }
 
 pub(crate) fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<dyn Error>> {

@@ -88,10 +88,15 @@ struct PresentationState {
     /// has put anything on it. A frame drawn while this is false is a frame of
     /// nothing, and revealing on it is what produced the empty popup.
     content_ready: bool,
-    /// Bumped every time the content changes. The only purpose is diagnostic —
-    /// it is what the log means by `content=`, so a frame can be tied to the
-    /// text it drew.
+    /// Bumped every time the content changes.
     content_revision: u64,
+    /// The revision the frame that queued the reveal was drawn with.
+    ///
+    /// A reveal is queued onto the event loop and carried out later. In that
+    /// gap the content can change — a `Completed` arriving just after the
+    /// `Partial`'s frame — and revealing then would put the partial on screen
+    /// with no one left to ask for a frame of the final text.
+    accepted_revision: Option<u64>,
 }
 
 impl Default for PresentationState {
@@ -101,6 +106,7 @@ impl Default for PresentationState {
             next_generation: 1,
             content_ready: false,
             content_revision: 0,
+            accepted_revision: None,
         }
     }
 }
@@ -167,6 +173,7 @@ impl PresentationState {
             return None;
         }
         self.phase = PresentationPhase::RevealQueued(ticket);
+        self.accepted_revision = Some(self.content_revision);
         Some(ticket)
     }
 
@@ -181,13 +188,28 @@ impl PresentationState {
         self.content_revision = self.content_revision.saturating_add(1);
         let waiting = match self.phase {
             PresentationPhase::AwaitingFrame(ticket) => Some(ticket),
+            // A reveal already queued for the previous content is taken back.
+            // The reveal runs later, off the event loop, and carrying it out
+            // now would show the partial with nothing left to ask for a frame
+            // of the final text — which is the same defect as the deadline
+            // revealing an undrawn window, one step further along.
+            PresentationPhase::RevealQueued(ticket) => {
+                self.phase = PresentationPhase::AwaitingFrame(ticket);
+                self.accepted_revision = None;
+                Some(ticket)
+            }
             _ => None,
         };
         (self.content_revision, waiting)
     }
 
+    /// Whether this queued reveal may still be carried out.
+    ///
+    /// Both the ticket and the content have to be the ones that were accepted:
+    /// a reveal is queued and runs later, and in that gap either can change.
     fn can_reveal(&self, ticket: PresentationTicket) -> bool {
         self.phase == PresentationPhase::RevealQueued(ticket)
+            && self.accepted_revision == Some(self.content_revision)
     }
 
     fn complete_reveal(&mut self, ticket: PresentationTicket) -> bool {
@@ -834,6 +856,7 @@ mod tests {
             next_generation: state.next_generation,
             content_ready: true,
             content_revision: 1,
+            accepted_revision: None,
         };
         assert_eq!(by_frame.frame_rendered(), Some(ticket));
 
@@ -842,6 +865,7 @@ mod tests {
             next_generation: state.next_generation,
             content_ready: false,
             content_revision: 0,
+            accepted_revision: None,
         };
         assert_eq!(by_cancel.cancel(ticket), Some(42));
 
@@ -850,6 +874,7 @@ mod tests {
             next_generation: state.next_generation,
             content_ready: false,
             content_revision: 0,
+            accepted_revision: None,
         };
         assert!(by_retire.retire().is_some());
     }
@@ -939,6 +964,34 @@ mod content_gate_tests {
         );
         assert_eq!(revision, 2);
         assert_eq!(state.frame_rendered(), Some(ticket));
+    }
+
+    #[test]
+    fn a_final_result_arriving_after_the_frame_but_before_the_reveal_takes_it_back() {
+        // The gap the first fix left open: the frame is accepted, the reveal is
+        // queued onto the event loop, and the final text lands before it runs.
+        // Revealing then puts the partial on screen with nobody left to ask for
+        // a frame of the final text.
+        let mut state = parked();
+        let ticket = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(ticket).unwrap();
+        assert_eq!(state.frame_rendered(), Some(ticket));
+        assert!(state.can_reveal(ticket), "the reveal is queued");
+
+        let (_, waiting) = state.content_changed(true);
+
+        assert_eq!(waiting, Some(ticket), "the show is told to draw again");
+        assert!(
+            !state.can_reveal(ticket),
+            "and the queued reveal is taken back rather than showing the partial"
+        );
+        assert_eq!(state.phase, PresentationPhase::AwaitingFrame(ticket));
+
+        // The next frame carries the final text and reveals it.
+        assert_eq!(state.frame_rendered(), Some(ticket));
+        assert!(state.can_reveal(ticket));
+        assert!(state.complete_reveal(ticket));
     }
 
     #[test]

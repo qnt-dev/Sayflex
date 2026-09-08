@@ -501,92 +501,42 @@ pub(crate) fn adaptive_text_panel_height(
     estimated_lines as f32 * line_height + vertical_padding
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TranslationPreviewLayout {
-    pub(crate) card_width: f32,
-    /// How tall the window has to be for this much text at this width.
-    pub(crate) window_height: f32,
-}
-
-/// Room enough for the whole translation.
+/// How wide the card is drawn, from how much there is to read.
 ///
-/// The width was already chosen from the result's length. The height was not
-/// chosen at all: a `Window` takes its size from `preferred-height` when it is
-/// first shown and never again, and the first thing shown is the first
-/// *partial* — often a single word. Everything that arrived afterwards was
-/// crammed into a window sized for that word, which is why a finished
-/// translation read as a squashed block of text with its last lines cut off.
+/// A policy, not a measurement: three widths, so a word does not get a
+/// paragraph's window and a paragraph does not get a word's.
 #[must_use]
-pub(crate) fn translation_preview_layout(
-    source_text: &str,
-    result_text: &str,
-    view_mode: i32,
-) -> TranslationPreviewLayout {
-    let content_characters = result_text.chars().count();
-    let card_width = match content_characters {
+pub(crate) fn translation_preview_card_width(result_text: &str) -> f32 {
+    match result_text.chars().count() {
         0..=28 => 252.0,
         29..=140 => 352.0,
         _ => 480.0,
-    };
-
-    // The character measure the text wraps at, from the card's own width less
-    // its padding. This is an estimate and says so: Slint will not report the
-    // shaped width of a string from here. It is wrong by a factor of two for a
-    // line of full-width CJK — one character, two columns — so the measure is
-    // doubled when the text is mostly wide, and the clamp at the end is what
-    // stops any remaining error from putting the window off the screen.
-    const AVERAGE_GLYPH: f32 = 6.4;
-    const LINE: f32 = 17.0;
-    // The toolbar, the padding above and below it, and the card's own margin.
-    const CHROME: f32 = 61.0;
-
-    let wide = result_text.chars().filter(|glyph| is_wide(*glyph)).count() * 2
-        > result_text.chars().count().max(1);
-    let measure = if wide {
-        AVERAGE_GLYPH * 2.0
-    } else {
-        AVERAGE_GLYPH
-    };
-    let characters_per_line = f32::floor((card_width - 28.0) / measure).max(8.0) as usize;
-
-    let result_lines = estimated_wrapped_lines(result_text, characters_per_line).clamp(1, 14);
-    let source_lines = estimated_wrapped_lines(source_text, characters_per_line).clamp(1, 7);
-    let mut window_height = result_lines as f32 * LINE + CHROME;
-    match view_mode {
-        // The original in its own card underneath.
-        1 => window_height += source_lines as f32 * LINE + 28.0,
-        // Interleaved: every line of the result is paired with a line of the
-        // original, so the content is both. This was not accounted for at all,
-        // and a long original in DUAL was cut off.
-        2 => window_height += source_lines as f32 * LINE + 12.0,
-        _ => {}
-    }
-
-    TranslationPreviewLayout {
-        card_width,
-        window_height: window_height.clamp(96.0, 640.0),
     }
 }
 
-/// Whether a glyph takes two columns rather than one.
+/// The window height for a card Slint has already measured.
 ///
-/// Enough of the ranges to catch the scripts where one character per glyph
-/// width is out by a factor of two: CJK, kana, Hangul and the full-width forms.
-const fn is_wide(glyph: char) -> bool {
-    matches!(glyph as u32,
-        0x1100..=0x115F
-            | 0x2E80..=0x303E
-            | 0x3041..=0x33FF
-            | 0x3400..=0x4DBF
-            | 0x4E00..=0x9FFF
-            | 0xA000..=0xA4CF
-            | 0xAC00..=0xD7A3
-            | 0xF900..=0xFAFF
-            | 0xFE30..=0xFE6F
-            | 0xFF00..=0xFF60
-            | 0xFFE0..=0xFFE6
-            | 0x1F300..=0x1F9FF
-            | 0x20000..=0x3FFFD)
+/// This mirrors the `preferred-height` expression on `TranslationPreview` and
+/// nothing else. The height used to be estimated here — characters per line,
+/// pixels per glyph, a guess at the chrome — which was wrong for DUAL, where
+/// every line of the result is paired with a line of the original and the real
+/// stack is two or three times what a line count suggests, and wrong again for
+/// scripts whose glyphs take two columns.
+///
+/// Slint has laid the card out and knows both numbers. Asking it is the only
+/// way this can be right for a mode nobody thought to special-case.
+#[must_use]
+pub(crate) fn translation_window_height(
+    main_card_height: f32,
+    original_card_height: f32,
+    view_mode: i32,
+) -> f32 {
+    let alongside = if view_mode == 1 {
+        original_card_height + 18.0
+    } else {
+        0.0
+    };
+    (main_card_height + alongside).clamp(96.0, 720.0)
 }
 
 /// Sizes the window to the text and tells the card how wide it is.
@@ -595,18 +545,24 @@ const fn is_wide(glyph: char) -> bool {
 /// may have resized it themselves.
 pub(crate) fn apply_translation_preview_layout(
     preview: &TranslationPreview,
-    source_text: &str,
+    _source_text: &str,
     result_text: &str,
 ) {
-    let layout = translation_preview_layout(source_text, result_text, preview.get_view_mode());
-    preview.set_card_width(layout.card_width);
+    preview.set_card_width(translation_preview_card_width(result_text));
     if preview.get_pinned() {
         return;
     }
-    preview.window().set_size(slint::LogicalSize::new(
-        layout.card_width,
-        layout.window_height,
-    ));
+    // Read after the width and the content are set, so the card has been laid
+    // out with them. `main-card-height` is Slint's own measurement of the
+    // result — the interleaved stack included.
+    let height = translation_window_height(
+        preview.get_main_card_height(),
+        preview.get_original_card_height(),
+        preview.get_view_mode(),
+    );
+    preview
+        .window()
+        .set_size(slint::LogicalSize::new(preview.get_card_width(), height));
 }
 
 pub(crate) fn refresh_cloaked_translation_backdrop(
@@ -774,11 +730,40 @@ pub(crate) fn precreate_translation_preview(slot: &TranslationPreviewSlot) {
 
 #[cfg(test)]
 mod adaptive_popup_tests {
+    use super::{translation_preview_card_width, translation_window_height};
+
+    #[test]
+    fn the_card_is_as_wide_as_there_is_to_read() {
+        assert_eq!(translation_preview_card_width("Привет"), 252.0);
+        assert_eq!(translation_preview_card_width(&"a".repeat(60)), 352.0);
+        assert_eq!(translation_preview_card_width(&"a".repeat(300)), 480.0);
+    }
+
+    #[test]
+    fn the_window_is_the_height_the_card_measured() {
+        // Whatever Slint laid out, plus the original's card when it is shown
+        // alongside. The height was estimated here before — characters per
+        // line, pixels per glyph, a guess at the chrome — and was wrong for
+        // DUAL, where every line is paired with its original, and wrong again
+        // for scripts whose glyphs take two columns.
+        assert_eq!(translation_window_height(140.0, 96.0, 0), 140.0);
+        assert_eq!(translation_window_height(140.0, 96.0, 2), 140.0);
+        assert_eq!(translation_window_height(140.0, 96.0, 1), 254.0);
+    }
+
+    #[test]
+    fn a_card_that_measured_absurdly_is_still_a_usable_window() {
+        // Slint reports zero before the first layout, and a very long
+        // translation can measure taller than a screen.
+        assert_eq!(translation_window_height(0.0, 0.0, 0), 96.0);
+        assert_eq!(translation_window_height(4000.0, 0.0, 0), 720.0);
+    }
+
     use slint::ComponentHandle;
 
     use super::{
         TranslationPreview, adaptive_text_panel_height, backdrop_prefers_dark_text,
-        translation_pairs, translation_preview_layout, translation_units,
+        translation_pairs, translation_units,
     };
 
     fn uniform_backdrop(value: u8) -> Vec<u8> {
@@ -807,67 +792,6 @@ mod adaptive_popup_tests {
         assert_eq!(
             adaptive_text_panel_height("one\ntwo\nthree", 70, 1, 6, 15.0, 16.0),
             61.0
-        );
-    }
-
-    #[test]
-    fn short_translation_uses_the_compact_width() {
-        let layout = translation_preview_layout("Hello", "Привет", 0);
-        assert_eq!(layout.card_width, 252.0);
-    }
-
-    #[test]
-    fn long_translation_uses_the_readable_width() {
-        let layout = translation_preview_layout("source", &"translated text ".repeat(500), 0);
-        assert_eq!(layout.card_width, 480.0);
-    }
-
-    #[test]
-    fn the_window_grows_with_the_translation_instead_of_squashing_it() {
-        // The defect this replaces: a window takes its size from
-        // `preferred-height` once, when it is first shown, and the first thing
-        // shown is the first partial — often one word. Everything that arrived
-        // afterwards was crammed into a window sized for that word.
-        let one_word = translation_preview_layout("Hi", "Привет", 0);
-        let a_paragraph = translation_preview_layout("source", &"слово ".repeat(60), 0);
-
-        assert!(
-            a_paragraph.window_height > one_word.window_height,
-            "one word {} vs a paragraph {}",
-            one_word.window_height,
-            a_paragraph.window_height
-        );
-        assert!(
-            a_paragraph.window_height <= 640.0,
-            "and it never grows past the screen"
-        );
-    }
-
-    #[test]
-    fn showing_the_original_alongside_makes_room_for_it() {
-        let source = "A fairly long original sentence that wraps across several lines                       when it is shown underneath the translation";
-        let result_only = translation_preview_layout(source, "Перевод", 0);
-        let with_original = translation_preview_layout(source, "Перевод", 1);
-        // DUAL pairs every line with its original and was not accounted for at
-        // all: a long original in that mode was simply cut off.
-        let interleaved = translation_preview_layout(source, "Перевод", 2);
-
-        assert!(with_original.window_height > result_only.window_height);
-        assert!(interleaved.window_height > result_only.window_height);
-    }
-
-    #[test]
-    fn a_line_of_wide_glyphs_gets_the_room_it_occupies() {
-        // One character per glyph width is out by a factor of two for CJK, so
-        // the card was sized for half the lines the text needs.
-        let latin = translation_preview_layout("source", &"a".repeat(120), 0);
-        let wide = translation_preview_layout("source", &"漢".repeat(120), 0);
-
-        assert!(
-            wide.window_height > latin.window_height,
-            "latin {} vs wide {}",
-            latin.window_height,
-            wide.window_height
         );
     }
 

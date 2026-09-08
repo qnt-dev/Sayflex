@@ -38,4 +38,12 @@ Set-Content -LiteralPath "$installer.sha256" -Encoding ascii -NoNewline -Value (
     "$checksum  $([System.IO.Path]::GetFileName($installer))"
 )
 
+# Checked here, after it exists and after its sidecar is written. The publish
+# script's own run of the validator happens before Inno Setup has produced
+# anything, so it can say nothing about this file.
+& (Join-Path $PSScriptRoot 'validate-release.ps1') -InstallerPath $installer
+if ($LASTEXITCODE -ne 0) {
+    throw 'The installer did not pass validation.'
+}
+
 Write-Host "SayFlex installer created in $(Join-Path $rustRoot 'dist')"

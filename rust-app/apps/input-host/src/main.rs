@@ -34,6 +34,12 @@ use windows_sys::Win32::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Asked by the release check, which otherwise cannot find out what a
+    // packaged process speaks short of driving a whole handshake.
+    if std::env::args().any(|argument| argument == "--protocol-version") {
+        println!("{PROTOCOL_VERSION}");
+        return Ok(());
+    }
     rust_platform_windows::configure_safe_dll_search()?;
     let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "input-host");
     diagnostic_line("input_host lifecycle=starting");
