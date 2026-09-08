@@ -4834,6 +4834,7 @@ dependencies = [
  "rust-app-core",
  "rust-protocol",
  "serde_json",
+ "winresource",
 ]
 
 [[package]]
@@ -4863,6 +4864,7 @@ dependencies = [
  "thiserror 2.0.19",
  "windows",
  "windows-sys 0.61.2",
+ "winresource",
 ]
 
 [[package]]
@@ -4884,6 +4886,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "whisper-rs",
+ "winresource",
 ]
 
 [[package]]
@@ -4903,6 +4906,7 @@ dependencies = [
  "sys-locale",
  "tempfile",
  "thiserror 2.0.19",
+ "winresource",
  "zip",
 ]
 

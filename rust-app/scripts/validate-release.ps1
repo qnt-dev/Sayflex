@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
-    [string]$AppDirectory
+    [string]$AppDirectory,
+    # Compare the installed copy against this staged one. Only meaningful after
+    # installing: during a publish the installed copy is still the previous
+    # release, so this would always fail.
+    [switch]$Installed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,6 +12,7 @@ if ([string]::IsNullOrWhiteSpace($AppDirectory)) {
     $AppDirectory = Join-Path $PSScriptRoot '..\dist\app'
 }
 $appRoot = [System.IO.Path]::GetFullPath($AppDirectory)
+$rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $required = @(
     'SayFlex.exe',
     'SayFlex.InputHost.exe',
@@ -78,24 +83,29 @@ foreach ($name in $required) {
     }
 }
 
-# 2. The installed set matches the staged set, hash for hash. A sidecar that is
-#    only printed proves nothing; this is the comparison the wording used to
-#    claim and did not do.
-$installed = Join-Path $env:LOCALAPPDATA 'Programs\SayFlex'
-if (Test-Path -LiteralPath $installed) {
-    foreach ($row in $files) {
-        $there = Join-Path $installed $row.File
-        if (-not (Test-Path -LiteralPath $there)) {
-            $failures.Add("$($row.File) is staged but not installed")
-            continue
-        }
-        $hash = (Get-FileHash -LiteralPath $there -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($hash -ne $row.SHA256) {
-            $failures.Add("$($row.File) installed is not the staged build")
+# 2. The installed set matches the staged set, hash for hash.
+#
+#    Only when asked for with -Installed. Comparing them during a publish is a
+#    guaranteed failure — the installed copy is still the previous release at
+#    that point — and a gate that always fails is a gate nobody reads. Run this
+#    again after installing, which is when the question means something.
+if ($Installed) {
+    $installedRoot = Join-Path $env:LOCALAPPDATA 'Programs\SayFlex'
+    if (-not (Test-Path -LiteralPath $installedRoot)) {
+        $failures.Add('-Installed was asked for, and there is no installed copy')
+    } else {
+        foreach ($row in $files) {
+            $there = Join-Path $installedRoot $row.File
+            if (-not (Test-Path -LiteralPath $there)) {
+                $failures.Add("$($row.File) is staged but not installed")
+                continue
+            }
+            $hash = (Get-FileHash -LiteralPath $there -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $row.SHA256) {
+                $failures.Add("$($row.File) installed is not the staged build")
+            }
         }
     }
-} else {
-    Write-Host 'No installed copy to compare against; install the package and run this again.'
 }
 
 # 3. Every worker agrees with the desktop about the protocol. A handshake that
@@ -107,9 +117,20 @@ $protocol = (
 ).Matches[0].Groups[1].Value
 foreach ($worker in @('SayFlex.Speech.Cpu.exe', 'SayFlex.Translation.exe')) {
     $path = Join-Path $appRoot $worker
-    $handshake = & $path --protocol-version 2>&1
-    if ($LASTEXITCODE -ne 0 -or "$handshake".Trim() -ne $protocol) {
-        $failures.Add("$worker answers '$handshake' for the protocol, not $protocol")
+    # Started rather than called, so its output is read from a file: a native
+    # process's stdout captured through the pipeline came back empty here, and
+    # an empty answer read as a mismatch.
+    $out = [System.IO.Path]::GetTempFileName()
+    try {
+        $run = Start-Process -FilePath $path -ArgumentList '--protocol-version' `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out
+        $answer = (Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue)
+        $answer = "$answer".Trim()
+        if ($run.ExitCode -ne 0 -or $answer -ne $protocol) {
+            $failures.Add("$worker answers '$answer' for the protocol, not $protocol")
+        }
+    } finally {
+        Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
     }
 }
 
