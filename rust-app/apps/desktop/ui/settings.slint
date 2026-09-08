@@ -252,8 +252,16 @@ export component SettingsWindow inherits Window {
             // The page fills the column. Pages whose rows can outgrow it put
             // those rows in a ListView, which scrolls; the rest are drawn to
             // fit the 940x640 floor this window declares.
+            //
+            // The floor is stated here rather than left to whichever page is
+            // open, because a window that reports a different minimum for each
+            // page is a window that resizes itself as you walk through it —
+            // 720 tall on Dictation, 640 on Providers, jumping under the
+            // pointer. 474 is what the floor leaves between the topline and
+            // the footer.
             page := VerticalLayout {
                 horizontal-stretch: 1;
+                min-height: 474px;
                 spacing: 0px;
 
                 if root.active-page == 0 : OverviewPage {

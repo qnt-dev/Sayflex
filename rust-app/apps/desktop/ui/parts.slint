@@ -278,8 +278,11 @@ export component ListRow inherits Rectangle {
                 border-width: root.tone == "resting" || root.tone == "off" ? 1px : 0px;
                 border-color: Sheet.hairline;
             }
+            // A row whose switch already says "On" does not need a word beside
+            // it saying "Held": an empty state gives its column back to the
+            // line that has something to say.
             Text {
-                width: 108px;
+                width: root.state-text == "" ? 0px : 108px;
                 text: root.state-text;
                 color: root.tone == "active"
                     ? Sheet.ink

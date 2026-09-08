@@ -4,6 +4,7 @@
 // the setting is; the value says what is true now, never what pressing it would
 // do.
 
+import { ListView } from "std-widgets.slint";
 import { Sheet } from "sheet.slint";
 import { HotkeyRow } from "rows.slint";
 import { RowAction, Toggle, Stepper, MenuButton, MenuOption } from "controls.slint";
@@ -154,56 +155,62 @@ export component HotkeysPage inherits VerticalLayout {
         claim-signal: root.summary-signal;
     }
 
-    for row[index] in root.rows : VerticalLayout {
-        spacing: 0px;
+    // The commands are a list, and a list belongs in a ListView: a page that
+    // reports a taller minimum than its neighbours makes the window resize
+    // itself as you walk through the navigation.
+    ListView {
+        vertical-stretch: 1;
 
-        ListRow {
-            lead: row.keys;
-            title: row.name;
-            detail: row.detail;
-            state-text: row.state;
-            tone: row.tone;
-            controls-width: 186px;
+        for row[index] in root.rows : VerticalLayout {
+            spacing: 0px;
 
-            Toggle {
-                checked: row.enabled;
-                on-label: "On";
-                off-label: "Off";
-                toggled(next) => { root.toggle-row(index, next); }
+            ListRow {
+                lead: row.keys;
+                title: row.name;
+                detail: row.detail;
+                tone: row.tone;
+                controls-width: 186px;
+
+                Toggle {
+                    checked: row.enabled;
+                    on-label: "On";
+                    off-label: "Off";
+                    toggled(next) => { root.toggle-row(index, next); }
+                }
+
+                // The combination itself is fixed in this build. The button says
+                // so rather than being absent, because a page that silently omits
+                // the thing its design promised is a page that has been quietly
+                // reduced.
+                RowAction {
+                    label: "Change";
+                    enabled: row.locked-reason == "";
+                    reason: row.locked-reason;
+                }
             }
 
-            // The combination itself is fixed in this build. The button says
-            // so rather than being absent, because a page that silently omits
-            // the thing its design promised is a page that has been quietly
-            // reduced.
-            RowAction {
-                label: "Change";
-                enabled: row.locked-reason == "";
-                reason: row.locked-reason;
+            if row.mode != "" && row.enabled : HorizontalLayout {
+                height: 42px;
+                padding-left: 110px;
+                padding-bottom: 10px;
+                alignment: start;
+                spacing: 12px;
+                GroupLabel {
+                    text: "DOES";
+                    vertical-alignment: center;
+                }
+                MenuButton {
+                    compact: true;
+                    text: row.mode-value;
+                    value: row.mode-key;
+                    options: [
+                        { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
+                        { value: "palette", label: "Always ask", note: "Shows the palette every time" },
+                    ];
+                    chosen(value) => { root.set-mode(row.mode, value); }
+                }
             }
         }
 
-        if row.mode != "" && row.enabled : HorizontalLayout {
-            height: 42px;
-            padding-left: 110px;
-            padding-bottom: 10px;
-            alignment: start;
-            spacing: 12px;
-            GroupLabel {
-                text: "DOES";
-                vertical-alignment: center;
-            }
-            MenuButton {
-                compact: true;
-                text: row.mode-value;
-                value: row.mode-key;
-                options: [
-                    { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
-                    { value: "palette", label: "Always ask", note: "Shows the palette every time" },
-                ];
-                chosen(value) => { root.set-mode(row.mode, value); }
-            }
-        }
     }
-
 }
