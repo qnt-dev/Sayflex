@@ -33,27 +33,58 @@ const FRAME_DEADLINE: Duration = Duration::from_millis(2_500);
 /// entirely, so it is asked for again on this cadence until it comes.
 const REDRAW_RETRY: Duration = Duration::from_millis(40);
 
+/// Which show a timer belongs to: the window, and the generation on it.
+///
+/// Keyed by the window alone, a callback from an abandoned show could cancel
+/// the timers of the show that replaced it — same window, different
+/// presentation — and leave the new one waiting for a frame nobody would time
+/// out.
+type TimerKey = (u64, u64);
+
 thread_local! {
-    /// The early second request for a frame, kept alive alongside its watchdog
-    /// and dropped with it.
-    static REDRAW_RETRIES: RefCell<HashMap<u64, slint::Timer>> = RefCell::new(HashMap::new());
+    /// The repeated request for a frame, kept alive alongside its watchdog and
+    /// dropped with it.
+    static REDRAW_RETRIES: RefCell<HashMap<TimerKey, slint::Timer>> = RefCell::new(HashMap::new());
 }
 
 thread_local! {
     /// Watchdogs live on the event-loop thread, because a `slint::Timer` is
     /// neither `Send` nor able to outlive being dropped.
     ///
-    /// Keyed by the window, not by the presenter's name. Every translation
-    /// preview is called `translation_preview_overlay`, so with two of them
-    /// pinned at once the second one's timer replaced the first one's and the
-    /// first was left waiting for a frame nobody would time out.
-    static FRAME_WATCHDOGS: RefCell<HashMap<u64, slint::Timer>> = RefCell::new(HashMap::new());
+    /// Keyed by the window and the generation, not by the presenter's name.
+    /// Every translation preview is called `translation_preview_overlay`, so
+    /// with two of them pinned at once the second one's timer replaced the
+    /// first one's and the first was left waiting for a frame nobody would time
+    /// out.
+    static FRAME_WATCHDOGS: RefCell<HashMap<TimerKey, slint::Timer>> = RefCell::new(HashMap::new());
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OverlayContract {
     ClickThrough,
     Interactive,
+}
+
+/// Whether this overlay has content that has to arrive before it is worth
+/// showing.
+///
+/// The frame gate refuses to reveal a window nothing has been drawn on, which
+/// is what stopped the translation preview appearing empty. That rule needs to
+/// know what "nothing" means, and it is not the same for every window: a
+/// translation is empty until its text arrives, while the recording visualiser
+/// draws itself from the moment it exists and has no separate content at all.
+///
+/// It was a method the owner had to remember to call, and three of the five
+/// owners did not — the visualiser, the action palette and the selection
+/// chooser each ran their frame gate against a flag nobody ever set, had every
+/// frame refused, and died at the deadline. Nothing showed. Making it a
+/// property of the presenter means there is nothing left to forget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ContentPolicy {
+    /// Renderable as soon as it exists. Any frame reveals it.
+    AlwaysRenderable,
+    /// Empty until the owner says otherwise, through `content_changed`.
+    RequiresContent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +111,7 @@ enum PresentationPhase {
 
 #[derive(Debug)]
 struct PresentationState {
+    policy: ContentPolicy,
     phase: PresentationPhase,
     next_generation: u64,
     /// Whether what the window has been told to show is worth showing.
@@ -99,15 +131,22 @@ struct PresentationState {
     accepted_revision: Option<u64>,
 }
 
-impl Default for PresentationState {
-    fn default() -> Self {
+impl PresentationState {
+    fn new(policy: ContentPolicy) -> Self {
         Self {
+            policy,
             phase: PresentationPhase::Detached,
             next_generation: 1,
-            content_ready: false,
+            content_ready: matches!(policy, ContentPolicy::AlwaysRenderable),
             content_revision: 0,
             accepted_revision: None,
         }
+    }
+}
+
+impl Default for PresentationState {
+    fn default() -> Self {
+        Self::new(ContentPolicy::RequiresContent)
     }
 }
 
@@ -235,7 +274,18 @@ impl PresentationState {
         self.phase = PresentationPhase::Parked {
             window_handle: ticket.window_handle,
         };
+        self.forget_content();
         Some(ticket.window_handle)
+    }
+
+    /// Back to however empty this overlay starts.
+    ///
+    /// A window that has been put away has nothing on it as far as the next
+    /// show is concerned: leaving the flag set would let a frame drawn before
+    /// the new content arrived reveal the previous translation.
+    fn forget_content(&mut self) {
+        self.content_ready = matches!(self.policy, ContentPolicy::AlwaysRenderable);
+        self.accepted_revision = None;
     }
 
     fn retire(&mut self) -> Option<(u64, Option<u64>)> {
@@ -271,9 +321,10 @@ impl OverlayPresenter {
         window: &slint::Window,
         name: &'static str,
         contract: OverlayContract,
+        policy: ContentPolicy,
         on_presented: Option<PresentedCallback>,
     ) -> Result<Self, String> {
-        let state = Arc::new(Mutex::new(PresentationState::default()));
+        let state = Arc::new(Mutex::new(PresentationState::new(policy)));
         let render_state = Arc::clone(&state);
         // Read when the renderer starts a frame, reported when it finishes it.
         // Reading the revision only at `AfterRendering` says what was current
@@ -328,11 +379,18 @@ impl OverlayPresenter {
                     } else {
                         None
                     };
-                    rust_app_core::diagnostics::log_line(&format!(
-                        "{name} frame=rendered phase={phase:?} drew={drawn} current={current} \
-                         ready={ready} accepted={}",
-                        ticket.is_some()
-                    ));
+                    // Only frames that had a decision to make. A presented
+                    // window draws sixty times a second, and each of those was
+                    // formatted and queued from inside the render callback:
+                    // four thousand lines in one session, three quarters of
+                    // them about windows that were parked.
+                    if ticket.is_some() || matches!(phase, PresentationPhase::AwaitingFrame(_)) {
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "{name} frame=rendered phase={phase:?} drew={drawn} \
+                             current={current} ready={ready} accepted={}",
+                            ticket.is_some()
+                        ));
+                    }
                     ticket
                 };
                 let Some(ticket) = ticket else {
@@ -342,7 +400,13 @@ impl OverlayPresenter {
                 let queued_state = Arc::clone(&render_state);
                 let queued_callback = callback.clone();
                 let queue_result = slint::invoke_from_event_loop(move || {
-                    disarm_watchdog(ticket.window_handle);
+                    // Deliberately not disarmed first. This runs after the
+                    // event loop gets to it, and by then the content may have
+                    // changed and put the show back to waiting for a new frame.
+                    // Cancelling the timers here left that show with no frame,
+                    // no watchdog and no way out — a window hidden for good.
+                    // `reveal_revealable` disarms them when it actually
+                    // reveals.
                     reveal_revealable(
                         &queued_state,
                         name,
@@ -499,7 +563,7 @@ impl OverlayPresenter {
             }
         });
         REDRAW_RETRIES.with_borrow_mut(|timers| {
-            timers.insert(ticket.window_handle, nudge);
+            timers.insert(key_of(ticket), nudge);
         });
 
         let state = Arc::clone(&self.state);
@@ -526,7 +590,7 @@ impl OverlayPresenter {
             // Without this it kept waking every forty milliseconds to check a
             // ticket that had already been given up on, until the next show
             // replaced it.
-            disarm_watchdog(ticket.window_handle);
+            disarm_watchdog(ticket);
             let _ = reconcile_contract(contract, ticket.window_handle);
             let _ = rust_platform_windows::conceal_overlay_window(ticket.window_handle);
             rust_app_core::diagnostics::log_line(&format!(
@@ -537,7 +601,7 @@ impl OverlayPresenter {
             ));
         });
         FRAME_WATCHDOGS.with_borrow_mut(|timers| {
-            timers.insert(ticket.window_handle, timer);
+            timers.insert(key_of(ticket), timer);
         });
     }
 
@@ -599,7 +663,7 @@ impl OverlayPresenter {
         stage: &str,
         error: &str,
     ) {
-        disarm_watchdog(ticket.window_handle);
+        disarm_watchdog(ticket);
         let window_handle = self
             .state
             .lock()
@@ -617,7 +681,7 @@ impl OverlayPresenter {
 
     pub(crate) fn retire(&self, window: &slint::Window, reason: &str) {
         if let Some(handle) = self.window_handle() {
-            disarm_watchdog(handle);
+            disarm_all_watchdogs(handle);
         }
         let retirement = self
             .state
@@ -661,8 +725,12 @@ fn reveal_revealable(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .can_reveal(ticket);
     if !can_reveal {
+        // The content moved while this was queued, so the show is waiting for a
+        // new frame. Its timers stay armed: they are the only thing that will
+        // get it out if that frame never comes.
         return;
     }
+    disarm_watchdog(ticket);
     let result = reconcile_and_verify_contract(contract, ticket.window_handle, true)
         .and_then(|()| rust_platform_windows::reveal_overlay_window(ticket.window_handle))
         .and_then(|()| reconcile_and_verify_contract(contract, ticket.window_handle, false));
@@ -701,12 +769,31 @@ fn reveal_revealable(
 /// Dropping the timer cancels it. A watchdog that fires after its frame landed
 /// would find the ticket already revealed and do nothing, but leaving live
 /// timers behind for every presentation is untidy and eventually expensive.
-fn disarm_watchdog(window_handle: u64) {
+/// The slot a show's timers are filed under.
+const fn key_of(ticket: PresentationTicket) -> TimerKey {
+    (ticket.window_handle, ticket.generation)
+}
+
+/// Stops the timers of one show, and only that one.
+fn disarm_watchdog(ticket: PresentationTicket) {
+    let key = key_of(ticket);
     FRAME_WATCHDOGS.with_borrow_mut(|timers| {
-        timers.remove(&window_handle);
+        timers.remove(&key);
     });
     REDRAW_RETRIES.with_borrow_mut(|timers| {
-        timers.remove(&window_handle);
+        timers.remove(&key);
+    });
+}
+
+/// Stops every timer on a window, whichever show they belong to.
+///
+/// For retirement, where the window itself is going away.
+fn disarm_all_watchdogs(window_handle: u64) {
+    FRAME_WATCHDOGS.with_borrow_mut(|timers| {
+        timers.retain(|(window, _), _| *window != window_handle);
+    });
+    REDRAW_RETRIES.with_borrow_mut(|timers| {
+        timers.retain(|(window, _), _| *window != window_handle);
     });
 }
 
@@ -750,7 +837,7 @@ fn reconcile_and_verify_contract(
 
 #[cfg(test)]
 mod tests {
-    use super::{PresentationPhase, PresentationState};
+    use super::{ContentPolicy, PresentationPhase, PresentationState};
 
     #[test]
     fn frame_acknowledgement_is_required_before_reveal() {
@@ -852,6 +939,7 @@ mod tests {
         state.await_frame(ticket).unwrap();
 
         let mut by_frame = PresentationState {
+            policy: ContentPolicy::RequiresContent,
             phase: state.phase,
             next_generation: state.next_generation,
             content_ready: true,
@@ -861,6 +949,7 @@ mod tests {
         assert_eq!(by_frame.frame_rendered(), Some(ticket));
 
         let mut by_cancel = PresentationState {
+            policy: ContentPolicy::RequiresContent,
             phase: PresentationPhase::AwaitingFrame(ticket),
             next_generation: state.next_generation,
             content_ready: false,
@@ -870,6 +959,7 @@ mod tests {
         assert_eq!(by_cancel.cancel(ticket), Some(42));
 
         let mut by_retire = PresentationState {
+            policy: ContentPolicy::RequiresContent,
             phase: PresentationPhase::AwaitingFrame(ticket),
             next_generation: state.next_generation,
             content_ready: false,
@@ -905,13 +995,53 @@ mod tests {
 
 #[cfg(test)]
 mod content_gate_tests {
-    use super::{PresentationPhase, PresentationState};
+    use super::{ContentPolicy, PresentationPhase, PresentationState};
 
     /// A state machine attached to a window, with nothing on that window yet.
     fn parked() -> PresentationState {
         let mut state = PresentationState::default();
         state.attach(4242).unwrap();
         state
+    }
+
+    #[test]
+    fn an_overlay_that_draws_itself_needs_nobody_to_announce_its_content() {
+        // The regression the policy replaces: `content_ready` was a flag the
+        // owner had to remember to set, and three of the five owners did not.
+        // The recording visualiser, the action palette and the selection
+        // chooser each had every frame refused as empty and died at the
+        // deadline — nothing appeared at all.
+        let mut state = PresentationState::new(ContentPolicy::AlwaysRenderable);
+        state.attach(4242).unwrap();
+        let ticket = state.begin_prepare().unwrap();
+        state.await_frame(ticket).unwrap();
+
+        assert_eq!(
+            state.frame_rendered(),
+            Some(ticket),
+            "a window with nothing to wait for is revealed by its first frame"
+        );
+    }
+
+    #[test]
+    fn putting_an_overlay_away_forgets_what_was_on_it() {
+        // Otherwise the next show could be revealed by a frame drawn before its
+        // own content arrived — the previous translation, one show late.
+        let mut state = parked();
+        let ticket = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(ticket).unwrap();
+        assert_eq!(state.frame_rendered(), Some(ticket));
+        state.cancel(ticket);
+
+        let next = state.begin_prepare().unwrap();
+        state.await_frame(next).unwrap();
+
+        assert_eq!(
+            state.frame_rendered(),
+            None,
+            "the new show starts as empty as the first one did"
+        );
     }
 
     #[test]

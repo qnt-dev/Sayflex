@@ -25,7 +25,7 @@ use slint::{
 use crate::{
     MAX_TRANSLATION_BLUR_RADIUS, RuntimeEvent, TranslationPair, TranslationPreview,
     TranslatorWindow, dispatch_runtime_event, native_window_handle,
-    overlay_presenter::{OverlayContract, OverlayPresenter},
+    overlay_presenter::{ContentPolicy, OverlayContract, OverlayPresenter},
     present_translation_preview, slint_window_handle,
 };
 
@@ -315,6 +315,7 @@ pub(crate) fn create_translation_preview_slot(
         preview.window(),
         "translation_preview_overlay",
         OverlayContract::Interactive,
+        ContentPolicy::RequiresContent,
         Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
     )?;
     wire_translation_preview(&preview, &presenter);
@@ -573,9 +574,10 @@ pub(crate) fn apply_translation_preview_layout(
     if measured > 0.0 {
         preview.set_original_card_height(measured.clamp(48.0, 240.0));
     }
-    // Read after the width and the content are set, so the card has been laid
-    // out with them. `main-card-height` is Slint's own measurement of the
-    // result — the interleaved stack included.
+    // Read after the content and the width are set, which is why every caller
+    // sets them first. `main-card-height` is Slint's own measurement of the
+    // card it has laid out — the interleaved stack included — and it measures
+    // whatever text is on it at the moment it is asked.
     let height = translation_window_height(
         preview.get_main_card_height(),
         preview.get_original_card_height(),

@@ -27,7 +27,7 @@ use crate::{
     ActionPalette, SelectionChooser, TranslationPair, TranslationPreview,
     adaptive_text_panel_height, apply_translation_preview_layout,
     configure_indicator_native_window, flow_sphere, native_window_handle,
-    overlay_presenter::{OverlayContract, OverlayPresenter},
+    overlay_presenter::{ContentPolicy, OverlayContract, OverlayPresenter},
     precreate_indicator, refresh_cloaked_translation_backdrop,
     settings_document::data_root,
     show_indicator, slint_window_handle,
@@ -344,6 +344,7 @@ pub(crate) fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dy
         indicator.window(),
         "recording_overlay_probe",
         OverlayContract::ClickThrough,
+        ContentPolicy::AlwaysRenderable,
         None,
     )?;
     indicator.set_visualizer_style(VisualizerStyle::WritingSlate.index());
@@ -578,6 +579,7 @@ pub(crate) fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<
         preview.window(),
         "translation_preview_probe",
         OverlayContract::Interactive,
+        ContentPolicy::RequiresContent,
         None,
     )?;
     preview.set_prepared(false);
@@ -639,8 +641,8 @@ pub(crate) fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<
             } else {
                 "The translation overlay is rendered completely before DWM reveals its native window."
             };
-            apply_translation_preview_layout(&preview, "", text);
             preview.set_translated_text(text.into());
+            apply_translation_preview_layout(&preview, "", text);
             preview.set_prepared(false);
             // The contract this probe exists to exercise: a presenter that has
             // not been told there is content will not accept a frame. Without
@@ -749,6 +751,7 @@ pub(crate) fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Err
         preview.window(),
         "translation_preview_probe",
         OverlayContract::Interactive,
+        ContentPolicy::RequiresContent,
         Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
     )?;
     let translated = if long_text {
@@ -787,12 +790,13 @@ pub(crate) fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Err
             },
         ]
     };
-    apply_translation_preview_layout(&preview, source, &translated);
-    preview.set_card_width(480.0);
     preview.set_source_text(source.into());
-    preview.set_original_card_height(if long_text { 124.0 } else { 96.0 });
     preview.set_dual_pairs(ModelRc::new(VecModel::from(dual_pairs)));
     preview.set_translated_text(translated.clone().into());
+    // After the content, like every other caller: the card is measured with
+    // whatever is on it.
+    apply_translation_preview_layout(&preview, source, &translated);
+    preview.set_card_width(480.0);
     preview.set_prepared(false);
     wire_translation_preview(&preview, &presenter);
     preview

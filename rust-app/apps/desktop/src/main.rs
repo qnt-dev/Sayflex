@@ -78,7 +78,7 @@ mod translation_view;
 mod visualizer;
 mod worker_supervisor;
 
-use overlay_presenter::{OverlayContract, OverlayPresenter};
+use overlay_presenter::{ContentPolicy, OverlayContract, OverlayPresenter};
 use speech_backend::{SpeechBackend, SpeechBackendPreference};
 
 slint::include_modules!();
@@ -596,6 +596,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         panel_indicator.window(),
         "recording_panel_overlay",
         OverlayContract::ClickThrough,
+        // Draws itself from the moment it exists.
+        ContentPolicy::AlwaysRenderable,
         None,
     )
     .map_err(|error| format!("recording overlay initialization failed: {error}"))?;
@@ -603,6 +605,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         transparent_indicator.window(),
         "recording_transparent_overlay",
         OverlayContract::ClickThrough,
+        ContentPolicy::AlwaysRenderable,
         None,
     )
     .map_err(|error| format!("transparent recording overlay initialization failed: {error}"))?;
@@ -635,6 +638,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         chooser.window(),
         "selection_chooser_overlay",
         OverlayContract::Interactive,
+        ContentPolicy::AlwaysRenderable,
         None,
     )
     .map_err(|error| format!("selection chooser initialization failed: {error}"))?;
@@ -642,6 +646,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         action_palette.window(),
         "action_palette_overlay",
         OverlayContract::Interactive,
+        ContentPolicy::AlwaysRenderable,
         None,
     )
     .map_err(|error| format!("action palette initialization failed: {error}"))?;
@@ -649,6 +654,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         translation_preview.window(),
         "translation_preview_overlay",
         OverlayContract::Interactive,
+        // Empty until the translation arrives.
+        ContentPolicy::RequiresContent,
         Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
     )
     .map_err(|error| format!("translation preview initialization failed: {error}"))?;
@@ -2194,12 +2201,16 @@ fn show_selection_translation_preview(
             let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
         }
     }
-    apply_translation_preview_layout(preview, source_text, translated_text);
+    // The content first, then the measurement. This ran the other way round,
+    // so the card was measured against the *previous* text: empty on the first
+    // show, and the partial on the final one. A short test sentence hid it; a
+    // long translation would have been cut off again.
     preview.set_translated_text(translated_text.into());
     preview.set_dual_pairs(ModelRc::new(VecModel::from(translation_pairs(
         source_text,
         translated_text,
     ))));
+    apply_translation_preview_layout(preview, source_text, translated_text);
     // The presenter is told what is on the window, every time it changes. A
     // frame drawn before there was anything to draw must not reveal it, and a
     // `Completed` that lands while the `Partial` is still being drawn has to
