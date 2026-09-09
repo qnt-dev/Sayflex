@@ -26,6 +26,7 @@ $required = @(
     'SayFlex.Speech.Vulkan.exe',
     'SayFlex.Translation.exe',
     'SayFlex.Companion.exe',
+    'build-manifest.json',
     'speech-backends.json',
     'runtimes\cuda\cublas64_13.dll',
     'runtimes\cuda\cublasLt64_13.dll'
@@ -75,6 +76,65 @@ $files | Format-Table -AutoSize
 
 $failures = New-Object System.Collections.Generic.List[string]
 
+function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
+    $out = [System.IO.Path]::GetTempFileName()
+    try {
+        $run = Start-Process -FilePath $Path -ArgumentList $Argument `
+            -NoNewWindow -PassThru -RedirectStandardOutput $out
+        $null = $run.Handle
+        if (-not $run.WaitForExit(20000)) {
+            $run.Kill()
+            throw "$([System.IO.Path]::GetFileName($Path)) did not answer $Argument within 20 seconds"
+        }
+        $answer = "$(Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue)".Trim()
+        if ($run.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($answer)) {
+            throw "$([System.IO.Path]::GetFileName($Path)) failed to answer $Argument"
+        }
+        return $answer
+    } finally {
+        Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 0. The manifest binds this directory to one commit, one dependency lock and
+# one exact set of bytes. It is the authority used by every later comparison.
+$buildManifestPath = Join-Path $appRoot 'build-manifest.json'
+$buildManifest = Get-Content -LiteralPath $buildManifestPath -Raw | ConvertFrom-Json
+if ($buildManifest.schema_version -ne 1 -or $buildManifest.product -ne 'SayFlex') {
+    $failures.Add('build-manifest.json has an unsupported identity or schema')
+}
+if ($buildManifest.git_commit -notmatch '^[0-9a-f]{40}$') {
+    $failures.Add("build manifest has an invalid commit '$($buildManifest.git_commit)'")
+}
+$manifestFiles = @($buildManifest.files)
+$actualPayload = @(
+    Get-ChildItem -LiteralPath $appRoot -File -Recurse |
+        Where-Object Name -ne 'build-manifest.json' |
+        ForEach-Object { $_.FullName.Substring($appRoot.Length + 1).Replace('\', '/') } |
+        Sort-Object
+)
+$declaredPayload = @($manifestFiles | ForEach-Object path | Sort-Object)
+if (Compare-Object $declaredPayload $actualPayload) {
+    $failures.Add('the staged payload file set does not match build-manifest.json')
+}
+foreach ($entry in $manifestFiles) {
+    $path = Join-Path $appRoot ($entry.path.Replace('/', '\'))
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+    $item = Get-Item -LiteralPath $path
+    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($item.Length -ne $entry.bytes -or $hash -ne $entry.sha256) {
+        $failures.Add("$($entry.path) does not match build-manifest.json")
+    }
+}
+$head = (& git -C $rustRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -eq 0 -and $head -ne $buildManifest.git_commit) {
+    $failures.Add("staged build is commit $($buildManifest.git_commit), not current HEAD $head")
+}
+$lockHash = (Get-FileHash -LiteralPath (Join-Path $rustRoot 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($lockHash -ne $buildManifest.cargo_lock_sha256) {
+    $failures.Add('Cargo.lock does not match the dependency lock recorded by the build')
+}
+
 
 # 1. Every executable carries the version this release claims.
 # From the built desktop, not from Cargo.toml: the question is what this
@@ -90,6 +150,9 @@ $sourceVersion = (
 ).Matches[0].Groups[1].Value
 if ($expectedVersion -ne $sourceVersion) {
     $failures.Add("SayFlex.exe is $expectedVersion but the workspace says $sourceVersion")
+}
+if ($expectedVersion -ne $buildManifest.version) {
+    $failures.Add("SayFlex.exe is $expectedVersion but the build manifest says $($buildManifest.version)")
 }
 foreach ($name in $required) {
     if (-not $name.EndsWith('.exe')) { continue }
@@ -110,15 +173,54 @@ if ($Installed) {
     if (-not (Test-Path -LiteralPath $installedRoot)) {
         $failures.Add('-Installed was asked for, and there is no installed copy')
     } else {
-        foreach ($row in $files) {
-            $there = Join-Path $installedRoot $row.File
+        # Compare every byte that the build manifest owns, rather than only
+        # the small `$required` bootability subset. Otherwise a stale model
+        # runtime DLL or asset could survive installation while this check
+        # still called the installed product identical to staging.
+        $installedPayload = @($manifestFiles) + [pscustomobject]@{
+            path = 'build-manifest.json'
+            bytes = (Get-Item -LiteralPath $buildManifestPath).Length
+            sha256 = (Get-FileHash -LiteralPath $buildManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        $expectedInstalledFiles = @($installedPayload | ForEach-Object path | Sort-Object)
+        $actualInstalledFiles = @(
+            Get-ChildItem -LiteralPath $installedRoot -File -Recurse |
+                Where-Object { $_.Name -notmatch '^unins\d+\.(exe|dat|msg)$' } |
+                ForEach-Object { $_.FullName.Substring($installedRoot.Length + 1).Replace('\', '/') } |
+                Sort-Object
+        )
+        if (Compare-Object $expectedInstalledFiles $actualInstalledFiles) {
+            $failures.Add('the installed payload file set does not match the staged release')
+        }
+        foreach ($row in $installedPayload) {
+            $relativePath = $row.path.Replace('/', '\')
+            $there = Join-Path $installedRoot $relativePath
             if (-not (Test-Path -LiteralPath $there)) {
-                $failures.Add("$($row.File) is staged but not installed")
+                $failures.Add("$($row.path) is staged but not installed")
                 continue
             }
+            $item = Get-Item -LiteralPath $there
             $hash = (Get-FileHash -LiteralPath $there -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($hash -ne $row.SHA256) {
-                $failures.Add("$($row.File) installed is not the staged build")
+            if ($item.Length -ne $row.bytes -or $hash -ne $row.sha256) {
+                $failures.Add("$($row.path) installed is not the staged build")
+            }
+        }
+        # Inno's stable AppId is the registry identity. Its default display
+        # name is versioned ("SayFlex version 0.6.1"), so discovering the key
+        # through a presentation string made a correct installation look
+        # absent. Address the exact product key and read its values explicitly.
+        $uninstallPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{BE541A7B-AF41-4F29-8D3F-D9F75AB68F66}_is1'
+        $uninstall = Get-ItemProperty -LiteralPath $uninstallPath -ErrorAction SilentlyContinue
+        if (-not $uninstall) {
+            $failures.Add('the installed copy has no SayFlex uninstall registration')
+        } else {
+            if ($uninstall.DisplayVersion -ne $expectedVersion) {
+                $failures.Add("uninstall registration reports $($uninstall.DisplayVersion), not $expectedVersion")
+            }
+            $registeredLocation = "$($uninstall.InstallLocation)".TrimEnd('\')
+            if ($registeredLocation -and
+                -not $registeredLocation.Equals($installedRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+                $failures.Add("uninstall registration points at '$registeredLocation', not '$installedRoot'")
             }
         }
     }
@@ -126,11 +228,10 @@ if ($Installed) {
 
 # 3. Every worker agrees with the desktop about the protocol. A handshake that
 #    only happens at run time is a handshake nobody checks before shipping.
-$protocol = (
-    Select-String -Path (Join-Path $rustRoot 'crates\protocol\src\lib.rs') `
-        -Pattern 'PROTOCOL_VERSION: u32 = (\d+)' |
-        Select-Object -First 1
-).Matches[0].Groups[1].Value
+$protocol = Invoke-ReleaseProbe (Join-Path $appRoot 'SayFlex.exe') '--protocol-version'
+if ($protocol -ne "$($buildManifest.protocol_version)") {
+    $failures.Add("SayFlex.exe reports protocol $protocol but the build manifest says $($buildManifest.protocol_version)")
+}
 # Every process that speaks the protocol, not two of them: a CUDA worker that
 # disagrees is exactly as broken as a CPU one, and it is the one that runs.
 foreach ($worker in @(
@@ -142,31 +243,22 @@ foreach ($worker in @(
     'SayFlex.Companion.exe'
 )) {
     $path = Join-Path $appRoot $worker
-    # Started rather than called, so its output is read from a file: a native
-    # process's stdout captured through the pipeline came back empty here, and
-    # an empty answer read as a mismatch.
-    $out = [System.IO.Path]::GetTempFileName()
     try {
-        $run = Start-Process -FilePath $path -ArgumentList '--protocol-version' `
-            -NoNewWindow -PassThru -RedirectStandardOutput $out
-        # Touching the handle makes PowerShell keep it, without which ExitCode
-        # comes back empty after a timed WaitForExit and every worker was
-        # reported as answering wrongly while answering correctly.
-        $null = $run.Handle
-        # A worker that hangs must not hang the release check with it.
-        if (-not $run.WaitForExit(20000)) {
-            $run.Kill()
-            $failures.Add("$worker did not answer within 20 seconds")
-            continue
-        }
-        $answer = (Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue)
-        $answer = "$answer".Trim()
-        if ($run.ExitCode -ne 0 -or $answer -ne $protocol) {
+        $answer = Invoke-ReleaseProbe $path '--protocol-version'
+        if ($answer -ne $protocol) {
             $failures.Add("$worker answers '$answer' for the protocol, not $protocol")
         }
-    } finally {
-        Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+        $buildId = Invoke-ReleaseProbe $path '--build-id'
+        if ($buildId -ne $buildManifest.git_commit) {
+            $failures.Add("$worker belongs to commit '$buildId', not $($buildManifest.git_commit)")
+        }
+    } catch {
+        $failures.Add($_.Exception.Message)
     }
+}
+$desktopBuildId = Invoke-ReleaseProbe (Join-Path $appRoot 'SayFlex.exe') '--build-id'
+if ($desktopBuildId -ne $buildManifest.git_commit) {
+    $failures.Add("SayFlex.exe belongs to commit '$desktopBuildId', not $($buildManifest.git_commit)")
 }
 
 # 4. The installer's own checksum matches the sidecar shipped beside it. A
@@ -199,9 +291,9 @@ if ($failures.Count -gt 0) {
     throw "Release validation failed with $($failures.Count) problem(s)."
 }
 
-$checked = @('file set', 'backend manifest', 'versions', "protocol $protocol")
+$checked = @('file set', 'build manifest', 'binary build identity', 'Cargo.lock', 'backend manifest', 'versions', "protocol $protocol")
 if ($installerChecked) { $checked += 'installer checksum' }
-if ($Installed) { $checked += 'installed hashes' }
+if ($Installed) { $checked += 'installed hashes'; $checked += 'uninstall registration' }
 Write-Host "SayFlex $expectedVersion checked: $($checked -join ', ')."
 if (-not $installerChecked) {
     Write-Host 'No installer was named, so none was checked: pass -InstallerPath after building one.'

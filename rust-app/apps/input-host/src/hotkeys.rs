@@ -538,6 +538,8 @@ result=success chars={} release_wait_ms=Some({}) uia_ms={:?} clipboard_ms={:?} t
                         captured.clipboard_ms,
                         total_ms,
                     ));
+                    let mut target = target;
+                    target.selection_rect = captured.selection_rect;
                     let _ = events.send(InputHostEvent::SelectionCaptured {
                         request_id,
                         intent,
@@ -629,6 +631,8 @@ release_wait_ms={:?} uia_ms={:?} clipboard_ms=None total_ms={}",
         captured.uia_ms,
         capture_ready_ms,
     ));
+    let mut target = target;
+    target.selection_rect = captured.selection_rect;
     if events
         .send(InputHostEvent::SelectionCaptured {
             request_id,

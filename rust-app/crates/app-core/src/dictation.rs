@@ -107,6 +107,7 @@ mod tests {
             process_id,
             thread_id: 1,
             keyboard_layout: 0,
+            ..TargetSnapshot::default()
         }
     }
 

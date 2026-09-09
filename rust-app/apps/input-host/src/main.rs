@@ -36,6 +36,10 @@ use windows_sys::Win32::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Asked by the release check, which otherwise cannot find out what a
     // packaged process speaks short of driving a whole handshake.
+    if std::env::args().any(|argument| argument == "--build-id") {
+        println!("{}", rust_protocol::BUILD_COMMIT);
+        return Ok(());
+    }
     if std::env::args().any(|argument| argument == "--protocol-version") {
         println!("{PROTOCOL_VERSION}");
         return Ok(());

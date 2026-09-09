@@ -25,7 +25,7 @@ use rust_app_core::{
     dictation::{CompletionDelivery, HistoryUpdate, plan_completion},
 };
 use rust_protocol::{
-    CompanionRendererCommand, CompanionRendererEvent, HistoryEntry, InputHostCommand,
+    BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, HistoryEntry, InputHostCommand,
     InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId, SpeechOutputMode,
     SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript,
     TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationHistoryEntry,
@@ -45,20 +45,20 @@ use slint::winit_030::{
     winit::raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
 use slint::{
-    ComponentHandle, Image, ModelRc, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer,
-    TimerMode, VecModel,
+    ComponentHandle, Image, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
 };
 use translation_view::{
     TranslationPreviewRegistry, TranslationPreviewSlot, adaptive_text_panel_height,
     apply_translation_preview_layout, apply_translation_preview_pin_state,
     configure_slint_translation_resize, create_translation_preview_slot,
     precreate_translation_preview, refresh_cloaked_translation_backdrop,
-    retire_translation_preview, set_translation_status, translation_pairs,
+    retire_translation_preview, set_translation_status, update_translation_preview_content,
     wire_translation_preview,
 };
 use visualizer::{
-    CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, IndicatorAnimation, RecordingSurface,
-    VisualizerStyle, WritingSlateSurface, new_recording_indicators,
+    BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, IndicatorAnimation,
+    RecordingSurface, VisualizerStyle, WritingSlateSurface, new_recording_indicators,
+    new_settings_preview,
 };
 use worker_supervisor::{
     InitialWorkers, SessionEventRouter, StartupSessionGate, WorkerLifecycle, WorkerRecovery,
@@ -78,7 +78,7 @@ mod translation_view;
 mod visualizer;
 mod worker_supervisor;
 
-use overlay_presenter::{ContentPolicy, OverlayContract, OverlayPresenter};
+use overlay_presenter::{OverlayContract, OverlayPresenter};
 use speech_backend::{SpeechBackend, SpeechBackendPreference};
 
 slint::include_modules!();
@@ -212,10 +212,11 @@ struct RecordingOverlays {
 }
 
 impl RecordingOverlays {
-    fn for_style(&self, style: VisualizerStyle) -> &RecordingOverlay {
+    fn for_style(&self, style: VisualizerStyle) -> Option<&RecordingOverlay> {
         match style.recording_surface() {
-            RecordingSurface::Panel => &self.panel,
-            RecordingSurface::Transparent => &self.transparent,
+            Some(RecordingSurface::Panel) => Some(&self.panel),
+            Some(RecordingSurface::Transparent) => Some(&self.transparent),
+            None => None,
         }
     }
 
@@ -228,6 +229,12 @@ impl RecordingOverlays {
     fn set_circular_palette(&self, palette: CircularSpectrumPalette) {
         for overlay in [&self.panel, &self.transparent] {
             overlay.indicator.set_circular_palette(palette.index());
+        }
+    }
+
+    fn set_broadcast_mic_palette(&self, palette: BroadcastMicPalette) {
+        for overlay in [&self.panel, &self.transparent] {
+            overlay.indicator.set_broadcast_mic_palette(palette.index());
         }
     }
 
@@ -246,13 +253,18 @@ impl RecordingOverlays {
 
     fn retire_inactive_surface(&self, style: VisualizerStyle) {
         let inactive = match style.recording_surface() {
-            RecordingSurface::Panel => &self.transparent,
-            RecordingSurface::Transparent => &self.panel,
+            Some(RecordingSurface::Panel) => Some(&self.transparent),
+            Some(RecordingSurface::Transparent) => Some(&self.panel),
+            None => None,
         };
-        inactive.indicator.set_prepared(false);
-        inactive
-            .presenter
-            .retire(inactive.indicator.window(), "visualizer_surface_switch");
+        if let Some(inactive) = inactive {
+            inactive.indicator.set_prepared(false);
+            inactive
+                .presenter
+                .retire(inactive.indicator.window(), "visualizer_surface_switch");
+        } else {
+            self.retire_all("visualizer_disabled");
+        }
     }
 }
 
@@ -350,6 +362,7 @@ struct AppState {
     fast_release_previews: bool,
     visualizer_style: VisualizerStyle,
     circular_spectrum_palette: CircularSpectrumPalette,
+    broadcast_mic_palette: BroadcastMicPalette,
     flow_sphere_palette: flow_sphere::FlowSpherePalette,
     writing_slate_surface: WritingSlateSurface,
     companion_home_position: Option<(i32, i32)>,
@@ -443,6 +456,7 @@ impl AppState {
             fast_release_previews: saved_settings.fast_release_previews,
             visualizer_style: saved_settings.visualizer_style,
             circular_spectrum_palette: saved_settings.circular_spectrum_palette,
+            broadcast_mic_palette: saved_settings.broadcast_mic_palette,
             flow_sphere_palette: saved_settings.flow_sphere_palette,
             writing_slate_surface: saved_settings.writing_slate_surface,
             companion_home_position: saved_settings.companion_home_position,
@@ -533,6 +547,14 @@ impl AppState {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if env::args().any(|argument| argument == "--protocol-version") {
+        println!("{PROTOCOL_VERSION}");
+        return Ok(());
+    }
+    if env::args().any(|argument| argument == "--build-id") {
+        println!("{BUILD_COMMIT}");
+        return Ok(());
+    }
     rust_platform_windows::configure_process_error_mode();
     rust_platform_windows::configure_safe_dll_search()?;
     // Before any window: the shell reads the application's identity when the
@@ -592,20 +614,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     settings.set_today(rust_platform_windows::local_date_line().into());
     let saved_settings = load_settings();
     let (panel_indicator, transparent_indicator, indicator_animation) = new_recording_indicators()?;
-    let panel_indicator_presenter = OverlayPresenter::install(
+    let settings_preview_animation = new_settings_preview(&settings);
+    let panel_indicator_presenter = OverlayPresenter::install_always_renderable(
         panel_indicator.window(),
         "recording_panel_overlay",
         OverlayContract::ClickThrough,
-        // Draws itself from the moment it exists.
-        ContentPolicy::AlwaysRenderable,
         None,
     )
     .map_err(|error| format!("recording overlay initialization failed: {error}"))?;
-    let transparent_indicator_presenter = OverlayPresenter::install(
+    let transparent_indicator_presenter = OverlayPresenter::install_always_renderable(
         transparent_indicator.window(),
         "recording_transparent_overlay",
         OverlayContract::ClickThrough,
-        ContentPolicy::AlwaysRenderable,
         None,
     )
     .map_err(|error| format!("transparent recording overlay initialization failed: {error}"))?;
@@ -629,33 +649,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         .set_flow_sphere_palette(saved_settings.flow_sphere_palette);
     recording_overlays.set_style(saved_settings.visualizer_style);
     recording_overlays.set_circular_palette(saved_settings.circular_spectrum_palette);
+    recording_overlays.set_broadcast_mic_palette(saved_settings.broadcast_mic_palette);
     recording_overlays.set_writing_slate_surface(saved_settings.writing_slate_surface);
     let chooser = SelectionChooser::new()?;
     let action_palette = ActionPalette::new()?;
     let translation_preview = Rc::new(TranslationPreview::new()?);
     translation_preview.set_blur_radius(saved_settings.translation_blur_radius as i32);
-    let chooser_presenter = OverlayPresenter::install(
+    let chooser_presenter = OverlayPresenter::install_always_renderable(
         chooser.window(),
         "selection_chooser_overlay",
         OverlayContract::Interactive,
-        ContentPolicy::AlwaysRenderable,
         None,
     )
     .map_err(|error| format!("selection chooser initialization failed: {error}"))?;
-    let action_palette_presenter = OverlayPresenter::install(
+    let action_palette_presenter = OverlayPresenter::install_always_renderable(
         action_palette.window(),
         "action_palette_overlay",
         OverlayContract::Interactive,
-        ContentPolicy::AlwaysRenderable,
         None,
     )
     .map_err(|error| format!("action palette initialization failed: {error}"))?;
-    let translation_preview_presenter = OverlayPresenter::install(
+    let translation_preview_presenter = OverlayPresenter::install_content_gated(
         translation_preview.window(),
         "translation_preview_overlay",
         OverlayContract::Interactive,
-        // Empty until the translation arrives.
-        ContentPolicy::RequiresContent,
         Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
     )
     .map_err(|error| format!("translation preview initialization failed: {error}"))?;
@@ -871,12 +888,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             None
         }
     };
-    let animation_timer = start_indicator_animation(
+    let animation_timer = start_indicator_animation_with_settings_preview(
         vec![
             recording_overlays.panel.indicator.as_weak(),
             recording_overlays.transparent.indicator.as_weak(),
         ],
         &indicator_animation,
+        settings.as_weak(),
+        &settings_preview_animation,
     );
 
     if !env::args().any(|argument| argument == "--background") {
@@ -924,6 +943,27 @@ fn start_indicator_animation(
     indicators: Vec<slint::Weak<RecordingIndicator>>,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
 ) -> Timer {
+    start_indicator_animation_with_optional_settings_preview(indicators, indicator_animation, None)
+}
+
+fn start_indicator_animation_with_settings_preview(
+    indicators: Vec<slint::Weak<RecordingIndicator>>,
+    indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
+    settings: slint::Weak<SettingsWindow>,
+    settings_preview_animation: &Rc<RefCell<IndicatorAnimation>>,
+) -> Timer {
+    start_indicator_animation_with_optional_settings_preview(
+        indicators,
+        indicator_animation,
+        Some((settings, Rc::clone(settings_preview_animation))),
+    )
+}
+
+fn start_indicator_animation_with_optional_settings_preview(
+    indicators: Vec<slint::Weak<RecordingIndicator>>,
+    indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
+    settings_preview: Option<(slint::Weak<SettingsWindow>, Rc<RefCell<IndicatorAnimation>>)>,
+) -> Timer {
     let timer = Timer::default();
     let indicator_animation = Rc::clone(indicator_animation);
     // One buffer, refilled. This ran sixty times a second on the same thread
@@ -936,6 +976,13 @@ fn start_indicator_animation(
         live.clear();
         live.extend(indicators.iter().filter_map(slint::Weak::upgrade));
         indicator_animation.borrow_mut().tick(&live);
+        if let Some((settings, settings_preview_animation)) = &settings_preview
+            && let Some(settings) = settings.upgrade()
+        {
+            settings_preview_animation
+                .borrow_mut()
+                .tick_settings_preview(&settings);
+        }
     });
     timer
 }
@@ -1502,7 +1549,11 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             }
             let active_style = state.borrow().active_visualizer_style.unwrap_or_default();
             indicator_animation.borrow_mut().set_style(active_style);
-            indicator_animation.borrow_mut().begin_listening();
+            if active_style == VisualizerStyle::Off {
+                indicator_animation.borrow_mut().stop();
+            } else {
+                indicator_animation.borrow_mut().begin_listening();
+            }
             recording_overlays.set_style(active_style);
             if active_style.uses_external_renderer() {
                 if let Err(error) = workers.send_companion(&CompanionRendererCommand::Activate {
@@ -1519,16 +1570,17 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 }
             } else {
                 recording_overlays.retire_inactive_surface(active_style);
-                let overlay = recording_overlays.for_style(active_style);
-                overlay.indicator.set_processing(false);
-                overlay.indicator.set_signal_opacity(0.54);
-                overlay.indicator.set_disc_opacity(1.0);
-                show_indicator(
-                    &overlay.indicator,
-                    &overlay.presenter,
-                    overlay.transparent,
-                    Some(target.window_handle),
-                );
+                if let Some(overlay) = recording_overlays.for_style(active_style) {
+                    overlay.indicator.set_processing(false);
+                    overlay.indicator.set_signal_opacity(0.54);
+                    overlay.indicator.set_disc_opacity(1.0);
+                    show_indicator(
+                        &overlay.indicator,
+                        &overlay.presenter,
+                        overlay.transparent,
+                        Some(target.window_handle),
+                    );
+                }
             }
             set_indicator_status(settings, "Listening…");
         }
@@ -1566,7 +1618,9 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     set_status_problem(settings, &format!("Could not finish recording: {error}"));
                     return;
                 }
-                indicator_animation.borrow_mut().begin_processing();
+                if state.borrow().active_visualizer_style != Some(VisualizerStyle::Off) {
+                    indicator_animation.borrow_mut().begin_processing();
+                }
                 if state
                     .borrow()
                     .active_visualizer_style
@@ -1577,8 +1631,9 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 }
                 if let Some(active_style) = state.borrow().active_visualizer_style
                     && !active_style.uses_external_renderer()
+                    && let Some(overlay) = recording_overlays.for_style(active_style)
                 {
-                    let indicator = &recording_overlays.for_style(active_style).indicator;
+                    let indicator = &overlay.indicator;
                     indicator.set_processing(true);
                     indicator.set_signal_opacity(0.72);
                     indicator.set_disc_opacity(0.82);
@@ -2181,7 +2236,6 @@ fn show_selection_translation_preview(
     let first_show = preview.get_request_id().as_str() != request_id_text;
     if first_show {
         preview.set_request_id(request_id_text.into());
-        preview.set_source_text(source_text.into());
         preview.set_original_card_height(adaptive_text_panel_height(
             source_text,
             48,
@@ -2201,22 +2255,12 @@ fn show_selection_translation_preview(
             let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
         }
     }
-    // The content first, then the measurement. This ran the other way round,
-    // so the card was measured against the *previous* text: empty on the first
-    // show, and the partial on the final one. A short test sentence hid it; a
-    // long translation would have been cut off again.
-    preview.set_translated_text(translated_text.into());
-    preview.set_dual_pairs(ModelRc::new(VecModel::from(translation_pairs(
+    update_translation_preview_content(
+        preview,
+        translation_preview_presenter,
         source_text,
         translated_text,
-    ))));
-    apply_translation_preview_layout(preview, source_text, translated_text);
-    // The presenter is told what is on the window, every time it changes. A
-    // frame drawn before there was anything to draw must not reveal it, and a
-    // `Completed` that lands while the `Partial` is still being drawn has to
-    // produce a new frame rather than let the old wait be satisfied.
-    translation_preview_presenter
-        .content_changed(preview.window(), !translated_text.trim().is_empty());
+    );
     if first_show {
         preview.set_prepared(false);
         preview.invoke_reset_scroll();
@@ -2277,6 +2321,10 @@ fn present_translation_preview(
             handle,
             target.window_handle,
             target.thread_id,
+            target
+                .selection_rect
+                .map(|rect| (rect.left, rect.top, rect.right, rect.bottom)),
+            target.pointer.map(|point| (point.x, point.y)),
         ),
         None => rust_platform_windows::configure_translation_window(handle),
     };
@@ -2527,7 +2575,9 @@ fn handle_speech_event(
             );
         }
         SpeechWorkerEvent::Processing { session_id } => {
-            indicator_animation.borrow_mut().begin_processing();
+            if state.borrow().active_visualizer_style != Some(VisualizerStyle::Off) {
+                indicator_animation.borrow_mut().begin_processing();
+            }
             if state
                 .borrow()
                 .active_visualizer_style
@@ -2538,11 +2588,9 @@ fn handle_speech_event(
             }
             if let Some(active_style) = state.borrow().active_visualizer_style
                 && !active_style.uses_external_renderer()
+                && let Some(overlay) = recording_overlays.for_style(active_style)
             {
-                recording_overlays
-                    .for_style(active_style)
-                    .indicator
-                    .set_processing(true);
+                overlay.indicator.set_processing(true);
             }
         }
         SpeechWorkerEvent::Completed {
@@ -3701,6 +3749,7 @@ mod selection_release_gate_tests {
             process_id: 7,
             thread_id: 8,
             keyboard_layout: 9,
+            ..TargetSnapshot::default()
         };
         let (gate, dispatch) =
             release_gate_for_replacement(Some(SelectionReleaseGate::Pending), target, "translated");
@@ -3769,6 +3818,7 @@ mod insert_last_tests {
             process_id: 7,
             thread_id: 8,
             keyboard_layout: 9,
+            ..TargetSnapshot::default()
         }
     }
 

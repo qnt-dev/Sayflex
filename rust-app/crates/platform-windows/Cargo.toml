@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rust-app-core = { version = "0.6.0", path = "../app-core" }
+rust-app-core = { version = "0.6.1", path = "../app-core" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

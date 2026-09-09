@@ -1,6 +1,6 @@
 use std::{ffi::c_void, mem, path::Path};
 
-use rust_protocol::TargetSnapshot;
+use rust_protocol::{ScreenPoint, TargetSnapshot};
 use windows_sys::Win32::{
     Foundation::CloseHandle,
     System::Threading::{
@@ -10,7 +10,8 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::GetKeyboardLayout,
         WindowsAndMessaging::{
             ES_PASSWORD, GA_ROOT, GUITHREADINFO, GWL_STYLE, GetAncestor, GetClassNameW,
-            GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW, GetWindowThreadProcessId,
+            GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW,
+            GetWindowThreadProcessId,
         },
     },
 };
@@ -54,6 +55,8 @@ fn capture_window(top_level: *mut c_void) -> TargetSnapshot {
         process_id,
         thread_id,
         keyboard_layout: layout as usize as u64,
+        selection_rect: None,
+        pointer: captured_pointer(),
     }
 }
 
@@ -208,7 +211,17 @@ pub fn capture_focused_target() -> TargetSnapshot {
         process_id,
         thread_id,
         keyboard_layout: layout as usize as u64,
+        selection_rect: None,
+        pointer: captured_pointer(),
     }
+}
+
+fn captured_pointer() -> Option<ScreenPoint> {
+    let mut point = windows_sys::Win32::Foundation::POINT::default();
+    (unsafe { GetCursorPos(&mut point) } != 0).then_some(ScreenPoint {
+        x: point.x,
+        y: point.y,
+    })
 }
 
 #[cfg(test)]

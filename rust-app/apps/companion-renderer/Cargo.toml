@@ -6,12 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-pet_orb = { path = "../../../desktop-pet/crates/pet_orb" }
-pet_particles = { path = "../../../desktop-pet/crates/pet_particles" }
-pet_platform = { path = "../../../desktop-pet/crates/pet_platform" }
-pet_render = { path = "../../../desktop-pet/crates/pet_render" }
-rust-app-core = { version = "0.6.0", path = "../../crates/app-core" }
-rust-protocol = { version = "0.6.0", path = "../../crates/protocol" }
+pet_orb = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_orb" }
+pet_particles = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_particles" }
+pet_platform = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_platform" }
+pet_render = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_render" }
+rust-app-core = { version = "0.6.1", path = "../../crates/app-core" }
+rust-protocol = { version = "0.6.1", path = "../../crates/protocol" }
 serde_json.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]

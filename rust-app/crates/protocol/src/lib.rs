@@ -3,8 +3,8 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 15 adds the ordered list of transcription providers: the local
-// engine and any network services the user has keys for.
+// Version 18 adds capture-time selection and pointer geometry to target
+// snapshots so overlays can be placed beside the text instead of guessing.
 // All packaged processes must agree on this schema before exchanging commands.
 /// The shape of every message in this file, as one number.
 ///
@@ -15,7 +15,13 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
+/// Source identity injected by the release builder. Development builds say so
+/// explicitly instead of pretending to belong to an arbitrary checkout.
+pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
+    Some(value) => value,
+    None => "development",
+};
 pub const AUDIO_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -83,11 +89,33 @@ impl fmt::Display for RequestId {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetSnapshot {
     pub window_handle: u64,
     pub process_id: u32,
     pub thread_id: u32,
     pub keyboard_layout: u64,
+    /// Selection geometry captured while the target still owned focus. UIA
+    /// providers report physical screen coordinates. Older peers omit it.
+    #[serde(default)]
+    pub selection_rect: Option<ScreenRect>,
+    /// Pointer position at the hotkey edge. This is a stable fallback for
+    /// canvas/terminal targets where neither UIA nor a Win32 caret exists.
+    #[serde(default)]
+    pub pointer: Option<ScreenPoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -851,6 +879,7 @@ mod tests {
                 process_id: 7,
                 thread_id: 8,
                 keyboard_layout: 9,
+                ..TargetSnapshot::default()
             },
         };
         let input_json = serde_json::to_string(&input).unwrap();
@@ -1120,8 +1149,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 17,
-            "every fingerprint below was written for protocol 17: if a shape \
+            PROTOCOL_VERSION, 18,
+            "every fingerprint below was written for protocol 18: if a shape \
              changes, this number changes with it"
         );
     }
@@ -1343,6 +1372,644 @@ request_id:string,tokenize_duration_ms:number,translated_text:string)",
                 session_id: SessionId::new()
             }),
             "listening"
+        );
+    }
+}
+
+#[cfg(test)]
+mod complete_wire_schema_tests {
+    //! A schema fingerprint is useful only if every process direction and every
+    //! variant participates. The older test covered all translation events but
+    //! only six speech events and no commands, input-host or companion traffic.
+
+    use serde::Serialize;
+    use serde_json::Value;
+
+    use super::*;
+
+    fn target() -> TargetSnapshot {
+        TargetSnapshot {
+            window_handle: 1,
+            process_id: 2,
+            thread_id: 3,
+            keyboard_layout: 4,
+            selection_rect: Some(ScreenRect {
+                left: 5,
+                top: 6,
+                right: 7,
+                bottom: 8,
+            }),
+            pointer: Some(ScreenPoint { x: 9, y: 10 }),
+        }
+    }
+
+    fn latency() -> TranscriptionLatency {
+        TranscriptionLatency {
+            audio_finalize_ms: 1,
+            preprocessing_ms: 2,
+            final_queue_wait_ms: 3,
+            inference_ms: 4,
+            after_release_ms: 5,
+            speculative_reuse: true,
+        }
+    }
+
+    fn transcript() -> Transcript {
+        Transcript {
+            session_id: SessionId::new(),
+            text: "text".to_owned(),
+            language: "en".to_owned(),
+            audio_duration_ms: 1,
+            processing_duration_ms: 2,
+            provider: Some("provider".to_owned()),
+            latency: latency(),
+        }
+    }
+
+    fn speech_model() -> ModelSummary {
+        ModelSummary {
+            catalog_id: "model".to_owned(),
+            display_name: "Model".to_owned(),
+            description: "description".to_owned(),
+            size_bytes: 1,
+            installed: true,
+            selected: true,
+            recommended: true,
+            supports_speech_translation: true,
+        }
+    }
+
+    fn translation_model() -> TranslationModelSummary {
+        TranslationModelSummary {
+            catalog_id: "translation".to_owned(),
+            display_name: "Translation".to_owned(),
+            description: "description".to_owned(),
+            tier: TranslationTier::Tiny,
+            languages: vec![TranslationLanguage::English],
+            size_bytes: 1,
+            installed: true,
+            selected: true,
+            recommended: true,
+            license: "license".to_owned(),
+        }
+    }
+
+    fn transcription_entry() -> TranscriptionProviderEntry {
+        TranscriptionProviderEntry {
+            id: "provider".to_owned(),
+            enabled: true,
+            endpoint: Some("https://example.invalid".to_owned()),
+            model: Some("model".to_owned()),
+            account: Some("account".to_owned()),
+        }
+    }
+
+    fn transcription_status() -> TranscriptionProviderStatus {
+        TranscriptionProviderStatus {
+            id: "provider".to_owned(),
+            position: 1,
+            enabled: true,
+            available: true,
+            detail: "detail".to_owned(),
+            has_credential: true,
+            credential_hint: Some("hint".to_owned()),
+        }
+    }
+
+    fn translation_entry() -> TranslationProviderEntry {
+        TranslationProviderEntry {
+            id: "provider".to_owned(),
+            enabled: true,
+            region: Some("region".to_owned()),
+        }
+    }
+
+    fn translation_status() -> TranslationProviderStatus {
+        TranslationProviderStatus {
+            id: "provider".to_owned(),
+            position: 1,
+            enabled: true,
+            available: true,
+            detail: "detail".to_owned(),
+            has_credential: true,
+            credential_hint: Some("hint".to_owned()),
+        }
+    }
+
+    fn translation_result_full() -> TranslationResult {
+        TranslationResult {
+            request_id: RequestId::new(),
+            source_text: "source".to_owned(),
+            translated_text: "translated".to_owned(),
+            source_language: TranslationLanguage::English,
+            target_language: TranslationLanguage::Russian,
+            tier: Some(TranslationTier::Tiny),
+            provider: Some("provider".to_owned()),
+            processing_duration_ms: 1,
+            first_token_duration_ms: 2,
+            backend_request_count: 3,
+            tokenize_duration_ms: 4,
+            chunk_count: 5,
+        }
+    }
+
+    fn input_events() -> Vec<InputHostEvent> {
+        let request_id = RequestId::new();
+        let session_id = SessionId::new();
+        vec![
+            InputHostEvent::Ready {
+                protocol_version: 1,
+            },
+            InputHostEvent::DictationBegin {
+                session_id,
+                started_unix_ms: 1,
+                target: target(),
+            },
+            InputHostEvent::DictationEnd {
+                session_id,
+                target: target(),
+            },
+            InputHostEvent::InsertLastRequested { target: target() },
+            InputHostEvent::SelectionCaptureStarted {
+                request_id,
+                intent: TextActionIntent::Translate,
+                target: target(),
+                started_unix_ms: 1,
+            },
+            InputHostEvent::SelectionCaptured {
+                request_id,
+                intent: TextActionIntent::Translate,
+                target: target(),
+                text: "text".to_owned(),
+                timing: SelectionCaptureTiming {
+                    release_wait_ms: Some(1),
+                    uia_ms: Some(2),
+                    clipboard_ms: Some(3),
+                    total_ms: 4,
+                },
+            },
+            InputHostEvent::SelectionInputReleased {
+                request_id,
+                release_wait_ms: 1,
+            },
+            InputHostEvent::SelectionInputReleaseFailed {
+                request_id,
+                message: "message".to_owned(),
+            },
+            InputHostEvent::SelectionCaptureFailed {
+                request_id,
+                message: "message".to_owned(),
+            },
+            InputHostEvent::InsertionCompleted {
+                session_id,
+                method: InsertionMethod::ClipboardTransaction,
+                delivery: InsertionDelivery::PayloadRead,
+                dispatch_duration_ms: 1,
+            },
+            InputHostEvent::Recovered { session_id },
+            InputHostEvent::SelectionReplaced { request_id },
+            InputHostEvent::TextCopied { request_id },
+            InputHostEvent::Failed {
+                session_id: Some(session_id),
+                code: "code".to_owned(),
+                message: "message".to_owned(),
+            },
+        ]
+    }
+
+    fn input_commands() -> Vec<InputHostCommand> {
+        let request_id = RequestId::new();
+        vec![
+            InputHostCommand::InsertTranscript {
+                transcript: transcript(),
+                target: target(),
+                add_trailing_space: true,
+            },
+            InputHostCommand::CopyTranscript {
+                transcript: transcript(),
+            },
+            InputHostCommand::CopyText {
+                request_id,
+                text: "text".to_owned(),
+            },
+            InputHostCommand::ReplaceSelection {
+                request_id,
+                target: target(),
+                text: "text".to_owned(),
+            },
+            InputHostCommand::CancelSelection { request_id },
+            InputHostCommand::Shutdown,
+        ]
+    }
+
+    fn translation_commands() -> Vec<TranslationWorkerCommand> {
+        let request_id = RequestId::new();
+        vec![
+            TranslationWorkerCommand::Initialize {
+                selected_tier: Some(TranslationTier::Tiny),
+                keep_warm: true,
+                history_enabled: true,
+            },
+            TranslationWorkerCommand::EnsureModel {
+                tier: TranslationTier::Tiny,
+            },
+            TranslationWorkerCommand::CancelModelInstall,
+            TranslationWorkerCommand::SelectTier {
+                tier: TranslationTier::Tiny,
+                keep_warm: true,
+            },
+            TranslationWorkerCommand::Translate {
+                request_id,
+                text: "text".to_owned(),
+                source_language: Some(TranslationLanguage::English),
+                target_language: Some(TranslationLanguage::Russian),
+            },
+            TranslationWorkerCommand::Cancel { request_id },
+            TranslationWorkerCommand::SetTranslationProviders {
+                providers: vec![translation_entry()],
+            },
+            TranslationWorkerCommand::SetTranslationProviderCredential {
+                operation_id: request_id,
+                provider_id: "provider".to_owned(),
+                secret: Some("secret".to_owned()),
+            },
+            TranslationWorkerCommand::GetTranslationProviders,
+            TranslationWorkerCommand::GetHistory { limit: 1 },
+            TranslationWorkerCommand::SetHistoryEnabled { enabled: true },
+            TranslationWorkerCommand::ClearHistory,
+            TranslationWorkerCommand::Shutdown,
+        ]
+    }
+
+    fn translation_events() -> Vec<TranslationWorkerEvent> {
+        let request_id = RequestId::new();
+        vec![
+            TranslationWorkerEvent::Ready {
+                protocol_version: 1,
+                selected_tier: Some(TranslationTier::Tiny),
+                models: vec![translation_model()],
+            },
+            TranslationWorkerEvent::ModelDownloadProgress {
+                catalog_id: "model".to_owned(),
+                downloaded_bytes: 1,
+                total_bytes: 2,
+            },
+            TranslationWorkerEvent::ModelInstalled {
+                catalog_id: "model".to_owned(),
+                tier: TranslationTier::Tiny,
+                path: "path".to_owned(),
+            },
+            TranslationWorkerEvent::ModelReady {
+                catalog_id: "model".to_owned(),
+                tier: TranslationTier::Tiny,
+                load_duration_ms: 1,
+            },
+            TranslationWorkerEvent::ModelSelected {
+                tier: TranslationTier::Tiny,
+            },
+            TranslationWorkerEvent::Partial {
+                request_id,
+                translated_text: "text".to_owned(),
+                first_token_duration_ms: 1,
+                tokenize_duration_ms: 2,
+                chunk_index: 3,
+                chunk_count: 4,
+            },
+            TranslationWorkerEvent::Completed {
+                result: translation_result_full(),
+                created_unix_ms: 1,
+            },
+            TranslationWorkerEvent::Cancelled { request_id },
+            TranslationWorkerEvent::History {
+                entries: vec![TranslationHistoryEntry {
+                    result: translation_result_full(),
+                    created_unix_ms: 1,
+                }],
+            },
+            TranslationWorkerEvent::TranslationProviders {
+                statuses: vec![translation_status()],
+            },
+            TranslationWorkerEvent::CredentialSaved {
+                operation_id: request_id,
+                provider_id: "provider".to_owned(),
+                error: "error".to_owned(),
+            },
+            TranslationWorkerEvent::Failed {
+                request_id: Some(request_id),
+                catalog_id: Some("model".to_owned()),
+                code: "code".to_owned(),
+                message: "message".to_owned(),
+                retryable: true,
+            },
+        ]
+    }
+
+    fn speech_commands() -> Vec<SpeechWorkerCommand> {
+        let session_id = SessionId::new();
+        let request_id = RequestId::new();
+        vec![
+            SpeechWorkerCommand::Initialize {
+                selected_model_id: "model".to_owned(),
+                output_mode: SpeechOutputMode::OriginalLanguage,
+                history_enabled: true,
+                fast_release_previews: true,
+            },
+            SpeechWorkerCommand::Begin {
+                session_id,
+                started_unix_ms: 1,
+            },
+            SpeechWorkerCommand::End { session_id },
+            SpeechWorkerCommand::Cancel { session_id },
+            SpeechWorkerCommand::EnsureModel {
+                catalog_id: "model".to_owned(),
+            },
+            SpeechWorkerCommand::SelectModel {
+                catalog_id: "model".to_owned(),
+            },
+            SpeechWorkerCommand::CancelModelInstall,
+            SpeechWorkerCommand::SetTranscriptionProviders {
+                providers: vec![transcription_entry()],
+            },
+            SpeechWorkerCommand::SetProviderCredential {
+                operation_id: request_id,
+                provider_id: "provider".to_owned(),
+                secret: Some("secret".to_owned()),
+            },
+            SpeechWorkerCommand::GetTranscriptionProviders,
+            SpeechWorkerCommand::SetOutputMode {
+                output_mode: SpeechOutputMode::TranslateToEnglish,
+            },
+            SpeechWorkerCommand::SetFastReleasePreviews { enabled: true },
+            SpeechWorkerCommand::GetHistory { limit: 1 },
+            SpeechWorkerCommand::SetHistoryEnabled { enabled: true },
+            SpeechWorkerCommand::ClearHistory,
+            SpeechWorkerCommand::Shutdown,
+        ]
+    }
+
+    fn speech_events() -> Vec<SpeechWorkerEvent> {
+        let session_id = SessionId::new();
+        let request_id = RequestId::new();
+        vec![
+            SpeechWorkerEvent::Ready {
+                protocol_version: 1,
+                selected_model_id: "model".to_owned(),
+                models: vec![speech_model()],
+            },
+            SpeechWorkerEvent::ModelDownloadProgress {
+                catalog_id: "model".to_owned(),
+                downloaded_bytes: 1,
+                total_bytes: 2,
+            },
+            SpeechWorkerEvent::ModelInstalled {
+                catalog_id: "model".to_owned(),
+                path: "path".to_owned(),
+            },
+            SpeechWorkerEvent::ModelReady {
+                catalog_id: "model".to_owned(),
+                path: "path".to_owned(),
+                backend: "backend".to_owned(),
+                load_duration_ms: 1,
+                warmup_duration_ms: 2,
+            },
+            SpeechWorkerEvent::ModelSelected {
+                catalog_id: "model".to_owned(),
+            },
+            SpeechWorkerEvent::Listening { session_id },
+            SpeechWorkerEvent::AudioLevel {
+                session_id,
+                peak: 0.5,
+                spectrum: vec![0.25],
+            },
+            SpeechWorkerEvent::Processing { session_id },
+            SpeechWorkerEvent::Completed {
+                transcript: transcript(),
+                created_unix_ms: 1,
+            },
+            SpeechWorkerEvent::Cancelled { session_id },
+            SpeechWorkerEvent::History {
+                entries: vec![HistoryEntry {
+                    transcript: transcript(),
+                    created_unix_ms: 1,
+                }],
+            },
+            SpeechWorkerEvent::TranscriptionProviders {
+                statuses: vec![transcription_status()],
+            },
+            SpeechWorkerEvent::CredentialSaved {
+                operation_id: request_id,
+                provider_id: "provider".to_owned(),
+                error: "error".to_owned(),
+            },
+            SpeechWorkerEvent::TranscribedRemotely {
+                session_id,
+                provider_id: "provider".to_owned(),
+            },
+            SpeechWorkerEvent::Failed {
+                session_id: Some(session_id),
+                code: "code".to_owned(),
+                message: "message".to_owned(),
+                retryable: true,
+            },
+        ]
+    }
+
+    fn companion_commands() -> Vec<CompanionRendererCommand> {
+        let session_id = SessionId::new();
+        vec![
+            CompanionRendererCommand::SetEnabled { enabled: true },
+            CompanionRendererCommand::SetHomePosition { x: 1, y: 2 },
+            CompanionRendererCommand::Activate {
+                session_id,
+                target_window_handle: 1,
+            },
+            CompanionRendererCommand::AudioLevel {
+                session_id,
+                peak: 0.5,
+                spectrum: vec![0.25],
+            },
+            CompanionRendererCommand::Processing { session_id },
+            CompanionRendererCommand::Complete { session_id },
+            CompanionRendererCommand::Dismiss {
+                session_id: Some(session_id),
+            },
+            CompanionRendererCommand::Shutdown,
+        ]
+    }
+
+    fn companion_events() -> Vec<CompanionRendererEvent> {
+        vec![
+            CompanionRendererEvent::Ready {
+                protocol_version: 1,
+            },
+            CompanionRendererEvent::HomePositionChanged { x: 1, y: 2 },
+            CompanionRendererEvent::Failed {
+                session_id: Some(SessionId::new()),
+                code: "code".to_owned(),
+                message: "message".to_owned(),
+            },
+        ]
+    }
+
+    macro_rules! index_fn {
+        ($name:ident, $ty:ty, $($pattern:pat => $index:expr),+ $(,)?) => {
+            fn $name(value: &$ty) -> usize {
+                match value { $($pattern => $index),+ }
+            }
+        };
+    }
+
+    index_fn!(input_event_index, InputHostEvent,
+        InputHostEvent::Ready { .. } => 0, InputHostEvent::DictationBegin { .. } => 1,
+        InputHostEvent::DictationEnd { .. } => 2, InputHostEvent::InsertLastRequested { .. } => 3,
+        InputHostEvent::SelectionCaptureStarted { .. } => 4, InputHostEvent::SelectionCaptured { .. } => 5,
+        InputHostEvent::SelectionInputReleased { .. } => 6, InputHostEvent::SelectionInputReleaseFailed { .. } => 7,
+        InputHostEvent::SelectionCaptureFailed { .. } => 8, InputHostEvent::InsertionCompleted { .. } => 9,
+        InputHostEvent::Recovered { .. } => 10, InputHostEvent::SelectionReplaced { .. } => 11,
+        InputHostEvent::TextCopied { .. } => 12, InputHostEvent::Failed { .. } => 13
+    );
+    index_fn!(input_command_index, InputHostCommand,
+        InputHostCommand::InsertTranscript { .. } => 0, InputHostCommand::CopyTranscript { .. } => 1,
+        InputHostCommand::CopyText { .. } => 2, InputHostCommand::ReplaceSelection { .. } => 3,
+        InputHostCommand::CancelSelection { .. } => 4, InputHostCommand::Shutdown => 5
+    );
+    index_fn!(translation_command_index, TranslationWorkerCommand,
+        TranslationWorkerCommand::Initialize { .. } => 0, TranslationWorkerCommand::EnsureModel { .. } => 1,
+        TranslationWorkerCommand::CancelModelInstall => 2, TranslationWorkerCommand::SelectTier { .. } => 3,
+        TranslationWorkerCommand::Translate { .. } => 4, TranslationWorkerCommand::Cancel { .. } => 5,
+        TranslationWorkerCommand::SetTranslationProviders { .. } => 6, TranslationWorkerCommand::SetTranslationProviderCredential { .. } => 7,
+        TranslationWorkerCommand::GetTranslationProviders => 8, TranslationWorkerCommand::GetHistory { .. } => 9,
+        TranslationWorkerCommand::SetHistoryEnabled { .. } => 10, TranslationWorkerCommand::ClearHistory => 11,
+        TranslationWorkerCommand::Shutdown => 12
+    );
+    index_fn!(translation_event_index, TranslationWorkerEvent,
+        TranslationWorkerEvent::Ready { .. } => 0, TranslationWorkerEvent::ModelDownloadProgress { .. } => 1,
+        TranslationWorkerEvent::ModelInstalled { .. } => 2, TranslationWorkerEvent::ModelReady { .. } => 3,
+        TranslationWorkerEvent::ModelSelected { .. } => 4, TranslationWorkerEvent::Partial { .. } => 5,
+        TranslationWorkerEvent::Completed { .. } => 6, TranslationWorkerEvent::Cancelled { .. } => 7,
+        TranslationWorkerEvent::History { .. } => 8, TranslationWorkerEvent::TranslationProviders { .. } => 9,
+        TranslationWorkerEvent::CredentialSaved { .. } => 10, TranslationWorkerEvent::Failed { .. } => 11
+    );
+    index_fn!(speech_command_index, SpeechWorkerCommand,
+        SpeechWorkerCommand::Initialize { .. } => 0, SpeechWorkerCommand::Begin { .. } => 1,
+        SpeechWorkerCommand::End { .. } => 2, SpeechWorkerCommand::Cancel { .. } => 3,
+        SpeechWorkerCommand::EnsureModel { .. } => 4, SpeechWorkerCommand::SelectModel { .. } => 5,
+        SpeechWorkerCommand::CancelModelInstall => 6, SpeechWorkerCommand::SetTranscriptionProviders { .. } => 7,
+        SpeechWorkerCommand::SetProviderCredential { .. } => 8, SpeechWorkerCommand::GetTranscriptionProviders => 9,
+        SpeechWorkerCommand::SetOutputMode { .. } => 10, SpeechWorkerCommand::SetFastReleasePreviews { .. } => 11,
+        SpeechWorkerCommand::GetHistory { .. } => 12, SpeechWorkerCommand::SetHistoryEnabled { .. } => 13,
+        SpeechWorkerCommand::ClearHistory => 14, SpeechWorkerCommand::Shutdown => 15
+    );
+    index_fn!(speech_event_index, SpeechWorkerEvent,
+        SpeechWorkerEvent::Ready { .. } => 0, SpeechWorkerEvent::ModelDownloadProgress { .. } => 1,
+        SpeechWorkerEvent::ModelInstalled { .. } => 2, SpeechWorkerEvent::ModelReady { .. } => 3,
+        SpeechWorkerEvent::ModelSelected { .. } => 4, SpeechWorkerEvent::Listening { .. } => 5,
+        SpeechWorkerEvent::AudioLevel { .. } => 6, SpeechWorkerEvent::Processing { .. } => 7,
+        SpeechWorkerEvent::Completed { .. } => 8, SpeechWorkerEvent::Cancelled { .. } => 9,
+        SpeechWorkerEvent::History { .. } => 10, SpeechWorkerEvent::TranscriptionProviders { .. } => 11,
+        SpeechWorkerEvent::CredentialSaved { .. } => 12, SpeechWorkerEvent::TranscribedRemotely { .. } => 13,
+        SpeechWorkerEvent::Failed { .. } => 14
+    );
+    index_fn!(companion_command_index, CompanionRendererCommand,
+        CompanionRendererCommand::SetEnabled { .. } => 0, CompanionRendererCommand::SetHomePosition { .. } => 1,
+        CompanionRendererCommand::Activate { .. } => 2, CompanionRendererCommand::AudioLevel { .. } => 3,
+        CompanionRendererCommand::Processing { .. } => 4, CompanionRendererCommand::Complete { .. } => 5,
+        CompanionRendererCommand::Dismiss { .. } => 6, CompanionRendererCommand::Shutdown => 7
+    );
+    index_fn!(companion_event_index, CompanionRendererEvent,
+        CompanionRendererEvent::Ready { .. } => 0, CompanionRendererEvent::HomePositionChanged { .. } => 1,
+        CompanionRendererEvent::Failed { .. } => 2
+    );
+
+    fn assert_complete<T>(values: &[T], index: fn(&T) -> usize, count: usize) {
+        let mut indices = values.iter().map(index).collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices.dedup();
+        assert_eq!(indices, (0..count).collect::<Vec<_>>());
+    }
+
+    fn schema_path(value: &Value, prefix: &str, output: &mut Vec<String>) {
+        match value {
+            Value::Object(fields) => {
+                for (name, child) in fields {
+                    let prefix = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{prefix}.{name}")
+                    };
+                    schema_path(child, &prefix, output);
+                }
+            }
+            Value::Array(items) => match items.first() {
+                Some(item) => schema_path(item, &format!("{prefix}[]"), output),
+                None => output.push(format!("{prefix}[]")),
+            },
+            Value::Null => output.push(format!("{prefix}:null")),
+            Value::Bool(_) => output.push(format!("{prefix}:bool")),
+            Value::Number(_) => output.push(format!("{prefix}:number")),
+            Value::String(_) => output.push(format!("{prefix}:string")),
+        }
+    }
+
+    fn append<T: Serialize>(channel: &str, values: &[T], output: &mut Vec<String>) {
+        for value in values {
+            let value = serde_json::to_value(value).unwrap();
+            let kind = value.get("type").and_then(Value::as_str).unwrap();
+            let mut paths = Vec::new();
+            match value.get("payload") {
+                Some(payload) => schema_path(payload, "", &mut paths),
+                None => paths.push("()".to_owned()),
+            }
+            paths.sort();
+            output.push(format!("{channel}.{kind}({})", paths.join(",")));
+        }
+    }
+
+    fn stable_hash(lines: &[String]) -> u64 {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in lines.iter().flat_map(|line| line.bytes().chain([b'\n'])) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    #[test]
+    fn every_process_direction_and_variant_has_a_versioned_wire_shape() {
+        let input_events = input_events();
+        let input_commands = input_commands();
+        let translation_commands = translation_commands();
+        let translation_events = translation_events();
+        let speech_commands = speech_commands();
+        let speech_events = speech_events();
+        let companion_commands = companion_commands();
+        let companion_events = companion_events();
+
+        assert_complete(&input_events, input_event_index, 14);
+        assert_complete(&input_commands, input_command_index, 6);
+        assert_complete(&translation_commands, translation_command_index, 13);
+        assert_complete(&translation_events, translation_event_index, 12);
+        assert_complete(&speech_commands, speech_command_index, 16);
+        assert_complete(&speech_events, speech_event_index, 15);
+        assert_complete(&companion_commands, companion_command_index, 8);
+        assert_complete(&companion_events, companion_event_index, 3);
+
+        let mut schema = Vec::new();
+        append("input.event", &input_events, &mut schema);
+        append("input.command", &input_commands, &mut schema);
+        append("translation.command", &translation_commands, &mut schema);
+        append("translation.event", &translation_events, &mut schema);
+        append("speech.command", &speech_commands, &mut schema);
+        append("speech.event", &speech_events, &mut schema);
+        append("companion.command", &companion_commands, &mut schema);
+        append("companion.event", &companion_events, &mut schema);
+        schema.sort();
+
+        assert_eq!(
+            stable_hash(&schema),
+            0x2d07_271a_1134_f3e7,
+            "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
+            schema.join("\n")
         );
     }
 }

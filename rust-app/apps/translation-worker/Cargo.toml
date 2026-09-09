@@ -8,12 +8,12 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.100"
 
-rust-app-core = { version = "0.6.0", path = "../../crates/app-core" }
-rust-cloud-translation = { version = "0.6.0", path = "../../crates/cloud-translation" }
-rust-model-manager = { version = "0.6.0", path = "../../crates/model-manager" }
-rust-platform-windows = { version = "0.6.0", path = "../../crates/platform-windows" }
-rust-protocol = { version = "0.6.0", path = "../../crates/protocol" }
-rust-translation-engine = { version = "0.6.0", path = "../../crates/translation-engine" }
+rust-app-core = { version = "0.6.1", path = "../../crates/app-core" }
+rust-cloud-translation = { version = "0.6.1", path = "../../crates/cloud-translation" }
+rust-model-manager = { version = "0.6.1", path = "../../crates/model-manager" }
+rust-platform-windows = { version = "0.6.1", path = "../../crates/platform-windows" }
+rust-protocol = { version = "0.6.1", path = "../../crates/protocol" }
+rust-translation-engine = { version = "0.6.1", path = "../../crates/translation-engine" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

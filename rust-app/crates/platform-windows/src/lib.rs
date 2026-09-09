@@ -213,6 +213,8 @@ pub fn configure_translation_window_for_target(
     _window_handle: u64,
     _target_window_handle: u64,
     _target_thread_id: u32,
+    _selection_rect: Option<(i32, i32, i32, i32)>,
+    _captured_pointer: Option<(i32, i32)>,
 ) -> Result<(), String> {
     Ok(())
 }

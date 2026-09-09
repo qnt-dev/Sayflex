@@ -80,7 +80,7 @@ pub(super) enum OverlayContract {
 /// frame refused, and died at the deadline. Nothing showed. Making it a
 /// property of the presenter means there is nothing left to forget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ContentPolicy {
+enum ContentPolicy {
     /// Renderable as soon as it exists. Any frame reveals it.
     AlwaysRenderable,
     /// Empty until the owner says otherwise, through `content_changed`.
@@ -223,7 +223,9 @@ impl PresentationState {
     /// `Partial` is still being drawn — and it means the frame that eventually
     /// lands must be a new one.
     fn content_changed(&mut self, ready: bool) -> (u64, Option<PresentationTicket>) {
-        self.content_ready = ready;
+        // Always-renderable overlays do not have an empty state.  Reporting a
+        // content change must never be able to turn one into a gated overlay.
+        self.content_ready = matches!(self.policy, ContentPolicy::AlwaysRenderable) || ready;
         self.content_revision = self.content_revision.saturating_add(1);
         let waiting = match self.phase {
             PresentationPhase::AwaitingFrame(ticket) => Some(ticket),
@@ -317,7 +319,37 @@ pub(crate) struct OverlayPresenter {
 }
 
 impl OverlayPresenter {
-    pub(crate) fn install(
+    pub(crate) fn install_always_renderable(
+        window: &slint::Window,
+        name: &'static str,
+        contract: OverlayContract,
+        on_presented: Option<PresentedCallback>,
+    ) -> Result<Self, String> {
+        Self::install(
+            window,
+            name,
+            contract,
+            ContentPolicy::AlwaysRenderable,
+            on_presented,
+        )
+    }
+
+    pub(crate) fn install_content_gated(
+        window: &slint::Window,
+        name: &'static str,
+        contract: OverlayContract,
+        on_presented: Option<PresentedCallback>,
+    ) -> Result<Self, String> {
+        Self::install(
+            window,
+            name,
+            contract,
+            ContentPolicy::RequiresContent,
+            on_presented,
+        )
+    }
+
+    fn install(
         window: &slint::Window,
         name: &'static str,
         contract: OverlayContract,
@@ -1021,6 +1053,17 @@ mod content_gate_tests {
             Some(ticket),
             "a window with nothing to wait for is revealed by its first frame"
         );
+    }
+
+    #[test]
+    fn always_renderable_policy_cannot_be_disabled_by_a_content_report() {
+        let mut state = PresentationState::new(ContentPolicy::AlwaysRenderable);
+        state.attach(4242).unwrap();
+        let ticket = state.begin_prepare().unwrap();
+        state.content_changed(false);
+        state.await_frame(ticket).unwrap();
+
+        assert_eq!(state.frame_rendered(), Some(ticket));
     }
 
     #[test]

@@ -12,6 +12,7 @@ import { RowAction, ScrollRail } from "controls.slint";
 import { ModelsPage, ProvidersPage, HistoryPage } from "pages_lists.slint";
 import { TranslationPage, HotkeysPage } from "pages_forms.slint";
 import { OverviewPage, DictationPage, VisualsPage } from "pages_instruments.slint";
+import { SlateLine } from "recording_visual.slint";
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -153,10 +154,28 @@ export component SettingsWindow inherits Window {
     in property <string> visuals-subtitle: "";
     in property <string> visuals-caption: "";
     in property <string> visuals-note: "";
-    in property <bool> visuals-native-surface: false;
     in-out property <int> selected-circular-palette: 0;
+    in-out property <int> selected-broadcast-mic-palette: 0;
     in-out property <int> selected-flow-sphere-palette: 0;
     in-out property <int> selected-writing-slate-surface: 0;
+    in property <[float]> visual-preview-bars;
+    in property <[float]> visual-preview-spectrum;
+    in property <[SlateLine]> visual-preview-slate-lines;
+    in property <image> visual-preview-flow-sphere-frame;
+    in property <bool> visual-preview-processing: false;
+    in property <float> visual-preview-signal-opacity: 0.8;
+    in property <float> visual-preview-disc-opacity: 1;
+    in property <float> visual-preview-orb-size: 14;
+    in property <float> visual-preview-orb-glow: 0.35;
+    in property <float> visual-preview-ribbon-y1: 9.5;
+    in property <float> visual-preview-ribbon-y2: 9.5;
+    in property <float> visual-preview-ribbon-y3: 9.5;
+    in property <float> visual-preview-ribbon-y4: 9.5;
+    in property <float> visual-preview-mic-edge-height: 5;
+    in property <float> visual-preview-mic-outer-height: 7;
+    in property <float> visual-preview-mic-middle-height: 9;
+    in property <float> visual-preview-mic-inner-height: 6;
+    in property <float> visual-preview-mic-near-height: 7;
 
     // ── what the window can be asked to do ──
     callback choose-model(string);
@@ -170,6 +189,7 @@ export component SettingsWindow inherits Window {
     callback select-speech-backend(int);
     callback select-visualizer(int);
     callback select-circular-palette(int);
+    callback select-broadcast-mic-palette(int);
     callback select-flow-sphere-palette(int);
     callback select-writing-slate-surface(int);
     callback set-translation-enabled(bool);
@@ -394,12 +414,31 @@ export component SettingsWindow inherits Window {
                     subtitle: root.visuals-subtitle;
                     caption: root.visuals-caption;
                     side-note: root.visuals-note;
-                    native-surface: root.visuals-native-surface;
                     circular-palette: root.selected-circular-palette;
+                    broadcast-mic-palette: root.selected-broadcast-mic-palette;
                     sphere-palette: root.selected-flow-sphere-palette;
                     slate-surface: root.selected-writing-slate-surface;
+                    preview-bars: root.visual-preview-bars;
+                    preview-spectrum: root.visual-preview-spectrum;
+                    preview-slate-lines: root.visual-preview-slate-lines;
+                    preview-flow-sphere-frame: root.visual-preview-flow-sphere-frame;
+                    preview-processing: root.visual-preview-processing;
+                    preview-signal-opacity: root.visual-preview-signal-opacity;
+                    preview-disc-opacity: root.visual-preview-disc-opacity;
+                    preview-orb-size: root.visual-preview-orb-size;
+                    preview-orb-glow: root.visual-preview-orb-glow;
+                    preview-ribbon-y1: root.visual-preview-ribbon-y1;
+                    preview-ribbon-y2: root.visual-preview-ribbon-y2;
+                    preview-ribbon-y3: root.visual-preview-ribbon-y3;
+                    preview-ribbon-y4: root.visual-preview-ribbon-y4;
+                    preview-mic-edge-height: root.visual-preview-mic-edge-height;
+                    preview-mic-outer-height: root.visual-preview-mic-outer-height;
+                    preview-mic-middle-height: root.visual-preview-mic-middle-height;
+                    preview-mic-inner-height: root.visual-preview-mic-inner-height;
+                    preview-mic-near-height: root.visual-preview-mic-near-height;
                     select-visualizer(index) => { root.select-visualizer(index); }
                     select-circular-palette(index) => { root.select-circular-palette(index); }
+                    select-broadcast-mic-palette(index) => { root.select-broadcast-mic-palette(index); }
                     select-sphere-palette(index) => { root.select-flow-sphere-palette(index); }
                     select-slate-surface(index) => { root.select-writing-slate-surface(index); }
                 }

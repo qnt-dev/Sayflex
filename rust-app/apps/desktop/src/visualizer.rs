@@ -15,9 +15,9 @@ use std::{
 
 use rust_protocol::AUDIO_SPECTRUM_BANDS;
 use serde::{Deserialize, Serialize};
-use slint::{ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
 
-use crate::{RecordingIndicator, SlateLine, flow_sphere};
+use crate::{RecordingIndicator, SettingsWindow, SlateLine, flow_sphere};
 
 pub(crate) const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -38,6 +38,7 @@ pub(crate) enum VisualizerStyle {
     #[serde(alias = "writing_slate_preview")]
     WritingSlate,
     CompanionOrb,
+    Off,
 }
 
 /// Native composition is an HWND-creation-time contract, not a property to
@@ -55,6 +56,15 @@ pub(crate) enum CircularSpectrumPalette {
     Sunset,
     Arctic,
     Monochrome,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BroadcastMicPalette {
+    #[default]
+    White,
+    Blue,
+    Red,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +91,25 @@ impl CircularSpectrumPalette {
             Self::Sunset => 0,
             Self::Arctic => 1,
             Self::Monochrome => 2,
+        }
+    }
+}
+
+impl BroadcastMicPalette {
+    pub(crate) const fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::White),
+            1 => Some(Self::Blue),
+            2 => Some(Self::Red),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn index(self) -> i32 {
+        match self {
+            Self::White => 0,
+            Self::Blue => 1,
+            Self::Red => 2,
         }
     }
 }
@@ -115,6 +144,7 @@ impl VisualizerStyle {
             5 => Some(Self::FlowSphere),
             6 => Some(Self::WritingSlate),
             7 => Some(Self::CompanionOrb),
+            8 => Some(Self::Off),
             _ => None,
         }
     }
@@ -129,22 +159,29 @@ impl VisualizerStyle {
             Self::FlowSphere => 5,
             Self::WritingSlate => 6,
             Self::CompanionOrb => 7,
+            Self::Off => 8,
         }
     }
 
-    pub(crate) const fn recording_surface(self) -> RecordingSurface {
+    pub(crate) const fn recording_surface(self) -> Option<RecordingSurface> {
         match self {
-            Self::CircularSpectrum | Self::FlowSphere | Self::WritingSlate | Self::CompanionOrb => {
-                RecordingSurface::Transparent
+            Self::BroadcastMic
+            | Self::CircularSpectrum
+            | Self::FlowSphere
+            | Self::WritingSlate
+            | Self::CompanionOrb => Some(RecordingSurface::Transparent),
+            Self::VoiceOrb | Self::SymmetricSpectrum | Self::FluidRibbon => {
+                Some(RecordingSurface::Panel)
             }
-            Self::VoiceOrb | Self::SymmetricSpectrum | Self::FluidRibbon | Self::BroadcastMic => {
-                RecordingSurface::Panel
-            }
+            Self::Off => None,
         }
     }
 
     pub(crate) const fn uses_transparent_window(self) -> bool {
-        matches!(self.recording_surface(), RecordingSurface::Transparent)
+        matches!(
+            self.recording_surface(),
+            Some(RecordingSurface::Transparent)
+        )
     }
 
     pub(crate) const fn uses_external_renderer(self) -> bool {
@@ -470,27 +507,24 @@ impl IndicatorAnimation {
     }
 
     pub(crate) fn tick(&mut self, indicators: &[RecordingIndicator]) {
-        if self.mode == IndicatorMode::Hidden
-            || self.last_frame.elapsed() < INDICATOR_FRAME_INTERVAL
-        {
+        let Some(frame) = self.next_frame() else {
             return;
-        }
+        };
 
-        let elapsed = self.last_frame.elapsed();
-        self.last_frame = Instant::now();
-        let frame_scale =
-            (elapsed.as_secs_f32() / INDICATOR_FRAME_INTERVAL.as_secs_f32()).clamp(0.5, 2.5);
-        let frame = self.advance_frame(frame_scale);
-        self.bars.set_vec(frame.heights);
-        self.spectrum.set_vec(frame.spectrum_heights);
-        if self.style == VisualizerStyle::WritingSlate {
-            let slate_energy = self.target_level.max(self.display_level);
-            self.slate_lines.set_vec(self.writing_slate.advance(
-                frame_scale,
-                self.mode,
-                slate_energy,
-            ));
-        }
+        let flow_frame = if self.style == VisualizerStyle::FlowSphere {
+            self.flow_sphere_renderer.as_ref().and_then(|renderer| {
+                renderer.render_latest(
+                    self.phase,
+                    self.display_level,
+                    self.flow_voice_impulse,
+                    self.flow_sphere_palette,
+                    &self.display_spectrum,
+                    frame.visual_opacity,
+                )
+            })
+        } else {
+            None
+        };
 
         for indicator in indicators {
             indicator.set_visualizer_style(self.style.index());
@@ -510,19 +544,107 @@ impl IndicatorAnimation {
             indicator.set_mic_near_height(frame.mic_near_height);
             indicator.set_visual_scale(frame.visual_scale);
             indicator.set_visual_opacity(frame.visual_opacity);
-            if self.style == VisualizerStyle::FlowSphere
-                && let Some(renderer) = &self.flow_sphere_renderer
-                && let Some(frame) = renderer.render_latest(
-                    self.phase,
-                    self.display_level,
-                    self.flow_voice_impulse,
-                    self.flow_sphere_palette,
-                    &self.display_spectrum,
-                    frame.visual_opacity,
-                )
-            {
-                indicator.set_flow_sphere_frame(frame);
+            if let Some(flow_frame) = &flow_frame {
+                indicator.set_flow_sphere_frame(flow_frame.clone());
             }
+        }
+    }
+
+    fn next_frame(&mut self) -> Option<IndicatorFrame> {
+        if self.mode == IndicatorMode::Hidden
+            || self.last_frame.elapsed() < INDICATOR_FRAME_INTERVAL
+        {
+            return None;
+        }
+
+        let elapsed = self.last_frame.elapsed();
+        self.last_frame = Instant::now();
+        let frame_scale =
+            (elapsed.as_secs_f32() / INDICATOR_FRAME_INTERVAL.as_secs_f32()).clamp(0.5, 2.5);
+        let frame = self.advance_frame(frame_scale);
+        self.bars.set_vec(frame.heights.clone());
+        self.spectrum.set_vec(frame.spectrum_heights.clone());
+        if self.style == VisualizerStyle::WritingSlate {
+            let slate_energy = self.target_level.max(self.display_level);
+            self.slate_lines.set_vec(self.writing_slate.advance(
+                frame_scale,
+                self.mode,
+                slate_energy,
+            ));
+        }
+        Some(frame)
+    }
+
+    /// Drives the settings preview through the same animation and render path
+    /// as the recording overlay.  The microphone signal is synthetic so the
+    /// choices remain comparable without starting a recording.
+    pub(crate) fn tick_settings_preview(&mut self, settings: &SettingsWindow) {
+        let selected = VisualizerStyle::from_index(settings.get_selected_visualizer());
+        if !settings.window().is_visible()
+            || settings.get_active_page() != 5
+            || matches!(
+                selected,
+                None | Some(VisualizerStyle::Off | VisualizerStyle::CompanionOrb)
+            )
+        {
+            if self.mode != IndicatorMode::Hidden {
+                self.stop();
+            }
+            if self.style == VisualizerStyle::FlowSphere {
+                self.set_style(VisualizerStyle::Off);
+            }
+            return;
+        }
+
+        let style = selected.expect("preview style was checked above");
+        if self.style != style || self.mode == IndicatorMode::Hidden {
+            self.set_style(style);
+            self.begin_listening();
+        }
+        self.set_flow_sphere_palette(
+            flow_sphere::FlowSpherePalette::from_index(settings.get_selected_flow_sphere_palette())
+                .unwrap_or_default(),
+        );
+
+        let pulse = ((self.phase * 0.71).sin() * 0.5 + 0.5).powf(1.6);
+        let peak = 0.16 + pulse * 0.48;
+        let mut spectrum = [0.0; AUDIO_SPECTRUM_BANDS];
+        for (index, band) in spectrum.iter_mut().enumerate() {
+            let wave = ((self.phase * 0.83 + index as f32 * 0.57).sin() * 0.5 + 0.5).powf(2.1);
+            *band = (0.08 + wave * peak).clamp(0.0, 1.0);
+        }
+        self.set_microphone_signal(peak, &spectrum);
+
+        let Some(frame) = self.next_frame() else {
+            return;
+        };
+        settings.set_visual_preview_processing(false);
+        settings.set_visual_preview_signal_opacity(frame.signal_opacity);
+        settings.set_visual_preview_disc_opacity(frame.disc_opacity);
+        settings.set_visual_preview_orb_size(frame.orb_size);
+        settings.set_visual_preview_orb_glow(frame.orb_glow);
+        settings.set_visual_preview_ribbon_y1(frame.ribbon_y1);
+        settings.set_visual_preview_ribbon_y2(frame.ribbon_y2);
+        settings.set_visual_preview_ribbon_y3(frame.ribbon_y3);
+        settings.set_visual_preview_ribbon_y4(frame.ribbon_y4);
+        settings.set_visual_preview_mic_edge_height(frame.mic_edge_height);
+        settings.set_visual_preview_mic_outer_height(frame.mic_outer_height);
+        settings.set_visual_preview_mic_middle_height(frame.mic_middle_height);
+        settings.set_visual_preview_mic_inner_height(frame.mic_inner_height);
+        settings.set_visual_preview_mic_near_height(frame.mic_near_height);
+
+        if style == VisualizerStyle::FlowSphere
+            && let Some(renderer) = &self.flow_sphere_renderer
+            && let Some(flow_frame) = renderer.render_latest(
+                self.phase,
+                self.display_level,
+                self.flow_voice_impulse,
+                self.flow_sphere_palette,
+                &self.display_spectrum,
+                1.0,
+            )
+        {
+            settings.set_visual_preview_flow_sphere_frame(flow_frame);
         }
     }
 
@@ -674,6 +796,18 @@ pub(crate) fn new_indicator_models() -> IndicatorModels {
     }
 }
 
+pub(crate) fn new_settings_preview(settings: &SettingsWindow) -> Rc<RefCell<IndicatorAnimation>> {
+    let models = new_indicator_models();
+    settings.set_visual_preview_bars(ModelRc::from(Rc::clone(&models.bars)));
+    settings.set_visual_preview_spectrum(ModelRc::from(Rc::clone(&models.spectrum)));
+    settings.set_visual_preview_slate_lines(ModelRc::from(Rc::clone(&models.slate_lines)));
+    Rc::new(RefCell::new(IndicatorAnimation::new(
+        models.bars,
+        models.spectrum,
+        models.slate_lines,
+    )))
+}
+
 pub(crate) fn build_indicator(
     models: &IndicatorModels,
 ) -> Result<RecordingIndicator, slint::PlatformError> {
@@ -812,20 +946,25 @@ mod indicator_animation_tests {
             VisualizerStyle::VoiceOrb,
             VisualizerStyle::SymmetricSpectrum,
             VisualizerStyle::FluidRibbon,
-            VisualizerStyle::BroadcastMic,
         ] {
-            assert_eq!(style.recording_surface(), RecordingSurface::Panel);
+            assert_eq!(style.recording_surface(), Some(RecordingSurface::Panel));
             assert!(!style.uses_transparent_window());
         }
         for style in [
+            VisualizerStyle::BroadcastMic,
             VisualizerStyle::CircularSpectrum,
             VisualizerStyle::FlowSphere,
             VisualizerStyle::WritingSlate,
             VisualizerStyle::CompanionOrb,
         ] {
-            assert_eq!(style.recording_surface(), RecordingSurface::Transparent);
+            assert_eq!(
+                style.recording_surface(),
+                Some(RecordingSurface::Transparent)
+            );
             assert!(style.uses_transparent_window());
         }
+        assert_eq!(VisualizerStyle::Off.recording_surface(), None);
+        assert!(!VisualizerStyle::Off.uses_transparent_window());
     }
 
     #[test]
@@ -907,6 +1046,7 @@ mod indicator_animation_tests {
             VisualizerStyle::from_index(7),
             Some(VisualizerStyle::CompanionOrb)
         );
+        assert_eq!(VisualizerStyle::from_index(8), Some(VisualizerStyle::Off));
         assert_eq!(
             serde_json::to_string(&VisualizerStyle::FlowSphere).unwrap(),
             "\"flow_sphere\""
@@ -1072,6 +1212,22 @@ mod indicator_animation_tests {
             serde_json::from_str::<CircularSpectrumPalette>("\"monochrome\"").unwrap(),
             CircularSpectrumPalette::Monochrome
         );
+    }
+
+    #[test]
+    fn every_broadcast_mic_palette_choice_maps_to_a_persisted_value() {
+        use super::BroadcastMicPalette;
+
+        for (index, palette, serialized) in [
+            (0, BroadcastMicPalette::White, "\"white\""),
+            (1, BroadcastMicPalette::Blue, "\"blue\""),
+            (2, BroadcastMicPalette::Red, "\"red\""),
+        ] {
+            assert_eq!(BroadcastMicPalette::from_index(index), Some(palette));
+            assert_eq!(palette.index(), index);
+            assert_eq!(serde_json::to_string(&palette).unwrap(), serialized);
+        }
+        assert_eq!(BroadcastMicPalette::from_index(3), None);
     }
 
     #[test]

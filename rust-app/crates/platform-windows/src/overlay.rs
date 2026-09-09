@@ -744,27 +744,48 @@ pub fn prepare_action_window(window_handle: u64) -> Result<(), String> {
 /// the translation opened on the wrong screen, and to the user it had not
 /// opened at all.
 ///
-/// Three places to anchor to, best first:
+/// Five places to anchor to, best first:
 ///
-/// 1. the caret in the target application, which is where the user is looking;
-/// 2. the target window, which is at least on the right screen;
-/// 3. the pointer, which is only right by coincidence.
+/// 1. the selected text itself, when UI Automation exposes its rectangles;
+/// 2. the caret in the target application, which is where the user is looking;
+/// 3. the pointer captured with the translation gesture;
+/// 4. the target window, which is at least on the right screen;
+/// 5. the current pointer, as a last-resort fallback only.
 pub fn configure_translation_window_for_target(
     window_handle: u64,
     target_window_handle: u64,
     target_thread_id: u32,
+    selection_rect: Option<(i32, i32, i32, i32)>,
+    captured_pointer: Option<(i32, i32)>,
 ) -> Result<(), String> {
     configure_action_window(window_handle)?;
     let hwnd = window_handle as usize as HWND;
     apply_translation_window_contract(hwnd);
 
-    let anchor = caret_anchor(target_thread_id)
-        .or_else(|| window_anchor(target_window_handle))
-        .or_else(cursor_anchor);
+    let (anchor, source) = if let Some(anchor) = selection_anchor(selection_rect) {
+        (Some(anchor), "selection")
+    } else if let Some(anchor) = caret_anchor(target_thread_id) {
+        (Some(anchor), "caret")
+    } else if let Some((x, y)) = captured_pointer {
+        (Some(POINT { x, y }), "captured_pointer")
+    } else if let Some(anchor) = window_anchor(target_window_handle) {
+        (Some(anchor), "target_window")
+    } else {
+        (cursor_anchor(), "current_pointer")
+    };
     let Some(anchor) = anchor else {
         return Ok(());
     };
+    rust_app_core::diagnostics::log_line(&format!(
+        "translation_preview placement=anchor source={source} x={} y={}",
+        anchor.x, anchor.y
+    ));
     place_near(hwnd, anchor)
+}
+
+fn selection_anchor(rect: Option<(i32, i32, i32, i32)>) -> Option<POINT> {
+    let (left, top, right, bottom) = rect?;
+    (right > left && bottom > top).then_some(POINT { x: left, y: bottom })
 }
 
 /// Where the caret is on screen, if the target thread has one.
@@ -1423,7 +1444,7 @@ mod backdrop_tests {
 
 #[cfg(test)]
 mod placement_tests {
-    use super::{POINT, RECT, offer_position};
+    use super::{POINT, RECT, offer_position, selection_anchor};
 
     /// A second monitor to the right of the first, as Windows lays them out.
     fn second_screen() -> RECT {
@@ -1441,6 +1462,13 @@ mod placement_tests {
         let (x, y) = offer_position(anchor, 400, 200, second_screen());
 
         assert_eq!((x, y), (4018, 522));
+    }
+
+    #[test]
+    fn a_selection_anchors_below_its_last_visible_line() {
+        let anchor = selection_anchor(Some((120, 240, 380, 266))).expect("valid selection");
+        assert_eq!((anchor.x, anchor.y), (120, 266));
+        assert!(selection_anchor(Some((120, 240, 120, 266))).is_none());
     }
 
     #[test]

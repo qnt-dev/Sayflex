@@ -11,6 +11,7 @@
 import { Sheet } from "sheet.slint";
 import { Fact, ListHead, StageHeading, FactList, Note, GroupLabel, SideNote, PageLede, ClaimLine } from "parts.slint";
 import { RowAction, Toggle, ChoiceTile, MenuButton, MenuOption } from "controls.slint";
+import { RecordingVisual, SlateLine } from "recording_visual.slint";
 
 // ── Overview ─────────────────────────────────────────────
 export component OverviewPage inherits VerticalLayout {
@@ -282,16 +283,32 @@ export component VisualsPage inherits HorizontalLayout {
     in property <string> subtitle;
     in property <string> caption;
     in property <string> side-note;
-    // Circular and Flow sphere are drawn on their own native surface so they
-    // can be transparent per pixel; the frame says so instead of leaving them
-    // looking like the others.
-    in property <bool> native-surface: false;
     in property <int> circular-palette: 0;
+    in property <int> broadcast-mic-palette: 0;
     in property <int> sphere-palette: 0;
     in property <int> slate-surface: 0;
+    in property <[float]> preview-bars;
+    in property <[float]> preview-spectrum;
+    in property <[SlateLine]> preview-slate-lines;
+    in property <image> preview-flow-sphere-frame;
+    in property <bool> preview-processing: false;
+    in property <float> preview-signal-opacity: 0.8;
+    in property <float> preview-disc-opacity: 1;
+    in property <float> preview-orb-size: 14;
+    in property <float> preview-orb-glow: 0.35;
+    in property <float> preview-ribbon-y1: 9.5;
+    in property <float> preview-ribbon-y2: 9.5;
+    in property <float> preview-ribbon-y3: 9.5;
+    in property <float> preview-ribbon-y4: 9.5;
+    in property <float> preview-mic-edge-height: 5;
+    in property <float> preview-mic-outer-height: 7;
+    in property <float> preview-mic-middle-height: 9;
+    in property <float> preview-mic-inner-height: 6;
+    in property <float> preview-mic-near-height: 7;
 
     callback select-visualizer(int);
     callback select-circular-palette(int);
+    callback select-broadcast-mic-palette(int);
     callback select-sphere-palette(int);
     callback select-slate-surface(int);
 
@@ -315,19 +332,7 @@ export component VisualsPage inherits HorizontalLayout {
                 alignment: center;
                 Rectangle {
                     width: 290px;
-                    border-width: 1px;
-                    border-color: Sheet.hairline;
-                    background: Sheet.raised;
-
-                    if root.native-surface : Text {
-                        y: 8px;
-                        x: 10px;
-                        text: "OWN SURFACE";
-                        color: Sheet.muted;
-                        font-size: Sheet.label-size;
-                        font-weight: 650;
-                        letter-spacing: 1.4px;
-                    }
+                    background: transparent;
 
                     Text {
                         text: root.selected == 8 ? "no overlay" : "";
@@ -338,20 +343,43 @@ export component VisualsPage inherits HorizontalLayout {
                         vertical-alignment: center;
                     }
 
-                    // One shape for every style. Drawing each visualizer
-                    // properly means running the renderers this page is meant
-                    // to be choosing between, which is the recording overlay's
-                    // job; until that is shared, this frame says which one is
-                    // chosen rather than showing it.
-                    if root.selected != 8 : Rectangle {
-                        width: 92px;
-                        height: 92px;
-                        border-radius: root.selected == 0 || root.selected == 5 || root.selected == 7
-                            ? 46px
-                            : 0px;
-                        border-width: 1px;
-                        border-color: Sheet.hairline;
-                        background: @radial-gradient(circle, #ffffff55 0%, #11131714 70%);
+                    if root.selected < 7 : RecordingVisual {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        visualizer-style: root.selected;
+                        circular-palette: root.circular-palette;
+                        broadcast-mic-palette: root.broadcast-mic-palette;
+                        writing-slate-surface: root.slate-surface;
+                        bar-heights: root.preview-bars;
+                        spectrum-heights: root.preview-spectrum;
+                        slate-lines: root.preview-slate-lines;
+                        flow-sphere-frame: root.preview-flow-sphere-frame;
+                        processing: root.preview-processing;
+                        signal-opacity: root.preview-signal-opacity;
+                        disc-opacity: root.preview-disc-opacity;
+                        orb-size: root.preview-orb-size;
+                        orb-glow: root.preview-orb-glow;
+                        ribbon-y1: root.preview-ribbon-y1;
+                        ribbon-y2: root.preview-ribbon-y2;
+                        ribbon-y3: root.preview-ribbon-y3;
+                        ribbon-y4: root.preview-ribbon-y4;
+                        mic-edge-height: root.preview-mic-edge-height;
+                        mic-outer-height: root.preview-mic-outer-height;
+                        mic-middle-height: root.preview-mic-middle-height;
+                        mic-inner-height: root.preview-mic-inner-height;
+                        mic-near-height: root.preview-mic-near-height;
+                        visual-scale: 1;
+                        visual-opacity: 1;
+                        prepared: true;
+                    }
+
+                    if root.selected == 7 : Image {
+                        width: 116px;
+                        height: 116px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        source: @image-url("../../../../desktop-pet/assets/orb.png");
+                        image-fit: contain;
                     }
                 }
             }
@@ -403,15 +431,30 @@ export component VisualsPage inherits HorizontalLayout {
 
         // A palette belongs to the style that has one, so it appears only when
         // that style is chosen rather than sitting greyed out for the others.
+        if root.selected == 3 : GroupLabel { text: "COLOUR"; height: 30px; }
+        if root.selected == 3 : MenuButton {
+            text: root.broadcast-mic-palette == 0 ? "White"
+                : root.broadcast-mic-palette == 1 ? "Blue" : "Red";
+            value: root.broadcast-mic-palette == 0 ? "0" : root.broadcast-mic-palette == 1 ? "1" : "2";
+            options: [
+                { value: "0", label: "White" },
+                { value: "1", label: "Blue" },
+                { value: "2", label: "Red" },
+            ];
+            chosen(value) => { root.select-broadcast-mic-palette(value == "0" ? 0 : value == "1" ? 1 : 2); }
+        }
+
         if root.selected == 4 : GroupLabel { text: "PALETTE"; height: 30px; }
         if root.selected == 4 : MenuButton {
-            text: root.circular-palette == 0 ? "Monochrome" : "Warm";
-            value: root.circular-palette == 0 ? "0" : "1";
+            text: root.circular-palette == 0 ? "Sunset"
+                : root.circular-palette == 1 ? "Arctic" : "Monochrome";
+            value: root.circular-palette == 0 ? "0" : root.circular-palette == 1 ? "1" : "2";
             options: [
-                { value: "0", label: "Monochrome" },
-                { value: "1", label: "Warm" },
+                { value: "0", label: "Sunset" },
+                { value: "1", label: "Arctic" },
+                { value: "2", label: "Monochrome" },
             ];
-            chosen(value) => { root.select-circular-palette(value == "0" ? 0 : 1); }
+            chosen(value) => { root.select-circular-palette(value == "0" ? 0 : value == "1" ? 1 : 2); }
         }
 
         if root.selected == 5 : GroupLabel { text: "PALETTE"; height: 30px; }
@@ -427,13 +470,15 @@ export component VisualsPage inherits HorizontalLayout {
 
         if root.selected == 6 : GroupLabel { text: "SURFACE"; height: 30px; }
         if root.selected == 6 : MenuButton {
-            text: root.slate-surface == 0 ? "Paper" : "Glass";
-            value: root.slate-surface == 0 ? "0" : "1";
+            text: root.slate-surface == 0 ? "Dark panel"
+                : root.slate-surface == 1 ? "Matte glass" : "Blue glass";
+            value: root.slate-surface == 0 ? "0" : root.slate-surface == 1 ? "1" : "2";
             options: [
-                { value: "0", label: "Paper" },
-                { value: "1", label: "Glass" },
+                { value: "0", label: "Dark panel" },
+                { value: "1", label: "Matte glass" },
+                { value: "2", label: "Blue glass" },
             ];
-            chosen(value) => { root.select-slate-surface(value == "0" ? 0 : 1); }
+            chosen(value) => { root.select-slate-surface(value == "0" ? 0 : value == "1" ? 1 : 2); }
         }
 
         Rectangle { vertical-stretch: 1; }

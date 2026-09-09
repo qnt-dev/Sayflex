@@ -6,5 +6,5 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-pet_particles = { path = "../pet_particles" }
-pet_render = { path = "../pet_render" }
+pet_particles = { version = "0.1.0", path = "../pet_particles" }
+pet_render = { version = "0.1.0", path = "../pet_render" }

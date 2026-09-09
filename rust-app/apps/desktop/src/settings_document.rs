@@ -13,7 +13,7 @@ use rust_protocol::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    AppState, CircularSpectrumPalette, DEFAULT_TRANSLATION_BLUR_RADIUS,
+    AppState, BroadcastMicPalette, CircularSpectrumPalette, DEFAULT_TRANSLATION_BLUR_RADIUS,
     MAX_TRANSLATION_BLUR_RADIUS, TextActionMode, TranslationDelivery, VisualizerStyle,
     WritingSlateSurface, flow_sphere, speech_backend::SpeechBackendPreference,
 };
@@ -42,6 +42,7 @@ pub(crate) struct SavedSettings {
     pub(crate) fast_release_previews: bool,
     pub(crate) visualizer_style: VisualizerStyle,
     pub(crate) circular_spectrum_palette: CircularSpectrumPalette,
+    pub(crate) broadcast_mic_palette: BroadcastMicPalette,
     pub(crate) flow_sphere_palette: flow_sphere::FlowSpherePalette,
     pub(crate) writing_slate_surface: WritingSlateSurface,
     pub(crate) companion_home_position: Option<(i32, i32)>,
@@ -69,6 +70,7 @@ impl Default for SavedSettings {
             fast_release_previews: true,
             visualizer_style: VisualizerStyle::default(),
             circular_spectrum_palette: CircularSpectrumPalette::default(),
+            broadcast_mic_palette: BroadcastMicPalette::default(),
             flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
             writing_slate_surface: WritingSlateSurface::default(),
             companion_home_position: None,
@@ -134,6 +136,11 @@ impl<'de> Deserialize<'de> for SavedSettings {
             &document,
             "circular_spectrum_palette",
             &mut settings.circular_spectrum_palette,
+        );
+        read(
+            &document,
+            "broadcast_mic_palette",
+            &mut settings.broadcast_mic_palette,
         );
         read(
             &document,
@@ -206,6 +213,7 @@ impl SavedSettings {
             fast_release_previews: state.fast_release_previews,
             visualizer_style: state.visualizer_style,
             circular_spectrum_palette: state.circular_spectrum_palette,
+            broadcast_mic_palette: state.broadcast_mic_palette,
             flow_sphere_palette: state.flow_sphere_palette,
             writing_slate_surface: state.writing_slate_surface,
             companion_home_position: state.companion_home_position,
@@ -294,8 +302,8 @@ mod settings_document_tests {
     use crate::speech_backend::SpeechBackend;
 
     use super::{
-        AppState, MAX_TRANSLATION_BLUR_RADIUS, SETTINGS_SCHEMA_VERSION, SavedSettings,
-        TextActionMode, VisualizerStyle, parse_settings,
+        AppState, BroadcastMicPalette, MAX_TRANSLATION_BLUR_RADIUS, SETTINGS_SCHEMA_VERSION,
+        SavedSettings, TextActionMode, VisualizerStyle, parse_settings,
     };
 
     /// Exactly what the 0.5.27 build wrote, before the document carried a
@@ -345,6 +353,10 @@ mod settings_document_tests {
             defaults.translation_blur_radius
         );
         assert_eq!(settings.text_action_mode, defaults.text_action_mode);
+        assert_eq!(
+            settings.broadcast_mic_palette,
+            defaults.broadcast_mic_palette
+        );
         assert_eq!(
             settings.writing_slate_surface,
             defaults.writing_slate_surface
@@ -402,6 +414,7 @@ mod settings_document_tests {
             translation_enabled: true,
             companion_home_position: Some((-640, 320)),
             visualizer_style: VisualizerStyle::default(),
+            broadcast_mic_palette: BroadcastMicPalette::Red,
             text_action_mode: TextActionMode::default(),
             ..SavedSettings::default()
         };

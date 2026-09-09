@@ -1,11 +1,17 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.6.0',
+    [string]$Version,
     [switch]$SkipPublish
 )
 
 $ErrorActionPreference = 'Stop'
 $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = (
+        Select-String -Path (Join-Path $rustRoot 'Cargo.toml') -Pattern '^version = "(.+)"' |
+            Select-Object -First 1
+    ).Matches[0].Groups[1].Value
+}
 
 if (-not $SkipPublish) {
     & (Join-Path $PSScriptRoot 'publish.ps1') -Configuration Release

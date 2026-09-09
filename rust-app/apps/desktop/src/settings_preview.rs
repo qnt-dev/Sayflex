@@ -12,9 +12,17 @@
 
 use std::error::Error;
 
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use std::{cell::RefCell, rc::Rc};
 
-use crate::{Fact, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow};
+use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
+
+use crate::{
+    Fact, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow,
+    visualizer::{
+        BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, VisualizerStyle,
+        WritingSlateSurface, new_settings_preview,
+    },
+};
 
 /// Which page to open, from `--settings-preview=4`. Looking at one page at a
 /// time is how a page gets looked at.
@@ -54,6 +62,8 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     fill_hotkeys(&settings);
 
     wire(&settings);
+    let animation = new_settings_preview(&settings);
+    let animation_timer = start_visual_preview_animation(settings.as_weak(), animation);
     settings.on_quit_requested(|| {
         let _ = slint::quit_event_loop();
     });
@@ -63,7 +73,21 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     // of chrome that belongs to a different design.
     crate::configure_standard_app_window(&settings, "Settings preview");
     slint::run_event_loop()?;
+    animation_timer.stop();
     Ok(())
+}
+
+fn start_visual_preview_animation(
+    settings: slint::Weak<SettingsWindow>,
+    animation: Rc<RefCell<crate::visualizer::IndicatorAnimation>>,
+) -> Timer {
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, INDICATOR_FRAME_INTERVAL, move || {
+        if let Some(settings) = settings.upgrade() {
+            animation.borrow_mut().tick_settings_preview(&settings);
+        }
+    });
+    timer
 }
 
 /// The preview answers its own controls.
@@ -198,8 +222,52 @@ fn wire(settings: &SettingsWindow) {
         let weak = settings.as_weak();
         settings.on_select_visualizer(move |index| {
             if let Some(settings) = weak.upgrade() {
-                settings.set_selected_visualizer(index);
-                settings.set_visuals_native_surface(index == 4 || index == 5);
+                let Some(style) = VisualizerStyle::from_index(index) else {
+                    return;
+                };
+                settings.set_selected_visualizer(style.index());
+                crate::settings_view::sync_visualizer_copy(&settings, style);
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_select_broadcast_mic_palette(move |index| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            if let Some(palette) = BroadcastMicPalette::from_index(index) {
+                settings.set_selected_broadcast_mic_palette(palette.index());
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_select_circular_palette(move |index| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            if let Some(palette) = CircularSpectrumPalette::from_index(index) {
+                settings.set_selected_circular_palette(palette.index());
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_select_flow_sphere_palette(move |index| {
+            if let Some(settings) = weak.upgrade() {
+                settings.set_selected_flow_sphere_palette(index.clamp(0, 1));
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_select_writing_slate_surface(move |index| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            if let Some(surface) = WritingSlateSurface::from_index(index) {
+                settings.set_selected_writing_slate_surface(surface.index());
             }
         });
     }
@@ -523,13 +591,8 @@ fn fill_providers(settings: &SettingsWindow) {
 }
 
 fn fill_visuals(settings: &SettingsWindow) {
-    settings.set_visuals_subtitle("Flow sphere \u{b7} shown while recording".into());
-    settings.set_visuals_caption("A point cloud that accelerates on voice onset".into());
-    settings.set_visuals_note(
-        "Drawn on its own native surface, so it can be transparent per pixel.".into(),
-    );
-    settings.set_visuals_native_surface(true);
     settings.set_selected_visualizer(5);
+    crate::settings_view::sync_visualizer_copy(settings, VisualizerStyle::FlowSphere);
 }
 
 fn fill_history(settings: &SettingsWindow) {
@@ -541,7 +604,7 @@ fn fill_history(settings: &SettingsWindow) {
         return;
     }
     settings.set_history_scope("12 kept \u{b7} 3 went to a service".into());
-    settings.set_history_rows(ModelRc::new(VecModel::from(vec![
+    let mut rows = vec![
         HistoryRow {
             text: "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{43a}\u{430} \u{441}\u{432}\u{44f}\u{437}\u{438}, \u{44d}\u{442}\u{43e} \u{442}\u{435}\u{441}\u{442}\u{43e}\u{432}\u{430}\u{44f} \u{434}\u{438}\u{43a}\u{442}\u{43e}\u{432}\u{43a}\u{430}".into(),
             detail: "ru \u{b7} 3.2s audio \u{b7} 210ms release \u{b7} prepared".into(),
@@ -557,7 +620,25 @@ fn fill_history(settings: &SettingsWindow) {
             detail: "en \u{b7} 1.4s audio \u{b7} 180ms processing".into(),
             origin: "local".into(),
         },
-    ])));
+    ];
+    for index in 4..=12 {
+        rows.push(HistoryRow {
+            text: format!("Representative retained dictation {index}").into(),
+            detail: format!(
+                "en \u{b7} {}.{}s audio \u{b7} on this device",
+                index / 2,
+                index % 2
+            )
+            .into(),
+            origin: if index == 7 || index == 11 {
+                "remote"
+            } else {
+                "local"
+            }
+            .into(),
+        });
+    }
+    settings.set_history_rows(ModelRc::new(VecModel::from(rows)));
 }
 
 fn fill_hotkeys(settings: &SettingsWindow) {

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rust_protocol::TargetSnapshot;
+use rust_protocol::{ScreenRect, TargetSnapshot};
 use thiserror::Error;
 use windows::{
     Win32::{
@@ -15,6 +15,10 @@ use windows::{
         System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
             CoUninitialize,
+        },
+        System::Ole::{
+            SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound,
+            SafeArrayUnaccessData,
         },
         UI::Accessibility::{
             CUIAutomation8, IUIAutomation2, IUIAutomationElement, IUIAutomationTextEditPattern,
@@ -40,7 +44,10 @@ static TEXT_ACTOR: OnceLock<Result<TextAutomationActor, String>> = OnceLock::new
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SelectionOutcome {
-    Text(String),
+    Text {
+        text: String,
+        selection_rect: Option<ScreenRect>,
+    },
     Unavailable,
     Protected,
 }
@@ -357,9 +364,12 @@ impl UiAutomationClient {
                 let Some(element) = current.take() else {
                     break;
                 };
-                if let Some(text) = text_from_element(&element)? {
+                if let Some((text, selection_rect)) = text_from_element(&element)? {
                     if inject::is_foreground(target) {
-                        return Ok(SelectionOutcome::Text(text));
+                        return Ok(SelectionOutcome::Text {
+                            text,
+                            selection_rect,
+                        });
                     }
                     return Ok(SelectionOutcome::Unavailable);
                 }
@@ -433,7 +443,9 @@ fn focused_elements(
     elements
 }
 
-fn text_from_element(element: &IUIAutomationElement) -> Result<Option<String>, SelectionError> {
+fn text_from_element(
+    element: &IUIAutomationElement,
+) -> Result<Option<(String, Option<ScreenRect>)>, SelectionError> {
     // Some providers expose only a derived text interface. Query each native
     // pattern object and let COM perform the interface conversion.
     let pattern = unsafe { element.GetCurrentPattern(UIA_TextPatternId) }
@@ -463,6 +475,7 @@ fn text_from_element(element: &IUIAutomationElement) -> Result<Option<String>, S
     }
 
     let mut selections = Vec::with_capacity(length as usize);
+    let mut selection_rect = None;
     for index in 0..length {
         let range = unsafe { ranges.GetElement(index) }
             .map_err(|error| automation_error("Selection.GetElement", error))?;
@@ -471,12 +484,70 @@ fn text_from_element(element: &IUIAutomationElement) -> Result<Option<String>, S
         let text = String::from_utf16_lossy(&text);
         if !text.is_empty() {
             selections.push(text);
+            selection_rect = text_range_anchor(&range).or(selection_rect);
         }
     }
     if selections.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(selections.join("\n")))
+        Ok(Some((selections.join("\n"), selection_rect)))
+    }
+}
+
+/// Returns the last visible line of a selected range. UI Automation defines
+/// the SAFEARRAY as groups of four doubles: left, top, width and height in
+/// physical screen coordinates. The last line is the least likely to cover the
+/// text the user has just read when the preview opens below it.
+fn text_range_anchor(
+    range: &windows::Win32::UI::Accessibility::IUIAutomationTextRange,
+) -> Option<ScreenRect> {
+    unsafe {
+        let array = range.GetBoundingRectangles().ok()?;
+        if array.is_null() {
+            return None;
+        }
+
+        let result = (|| {
+            let lower = SafeArrayGetLBound(array, 1).ok()?;
+            let upper = SafeArrayGetUBound(array, 1).ok()?;
+            let length = upper.checked_sub(lower)?.checked_add(1)? as usize;
+            if length < 4 || !length.is_multiple_of(4) {
+                return None;
+            }
+            let mut data = std::ptr::null_mut();
+            SafeArrayAccessData(array, &mut data).ok()?;
+            if data.is_null() {
+                let _ = SafeArrayUnaccessData(array);
+                return None;
+            }
+            let values = std::slice::from_raw_parts(data.cast::<f64>(), length);
+            let rect = values.chunks_exact(4).rev().find_map(|value| {
+                let (left, top, width, height) = (value[0], value[1], value[2], value[3]);
+                if !left.is_finite()
+                    || !top.is_finite()
+                    || !width.is_finite()
+                    || !height.is_finite()
+                    || width <= 0.0
+                    || height <= 0.0
+                {
+                    return None;
+                }
+                Some(ScreenRect {
+                    left: left.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32,
+                    top: top.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32,
+                    right: (left + width)
+                        .round()
+                        .clamp(i32::MIN as f64, i32::MAX as f64) as i32,
+                    bottom: (top + height)
+                        .round()
+                        .clamp(i32::MIN as f64, i32::MAX as f64) as i32,
+                })
+            });
+            let _ = SafeArrayUnaccessData(array);
+            rect
+        })();
+        let _ = SafeArrayDestroy(array);
+        result
     }
 }
 

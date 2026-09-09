@@ -1,4 +1,4 @@
-use rust_protocol::TargetSnapshot;
+use rust_protocol::{ScreenRect, TargetSnapshot};
 use std::time::Instant;
 use thiserror::Error;
 
@@ -18,6 +18,7 @@ pub enum CaptureMethod {
 #[derive(Debug, PartialEq, Eq)]
 pub struct CapturedSelection {
     pub text: String,
+    pub selection_rect: Option<ScreenRect>,
     pub method: CaptureMethod,
     pub uia_ms: Option<u64>,
     pub clipboard_ms: Option<u64>,
@@ -67,7 +68,10 @@ pub fn await_uia_capture(
     };
     let uia_ms = had_pending_uia.then_some(uia_attempt.elapsed_ms);
     match uia_attempt.result {
-        Ok(SelectionOutcome::Text(text)) if !text.is_empty() => {
+        Ok(SelectionOutcome::Text {
+            text,
+            selection_rect,
+        }) if !text.is_empty() => {
             if !inject::is_foreground(target) {
                 return Err(clipboard::ClipboardError::TargetChanged.into());
             }
@@ -79,6 +83,7 @@ pub fn await_uia_capture(
             ));
             return Ok(UiaCapture::Captured(CapturedSelection {
                 text,
+                selection_rect,
                 method: CaptureMethod::UiAutomation,
                 uia_ms,
                 clipboard_ms: None,
@@ -91,7 +96,7 @@ pub fn await_uia_capture(
             ));
             return Err(CaptureError::Protected);
         }
-        Ok(SelectionOutcome::Text(_)) | Ok(SelectionOutcome::Unavailable) => {
+        Ok(SelectionOutcome::Text { .. }) | Ok(SelectionOutcome::Unavailable) => {
             crate::diagnostic_line(&format!(
                 "uia_selection target_pid={} result=unavailable fallback=clipboard",
                 target.process_id
@@ -133,6 +138,7 @@ pub fn capture_clipboard_after_release(
     };
     Ok(CapturedSelection {
         text: captured.text,
+        selection_rect: None,
         method,
         uia_ms,
         clipboard_ms: Some(clipboard_ms),

@@ -27,7 +27,7 @@ use crate::{
     ActionPalette, SelectionChooser, TranslationPair, TranslationPreview,
     adaptive_text_panel_height, apply_translation_preview_layout,
     configure_indicator_native_window, flow_sphere, native_window_handle,
-    overlay_presenter::{ContentPolicy, OverlayContract, OverlayPresenter},
+    overlay_presenter::{OverlayContract, OverlayPresenter},
     precreate_indicator, refresh_cloaked_translation_backdrop,
     settings_document::data_root,
     show_indicator, slint_window_handle,
@@ -340,11 +340,10 @@ pub(crate) fn run_indicator_presentation_probe(cycles: u32) -> Result<(), Box<dy
         "recording-overlay-probe",
     );
     let (indicator, animation) = new_indicator()?;
-    let presenter = OverlayPresenter::install(
+    let presenter = OverlayPresenter::install_always_renderable(
         indicator.window(),
         "recording_overlay_probe",
         OverlayContract::ClickThrough,
-        ContentPolicy::AlwaysRenderable,
         None,
     )?;
     indicator.set_visualizer_style(VisualizerStyle::WritingSlate.index());
@@ -575,11 +574,10 @@ pub(crate) fn run_translation_presentation_probe(cycles: u32) -> Result<(), Box<
         "translation-overlay-probe",
     );
     let preview = TranslationPreview::new()?;
-    let presenter = OverlayPresenter::install(
+    let presenter = OverlayPresenter::install_content_gated(
         preview.window(),
         "translation_preview_probe",
         OverlayContract::Interactive,
-        ContentPolicy::RequiresContent,
         None,
     )?;
     preview.set_prepared(false);
@@ -747,11 +745,10 @@ pub(crate) fn run_translation_preview(long_text: bool) -> Result<(), Box<dyn Err
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.TranslationPreview")?;
     let preview = TranslationPreview::new()?;
-    let presenter = OverlayPresenter::install(
+    let presenter = OverlayPresenter::install_content_gated(
         preview.window(),
         "translation_preview_probe",
         OverlayContract::Interactive,
-        ContentPolicy::RequiresContent,
         Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
     )?;
     let translated = if long_text {

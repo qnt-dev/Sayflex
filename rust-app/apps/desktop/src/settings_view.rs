@@ -39,7 +39,8 @@ use crate::{
     translation_view::{TranslationPreviewRegistry, adaptive_text_panel_height},
     unix_ms,
     visualizer::{
-        CircularSpectrumPalette, IndicatorAnimation, VisualizerStyle, WritingSlateSurface,
+        BroadcastMicPalette, CircularSpectrumPalette, IndicatorAnimation, VisualizerStyle,
+        WritingSlateSurface,
     },
     worker_supervisor::Workers,
 };
@@ -243,9 +244,10 @@ pub(crate) fn sync_action_settings(
     // ── Visuals ──
     settings.set_selected_visualizer(state.visualizer_style.index());
     settings.set_selected_circular_palette(state.circular_spectrum_palette.index());
+    settings.set_selected_broadcast_mic_palette(state.broadcast_mic_palette.index());
     settings.set_selected_flow_sphere_palette(state.flow_sphere_palette.index());
     settings.set_selected_writing_slate_surface(state.writing_slate_surface.index());
-    sync_visualizer_copy(&settings, state.visualizer_style.index());
+    sync_visualizer_copy(&settings, state.visualizer_style);
 
     // ── Hotkeys ──
     settings.set_hotkey_rows(ModelRc::new(VecModel::from(hotkey_rows(&state))));
@@ -256,33 +258,36 @@ pub(crate) fn sync_action_settings(
 
 /// The subtitle and note beside the visualizer preview.
 ///
-/// Circular and Flow sphere are drawn on a native surface of their own so they
-/// can be transparent per pixel; that is not decoration, it is why they behave
-/// differently, so the page says it.
-fn sync_visualizer_copy(settings: &SettingsWindow, index: i32) {
-    let (name, caption) = match index {
-        0 => ("Voice orb", "Follows the level of your voice"),
-        1 => ("Spectrum", "Thirty-two bands, thirty-one times a second"),
-        2 => ("Fluid ribbon", "One line that thickens with the voice"),
-        3 => ("Broadcast mic", "Level bars beside a studio microphone"),
-        4 => ("Circular", "The spectrum wrapped into a ring"),
-        5 => (
+/// Transparent visualizers are drawn on a native surface of their own. That is
+/// not decoration, it is why they behave differently, so the page says it.
+pub(crate) fn sync_visualizer_copy(settings: &SettingsWindow, style: VisualizerStyle) {
+    let (name, caption) = match style {
+        VisualizerStyle::VoiceOrb => ("Voice orb", "Follows the level of your voice"),
+        VisualizerStyle::SymmetricSpectrum => {
+            ("Spectrum", "Thirty-two bands, thirty-one times a second")
+        }
+        VisualizerStyle::FluidRibbon => ("Fluid ribbon", "One line that thickens with the voice"),
+        VisualizerStyle::BroadcastMic => ("Broadcast mic", "Level bars beside a studio microphone"),
+        VisualizerStyle::CircularSpectrum => ("Circular", "The spectrum wrapped into a ring"),
+        VisualizerStyle::FlowSphere => (
             "Flow sphere",
             "A point cloud that accelerates on voice onset",
         ),
-        6 => ("Writing slate", "The words as they are recognised"),
-        7 => (
+        VisualizerStyle::WritingSlate => ("Writing slate", "The words as they are recognised"),
+        VisualizerStyle::CompanionOrb => (
             "Companion orb",
             "Stays where you put it, between dictations",
         ),
-        _ => ("Off", "No overlay is drawn while recording"),
+        VisualizerStyle::Off => ("Off", "No overlay is drawn while recording"),
     };
-    let native = index == 4 || index == 5;
+    let native =
+        style.recording_surface() == Some(crate::visualizer::RecordingSurface::Transparent);
     settings.set_visuals_subtitle(format!("{name} · shown while recording").into());
     settings.set_visuals_caption(caption.into());
-    settings.set_visuals_native_surface(native);
     settings.set_visuals_note(
-        if native {
+        if style == VisualizerStyle::Off {
+            "The microphone and transcription keep working; only the overlay is disabled."
+        } else if native {
             "Drawn on its own native surface, so it can be transparent per pixel."
         } else {
             "Drawn by the application itself, over whatever you are typing into."
@@ -1033,6 +1038,24 @@ pub(crate) fn wire_settings(
                 } else {
                     "Visualizer updated. The next dictation uses the selected style."
                 },
+            );
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let recording_overlays = recording_overlays.clone();
+        let state = Rc::clone(state);
+        settings.on_select_broadcast_mic_palette(move |index| {
+            let Some(palette) = BroadcastMicPalette::from_index(index) else {
+                return;
+            };
+            state.borrow_mut().broadcast_mic_palette = palette;
+            recording_overlays.set_broadcast_mic_palette(palette);
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+            set_indicator_status(
+                &settings_weak,
+                "Broadcast microphone colour updated for the next dictation.",
             );
         });
     }

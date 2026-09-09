@@ -388,6 +388,10 @@ fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
     // Asked by the release check, which otherwise has no way to find out what a
     // packaged worker speaks short of driving a whole handshake.
+    if std::env::args().any(|argument| argument == "--build-id") {
+        println!("{}", rust_protocol::BUILD_COMMIT);
+        return Ok(());
+    }
     if std::env::args().any(|argument| argument == "--protocol-version") {
         println!("{PROTOCOL_VERSION}");
         return Ok(());

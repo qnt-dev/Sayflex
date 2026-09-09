@@ -7,6 +7,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$gitCommit = (& git -C $rustRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-f]{40}$') {
+    throw 'The release source commit could not be identified.'
+}
+$dirty = @(& git -C $rustRoot status --porcelain)
+if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
+    throw 'A release must be built from a clean committed worktree.'
+}
 
 # One publish at a time.
 #
@@ -135,6 +143,7 @@ $previousVulkanSdk = $env:VULKAN_SDK
 $previousCudaArchitectures = $env:CMAKE_CUDA_ARCHITECTURES
 $previousLibclangPath = $env:LIBCLANG_PATH
 $previousGeneratorInstance = $env:CMAKE_GENERATOR_INSTANCE
+$previousBuildCommit = $env:SAYFLEX_BUILD_COMMIT
 $publishSucceeded = $false
 
 try {
@@ -144,6 +153,7 @@ try {
     }
     $env:LIBCLANG_PATH = Split-Path -Parent $libclang
     $env:CMAKE_GENERATOR_INSTANCE = $visualStudioInstance
+    $env:SAYFLEX_BUILD_COMMIT = $gitCommit
     New-Item -ItemType Directory -Force -Path $output | Out-Null
     Get-ChildItem -LiteralPath $output -Force -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force
@@ -239,6 +249,53 @@ try {
         $manifest | ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $output 'speech-backends.json') -Encoding utf8
 
+        # Bind the staged payload to its exact source and dependency graph.
+        # This manifest intentionally does not hash itself.
+        $desktopPath = Join-Path $output 'SayFlex.exe'
+        $protocolOutput = [System.IO.Path]::GetTempFileName()
+        try {
+            $probe = Start-Process -FilePath $desktopPath -ArgumentList '--protocol-version' `
+                -NoNewWindow -PassThru -RedirectStandardOutput $protocolOutput
+            $null = $probe.Handle
+            if (-not $probe.WaitForExit(20000)) {
+                $probe.Kill()
+                throw 'The built desktop did not report its protocol version.'
+            }
+            $protocolVersion = "$(Get-Content -LiteralPath $protocolOutput -Raw)".Trim()
+            if ($probe.ExitCode -ne 0 -or $protocolVersion -notmatch '^\d+$') {
+                throw "The built desktop reported an invalid protocol version: '$protocolVersion'."
+            }
+        } finally {
+            Remove-Item -LiteralPath $protocolOutput -Force -ErrorAction SilentlyContinue
+        }
+        $sourceVersion = (
+            Select-String -Path (Join-Path $rustRoot 'Cargo.toml') -Pattern '^version = "(.+)"' |
+                Select-Object -First 1
+        ).Matches[0].Groups[1].Value
+        $payloadFiles = @(
+            Get-ChildItem -LiteralPath $output -File -Recurse |
+                Where-Object Name -ne 'build-manifest.json' |
+                Sort-Object FullName |
+                ForEach-Object {
+                    [ordered]@{
+                        path = $_.FullName.Substring($output.Length + 1).Replace('\', '/')
+                        bytes = $_.Length
+                        sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    }
+                }
+        )
+        [ordered]@{
+            schema_version = 1
+            product = 'SayFlex'
+            version = $sourceVersion
+            protocol_version = [int]$protocolVersion
+            git_commit = $gitCommit
+            cargo_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $rustRoot 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+            built_utc = [DateTime]::UtcNow.ToString('o')
+            files = $payloadFiles
+        } | ConvertTo-Json -Depth 6 |
+            Set-Content -LiteralPath (Join-Path $output 'build-manifest.json') -Encoding utf8
+
         & (Join-Path $PSScriptRoot 'validate-release.ps1') -AppDirectory $output
         if ($LASTEXITCODE -ne 0) { throw 'Release validation failed.' }
         $publishSucceeded = $true
@@ -255,6 +312,7 @@ finally {
     $env:CMAKE_CUDA_ARCHITECTURES = $previousCudaArchitectures
     $env:LIBCLANG_PATH = $previousLibclangPath
     $env:CMAKE_GENERATOR_INSTANCE = $previousGeneratorInstance
+    $env:SAYFLEX_BUILD_COMMIT = $previousBuildCommit
     if (-not $KeepBuildArtifacts) {
         foreach ($target in $temporaryTargets) {
             if (Test-Path -LiteralPath $target) {

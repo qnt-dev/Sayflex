@@ -25,7 +25,7 @@ use slint::{
 use crate::{
     MAX_TRANSLATION_BLUR_RADIUS, RuntimeEvent, TranslationPair, TranslationPreview,
     TranslatorWindow, dispatch_runtime_event, native_window_handle,
-    overlay_presenter::{ContentPolicy, OverlayContract, OverlayPresenter},
+    overlay_presenter::{OverlayContract, OverlayPresenter},
     present_translation_preview, slint_window_handle,
 };
 
@@ -311,11 +311,10 @@ pub(crate) fn create_translation_preview_slot(
             .map_err(|error| format!("could not create translation window: {error}"))?,
     );
     preview.set_blur_radius(blur_radius as i32);
-    let presenter = OverlayPresenter::install(
+    let presenter = OverlayPresenter::install_content_gated(
         preview.window(),
         "translation_preview_overlay",
         OverlayContract::Interactive,
-        ContentPolicy::RequiresContent,
         Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
     )?;
     wire_translation_preview(&preview, &presenter);
@@ -586,6 +585,26 @@ pub(crate) fn apply_translation_preview_layout(
     preview
         .window()
         .set_size(slint::LogicalSize::new(preview.get_card_width(), height));
+}
+
+/// The only production transaction that changes translation-card content.
+/// Content, Slint's intrinsic measurement and the presenter's frame revision
+/// must advance in this order; exposing those as three independent caller
+/// obligations is how the first popup was measured empty and then revealed on
+/// a stale frame.
+pub(crate) fn update_translation_preview_content(
+    preview: &TranslationPreview,
+    presenter: &OverlayPresenter,
+    source_text: &str,
+    translated_text: &str,
+) {
+    preview.set_source_text(source_text.into());
+    preview.set_translated_text(translated_text.into());
+    preview.set_dual_pairs(slint::ModelRc::new(slint::VecModel::from(
+        translation_pairs(source_text, translated_text),
+    )));
+    apply_translation_preview_layout(preview, source_text, translated_text);
+    presenter.content_changed(preview.window(), !translated_text.trim().is_empty());
 }
 
 pub(crate) fn refresh_cloaked_translation_backdrop(
