@@ -175,14 +175,22 @@ pub fn start(
     })
 }
 
-/// The language the services are told to expect.
+/// The fallback language for services that cannot detect one themselves.
 ///
-/// Azure will not detect it and Deepgram detects only when asked, so a wrong
-/// answer here is the difference between a Russian dictation coming back in
-/// Russian and coming back as English nonsense. The user's Windows language is
-/// the best evidence available without asking them.
+/// This is deliberately not forwarded to providers that support automatic
+/// detection. The Windows UI language is useful as a last resort for Azure's
+/// fixed-language endpoint, but says nothing reliable about what the user is
+/// speaking to Groq or Deepgram.
 fn system_language() -> Option<LanguageHint> {
     sys_locale::get_locale().and_then(|locale| LanguageHint::new(&locale))
+}
+
+fn reported_language(provider: &ProviderId, fallback: Option<&LanguageHint>) -> String {
+    if provider.as_str() == ProviderId::AZURE {
+        fallback.map_or_else(|| "unknown".to_owned(), |hint| hint.primary().to_owned())
+    } else {
+        "auto".to_owned()
+    }
 }
 
 struct State {
@@ -331,10 +339,7 @@ impl State {
                 let transcript = Transcript {
                     session_id,
                     text,
-                    language: request
-                        .language
-                        .as_ref()
-                        .map_or_else(|| "auto".to_owned(), |hint| hint.primary().to_owned()),
+                    language: reported_language(&provider, request.language.as_ref()),
                     audio_duration_ms: recording.duration_ms,
                     processing_duration_ms: crate::elapsed_ms(started),
                     provider: Some(provider.to_string()),
@@ -466,5 +471,33 @@ fn describe(unavailable: &Option<rust_cloud_speech::Unavailable>) -> String {
             "{reason}; available again in about {} min",
             remaining.as_secs().div_ceil(60)
         ),
+    }
+}
+
+#[cfg(test)]
+mod language_policy_tests {
+    use rust_cloud_speech::{LanguageHint, ProviderId};
+
+    use super::reported_language;
+
+    #[test]
+    fn an_english_windows_locale_is_not_reported_as_groqs_detected_language() {
+        let windows_locale = LanguageHint::new("en-US");
+
+        assert_eq!(
+            reported_language(&ProviderId::new(ProviderId::GROQ), windows_locale.as_ref()),
+            "auto"
+        );
+        assert_eq!(
+            reported_language(
+                &ProviderId::new(ProviderId::DEEPGRAM),
+                windows_locale.as_ref()
+            ),
+            "auto"
+        );
+        assert_eq!(
+            reported_language(&ProviderId::new(ProviderId::AZURE), windows_locale.as_ref()),
+            "en"
+        );
     }
 }

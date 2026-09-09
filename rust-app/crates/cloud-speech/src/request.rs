@@ -193,12 +193,11 @@ pub fn plan_request(
             let model = entry.model.as_deref().unwrap_or(DEEPGRAM_DEFAULT_MODEL);
             let mut url =
                 format!("https://api.deepgram.com/v1/listen?model={model}&smart_format=true");
-            // Detection is off unless it is asked for, so an unset language
-            // would otherwise mean "assume English".
-            match request.language.as_ref() {
-                Some(language) => url.push_str(&format!("&language={}", language.tag())),
-                None => url.push_str("&detect_language=true"),
-            }
+            // The current preference is automatic. The Windows UI locale is
+            // only a fallback for providers such as Azure that cannot detect
+            // the language; it is not evidence about what this recording
+            // contains.
+            url.push_str("&detect_language=true");
             Ok(RequestPlan {
                 url,
                 headers: vec![
@@ -227,15 +226,15 @@ fn openai_compatible(
     } else {
         OPENAI_DEFAULT_MODEL
     });
-    let mut fields = vec![
+    let fields = vec![
         ("model".to_owned(), model.to_owned()),
         ("response_format".to_owned(), "json".to_owned()),
     ];
-    // Translation takes the source language, not the target; transcription
-    // takes the language to expect. Either way it is the primary subtag here.
-    if let Some(language) = request.language.as_ref() {
-        fields.push(("language".to_owned(), language.primary().to_owned()));
-    }
+    // Groq can detect the recording language and documents this field as
+    // optional. The value in `request.language` currently comes from the
+    // Windows UI locale for providers that require a language; forwarding it
+    // here turns a Russian recording into an English transcription request on
+    // an English installation of Windows.
     let route = if request.translate_to_english {
         "audio/translations"
     } else {
@@ -449,13 +448,8 @@ mod tests {
 
     #[test]
     fn deepgram_uses_its_token_scheme() {
-        let plan = plan_request(
-            &entry(ProviderId::DEEPGRAM),
-            "dg_key",
-            vec![],
-            &without_language(),
-        )
-        .unwrap();
+        let plan =
+            plan_request(&entry(ProviderId::DEEPGRAM), "dg_key", vec![], &request()).unwrap();
 
         assert!(
             plan.url
@@ -465,6 +459,8 @@ mod tests {
             plan.headers[0],
             ("Authorization".to_owned(), "Token dg_key".to_owned())
         );
+        assert!(plan.url.contains("detect_language=true"));
+        assert!(!plan.url.contains("language=ru"));
     }
 
     #[test]
@@ -569,13 +565,16 @@ mod tests {
     }
 
     #[test]
-    fn the_openai_route_is_given_the_bare_language_code() {
+    fn the_openai_route_does_not_treat_the_windows_locale_as_the_audio_language() {
         let plan = plan_request(&entry(ProviderId::GROQ), "gsk_key", vec![], &request()).unwrap();
 
         let RequestBody::Form { fields, .. } = plan.body else {
             panic!("the OpenAI route takes a form");
         };
-        assert!(fields.contains(&("language".to_owned(), "ru".to_owned())));
+        assert!(
+            !fields.iter().any(|(name, _)| name == "language"),
+            "an operating-system locale is not evidence about the recorded speech"
+        );
     }
 
     #[test]
