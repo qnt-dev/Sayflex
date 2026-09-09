@@ -3,8 +3,9 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 18 adds capture-time selection and pointer geometry to target
-// snapshots so overlays can be placed beside the text instead of guessing.
+// Version 19 carries the user's translation language policy with every
+// request. This keeps direction selection deterministic in both local and
+// cloud paths instead of hiding an English/Russian rule inside one worker.
 // All packaged processes must agree on this schema before exchanging commands.
 /// The shape of every message in this file, as one number.
 ///
@@ -15,7 +16,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -275,23 +276,119 @@ pub enum TranslationLanguage {
     #[default]
     English,
     Russian,
+    Ukrainian,
+    Spanish,
+    PortugueseBrazil,
+    German,
+    French,
+    Italian,
+    ChineseSimplified,
+    ChineseTraditional,
+    Japanese,
+    Korean,
+    Hindi,
+    Arabic,
 }
 
 impl TranslationLanguage {
+    pub const ALL: [Self; 14] = [
+        Self::English,
+        Self::Russian,
+        Self::Ukrainian,
+        Self::Spanish,
+        Self::PortugueseBrazil,
+        Self::German,
+        Self::French,
+        Self::Italian,
+        Self::ChineseSimplified,
+        Self::ChineseTraditional,
+        Self::Japanese,
+        Self::Korean,
+        Self::Hindi,
+        Self::Arabic,
+    ];
+
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
             Self::English => "en",
             Self::Russian => "ru",
+            Self::Ukrainian => "uk",
+            Self::Spanish => "es",
+            Self::PortugueseBrazil => "pt-BR",
+            Self::German => "de",
+            Self::French => "fr",
+            Self::Italian => "it",
+            Self::ChineseSimplified => "zh-Hans",
+            Self::ChineseTraditional => "zh-Hant",
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
+            Self::Hindi => "hi",
+            Self::Arabic => "ar",
         }
     }
 
     #[must_use]
-    pub const fn opposite(self) -> Self {
+    pub const fn display_name(self) -> &'static str {
         match self {
-            Self::English => Self::Russian,
-            Self::Russian => Self::English,
+            Self::English => "English",
+            Self::Russian => "Russian",
+            Self::Ukrainian => "Ukrainian",
+            Self::Spanish => "Spanish",
+            Self::PortugueseBrazil => "Portuguese (Brazil)",
+            Self::German => "German",
+            Self::French => "French",
+            Self::Italian => "Italian",
+            Self::ChineseSimplified => "Chinese (Simplified)",
+            Self::ChineseTraditional => "Chinese (Traditional)",
+            Self::Japanese => "Japanese",
+            Self::Korean => "Korean",
+            Self::Hindi => "Hindi",
+            Self::Arabic => "Arabic",
         }
+    }
+
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|language| {
+            language.code().eq_ignore_ascii_case(code)
+                || language
+                    .code()
+                    .split('-')
+                    .next()
+                    .is_some_and(|base| base.eq_ignore_ascii_case(code))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationLanguagePolicy {
+    pub primary: TranslationLanguage,
+    pub secondary: TranslationLanguage,
+}
+
+impl Default for TranslationLanguagePolicy {
+    fn default() -> Self {
+        Self {
+            primary: TranslationLanguage::English,
+            secondary: TranslationLanguage::Russian,
+        }
+    }
+}
+
+impl TranslationLanguagePolicy {
+    #[must_use]
+    pub fn target_for(self, source: TranslationLanguage) -> TranslationLanguage {
+        if source == self.primary {
+            self.secondary
+        } else {
+            self.primary
+        }
+    }
+
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        self.primary != self.secondary
     }
 }
 
@@ -521,6 +618,7 @@ pub enum TranslationWorkerCommand {
         text: String,
         source_language: Option<TranslationLanguage>,
         target_language: Option<TranslationLanguage>,
+        language_policy: TranslationLanguagePolicy,
     },
     Cancel {
         request_id: RequestId,
@@ -630,6 +728,9 @@ pub enum SpeechWorkerCommand {
         output_mode: SpeechOutputMode,
         history_enabled: bool,
         fast_release_previews: bool,
+        /// Whether the local Whisper route is enabled and should occupy
+        /// memory. A cloud-only chain starts without loading it.
+        prepare_local_model: bool,
     },
     Begin {
         session_id: SessionId,
@@ -1149,8 +1250,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 18,
-            "every fingerprint below was written for protocol 18: if a shape \
+            PROTOCOL_VERSION, 19,
+            "every fingerprint below was written for protocol 19: if a shape \
              changes, this number changes with it"
         );
     }
@@ -1623,6 +1724,7 @@ mod complete_wire_schema_tests {
                 text: "text".to_owned(),
                 source_language: Some(TranslationLanguage::English),
                 target_language: Some(TranslationLanguage::Russian),
+                language_policy: TranslationLanguagePolicy::default(),
             },
             TranslationWorkerCommand::Cancel { request_id },
             TranslationWorkerCommand::SetTranslationProviders {
@@ -1713,6 +1815,7 @@ mod complete_wire_schema_tests {
                 output_mode: SpeechOutputMode::OriginalLanguage,
                 history_enabled: true,
                 fast_release_previews: true,
+                prepare_local_model: true,
             },
             SpeechWorkerCommand::Begin {
                 session_id,
@@ -2007,7 +2110,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x2d07_271a_1134_f3e7,
+            0x04a3_85ba_aea5_a072,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

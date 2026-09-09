@@ -29,8 +29,9 @@ use rust_protocol::{
     InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId, SpeechOutputMode,
     SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript,
     TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationHistoryEntry,
-    TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
-    TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
+    TranslationLanguage, TranslationLanguagePolicy, TranslationModelSummary,
+    TranslationProviderEntry, TranslationProviderStatus, TranslationResult, TranslationTier,
+    TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize};
 use settings_document::{SavedSettings, data_root, load_settings, save_settings};
@@ -367,6 +368,11 @@ struct AppState {
     writing_slate_surface: WritingSlateSurface,
     companion_home_position: Option<(i32, i32)>,
     input_ready: bool,
+    /// The speech process has completed its protocol handshake. This is
+    /// deliberately separate from `speech_ready`: a cloud-first route can
+    /// record as soon as the process is alive, without waiting for a local
+    /// Whisper model that route will never reach.
+    speech_worker_ready: bool,
     speech_ready: bool,
     indicator_session: Option<SessionId>,
     active_visualizer_style: Option<VisualizerStyle>,
@@ -375,11 +381,16 @@ struct AppState {
     pending_selection: Option<PendingSelection>,
     translation_models: Vec<TranslationModelSummary>,
     selected_translation_tier: Option<TranslationTier>,
+    /// The translation process has completed its protocol handshake. Cloud
+    /// text providers depend on this, not on whether a local model is warm.
+    translation_worker_ready: bool,
     translation_ready: bool,
     translation_enabled: bool,
     layout_enabled: bool,
     translation_keep_warm: bool,
     translation_blur_radius: u32,
+    translation_primary_language: TranslationLanguage,
+    translation_secondary_language: TranslationLanguage,
     text_action_mode: TextActionMode,
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
@@ -461,6 +472,7 @@ impl AppState {
             writing_slate_surface: saved_settings.writing_slate_surface,
             companion_home_position: saved_settings.companion_home_position,
             input_ready: false,
+            speech_worker_ready: false,
             speech_ready: false,
             indicator_session: None,
             active_visualizer_style: None,
@@ -469,11 +481,14 @@ impl AppState {
             pending_selection: None,
             translation_models: Vec::new(),
             selected_translation_tier: saved_settings.selected_translation_tier,
+            translation_worker_ready: false,
             translation_ready: false,
             translation_enabled: saved_settings.translation_enabled,
             layout_enabled: saved_settings.layout_enabled,
             translation_keep_warm: saved_settings.translation_keep_warm,
             translation_blur_radius: saved_settings.translation_blur_radius,
+            translation_primary_language: saved_settings.translation_primary_language,
+            translation_secondary_language: saved_settings.translation_secondary_language,
             text_action_mode: saved_settings.text_action_mode,
             translation_delivery: saved_settings.translation_delivery,
             pending_text_action: None,
@@ -489,6 +504,75 @@ impl AppState {
             translation_chain: saved_settings.translation_providers.clone(),
             pending_credentials: HashMap::new(),
             history_enabled: saved_settings.history_enabled,
+        }
+    }
+
+    fn first_transcription_provider(&self) -> Option<&TranscriptionProviderStatus> {
+        self.transcription_providers
+            .iter()
+            .filter(|status| status.enabled && status.available)
+            .min_by_key(|status| status.position)
+    }
+
+    fn local_speech_enabled(&self) -> bool {
+        self.transcription_chain.is_empty()
+            || self
+                .transcription_chain
+                .iter()
+                .any(|entry| entry.id == "local" && entry.enabled)
+    }
+
+    fn local_translation_enabled(&self) -> bool {
+        self.translation_chain.is_empty()
+            || self
+                .translation_chain
+                .iter()
+                .any(|entry| entry.id == "local" && entry.enabled)
+    }
+
+    /// Whether the configured transcription route can accept a recording now.
+    /// Cloud-only operation depends on the worker handshake; local operation
+    /// additionally depends on a loaded model.
+    fn speech_path_ready(&self) -> bool {
+        match self.first_transcription_provider() {
+            Some(status) if status.id == "local" => self.speech_ready,
+            Some(_) => self.speech_worker_ready,
+            None => self.transcription_providers.is_empty() && self.speech_ready,
+        }
+    }
+
+    fn speech_waits_for_local(&self) -> bool {
+        match self.first_transcription_provider() {
+            Some(status) => status.id == "local" && !self.speech_ready,
+            None => self.transcription_providers.is_empty() && !self.speech_ready,
+        }
+    }
+
+    /// Whether the first translation row that can actually run is ready now.
+    /// A cloud-only order must not be blocked on a local model it will never
+    /// reach; a local-first order still waits for that model to be warm.
+    fn translation_path_ready(&self) -> bool {
+        match self
+            .translation_providers
+            .iter()
+            .filter(|status| status.enabled && status.available)
+            .min_by_key(|status| status.position)
+        {
+            Some(status) if status.id == "local" => self.translation_ready,
+            Some(_) => self.translation_worker_ready,
+            None => self.translation_providers.is_empty() && self.translation_ready,
+        }
+    }
+
+    fn translation_waits_for_local(&self) -> bool {
+        match self
+            .translation_providers
+            .iter()
+            .filter(|status| status.enabled && status.available)
+            .min_by_key(|status| status.position)
+        {
+            Some(status) => status.id == "local" && !self.translation_ready,
+            None => self.translation_providers.is_empty() && !self.translation_ready,
         }
     }
 
@@ -775,6 +859,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         output_mode,
         history_enabled: saved_settings.history_enabled,
         fast_release_previews: saved_settings.fast_release_previews,
+        prepare_local_model: state.borrow().local_speech_enabled(),
     })?;
     // An empty list means the user has never arranged one; the worker keeps
     // its own default of the local engine first and every service switched off.
@@ -1372,8 +1457,12 @@ fn handle_worker_exit(
         let mut state = runtime.state.borrow_mut();
         match kind {
             WorkerKind::Input => state.input_ready = false,
-            WorkerKind::Speech => state.speech_ready = false,
+            WorkerKind::Speech => {
+                state.speech_worker_ready = false;
+                state.speech_ready = false;
+            }
             WorkerKind::Translation => {
+                state.translation_worker_ready = false;
                 state.translation_ready = false;
                 state.pending_translations.clear();
             }
@@ -1416,6 +1505,7 @@ fn handle_worker_exit(
                             output_mode: state.output_mode,
                             history_enabled: state.history_enabled,
                             fast_release_previews: state.fast_release_previews,
+                            prepare_local_model: state.local_speech_enabled(),
                         })
                 }
                 WorkerKind::Translation => {
@@ -1507,8 +1597,23 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 set_status_problem(settings, "Input worker is not ready.");
                 return;
             }
-            if !state.borrow().speech_ready {
-                set_indicator_status(settings, "Speech model is still being prepared.");
+            let (path_ready, worker_ready, waits_for_local) = {
+                let state = state.borrow();
+                (
+                    state.speech_path_ready(),
+                    state.speech_worker_ready,
+                    state.speech_waits_for_local(),
+                )
+            };
+            if !path_ready {
+                let message = if !worker_ready {
+                    "Speech service is still starting."
+                } else if waits_for_local {
+                    "Speech model is still being prepared."
+                } else {
+                    "No transcription provider is ready. Enable a local model or configure a speech service in Settings."
+                };
+                set_indicator_status(settings, message);
                 return;
             }
             if state.borrow().indicator_session.is_some() {
@@ -2127,12 +2232,13 @@ fn begin_selection_translation(
         delivery,
         request_started_unix_ms,
     } = request;
-    let (enabled, selected_tier, ready) = {
+    let (enabled, selected_tier, path_ready, waits_for_local) = {
         let state = state.borrow();
         (
             state.translation_enabled,
             state.selected_translation_tier,
-            state.translation_ready,
+            state.translation_path_ready(),
+            state.translation_waits_for_local(),
         )
     };
     if !enabled {
@@ -2147,21 +2253,21 @@ reason=translation_disabled"
         ));
         return;
     }
-    if selected_tier.is_none() {
+    if !(path_ready || selected_tier.is_some() && waits_for_local) {
         state
             .borrow_mut()
             .selection_release_gates
             .remove(&request_id);
         set_indicator_status(
             settings,
-            "Choose and download a translation model in Settings first.",
+            "Choose a local translation model or configure a text service in Settings first.",
         );
         rust_app_core::diagnostics::log_line(&format!(
             "translation_pipeline request={request_id} stage=rejected reason=no_selected_model"
         ));
         return;
     }
-    if !ready {
+    if !path_ready {
         state.borrow_mut().queued_selection_translation = Some(SelectionTranslationRequest {
             request_id,
             target,
@@ -2169,7 +2275,7 @@ reason=translation_disabled"
             delivery,
             request_started_unix_ms,
         });
-        set_indicator_status(settings, "The translation model is still loading.");
+        set_indicator_status(settings, "The local translation model is still loading.");
         rust_app_core::diagnostics::log_line(&format!(
             "translation_pipeline request={request_id} stage=queued reason=model_loading"
         ));
@@ -2199,6 +2305,10 @@ reason=translation_disabled"
             text,
             source_language: None,
             target_language: None,
+            language_policy: TranslationLanguagePolicy {
+                primary: state.borrow().translation_primary_language,
+                secondary: state.borrow().translation_secondary_language,
+            },
         })
     {
         let mut app = state.borrow_mut();
@@ -2209,7 +2319,7 @@ reason=translation_disabled"
             .clear_current_request(request_id);
         set_status_problem(settings, &format!("Could not start translation: {error}"));
     } else {
-        set_indicator_status(settings, "Translating locally…");
+        set_indicator_status(settings, "Translating…");
         rust_app_core::diagnostics::log_line(&format!(
             "translation_pipeline request={request_id} stage=dispatched"
         ));
@@ -2361,12 +2471,14 @@ fn fallback_and_initialize_speech(
     let initialization = {
         let mut state = state.borrow_mut();
         state.speech_backend_active = Some(backend);
+        state.speech_worker_ready = false;
         state.speech_ready = false;
         workers.speech.send(&SpeechWorkerCommand::Initialize {
             selected_model_id: state.selected_model_id.clone(),
             output_mode: state.output_mode,
             history_enabled: state.history_enabled,
             fast_release_previews: state.fast_release_previews,
+            prepare_local_model: state.local_speech_enabled(),
         })
     };
     sync_action_settings(settings, state);
@@ -2420,7 +2532,10 @@ fn handle_speech_event(
             models,
         } => {
             if protocol_version != PROTOCOL_VERSION {
-                state.borrow_mut().speech_ready = false;
+                let mut state = state.borrow_mut();
+                state.speech_worker_ready = false;
+                state.speech_ready = false;
+                drop(state);
                 set_runtime_status(settings, "Worker mismatch");
                 set_indicator_status(
                     settings,
@@ -2430,12 +2545,22 @@ fn handle_speech_event(
             }
             {
                 let mut state = state.borrow_mut();
+                state.speech_worker_ready = true;
                 state.selected_model_id = selected_model_id;
                 state.models = models;
             }
             sync_models(settings, state);
-            set_runtime_status(settings, "Preparing model");
-            set_indicator_status(settings, "Loading and warming the local speech engine…");
+            if state.borrow().local_speech_enabled() {
+                set_runtime_status(settings, "Preparing model");
+                set_indicator_status(settings, "Loading and warming the local speech engine…");
+            } else {
+                set_runtime_status(settings, "Cloud speech ready");
+                set_indicator_status(
+                    settings,
+                    "Cloud speech is ready. The local speech engine is disabled.",
+                );
+            }
+            sync_action_settings(settings, state);
             let _ = workers.speech.send(&SpeechWorkerCommand::GetHistory {
                 limit: HISTORY_LIMIT,
             });
@@ -2481,6 +2606,30 @@ fn handle_speech_event(
             ..
         } => {
             finish_download(state, &catalog_id);
+            if !state.borrow().local_speech_enabled() {
+                {
+                    let mut state = state.borrow_mut();
+                    if let Some(model) = state
+                        .models
+                        .iter_mut()
+                        .find(|model| model.catalog_id == catalog_id)
+                    {
+                        model.installed = true;
+                    }
+                    state.speech_ready = false;
+                }
+                sync_models(settings, state);
+                sync_action_settings(settings, state);
+                set_runtime_status(settings, "Cloud speech ready");
+                set_indicator_status(
+                    settings,
+                    "Cloud speech is ready. The local speech engine is disabled.",
+                );
+                rust_app_core::diagnostics::log_line(&format!(
+                    "speech_model state=stale_ready_ignored model={catalog_id}"
+                ));
+                return;
+            }
             let active = match workers.mark_speech_backend_ready(&backend) {
                 Ok(active) => active,
                 Err(error) => {
@@ -2551,11 +2700,13 @@ fn handle_speech_event(
                 for model in &mut state.models {
                     model.selected = model.catalog_id == catalog_id;
                 }
-                state.speech_ready = true;
+                state.speech_ready = state.local_speech_enabled();
             }
             let _ = save_settings(&state.borrow());
             sync_models(settings, state);
-            set_indicator_status(settings, "Speech model selected.");
+            if state.borrow().local_speech_enabled() {
+                set_indicator_status(settings, "Speech model selected.");
+            }
         }
         SpeechWorkerEvent::Listening { session_id: _ } => {}
         SpeechWorkerEvent::AudioLevel {
@@ -2730,6 +2881,7 @@ delivery={} target_pid={}",
                 state.transcription_providers = statuses;
             }
             sync_providers(settings, state);
+            sync_action_settings(settings, state);
         }
         SpeechWorkerEvent::TranscribedRemotely {
             session_id,
@@ -2928,6 +3080,7 @@ fn handle_translation_event(
             models,
         } => {
             if protocol_version != PROTOCOL_VERSION {
+                state.borrow_mut().translation_worker_ready = false;
                 set_indicator_status(
                     settings,
                     "Translation worker protocol mismatch. Reinstall the complete application.",
@@ -2941,6 +3094,7 @@ fn handle_translation_event(
             let recovered_selection = {
                 let mut state = state.borrow_mut();
                 let previous = state.selected_translation_tier;
+                state.translation_worker_ready = true;
                 state.translation_models = models;
                 state.selected_translation_tier = selected_tier;
                 state.translation_ready = false;
@@ -2955,10 +3109,17 @@ fn handle_translation_event(
             sync_translation_models(settings, state);
             sync_action_settings(settings, state);
             if selected_tier.is_none() {
-                set_translation_status(
-                    translator,
-                    "No model installed. Choose Fast or Quality in Settings.",
-                );
+                if state.borrow().local_translation_enabled() {
+                    set_translation_status(
+                        translator,
+                        "No model installed. Choose Fast or Quality in Settings.",
+                    );
+                } else {
+                    set_translation_status(
+                        translator,
+                        "Cloud translation is starting. The local model is disabled.",
+                    );
+                }
             }
             let _ = workers
                 .translation
@@ -3791,6 +3952,103 @@ mod selection_release_gate_tests {
             release_gate_after_input_release_failure(None, "still held".to_owned());
         assert!(gate.is_none());
         assert!(!had_deferred_replacement);
+    }
+}
+
+#[cfg(test)]
+mod provider_path_readiness_tests {
+    use rust_protocol::{SpeechOutputMode, TranscriptionProviderStatus, TranslationProviderStatus};
+
+    use super::{AppState, SavedSettings, SpeechBackend};
+
+    fn state() -> AppState {
+        AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        )
+    }
+
+    fn speech_status(id: &str, position: usize, available: bool) -> TranscriptionProviderStatus {
+        TranscriptionProviderStatus {
+            id: id.to_owned(),
+            position,
+            enabled: true,
+            available,
+            detail: String::new(),
+            has_credential: id != "local",
+            credential_hint: None,
+        }
+    }
+
+    fn translation_status(id: &str, position: usize, available: bool) -> TranslationProviderStatus {
+        TranslationProviderStatus {
+            id: id.to_owned(),
+            position,
+            enabled: true,
+            available,
+            detail: String::new(),
+            has_credential: id != "local",
+            credential_hint: None,
+        }
+    }
+
+    #[test]
+    fn cloud_only_speech_needs_the_worker_but_not_the_local_model() {
+        let mut state = state();
+        state.transcription_providers = vec![speech_status("groq", 0, true)];
+        assert!(!state.speech_path_ready());
+
+        state.speech_worker_ready = true;
+        assert!(state.speech_path_ready());
+        assert!(!state.speech_waits_for_local());
+    }
+
+    #[test]
+    fn local_first_speech_waits_for_the_local_model() {
+        let mut state = state();
+        state.speech_worker_ready = true;
+        state.transcription_providers = vec![
+            speech_status("local", 0, true),
+            speech_status("groq", 1, true),
+        ];
+        assert!(!state.speech_path_ready());
+        assert!(state.speech_waits_for_local());
+
+        state.speech_ready = true;
+        assert!(state.speech_path_ready());
+    }
+
+    #[test]
+    fn an_unavailable_cloud_only_route_does_not_fall_through_to_disabled_local() {
+        let mut state = state();
+        state.speech_worker_ready = true;
+        state.speech_ready = true;
+        state.transcription_providers = vec![speech_status("groq", 0, false)];
+        assert!(!state.speech_path_ready());
+        assert!(!state.speech_waits_for_local());
+    }
+
+    #[test]
+    fn cloud_only_translation_needs_the_worker_but_not_the_local_model() {
+        let mut state = state();
+        state.translation_providers = vec![translation_status("deepl", 0, true)];
+        assert!(!state.translation_path_ready());
+
+        state.translation_worker_ready = true;
+        assert!(state.translation_path_ready());
+        assert!(!state.translation_waits_for_local());
+    }
+
+    #[test]
+    fn an_unavailable_text_service_does_not_use_a_disabled_local_model() {
+        let mut state = state();
+        state.translation_worker_ready = true;
+        state.translation_ready = true;
+        state.translation_providers = vec![translation_status("deepl", 0, false)];
+        assert!(!state.translation_path_ready());
+        assert!(!state.translation_waits_for_local());
     }
 }
 

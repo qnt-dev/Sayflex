@@ -32,6 +32,9 @@ pub enum ModelCommand {
         catalog_id: String,
         announce_selection: bool,
     },
+    /// Cancels any install/load ahead of this command, then releases the
+    /// currently prepared model from the inference actor.
+    Deactivate,
     Shutdown,
 }
 
@@ -64,6 +67,11 @@ impl ModelActor {
     pub fn cancel(&self) {
         self.cancels.fetch_add(1, Ordering::AcqRel);
         self.cancellation.cancel();
+    }
+
+    pub fn deactivate(&self) {
+        self.cancel();
+        self.send(ModelCommand::Deactivate);
     }
 }
 
@@ -122,6 +130,7 @@ pub fn start(
                             }
                         }
                     }
+                    ModelCommand::Deactivate => inference.unload_model(),
                     ModelCommand::Shutdown => break,
                 }
             }

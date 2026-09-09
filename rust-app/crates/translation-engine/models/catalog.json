@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "packs": [
     {
       "id": "qwen35-4b-q4",
@@ -22,16 +22,7 @@
           "sha256": "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
         }
       ],
-      "directions": [
-        {
-          "source_language": "russian",
-          "target_language": "english"
-        },
-        {
-          "source_language": "english",
-          "target_language": "russian"
-        }
-      ]
+      "languages": ["english", "russian", "ukrainian", "spanish", "portuguese_brazil", "german", "french", "italian", "chinese_simplified", "chinese_traditional", "japanese", "korean", "hindi", "arabic"]
     },
     {
       "id": "qwen35-9b-q4",
@@ -54,16 +45,7 @@
           "sha256": "d784ce9eda1a5a7b51e8f705a9e6310844bf4f173654d115823c775fdea56d43"
         }
       ],
-      "directions": [
-        {
-          "source_language": "russian",
-          "target_language": "english"
-        },
-        {
-          "source_language": "english",
-          "target_language": "russian"
-        }
-      ]
+      "languages": ["english", "russian", "ukrainian", "spanish", "portuguese_brazil", "german", "french", "italian", "chinese_simplified", "chinese_traditional", "japanese", "korean", "hindi", "arabic"]
     }
   ]
 }

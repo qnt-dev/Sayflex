@@ -22,8 +22,8 @@ use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
 use rust_protocol::{
     PROTOCOL_VERSION, RequestId, TranslationHistoryEntry, TranslationLanguage,
-    TranslationModelSummary, TranslationResult, TranslationTier, TranslationWorkerCommand,
-    TranslationWorkerEvent,
+    TranslationLanguagePolicy, TranslationModelSummary, TranslationResult, TranslationTier,
+    TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use rust_translation_engine::{
     TranslationCancelled, TranslationCatalog, TranslationEngine, TranslationPackDescriptor,
@@ -90,6 +90,7 @@ impl TranslationCoordinator {
             text,
             source_language,
             target_language,
+            language_policy,
         } = asked;
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         *recover_lock(&self.current_request) = Some(request_id);
@@ -111,6 +112,7 @@ impl TranslationCoordinator {
                         text,
                         source_language,
                         target_language,
+                        language_policy,
                     },
                     || current_generation.load(Ordering::Acquire) == generation,
                 );
@@ -498,6 +500,7 @@ fn handle_command(
             text,
             source_language,
             target_language,
+            language_policy,
         } => {
             coordinator.submit(
                 state,
@@ -508,6 +511,7 @@ fn handle_command(
                     text,
                     source_language,
                     target_language,
+                    language_policy,
                 },
             )?;
         }
@@ -723,6 +727,7 @@ struct Asked {
     /// the desktop sends for every selection.
     source_language: Option<TranslationLanguage>,
     target_language: Option<TranslationLanguage>,
+    language_policy: TranslationLanguagePolicy,
 }
 
 /// The direction one request will actually be translated in.
@@ -735,9 +740,13 @@ fn resolve_direction(
     text: &str,
     source_language: Option<TranslationLanguage>,
     target_language: Option<TranslationLanguage>,
+    language_policy: TranslationLanguagePolicy,
 ) -> Result<(TranslationLanguage, TranslationLanguage)> {
+    if !language_policy.is_valid() {
+        anyhow::bail!("primary and secondary translation languages are the same");
+    }
     let source = source_language.unwrap_or_else(|| detect_language(text));
-    let target = target_language.unwrap_or_else(|| source.opposite());
+    let target = target_language.unwrap_or_else(|| language_policy.target_for(source));
     if source == target {
         anyhow::bail!("source and target languages are the same");
     }
@@ -756,6 +765,7 @@ fn translate_request(
         text,
         source_language,
         target_language,
+        language_policy,
     } = asked;
     let started = Instant::now();
     // One direction, worked out once, used by whichever path takes the request.
@@ -772,7 +782,8 @@ fn translate_request(
     if text.trim().is_empty() {
         anyhow::bail!("there is no text to translate");
     }
-    let (source, target) = resolve_direction(&text, source_language, target_language)?;
+    let (source, target) =
+        resolve_direction(&text, source_language, target_language, language_policy)?;
 
     // The list decides first, and the local engine is one row in it. When it is
     // the only row switched on — the default — this costs one comparison and
@@ -999,7 +1010,7 @@ mod selection_tests {
 
 #[cfg(test)]
 mod direction_tests {
-    use rust_protocol::TranslationLanguage;
+    use rust_protocol::{TranslationLanguage, TranslationLanguagePolicy};
 
     use super::resolve_direction;
 
@@ -1009,20 +1020,52 @@ mod direction_tests {
         // every selection the user translates, and a service was therefore
         // told to translate English into English.
         assert_eq!(
-            resolve_direction("The quick brown fox", None, None).unwrap(),
+            resolve_direction(
+                "The quick brown fox",
+                None,
+                None,
+                TranslationLanguagePolicy::default(),
+            )
+            .unwrap(),
             (TranslationLanguage::English, TranslationLanguage::Russian)
         );
         assert_eq!(
-            resolve_direction("Проверка связи", None, None).unwrap(),
+            resolve_direction(
+                "Проверка связи",
+                None,
+                None,
+                TranslationLanguagePolicy::default(),
+            )
+            .unwrap(),
             (TranslationLanguage::Russian, TranslationLanguage::English)
         );
     }
 
     #[test]
-    fn a_named_source_still_decides_its_own_opposite() {
+    fn a_named_source_uses_the_language_policy() {
         assert_eq!(
-            resolve_direction("anything", Some(TranslationLanguage::Russian), None).unwrap(),
+            resolve_direction(
+                "anything",
+                Some(TranslationLanguage::Russian),
+                None,
+                TranslationLanguagePolicy::default(),
+            )
+            .unwrap(),
             (TranslationLanguage::Russian, TranslationLanguage::English)
+        );
+    }
+
+    #[test]
+    fn ukrainian_is_in_the_current_policy_not_a_future_fallback() {
+        assert_eq!(
+            resolve_direction(
+                "Українська мова має власну історію",
+                None,
+                None,
+                TranslationLanguagePolicy::default(),
+            )
+            .unwrap(),
+            (TranslationLanguage::Ukrainian, TranslationLanguage::English)
         );
     }
 
@@ -1041,7 +1084,8 @@ mod direction_tests {
             ("The quick brown fox", "EN", "RU"),
             ("Проверка связи, это тестовая диктовка", "RU", "EN-GB"),
         ] {
-            let (from, to) = resolve_direction(text, None, None).unwrap();
+            let (from, to) =
+                resolve_direction(text, None, None, TranslationLanguagePolicy::default()).unwrap();
             let plan = plan_request(&deepl, "key", text, Some(from.code()), to.code())
                 .expect("the plan is buildable");
 
@@ -1096,7 +1140,8 @@ mod direction_tests {
         ] {
             // Exactly what `TranslationWorkerCommand::Translate` carries for a
             // selection: no languages at all.
-            let (source, target) = resolve_direction(text, None, None).unwrap();
+            let (source, target) =
+                resolve_direction(text, None, None, TranslationLanguagePolicy::default()).unwrap();
 
             let mut router = Router::new(Chain::new(vec![
                 ProviderEntry::new(ProviderId::new(ProviderId::DEEPL)),
@@ -1137,6 +1182,7 @@ mod direction_tests {
                 "anything",
                 Some(TranslationLanguage::English),
                 Some(TranslationLanguage::English),
+                TranslationLanguagePolicy::default(),
             )
             .is_err(),
             "translating a language into itself spends an allowance for nothing"

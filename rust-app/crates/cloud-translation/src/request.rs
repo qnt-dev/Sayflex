@@ -88,8 +88,19 @@ pub fn plan_request(
     }
     match entry.id.as_str() {
         ProviderId::DEEPL => Ok(plan_deepl(secret, text, source, target)),
-        ProviderId::AZURE => plan_azure(entry, secret, text, source, target),
-        ProviderId::GOOGLE => Ok(plan_google(secret, text, source, target)),
+        ProviderId::AZURE => plan_azure(
+            entry,
+            secret,
+            text,
+            source.map(azure_language),
+            azure_language(target),
+        ),
+        ProviderId::GOOGLE => Ok(plan_google(
+            secret,
+            text,
+            source.map(google_language),
+            google_language(target),
+        )),
         other => Err(PlanError::Unsupported(other.to_owned())),
     }
 }
@@ -134,7 +145,9 @@ fn plan_deepl(secret: &str, text: &str, source: Option<&str>, target: &str) -> R
 fn deepl_target(code: &str) -> String {
     match code.to_ascii_lowercase().as_str() {
         "en" => "EN-GB".to_owned(),
-        "pt" => "PT-PT".to_owned(),
+        "pt" | "pt-br" => "PT-BR".to_owned(),
+        "zh-hans" => "ZH-HANS".to_owned(),
+        "zh-hant" => "ZH-HANT".to_owned(),
         other => other.to_ascii_uppercase(),
     }
 }
@@ -145,7 +158,24 @@ fn deepl_target(code: &str) -> String {
 /// language DeepL knows, and the request is refused. One mapping was doing both
 /// jobs, so every English selection was announced as EN-GB and turned down.
 fn deepl_source(code: &str) -> String {
-    code.to_ascii_uppercase()
+    match code.to_ascii_lowercase().as_str() {
+        "pt" | "pt-br" => "PT".to_owned(),
+        "zh-hans" | "zh-hant" => "ZH".to_owned(),
+        other => other.to_ascii_uppercase(),
+    }
+}
+
+fn azure_language(code: &str) -> &str {
+    code
+}
+
+fn google_language(code: &str) -> &str {
+    match code {
+        "pt-BR" => "pt",
+        "zh-Hans" => "zh-CN",
+        "zh-Hant" => "zh-TW",
+        other => other,
+    }
 }
 
 /// Azure carries the key and the region in headers, and the languages in the
@@ -530,5 +560,38 @@ mod tests {
             .expect_err("guessing at an unknown service's shape would send the key somewhere odd");
 
         assert!(matches!(error, PlanError::Unsupported(_)));
+    }
+
+    #[test]
+    fn multilingual_codes_are_mapped_for_each_provider() {
+        let plan = plan_request(
+            &entry(ProviderId::DEEPL),
+            "key",
+            "text",
+            Some("zh-Hant"),
+            "pt-BR",
+        )
+        .unwrap();
+        assert!(plan.body.contains("\"source_lang\":\"ZH\""));
+        assert!(plan.body.contains("\"target_lang\":\"PT-BR\""));
+
+        let plan = plan_request(
+            &entry(ProviderId::GOOGLE),
+            "key",
+            "text",
+            Some("zh-Hant"),
+            "zh-Hans",
+        )
+        .unwrap();
+        assert!(plan.body.contains("\"source\":\"zh-TW\""));
+        assert!(plan.body.contains("\"target\":\"zh-CN\""));
+    }
+
+    #[test]
+    fn newly_supported_deepl_languages_are_not_blocked_by_a_stale_client_list() {
+        let plan =
+            plan_request(&entry(ProviderId::DEEPL), "key", "परीक्षण", Some("hi"), "en").unwrap();
+        assert!(plan.body.contains("\"source_lang\":\"HI\""));
+        assert!(plan.body.contains("\"target_lang\":\"EN-GB\""));
     }
 }

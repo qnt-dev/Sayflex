@@ -54,6 +54,9 @@ enum InferenceCommand {
         audio_finalize_ms: u64,
         release_started: Instant,
     },
+    /// Releases the local model and its backend allocations. Cloud-only mode
+    /// must not keep VRAM or RAM occupied by an engine it cannot route to.
+    Unload,
     Shutdown,
 }
 
@@ -109,6 +112,13 @@ impl InferenceHandle {
             selected,
         }) {
             eprintln!("could not queue speech model load: {error}");
+        }
+    }
+
+    pub fn unload_model(&self) {
+        self.reset_segmented_session();
+        if let Err(error) = self.commands.send(InferenceCommand::Unload) {
+            eprintln!("could not queue speech model unload: {error}");
         }
     }
 
@@ -382,6 +392,10 @@ fn inference_loop(
                         });
                     }
                 }
+            }
+            InferenceCommand::Unload => {
+                stable_prefix = None;
+                engine = WhisperEngine::new();
             }
             InferenceCommand::Shutdown => break,
         }

@@ -14,7 +14,7 @@ use reqwest::{
     blocking::Client,
     header::{AUTHORIZATION, CONTENT_TYPE},
 };
-use rust_protocol::{TranslationLanguage, TranslationTier};
+use rust_protocol::{TranslationLanguage, TranslationLanguagePolicy, TranslationTier};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -138,7 +138,8 @@ impl TranslationEngine {
             bail!("text exceeds the {MAX_INPUT_CHARACTERS}-character local translation limit");
         }
         let source = source_language.unwrap_or_else(|| detect_language(text));
-        let target = target_language.unwrap_or_else(|| source.opposite());
+        let target = target_language
+            .unwrap_or_else(|| TranslationLanguagePolicy::default().target_for(source));
         if source == target {
             bail!("source and target languages are the same");
         }
@@ -228,19 +229,63 @@ impl TranslationEngine {
 
 #[must_use]
 pub fn detect_language(text: &str) -> TranslationLanguage {
-    let mut cyrillic = 0_usize;
-    let mut latin = 0_usize;
-    for character in text.chars() {
-        if ('\u{0400}'..='\u{052f}').contains(&character) {
-            cyrillic += 1;
-        } else if character.is_ascii_alphabetic() {
-            latin += 1;
-        }
+    use std::sync::OnceLock;
+    use whatlang::{Detector, Lang};
+
+    static DETECTOR: OnceLock<Detector> = OnceLock::new();
+    let detector = DETECTOR.get_or_init(|| {
+        Detector::with_allowlist(vec![
+            Lang::Eng,
+            Lang::Rus,
+            Lang::Ukr,
+            Lang::Spa,
+            Lang::Por,
+            Lang::Deu,
+            Lang::Fra,
+            Lang::Ita,
+            Lang::Cmn,
+            Lang::Jpn,
+            Lang::Kor,
+            Lang::Hin,
+            Lang::Ara,
+        ])
+    });
+    let one_word = text.split_whitespace().nth(1).is_none();
+    let detected = detector.detect(text);
+    // A single shared-script word simply does not carry enough evidence for
+    // reliable multilingual identification. Preserve the established RU/EN
+    // word-lookup behaviour when confidence is weak; phrases and distinctive
+    // scripts use the detector. Shared-script one-word input remains
+    // inherently ambiguous without an explicit source-language control.
+    if one_word
+        && detected
+            .as_ref()
+            .is_none_or(|info| !info.is_reliable() && info.confidence() < 0.5)
+    {
+        return if text
+            .chars()
+            .any(|character| ('\u{0400}'..='\u{052f}').contains(&character))
+        {
+            TranslationLanguage::Russian
+        } else {
+            TranslationLanguage::English
+        };
     }
-    if cyrillic > 0 && cyrillic.saturating_mul(2) >= latin {
-        TranslationLanguage::Russian
-    } else {
-        TranslationLanguage::English
+    match detected.map(|info| info.lang()) {
+        Some(Lang::Eng) => TranslationLanguage::English,
+        Some(Lang::Rus) => TranslationLanguage::Russian,
+        Some(Lang::Ukr) => TranslationLanguage::Ukrainian,
+        Some(Lang::Spa) => TranslationLanguage::Spanish,
+        Some(Lang::Por) => TranslationLanguage::PortugueseBrazil,
+        Some(Lang::Deu) => TranslationLanguage::German,
+        Some(Lang::Fra) => TranslationLanguage::French,
+        Some(Lang::Ita) => TranslationLanguage::Italian,
+        Some(Lang::Cmn) => TranslationLanguage::ChineseSimplified,
+        Some(Lang::Jpn) => TranslationLanguage::Japanese,
+        Some(Lang::Kor) => TranslationLanguage::Korean,
+        Some(Lang::Hin) => TranslationLanguage::Hindi,
+        Some(Lang::Ara) => TranslationLanguage::Arabic,
+        _ => TranslationLanguage::English,
     }
 }
 
@@ -778,10 +823,7 @@ fn configure_hidden_process(command: &mut Command) {
 fn configure_hidden_process(_command: &mut Command) {}
 
 fn language_name(language: TranslationLanguage) -> &'static str {
-    match language {
-        TranslationLanguage::English => "English",
-        TranslationLanguage::Russian => "Russian",
-    }
+    language.display_name()
 }
 
 fn translation_instruction() -> String {
@@ -1081,6 +1123,77 @@ mod tests {
             detect_language("Версия Rust 1.88"),
             TranslationLanguage::Russian
         );
+    }
+
+    #[test]
+    fn language_detection_covers_every_offered_language_family() {
+        for (text, expected) in [
+            (
+                "This is a complete English sentence.",
+                TranslationLanguage::English,
+            ),
+            (
+                "Это полноценное русское предложение.",
+                TranslationLanguage::Russian,
+            ),
+            (
+                "Це повне українське речення.",
+                TranslationLanguage::Ukrainian,
+            ),
+            (
+                "Esta es una frase completa en español.",
+                TranslationLanguage::Spanish,
+            ),
+            (
+                "Esta é uma frase completa em português.",
+                TranslationLanguage::PortugueseBrazil,
+            ),
+            (
+                "Dies ist ein vollständiger deutscher Satz.",
+                TranslationLanguage::German,
+            ),
+            (
+                "Ceci est une phrase française complète.",
+                TranslationLanguage::French,
+            ),
+            (
+                "Questa è una frase italiana completa.",
+                TranslationLanguage::Italian,
+            ),
+            (
+                "这是一个完整的中文句子。",
+                TranslationLanguage::ChineseSimplified,
+            ),
+            (
+                "これは完全な日本語の文です。",
+                TranslationLanguage::Japanese,
+            ),
+            (
+                "이것은 완전한 한국어 문장입니다.",
+                TranslationLanguage::Korean,
+            ),
+            ("यह हिन्दी में एक पूर्ण वाक्य है।", TranslationLanguage::Hindi),
+            ("هذه جملة عربية كاملة.", TranslationLanguage::Arabic),
+        ] {
+            assert_eq!(detect_language(text), expected, "wrong language for {text}");
+        }
+    }
+
+    #[test]
+    fn script_distinct_single_words_are_detected_without_sentence_context() {
+        for (text, expected) in [
+            ("привет", TranslationLanguage::Russian),
+            ("привіт", TranslationLanguage::Ukrainian),
+            ("こんにちは", TranslationLanguage::Japanese),
+            ("안녕하세요", TranslationLanguage::Korean),
+        ] {
+            assert_eq!(detect_language(text), expected, "wrong language for {text}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_single_words_preserve_the_established_english_lookup_direction() {
+        assert_eq!(detect_language("hello"), TranslationLanguage::English);
     }
 
     #[test]

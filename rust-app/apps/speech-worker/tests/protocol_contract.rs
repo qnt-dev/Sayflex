@@ -81,7 +81,8 @@ fn the_worker_announces_the_protocol_version_and_a_model_it_knows() {
             "selected_model_id": "a-model-that-does-not-exist",
             "output_mode": "original_language",
             "history_enabled": false,
-            "fast_release_previews": true
+            "fast_release_previews": true,
+            "prepare_local_model": false
         }
     }));
     let event = worker.next_event();
@@ -125,7 +126,8 @@ fn an_unreadable_command_is_answered_rather_than_ignored() {
             "selected_model_id": "whisper-large-v3-turbo",
             "output_mode": "original_language",
             "history_enabled": false,
-            "fast_release_previews": true
+            "fast_release_previews": true,
+            "prepare_local_model": false
         }
     }));
     assert_eq!(worker.next_event()["type"], "ready");

@@ -512,6 +512,14 @@ pub(crate) fn apply_provider_chain(
     workers: &Workers,
 ) {
     let providers = state.borrow().transcription_chain.clone();
+    let local_enabled = providers
+        .iter()
+        .any(|provider| provider.id == "local" && provider.enabled);
+    if !local_enabled {
+        // The worker releases the model for this same configuration change;
+        // do not retain a stale "local ready" fact in the desktop.
+        state.borrow_mut().speech_ready = false;
+    }
     if let Err(error) = workers
         .speech
         .send(&SpeechWorkerCommand::SetTranscriptionProviders { providers })

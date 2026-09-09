@@ -114,6 +114,7 @@ export component ProvidersPage inherits VerticalLayout {
     in-out property <string> problem;
     callback toggle-provider(int);
     callback move-provider(int, int);
+    callback use-provider-only(int);
     /// The whole configuration of one provider, sent together.
     callback save-provider(string, string, string);
     /// Deleting a stored key stays its own command, asked for in place.
@@ -124,7 +125,7 @@ export component ProvidersPage inherits VerticalLayout {
     ListHead {
         index: "05 / 08";
         title: "Provider order";
-        lede: "Two lists, kept apart. Top first in each: the next is tried when the one above cannot take the work — out of quota, rate limited, unreachable, key refused, or it turned the request down. This computer ends the walk.";
+        lede: "Two separate lists. The first enabled row is used; failures move down. Choose Only for cloud-only use, or move a cloud service above This computer to keep local fallback.";
         claim: root.claim;
         claim-signal: root.audio-leaves-device;
     }
@@ -187,6 +188,13 @@ export component ProvidersPage inherits VerticalLayout {
                         on-label: "On";
                         off-label: "Off";
                         toggled(next) => { root.toggle-provider(index); }
+                    }
+
+                    RowAction {
+                        label: "Only";
+                        enabled: !row.needs-key || row.key-hint != "";
+                        reason: "Add a key before making this the only provider";
+                        clicked => { root.use-provider-only(index); }
                     }
 
                     if row.needs-key : RowAction {

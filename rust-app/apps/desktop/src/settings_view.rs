@@ -9,7 +9,8 @@ use std::{cell::RefCell, rc::Rc, time::Instant};
 use rust_app_core::{LayoutDirection, build_layout_candidates};
 use rust_protocol::{
     CompanionRendererCommand, HistoryEntry, InputHostCommand, RequestId, SpeechOutputMode,
-    SpeechWorkerCommand, TargetSnapshot, TranslationWorkerCommand,
+    SpeechWorkerCommand, TargetSnapshot, TranslationLanguage, TranslationLanguagePolicy,
+    TranslationWorkerCommand,
 };
 use slint::{
     ComponentHandle, Model, ModelRc, PhysicalPosition, SharedString, VecModel,
@@ -188,18 +189,27 @@ pub(crate) fn sync_action_settings(
             .is_some_and(|model| !model.supports_speech_translation),
     );
     settings.set_dictation_subtitle(
-        if state.speech_ready {
-            "Local speech · ready"
+        if state.speech_path_ready() {
+            match state.first_transcription_provider() {
+                Some(provider) if provider.id != "local" => {
+                    format!("{} · ready", row_display_name(Kind::Speech, &provider.id))
+                }
+                _ => "Local speech · ready".to_owned(),
+            }
+        } else if state.speech_waits_for_local() {
+            "Local speech · starting".to_owned()
         } else {
-            "Local speech · starting"
+            "Speech service · unavailable".to_owned()
         }
         .into(),
     );
     settings.set_dictation_readout(
-        if state.speech_ready {
+        if state.speech_path_ready() {
             "Ready"
-        } else {
+        } else if state.speech_waits_for_local() {
             "Warming up"
+        } else {
+            "Not ready"
         }
         .into(),
     );
@@ -239,7 +249,17 @@ pub(crate) fn sync_action_settings(
         .into(),
     );
     settings.set_translation_blur_radius(state.translation_blur_radius as i32);
-    settings.set_translation_ready(state.translation_ready);
+    settings.set_translation_ready(state.translation_path_ready());
+    settings
+        .set_translation_primary_language(state.translation_primary_language.display_name().into());
+    settings
+        .set_translation_primary_language_value(state.translation_primary_language.code().into());
+    settings.set_translation_secondary_language(
+        state.translation_secondary_language.display_name().into(),
+    );
+    settings.set_translation_secondary_language_value(
+        state.translation_secondary_language.code().into(),
+    );
 
     // ── Visuals ──
     settings.set_selected_visualizer(state.visualizer_style.index());
@@ -465,17 +485,24 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
     settings.set_provider_claim(privacy_claim(&leaving).into());
 
     let installed_speech = state.models.iter().any(|model| model.installed);
-    let (statement, sub) = if !installed_speech {
+    let speech_path_ready = state.speech_path_ready();
+    let speech_waits_for_local = state.speech_waits_for_local();
+    let (statement, sub) = if speech_path_ready {
+        (
+            "Ready to dictate",
+            "Hold Ctrl + Alt + Space anywhere in Windows.",
+        )
+    } else if speech_waits_for_local && !installed_speech {
         (
             "No speech model yet",
             "Install one on the Models page and dictation starts working.",
         )
-    } else if !state.speech_ready {
+    } else if speech_waits_for_local {
         ("Warming up", "The engine is loading the model you chose.")
     } else {
         (
-            "Ready to dictate",
-            "Hold Ctrl + Alt + Space anywhere in Windows.",
+            "No speech route",
+            "Enable a ready provider on the Providers page.",
         )
     };
     settings.set_overview_statement(statement.into());
@@ -483,7 +510,7 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
 
     // The note carries the one thing that wants attention, and its button goes
     // where the thing can be dealt with.
-    if !installed_speech {
+    if speech_waits_for_local && !installed_speech {
         settings.set_overview_note(
             "No speech model is installed, so nothing can be dictated yet.".into(),
         );
@@ -494,8 +521,8 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
             .set_overview_note("A model is downloading. It resumes if it is interrupted.".into());
         settings.set_overview_note_action("Details".into());
         settings.set_overview_note_signal(true);
-    } else if state.translation_enabled && !state.translation_ready {
-        settings.set_overview_note("Translation is on, but its engine is not warm yet.".into());
+    } else if state.translation_enabled && !state.translation_path_ready() {
+        settings.set_overview_note("Translation is on, but no text route is ready yet.".into());
         settings.set_overview_note_action("Details".into());
         settings.set_overview_note_signal(false);
     } else {
@@ -533,8 +560,8 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
             label: "TRANSLATION".into(),
             value: if !state.translation_enabled {
                 "off".into()
-            } else if state.translation_ready {
-                "warm".into()
+            } else if state.translation_path_ready() {
+                "ready".into()
             } else {
                 "cold".into()
             },
@@ -917,12 +944,14 @@ pub(crate) fn wire_settings(
                         let mut state = state.borrow_mut();
                         state.speech_backend_preference = preference;
                         state.speech_backend_active = Some(active);
+                        state.speech_worker_ready = false;
                         state.speech_ready = false;
                         workers.speech.send(&SpeechWorkerCommand::Initialize {
                             selected_model_id: state.selected_model_id.clone(),
                             output_mode: state.output_mode,
                             history_enabled: state.history_enabled,
                             fast_release_previews: state.fast_release_previews,
+                            prepare_local_model: state.local_speech_enabled(),
                         })
                     };
                     let _ = save_settings(&state.borrow());
@@ -1210,6 +1239,65 @@ pub(crate) fn wire_settings(
                 kind
             };
             match toggled {
+                Kind::Speech => apply_provider_chain(&settings_weak, &state, &workers),
+                Kind::Text => apply_translation_chain(&settings_weak, &state, &workers),
+            }
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_use_provider_only(move |index| {
+            let selected = (|| {
+                let mut state = state.borrow_mut();
+                let (kind, position) = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| locate(&state, index))?;
+                let configured = match kind {
+                    Kind::Speech => state
+                        .transcription_chain
+                        .get(position)
+                        .is_some_and(|entry| {
+                            entry.id == "local"
+                                || state
+                                    .transcription_providers
+                                    .iter()
+                                    .any(|status| status.id == entry.id && status.has_credential)
+                        }),
+                    Kind::Text => state.translation_chain.get(position).is_some_and(|entry| {
+                        entry.id == "local"
+                            || state
+                                .translation_providers
+                                .iter()
+                                .any(|status| status.id == entry.id && status.has_credential)
+                    }),
+                };
+                if !configured {
+                    return None;
+                }
+                match kind {
+                    Kind::Speech => {
+                        for (candidate, entry) in state.transcription_chain.iter_mut().enumerate() {
+                            entry.enabled = candidate == position;
+                        }
+                    }
+                    Kind::Text => {
+                        for (candidate, entry) in state.translation_chain.iter_mut().enumerate() {
+                            entry.enabled = candidate == position;
+                        }
+                    }
+                }
+                Some(kind)
+            })();
+            let Some(selected) = selected else {
+                set_status_problem(
+                    &settings_weak,
+                    "Add and save this provider's key before making it the only route.",
+                );
+                return;
+            };
+            match selected {
                 Kind::Speech => apply_provider_chain(&settings_weak, &state, &workers),
                 Kind::Text => apply_translation_chain(&settings_weak, &state, &workers),
             }
@@ -1572,6 +1660,44 @@ pub(crate) fn wire_settings(
         });
     }
     {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        settings.on_set_translation_primary_language(move |value| {
+            let Some(language) = TranslationLanguage::from_code(value.as_str()) else {
+                return;
+            };
+            {
+                let mut state = state.borrow_mut();
+                let previous = state.translation_primary_language;
+                state.translation_primary_language = language;
+                if state.translation_secondary_language == language {
+                    state.translation_secondary_language = previous;
+                }
+            }
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        settings.on_set_translation_secondary_language(move |value| {
+            let Some(language) = TranslationLanguage::from_code(value.as_str()) else {
+                return;
+            };
+            {
+                let mut state = state.borrow_mut();
+                let previous = state.translation_secondary_language;
+                state.translation_secondary_language = language;
+                if state.translation_primary_language == language {
+                    state.translation_primary_language = previous;
+                }
+            }
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+        });
+    }
+    {
         let workers = Rc::clone(workers);
         settings.on_quit_requested(move || {
             rust_app_core::diagnostics::log_line(
@@ -1804,18 +1930,22 @@ pub(crate) fn wire_translator(
                 translator.set_status_text("Enter text to translate.".into());
                 return;
             }
-            let (selected_tier, ready) = {
+            let (selected_tier, path_ready, waits_for_local) = {
                 let state = state.borrow();
-                (state.selected_translation_tier, state.translation_ready)
+                (
+                    state.selected_translation_tier,
+                    state.translation_path_ready(),
+                    state.translation_waits_for_local(),
+                )
             };
-            if selected_tier.is_none() {
+            if !(path_ready || selected_tier.is_some() && waits_for_local) {
                 translator.set_status_text(
-                    "No model installed. Choose Fast or Quality in Settings.".into(),
+                    "No translation provider is ready. Choose a local model or configure a service in Settings.".into(),
                 );
                 return;
             }
-            if !ready {
-                translator.set_status_text("Translation model is still loading.".into());
+            if !path_ready {
+                translator.set_status_text("The local translation model is still loading.".into());
                 return;
             }
             let request_id = RequestId::new();
@@ -1831,7 +1961,7 @@ pub(crate) fn wire_translator(
             );
             translator.set_processing(true);
             translator.set_result_text("".into());
-            translator.set_status_text("Translating locally…".into());
+            translator.set_status_text("Translating…".into());
             if let Err(error) = workers
                 .translation
                 .send(&TranslationWorkerCommand::Translate {
@@ -1839,6 +1969,10 @@ pub(crate) fn wire_translator(
                     text,
                     source_language: None,
                     target_language: None,
+                    language_policy: TranslationLanguagePolicy {
+                        primary: state.borrow().translation_primary_language,
+                        secondary: state.borrow().translation_secondary_language,
+                    },
                 })
             {
                 state.borrow_mut().pending_translations.remove(&request_id);

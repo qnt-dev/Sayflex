@@ -132,6 +132,10 @@ export component SettingsWindow inherits Window {
     in property <string> text-action-mode-label: "Decide from the text";
     in-out property <bool> translation-warm: true;
     in-out property <int> translation-blur-radius: 3;
+    in-out property <string> translation-primary-language: "English";
+    in-out property <string> translation-primary-language-value: "en";
+    in-out property <string> translation-secondary-language: "Russian";
+    in-out property <string> translation-secondary-language-value: "ru";
     in property <string> translation-note: "";
     in property <string> translation-note-action: "";
     in property <bool> translation-note-signal: false;
@@ -197,10 +201,13 @@ export component SettingsWindow inherits Window {
     callback set-text-action-mode(string);
     callback set-translation-warm(bool);
     callback set-translation-blur(int);
+    callback set-translation-primary-language(string);
+    callback set-translation-secondary-language(string);
     callback open-translator();
     callback set-hotkey-enabled(int, bool);
     callback move-provider(int, int);
     callback toggle-provider(int);
+    callback use-provider-only(int);
     callback save-provider(string, string, string);
     callback forget-provider-key(string);
     /// What the last save was refused for, and which row asked. Written by the
@@ -371,6 +378,10 @@ export component SettingsWindow inherits Window {
                     text-action-value: root.text-action-mode;
                     warm: root.translation-warm;
                     blur-radius: root.translation-blur-radius;
+                    primary-language: root.translation-primary-language;
+                    primary-language-value: root.translation-primary-language-value;
+                    secondary-language: root.translation-secondary-language;
+                    secondary-language-value: root.translation-secondary-language-value;
                     note-text: root.translation-note;
                     note-action: root.translation-note-action;
                     note-signal: root.translation-note-signal;
@@ -379,6 +390,8 @@ export component SettingsWindow inherits Window {
                     set-text-action(value) => { root.set-text-action-mode(value); }
                     set-warm(next) => { root.set-translation-warm(next); }
                     set-blur(value) => { root.set-translation-blur(value); }
+                    set-primary-language(value) => { root.set-translation-primary-language(value); }
+                    set-secondary-language(value) => { root.set-translation-secondary-language(value); }
                     open-translator => { root.open-translator(); }
                     note-acted => { root.active-page = 3; }
                 }
@@ -400,6 +413,7 @@ export component SettingsWindow inherits Window {
                     audio-leaves-device: root.audio-leaves-device || root.text-leaves-device;
                     claim: root.provider-claim;
                     toggle-provider(index) => { root.toggle-provider(index); }
+                    use-provider-only(index) => { root.use-provider-only(index); }
                     move-provider(from, to) => { root.move-provider(from, to); }
                     problem <=> root.provider-problem;
                     problem-for <=> root.provider-problem-for;

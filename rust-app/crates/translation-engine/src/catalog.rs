@@ -6,12 +6,6 @@ use thiserror::Error;
 const BUILT_IN_CATALOG: &str = include_str!("../models/catalog.json");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TranslationDirectionDescriptor {
-    pub source_language: TranslationLanguage,
-    pub target_language: TranslationLanguage,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranslationBackendDescriptor {
     LlamaCpp {
@@ -56,15 +50,15 @@ pub struct TranslationPackDescriptor {
     pub recommended_locales: Vec<String>,
     pub backend: TranslationBackendDescriptor,
     pub artifacts: Vec<BundleArtifact>,
-    pub directions: Vec<TranslationDirectionDescriptor>,
+    /// Languages the multilingual model may use in either direction.
+    /// Listing capabilities once avoids an error-prone N x N direction table.
+    pub languages: Vec<TranslationLanguage>,
 }
 
 impl TranslationPackDescriptor {
     #[must_use]
     pub fn supports(&self, source: TranslationLanguage, target: TranslationLanguage) -> bool {
-        self.directions.iter().any(|direction| {
-            direction.source_language == source && direction.target_language == target
-        })
+        source != target && self.languages.contains(&source) && self.languages.contains(&target)
     }
 
     #[must_use]
@@ -82,21 +76,12 @@ impl TranslationPackDescriptor {
         selected: bool,
         locale: &str,
     ) -> TranslationModelSummary {
-        let mut languages = Vec::new();
-        for direction in &self.directions {
-            if !languages.contains(&direction.source_language) {
-                languages.push(direction.source_language);
-            }
-            if !languages.contains(&direction.target_language) {
-                languages.push(direction.target_language);
-            }
-        }
         TranslationModelSummary {
             catalog_id: self.id.clone(),
             display_name: self.display_name.clone(),
             description: self.description.clone(),
             tier: self.tier,
-            languages,
+            languages: self.languages.clone(),
             size_bytes: self.as_bundle().total_bytes(),
             installed,
             selected,
@@ -126,7 +111,7 @@ impl TranslationCatalog {
     }
 
     pub fn validate(&self) -> Result<(), TranslationCatalogError> {
-        if self.schema_version != 2 {
+        if self.schema_version != 3 {
             return Err(TranslationCatalogError::UnsupportedSchema(
                 self.schema_version,
             ));
@@ -137,7 +122,7 @@ impl TranslationCatalog {
         for pack in &self.packs {
             if pack.id.trim().is_empty()
                 || pack.display_name.trim().is_empty()
-                || pack.directions.is_empty()
+                || pack.languages.len() < 2
                 || pack.backend.model_file().trim().is_empty()
                 || pack.backend.context_size() < 1_024
                 || pack.backend.max_output_tokens() == 0
@@ -166,8 +151,14 @@ impl TranslationCatalog {
             {
                 return Err(TranslationCatalogError::InvalidPack(pack.id.clone()));
             }
-            for direction in &pack.directions {
-                if direction.source_language == direction.target_language {
+            for language in &pack.languages {
+                if pack
+                    .languages
+                    .iter()
+                    .filter(|candidate| *candidate == language)
+                    .count()
+                    != 1
+                {
                     return Err(TranslationCatalogError::InvalidPack(pack.id.clone()));
                 }
             }
@@ -200,13 +191,16 @@ mod tests {
     use super::TranslationCatalog;
 
     #[test]
-    fn built_in_catalog_has_fast_and_quality_bidirectional_packs() {
+    fn built_in_catalog_has_fast_and_quality_multilingual_packs() {
         let catalog = TranslationCatalog::load().unwrap();
         assert_eq!(catalog.packs.len(), 2);
         for tier in [TranslationTier::Tiny, TranslationTier::Teacher] {
             let pack = catalog.by_tier(tier).unwrap();
             assert!(pack.supports(TranslationLanguage::Russian, TranslationLanguage::English));
             assert!(pack.supports(TranslationLanguage::English, TranslationLanguage::Russian));
+            assert!(pack.supports(TranslationLanguage::Ukrainian, TranslationLanguage::English));
+            assert!(pack.supports(TranslationLanguage::English, TranslationLanguage::Japanese));
+            assert_eq!(pack.languages, TranslationLanguage::ALL);
             assert!(pack.as_bundle().total_bytes() > 2_000_000_000);
         }
     }

@@ -8,7 +8,8 @@
 use std::{error::Error, fs, path::PathBuf};
 
 use rust_protocol::{
-    SpeechOutputMode, TranscriptionProviderEntry, TranslationProviderEntry, TranslationTier,
+    SpeechOutputMode, TranscriptionProviderEntry, TranslationLanguage, TranslationProviderEntry,
+    TranslationTier,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -51,6 +52,8 @@ pub(crate) struct SavedSettings {
     pub(crate) layout_enabled: bool,
     pub(crate) translation_keep_warm: bool,
     pub(crate) translation_blur_radius: u32,
+    pub(crate) translation_primary_language: TranslationLanguage,
+    pub(crate) translation_secondary_language: TranslationLanguage,
     pub(crate) text_action_mode: TextActionMode,
     pub(crate) translation_delivery: TranslationDelivery,
     pub(crate) history_enabled: bool,
@@ -79,6 +82,8 @@ impl Default for SavedSettings {
             layout_enabled: true,
             translation_keep_warm: true,
             translation_blur_radius: DEFAULT_TRANSLATION_BLUR_RADIUS,
+            translation_primary_language: TranslationLanguage::English,
+            translation_secondary_language: TranslationLanguage::Russian,
             text_action_mode: TextActionMode::default(),
             translation_delivery: TranslationDelivery::default(),
             history_enabled: true,
@@ -180,6 +185,16 @@ impl<'de> Deserialize<'de> for SavedSettings {
         );
         read(
             &document,
+            "translation_primary_language",
+            &mut settings.translation_primary_language,
+        );
+        read(
+            &document,
+            "translation_secondary_language",
+            &mut settings.translation_secondary_language,
+        );
+        read(
+            &document,
             "text_action_mode",
             &mut settings.text_action_mode,
         );
@@ -222,6 +237,8 @@ impl SavedSettings {
             layout_enabled: state.layout_enabled,
             translation_keep_warm: state.translation_keep_warm,
             translation_blur_radius: state.translation_blur_radius,
+            translation_primary_language: state.translation_primary_language,
+            translation_secondary_language: state.translation_secondary_language,
             text_action_mode: state.text_action_mode,
             translation_delivery: state.translation_delivery,
             history_enabled: state.history_enabled,
@@ -240,6 +257,14 @@ impl SavedSettings {
         self.selected_model_id = self
             .selected_model_id
             .filter(|identifier| !identifier.trim().is_empty());
+        if self.translation_primary_language == self.translation_secondary_language {
+            self.translation_secondary_language =
+                if self.translation_primary_language == TranslationLanguage::Russian {
+                    TranslationLanguage::English
+                } else {
+                    TranslationLanguage::Russian
+                };
+        }
         self.schema_version = SETTINGS_SCHEMA_VERSION;
         self
     }
@@ -297,7 +322,7 @@ pub(crate) fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod settings_document_tests {
-    use rust_protocol::{SpeechOutputMode, TranslationTier};
+    use rust_protocol::{SpeechOutputMode, TranslationLanguage, TranslationTier};
 
     use crate::speech_backend::SpeechBackend;
 
@@ -412,6 +437,7 @@ mod settings_document_tests {
     fn a_saved_document_reads_back_as_the_same_settings() {
         let saved = SavedSettings {
             translation_enabled: true,
+            translation_secondary_language: TranslationLanguage::Ukrainian,
             companion_home_position: Some((-640, 320)),
             visualizer_style: VisualizerStyle::default(),
             broadcast_mic_palette: BroadcastMicPalette::Red,
@@ -428,5 +454,22 @@ mod settings_document_tests {
         let document = serde_json::to_vec_pretty(&SavedSettings::from_state(&state)).unwrap();
 
         assert_eq!(parse_settings(&document), SavedSettings::from_state(&state));
+    }
+
+    #[test]
+    fn equal_translation_languages_are_repaired_without_resetting_the_document() {
+        let settings = parse_settings(
+            br#"{"translation_primary_language":"ukrainian","translation_secondary_language":"ukrainian","history_enabled":false}"#,
+        );
+
+        assert_eq!(
+            settings.translation_primary_language,
+            TranslationLanguage::Ukrainian
+        );
+        assert_eq!(
+            settings.translation_secondary_language,
+            TranslationLanguage::Russian
+        );
+        assert!(!settings.history_enabled);
     }
 }

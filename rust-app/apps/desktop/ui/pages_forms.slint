@@ -22,6 +22,10 @@ export component TranslationPage inherits VerticalLayout {
     in property <string> text-action-value;
     in property <bool> warm: false;
     in property <int> blur-radius: 3;
+    in property <string> primary-language: "English";
+    in property <string> primary-language-value: "en";
+    in property <string> secondary-language: "Russian";
+    in property <string> secondary-language-value: "ru";
     in property <string> note-text;
     in property <string> note-action;
     in property <bool> note-signal: false;
@@ -31,6 +35,8 @@ export component TranslationPage inherits VerticalLayout {
     callback set-text-action(string);
     callback set-warm(bool);
     callback set-blur(int);
+    callback set-primary-language(string);
+    callback set-secondary-language(string);
     callback open-translator();
     callback note-acted();
 
@@ -39,8 +45,8 @@ export component TranslationPage inherits VerticalLayout {
     ListHead {
         index: "03 / 08";
         title: "Translation";
-        lede: "Runs on this machine, in a llama.cpp process of its own. Nothing typed or spoken here is sent anywhere.";
-        claim: root.ready ? "Engine warm" : "Engine cold";
+        lede: "Detects the selected text, then follows the Text provider order. Network providers send that text to their service; the local model keeps it here.";
+        claim: root.ready ? "Ready" : "Not ready";
     }
 
     if root.note-text != "" : Note {
@@ -70,6 +76,60 @@ export component TranslationPage inherits VerticalLayout {
             font-size: Sheet.body-size;
             font-weight: 650;
             vertical-alignment: center;
+        }
+    }
+
+    FormRow {
+        label: "Primary language";
+        hint: "Foreign text is translated into this language";
+        MenuButton {
+            compact: true;
+            text: root.primary-language;
+            value: root.primary-language-value;
+            options: [
+                { value: "en", label: "English", note: "Primary language" },
+                { value: "ru", label: "Russian", note: "Primary language" },
+                { value: "uk", label: "Ukrainian", note: "Primary language" },
+                { value: "es", label: "Spanish", note: "Primary language" },
+                { value: "pt-BR", label: "Portuguese (Brazil)", note: "Primary language" },
+                { value: "de", label: "German", note: "Primary language" },
+                { value: "fr", label: "French", note: "Primary language" },
+                { value: "it", label: "Italian", note: "Primary language" },
+                { value: "zh-Hans", label: "Chinese (Simplified)", note: "Primary language" },
+                { value: "zh-Hant", label: "Chinese (Traditional)", note: "Primary language" },
+                { value: "ja", label: "Japanese", note: "Primary language" },
+                { value: "ko", label: "Korean", note: "Primary language" },
+                { value: "hi", label: "Hindi", note: "Primary language" },
+                { value: "ar", label: "Arabic", note: "Primary language" },
+            ];
+            chosen(value) => { root.set-primary-language(value); }
+        }
+    }
+
+    FormRow {
+        label: "Secondary language";
+        hint: "Primary-language text is translated into this one";
+        MenuButton {
+            compact: true;
+            text: root.secondary-language;
+            value: root.secondary-language-value;
+            options: [
+                { value: "en", label: "English", note: "Secondary language" },
+                { value: "ru", label: "Russian", note: "Secondary language" },
+                { value: "uk", label: "Ukrainian", note: "Secondary language" },
+                { value: "es", label: "Spanish", note: "Secondary language" },
+                { value: "pt-BR", label: "Portuguese (Brazil)", note: "Secondary language" },
+                { value: "de", label: "German", note: "Secondary language" },
+                { value: "fr", label: "French", note: "Secondary language" },
+                { value: "it", label: "Italian", note: "Secondary language" },
+                { value: "zh-Hans", label: "Chinese (Simplified)", note: "Secondary language" },
+                { value: "zh-Hant", label: "Chinese (Traditional)", note: "Secondary language" },
+                { value: "ja", label: "Japanese", note: "Secondary language" },
+                { value: "ko", label: "Korean", note: "Secondary language" },
+                { value: "hi", label: "Hindi", note: "Secondary language" },
+                { value: "ar", label: "Arabic", note: "Secondary language" },
+            ];
+            chosen(value) => { root.set-secondary-language(value); }
         }
     }
 

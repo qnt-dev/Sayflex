@@ -144,6 +144,35 @@ fn wire(settings: &SettingsWindow) {
     }
     {
         let weak = settings.as_weak();
+        settings.on_use_provider_only(move |index| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            let rows = settings.get_provider_rows();
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            let mut selected: Vec<ProviderRow> = rows.iter().collect();
+            let Some(section) = selected.get(index).map(|row| row.section.clone()) else {
+                return;
+            };
+            for (candidate, row) in selected.iter_mut().enumerate() {
+                if row.section == section {
+                    row.enabled = candidate == index;
+                    row.state = if row.enabled {
+                        "Standing by"
+                    } else {
+                        "Switched off"
+                    }
+                    .into();
+                    row.tone = if row.enabled { "resting" } else { "off" }.into();
+                }
+            }
+            settings.set_provider_rows(ModelRc::new(VecModel::from(selected)));
+        });
+    }
+    {
+        let weak = settings.as_weak();
         settings.on_set_translation_delivery(move |value| {
             let Some(settings) = weak.upgrade() else {
                 return;

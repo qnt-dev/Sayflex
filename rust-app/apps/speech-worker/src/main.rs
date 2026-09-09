@@ -56,6 +56,14 @@ const fn previews_allowed(requested: bool) -> bool {
     requested && SPECULATION_IS_AFFORDABLE
 }
 
+/// The router owns every cloud-first request and every request for which the
+/// local route is disabled. The second clause makes a freshly changed
+/// cloud-only configuration safe even before the router actor has observed
+/// its own copy of the provider list.
+const fn use_routing_actor(local_model_enabled: bool, router_prefers_cloud: bool) -> bool {
+    !local_model_enabled || router_prefers_cloud
+}
+
 fn main() -> Result<()> {
     rust_platform_windows::configure_safe_dll_search()?;
     // Asked by the release check, which otherwise has no way to find out what a
@@ -218,6 +226,8 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
     )?;
     let mut output_mode = SpeechOutputMode::OriginalLanguage;
     let mut fast_release_previews = previews_allowed(true);
+    let mut selected_model_id = catalog.default_model.clone();
+    let mut local_model_enabled = true;
 
     let stdin = io::stdin();
     for line in BufReader::new(stdin.lock()).lines() {
@@ -244,26 +254,32 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                 output_mode: requested_output_mode,
                 history_enabled,
                 fast_release_previews: requested_fast_release_previews,
+                prepare_local_model,
             } => {
                 let _ = history.send(HistoryCommand::SetEnabled {
                     enabled: history_enabled,
                 });
                 output_mode = requested_output_mode;
                 fast_release_previews = previews_allowed(requested_fast_release_previews);
-                let selected_model_id = if catalog.find(&requested).is_some() {
+                selected_model_id = if catalog.find(&requested).is_some() {
                     requested
                 } else {
                     catalog.default_model.clone()
                 };
+                local_model_enabled = prepare_local_model;
                 let _ = events.send(SpeechWorkerEvent::Ready {
                     protocol_version: PROTOCOL_VERSION,
                     selected_model_id: selected_model_id.clone(),
                     models: model_summaries(&catalog, &installer, &selected_model_id),
                 });
-                models.send(ModelCommand::Ensure {
-                    catalog_id: selected_model_id,
-                    announce_selection: false,
-                });
+                if local_model_enabled {
+                    models.send(ModelCommand::Ensure {
+                        catalog_id: selected_model_id.clone(),
+                        announce_selection: false,
+                    });
+                } else {
+                    models.deactivate();
+                }
             }
             SpeechWorkerCommand::Begin {
                 session_id,
@@ -271,7 +287,9 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
             } => match recorder.begin(session_id) {
                 Ok(()) => {
                     inference.begin_session(session_id);
-                    speculation.begin(session_id, output_mode, fast_release_previews);
+                    if !use_routing_actor(local_model_enabled, transcription.prefers_cloud()) {
+                        speculation.begin(session_id, output_mode, fast_release_previews);
+                    }
                     let _ = events.send(SpeechWorkerEvent::Listening { session_id });
                 }
                 Err(error) => {
@@ -305,7 +323,7 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                     }
                 };
                 let audio_finalize_ms = elapsed_ms(audio_finalize_started);
-                if transcription.prefers_cloud() {
+                if use_routing_actor(local_model_enabled, transcription.prefers_cloud()) {
                     transcription.send(TranscriptionCommand::Finalize {
                         recording: Box::new(recording),
                         output_mode,
@@ -336,6 +354,20 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
             }
             SpeechWorkerCommand::CancelModelInstall => models.cancel(),
             SpeechWorkerCommand::SetTranscriptionProviders { providers } => {
+                let enable_local = providers
+                    .iter()
+                    .any(|provider| provider.id == "local" && provider.enabled);
+                if enable_local != local_model_enabled {
+                    local_model_enabled = enable_local;
+                    if enable_local {
+                        models.send(ModelCommand::Ensure {
+                            catalog_id: selected_model_id.clone(),
+                            announce_selection: false,
+                        });
+                    } else {
+                        models.deactivate();
+                    }
+                }
                 transcription.send(TranscriptionCommand::SetProviders(providers));
             }
             SpeechWorkerCommand::SetProviderCredential {
@@ -356,10 +388,13 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                 // Choosing another model abandons an installation that is
                 // still running for the previous one.
                 models.cancel();
-                models.send(ModelCommand::Ensure {
-                    catalog_id,
-                    announce_selection: true,
-                });
+                selected_model_id.clone_from(&catalog_id);
+                if local_model_enabled {
+                    models.send(ModelCommand::Ensure {
+                        catalog_id,
+                        announce_selection: true,
+                    });
+                }
             }
             SpeechWorkerCommand::SetOutputMode {
                 output_mode: requested,
@@ -490,7 +525,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod speculation_policy_tests {
-    use super::{SPECULATION_IS_AFFORDABLE, previews_allowed};
+    use super::{SPECULATION_IS_AFFORDABLE, previews_allowed, use_routing_actor};
 
     #[test]
     fn the_setting_can_switch_previews_off_but_never_back_on_where_they_cost_too_much() {
@@ -510,5 +545,13 @@ mod speculation_policy_tests {
                 "one inference actor, and the final job waits behind every preview"
             );
         }
+    }
+
+    #[test]
+    fn cloud_only_never_takes_the_local_path_during_a_provider_update() {
+        assert!(use_routing_actor(false, false));
+        assert!(use_routing_actor(false, true));
+        assert!(!use_routing_actor(true, false));
+        assert!(use_routing_actor(true, true));
     }
 }
