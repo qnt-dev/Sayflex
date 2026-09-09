@@ -47,12 +47,12 @@ export global Sheet {
 
     // ── the size the workspace is drawn at ──
     //
-    // Every page is composed against these two numbers: the widest page needs
-    // 592 for its own columns, and the tallest needs 474 between the topline
-    // and the footer. The workspace never lays out smaller than this — below
-    // it, it scrolls — so a page is never asked to draw itself into less room
-    // than it was designed for, and nothing is ever cut off the bottom or the
-    // right.
+    // These are the workspace floors: the widest page needs 592 for its own
+    // columns, and even a short page needs 474 between the topline and footer.
+    // Taller pages report their actual preferred height to the workspace
+    // Flickable. The workspace never lays out smaller than these floors, so a
+    // page is never asked to draw itself into less room than it was designed
+    // for and longer pages remain reachable.
     //
     // 40 of padding on each side, the nav column, and 30 between them make up
     // the rest of the width.

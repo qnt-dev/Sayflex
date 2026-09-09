@@ -22,8 +22,8 @@ use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
 use rust_protocol::{
     PROTOCOL_VERSION, RequestId, TranslationHistoryEntry, TranslationLanguage,
-    TranslationLanguagePolicy, TranslationModelSummary, TranslationResult, TranslationTier,
-    TranslationWorkerCommand, TranslationWorkerEvent,
+    TranslationLanguagePolicy, TranslationModelSummary, TranslationProviderEntry,
+    TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use rust_translation_engine::{
     TranslationCancelled, TranslationCatalog, TranslationEngine, TranslationPackDescriptor,
@@ -187,6 +187,7 @@ enum InstallCommand {
         selected_tier: Option<TranslationTier>,
         keep_warm: bool,
         history_enabled: bool,
+        prepare_local_model: bool,
     },
     EnsureModel {
         tier: TranslationTier,
@@ -194,6 +195,9 @@ enum InstallCommand {
     SelectTier {
         tier: TranslationTier,
         keep_warm: bool,
+    },
+    SetLocalEnabled {
+        enabled: bool,
     },
     Shutdown,
 }
@@ -276,6 +280,7 @@ struct WorkerState {
     fetcher: HttpFetcher,
     selected_tier: Option<TranslationTier>,
     keep_warm: bool,
+    local_model_enabled: bool,
     engine: Option<TranslationEngine>,
     locale: String,
     history: TranslationHistory,
@@ -292,6 +297,7 @@ impl WorkerState {
             fetcher: HttpFetcher::new("translation-model-manager")?,
             selected_tier: None,
             keep_warm: true,
+            local_model_enabled: true,
             engine: None,
             locale: system_language(),
             history: TranslationHistory::load(root.join("translation-history.json")),
@@ -367,6 +373,9 @@ impl WorkerState {
     }
 
     fn ensure_engine(&mut self, writer: &EventWriter) -> Result<TranslationTier> {
+        if !self.local_model_enabled {
+            return Err(anyhow!("the local translation engine is disabled"));
+        }
         let tier = self
             .selected_tier
             .ok_or_else(|| anyhow!("no translation model is selected"))?;
@@ -475,12 +484,14 @@ fn handle_command(
             selected_tier,
             keep_warm,
             history_enabled,
+            prepare_local_model,
         } => {
             coordinator.cancel_all();
             installs.send(InstallCommand::Initialize {
                 selected_tier,
                 keep_warm,
                 history_enabled,
+                prepare_local_model,
             });
         }
         TranslationWorkerCommand::EnsureModel { tier } => {
@@ -519,11 +530,20 @@ fn handle_command(
             coordinator.cancel(request_id);
         }
         TranslationWorkerCommand::SetTranslationProviders { providers: entries } => {
-            let mut providers = recover_lock(providers);
-            providers.set_entries(&entries);
-            writer.send(&TranslationWorkerEvent::TranslationProviders {
-                statuses: providers.statuses(),
-            })?;
+            let local_enabled = local_translation_enabled(&entries);
+            {
+                let mut providers = recover_lock(providers);
+                providers.set_entries(&entries);
+                writer.send(&TranslationWorkerEvent::TranslationProviders {
+                    statuses: providers.statuses(),
+                })?;
+            }
+            if !local_enabled {
+                installs.cancel();
+            }
+            installs.send(InstallCommand::SetLocalEnabled {
+                enabled: local_enabled,
+            });
         }
         TranslationWorkerCommand::SetTranslationProviderCredential {
             operation_id,
@@ -583,6 +603,13 @@ fn handle_command(
     Ok(())
 }
 
+fn local_translation_enabled(entries: &[TranslationProviderEntry]) -> bool {
+    entries.is_empty()
+        || entries
+            .iter()
+            .any(|entry| entry.id == "local" && entry.enabled)
+}
+
 /// Runs one installation command. Called only from the installer thread, which
 /// is why it may hold the worker lock for minutes.
 /// Which model an install command is about, when it is about one.
@@ -596,7 +623,7 @@ const fn installing_tier(command: &InstallCommand) -> Option<TranslationTier> {
         InstallCommand::EnsureModel { tier } | InstallCommand::SelectTier { tier, .. } => {
             Some(*tier)
         }
-        InstallCommand::Shutdown => None,
+        InstallCommand::SetLocalEnabled { .. } | InstallCommand::Shutdown => None,
     }
 }
 
@@ -610,9 +637,11 @@ fn run_install(
             selected_tier,
             keep_warm,
             history_enabled,
+            prepare_local_model,
         } => {
             let mut state = recover_lock(state);
             state.keep_warm = keep_warm;
+            state.local_model_enabled = prepare_local_model;
             state.history_enabled = history_enabled;
             state.selected_tier = state.initial_tier(selected_tier);
             writer.send(&TranslationWorkerEvent::Ready {
@@ -620,7 +649,9 @@ fn run_install(
                 selected_tier: state.selected_tier,
                 models: state.summaries(),
             })?;
-            if let Some(tier) = state.selected_tier {
+            if state.local_model_enabled
+                && let Some(tier) = state.selected_tier
+            {
                 let catalog_id = state.pack(tier)?.id.clone();
                 state.ensure_runtime(writer, &catalog_id)?;
                 let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
@@ -664,14 +695,16 @@ fn run_install(
                 path: path.to_string_lossy().into_owned(),
             })?;
             state.selected_tier = Some(tier);
-            let keep_warm = state.keep_warm;
-            let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
             writer.send(&TranslationWorkerEvent::ModelSelected { tier })?;
-            writer.send(&TranslationWorkerEvent::ModelReady {
-                catalog_id,
-                tier,
-                load_duration_ms,
-            })?;
+            if state.local_model_enabled {
+                let keep_warm = state.keep_warm;
+                let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
+                writer.send(&TranslationWorkerEvent::ModelReady {
+                    catalog_id,
+                    tier,
+                    load_duration_ms,
+                })?;
+            }
         }
         InstallCommand::SelectTier { tier, keep_warm } => {
             let mut state = recover_lock(state);
@@ -680,15 +713,37 @@ fn run_install(
             }
             state.keep_warm = keep_warm;
             state.selected_tier = Some(tier);
-            let catalog_id = state.pack(tier)?.id.clone();
-            state.ensure_runtime(writer, &catalog_id)?;
-            let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
             writer.send(&TranslationWorkerEvent::ModelSelected { tier })?;
-            writer.send(&TranslationWorkerEvent::ModelReady {
-                catalog_id,
-                tier,
-                load_duration_ms,
-            })?;
+            if state.local_model_enabled {
+                let catalog_id = state.pack(tier)?.id.clone();
+                state.ensure_runtime(writer, &catalog_id)?;
+                let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
+                writer.send(&TranslationWorkerEvent::ModelReady {
+                    catalog_id,
+                    tier,
+                    load_duration_ms,
+                })?;
+            }
+        }
+        InstallCommand::SetLocalEnabled { enabled } => {
+            let mut state = recover_lock(state);
+            if state.local_model_enabled == enabled {
+                return Ok(());
+            }
+            state.local_model_enabled = enabled;
+            if !enabled {
+                state.engine = None;
+            } else if let Some(tier) = state.selected_tier {
+                let catalog_id = state.pack(tier)?.id.clone();
+                state.ensure_runtime(writer, &catalog_id)?;
+                let keep_warm = state.keep_warm;
+                let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
+                writer.send(&TranslationWorkerEvent::ModelReady {
+                    catalog_id,
+                    tier,
+                    load_duration_ms,
+                })?;
+            }
         }
         InstallCommand::Shutdown => {}
     }
@@ -1187,5 +1242,36 @@ mod direction_tests {
             .is_err(),
             "translating a language into itself spends an allowance for nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_model_policy_tests {
+    use rust_protocol::TranslationProviderEntry;
+
+    use super::local_translation_enabled;
+
+    fn entry(id: &str, enabled: bool) -> TranslationProviderEntry {
+        TranslationProviderEntry {
+            id: id.to_owned(),
+            enabled,
+            region: None,
+        }
+    }
+
+    #[test]
+    fn cloud_only_does_not_prepare_the_local_translation_model() {
+        assert!(
+            local_translation_enabled(&[]),
+            "an old empty setting is the local default"
+        );
+        assert!(local_translation_enabled(&[
+            entry("deepl", true),
+            entry("local", true),
+        ]));
+        assert!(!local_translation_enabled(&[
+            entry("deepl", true),
+            entry("local", false),
+        ]));
     }
 }

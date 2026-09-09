@@ -3,9 +3,9 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 19 carries the user's translation language policy with every
-// request. This keeps direction selection deterministic in both local and
-// cloud paths instead of hiding an English/Russian rule inside one worker.
+// Version 20 tells the translation worker whether the local route is enabled.
+// A cloud-only configuration must not load and retain a multi-gigabyte local
+// model it cannot route to.
 // All packaged processes must agree on this schema before exchanging commands.
 /// The shape of every message in this file, as one number.
 ///
@@ -16,7 +16,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -603,6 +603,9 @@ pub enum TranslationWorkerCommand {
         selected_tier: Option<TranslationTier>,
         keep_warm: bool,
         history_enabled: bool,
+        /// Whether the local translation route is enabled and may occupy
+        /// memory. Cloud-only operation still retains the selected tier.
+        prepare_local_model: bool,
     },
     EnsureModel {
         tier: TranslationTier,
@@ -1250,8 +1253,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 19,
-            "every fingerprint below was written for protocol 19: if a shape \
+            PROTOCOL_VERSION, 20,
+            "every fingerprint below was written for protocol 20: if a shape \
              changes, this number changes with it"
         );
     }
@@ -1710,6 +1713,7 @@ mod complete_wire_schema_tests {
                 selected_tier: Some(TranslationTier::Tiny),
                 keep_warm: true,
                 history_enabled: true,
+                prepare_local_model: true,
             },
             TranslationWorkerCommand::EnsureModel {
                 tier: TranslationTier::Tiny,
@@ -2110,7 +2114,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x04a3_85ba_aea5_a072,
+            0x5807_3ac2_df3f_d04f,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

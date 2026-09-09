@@ -879,6 +879,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             selected_tier: saved_settings.selected_translation_tier,
             keep_warm: saved_settings.translation_keep_warm,
             history_enabled: saved_settings.history_enabled,
+            prepare_local_model: state.borrow().local_translation_enabled(),
         })?;
     if !saved_settings.translation_providers.is_empty() {
         workers
@@ -1517,6 +1518,7 @@ fn handle_worker_exit(
                             selected_tier: state.selected_translation_tier,
                             keep_warm: state.translation_keep_warm,
                             history_enabled: state.history_enabled,
+                            prepare_local_model: state.local_translation_enabled(),
                         })
                 }
                 WorkerKind::Companion => Ok(()),
@@ -3173,6 +3175,28 @@ fn handle_translation_event(
             // so its row stayed at "100 %" with a Cancel button for the rest of
             // the session and Overview announced a download that was over.
             finish_download(state, &catalog_id);
+            if !state.borrow().local_translation_enabled() {
+                {
+                    let mut state = state.borrow_mut();
+                    state.translation_ready = false;
+                    for model in &mut state.translation_models {
+                        model.selected = model.tier == tier;
+                        if model.catalog_id == catalog_id {
+                            model.installed = true;
+                        }
+                    }
+                }
+                sync_translation_models(settings, state);
+                sync_action_settings(settings, state);
+                set_translation_status(
+                    translator,
+                    "Cloud translation ready. The local model is disabled.",
+                );
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_model state=stale_ready_ignored catalog_id={catalog_id}"
+                ));
+                return;
+            }
             rust_app_core::diagnostics::log_line(&format!(
                 "translation_model state=ready catalog_id={catalog_id} tier={tier:?} load_ms={load_duration_ms}"
             ));

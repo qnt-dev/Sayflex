@@ -11,7 +11,7 @@ use rust_protocol::{
     RequestId, SpeechWorkerCommand, TranscriptionProviderEntry, TranslationProviderEntry,
     TranslationWorkerCommand,
 };
-use slint::{ModelRc, VecModel};
+use slint::{Model, ModelRc, VecModel};
 
 use crate::{
     AppState, PendingCredential, ProviderRow, SettingsWindow, set_indicator_status,
@@ -179,6 +179,14 @@ pub(crate) fn expire_pending_credentials(
             .filter_map(|id| app.pending_credentials.remove(&id))
             .collect()
     };
+    if expired.is_empty() {
+        // This function is called by a two-second watchdog. Polling both
+        // workers on every idle tick made each reply replace the Slint row
+        // model, which reset the list's scroll position and destroyed an
+        // unsaved password field. Reconciliation is needed only after a real
+        // timeout left the stored state unknown.
+        return;
+    }
     for pending in expired {
         rust_app_core::diagnostics::log_line(&format!(
             "credential_store operation=unknown provider={} reason={reason}",
@@ -411,6 +419,51 @@ pub(crate) fn row_display_name(kind: Kind, id: &str) -> String {
     }
 }
 
+thread_local! {
+    /// One model for the lifetime of the settings window.
+    ///
+    /// Provider status replies may arrive while a person is typing a key. A
+    /// fresh `ModelRc<VecModel<_>>` makes Slint rebuild every repeated row,
+    /// which destroys the live password field (and resets the list position).
+    /// Keeping the model identity stable lets unchanged rows keep their local
+    /// control state while their status text is updated.
+    static PROVIDER_ROWS: RefCell<Option<Rc<VecModel<ProviderRow>>>> = const { RefCell::new(None) };
+}
+
+fn provider_rows_model(settings: &SettingsWindow) -> Rc<VecModel<ProviderRow>> {
+    PROVIDER_ROWS.with(|model| {
+        let mut model = model.borrow_mut();
+        if let Some(existing) = model.as_ref() {
+            return Rc::clone(existing);
+        }
+        let created = Rc::new(VecModel::<ProviderRow>::default());
+        settings.set_provider_rows(ModelRc::from(Rc::clone(&created)));
+        *model = Some(Rc::clone(&created));
+        created
+    })
+}
+
+fn update_provider_rows(settings: &SettingsWindow, rows: Vec<ProviderRow>) {
+    let model = provider_rows_model(settings);
+    let same_order = model.row_count() == rows.len()
+        && rows.iter().enumerate().all(|(index, row)| {
+            model
+                .row_data(index)
+                .is_some_and(|current| current.id == row.id && current.section == row.section)
+        });
+    if same_order {
+        // `row_changed` updates bindings in the existing repeated component;
+        // it does not tear down the Field that owns the unsaved key.
+        for (index, row) in rows.into_iter().enumerate() {
+            model.set_row_data(index, row);
+        }
+    } else {
+        // A real reorder or a schema change must reset the repeater. Those are
+        // explicit user/configuration changes, not background status traffic.
+        model.set_vec(rows);
+    }
+}
+
 pub(crate) fn sync_providers(
     settings: &slint::Weak<SettingsWindow>,
     state: &Rc<RefCell<AppState>>,
@@ -475,7 +528,7 @@ pub(crate) fn sync_providers(
     settings.set_departure_badge(departure_badge(&leaving).into());
     settings.set_provider_claim(privacy_claim(&leaving).into());
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
-    settings.set_provider_rows(ModelRc::new(VecModel::from(rows)));
+    update_provider_rows(&settings, rows);
 }
 
 /// Where the translation walk starts and where it stops.
@@ -541,6 +594,12 @@ pub(crate) fn apply_translation_chain(
     workers: &Workers,
 ) {
     let providers = state.borrow().translation_chain.clone();
+    let local_enabled = providers
+        .iter()
+        .any(|provider| provider.id == "local" && provider.enabled);
+    if !local_enabled {
+        state.borrow_mut().translation_ready = false;
+    }
     if let Err(error) = workers
         .translation
         .send(&TranslationWorkerCommand::SetTranslationProviders { providers })

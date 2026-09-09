@@ -285,7 +285,16 @@ export component SettingsWindow inherits Window {
             width: 100%;
             height: 100%;
             viewport-width: max(self.width, Sheet.workspace-min-width);
-            viewport-height: max(self.height, Sheet.workspace-min-height);
+            // The fixed floor only describes the smallest page. Form pages can
+            // grow when settings are added (Translation now does), so the
+            // scroll extent must come from the active page's actual layout.
+            // Otherwise the page draws past a 474px viewport, the last rows are
+            // clipped, and the rail quite truthfully believes there is nowhere
+            // to scroll.
+            viewport-height: max(
+                self.height,
+                max(Sheet.workspace-min-height, page.preferred-height + 30px)
+            );
 
         HorizontalLayout {
             width: parent.viewport-width;
@@ -306,21 +315,21 @@ export component SettingsWindow inherits Window {
                     height: 22px;
                 }
 
-                NavItem { label: "Overview"; active: root.active-page == 0; clicked => { root.active-page = 0; } }
-                NavItem { label: "Dictation"; active: root.active-page == 1; clicked => { root.active-page = 1; } }
-                NavItem { label: "Translation"; active: root.active-page == 2; clicked => { root.active-page = 2; } }
-                NavItem { label: "Models"; active: root.active-page == 3; clicked => { root.active-page = 3; } }
-                NavItem { label: "Providers"; active: root.active-page == 4; clicked => { root.active-page = 4; } }
-                NavItem { label: "Visuals"; active: root.active-page == 5; clicked => { root.active-page = 5; } }
-                NavItem { label: "History"; active: root.active-page == 6; clicked => { root.active-page = 6; } }
-                NavItem { label: "Hotkeys"; active: root.active-page == 7; clicked => { root.active-page = 7; } }
+                NavItem { label: "Overview"; active: root.active-page == 0; clicked => { root.active-page = 0; work.viewport-x = 0px; work.viewport-y = 0px; } }
+                NavItem { label: "Dictation"; active: root.active-page == 1; clicked => { root.active-page = 1; work.viewport-x = 0px; work.viewport-y = 0px; } }
+                NavItem { label: "Translation"; active: root.active-page == 2; clicked => { root.active-page = 2; work.viewport-x = 0px; work.viewport-y = 0px; } }
+                NavItem { label: "Models"; active: root.active-page == 3; clicked => { root.active-page = 3; work.viewport-x = 0px; work.viewport-y = 0px; } }
+                NavItem { label: "Providers"; active: root.active-page == 4; clicked => { root.active-page = 4; work.viewport-x = 0px; work.viewport-y = 0px; } }
+                NavItem { label: "Visuals"; active: root.active-page == 5; clicked => { root.active-page = 5; work.viewport-x = 0px; work.viewport-y = 0px; } }
+                NavItem { label: "History"; active: root.active-page == 6; clicked => { root.active-page = 6; work.viewport-x = 0px; work.viewport-y = 0px; } }
+                NavItem { label: "Hotkeys"; active: root.active-page == 7; clicked => { root.active-page = 7; work.viewport-x = 0px; work.viewport-y = 0px; } }
 
                 Rectangle { vertical-stretch: 1; }
             }
 
-            // The page fills the column. Pages whose rows can outgrow it put
-            // those rows in a ListView, which scrolls; the rest are drawn to
-            // the one size in `Sheet`.
+            // The page fills the column. List pages own their row scrolling;
+            // form and instrument pages report their natural preferred height
+            // to the outer Flickable, so adding a row cannot silently clip it.
             //
             // That size is stated here rather than left to whichever page is
             // open, because a column that reports a different minimum for each
