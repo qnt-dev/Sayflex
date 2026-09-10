@@ -8,8 +8,8 @@
 use std::{error::Error, fs, path::PathBuf};
 
 use rust_protocol::{
-    DictationLanguage, SpeechOutputMode, TranscriptionProviderEntry, TranslationLanguage,
-    TranslationProviderEntry, TranslationTier,
+    DictationLanguage, HotkeyBindings, SpeechOutputMode, TranscriptionProviderEntry,
+    TranslationLanguage, TranslationProviderEntry, TranslationTier,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -58,6 +58,7 @@ pub(crate) struct SavedSettings {
     pub(crate) text_action_mode: TextActionMode,
     pub(crate) translation_delivery: TranslationDelivery,
     pub(crate) history_enabled: bool,
+    pub(crate) hotkeys: HotkeyBindings,
     /// The user's ordered transcription list. Empty means "never configured",
     /// and the worker keeps its own default of the local engine first.
     pub(crate) transcription_providers: Vec<TranscriptionProviderEntry>,
@@ -89,6 +90,7 @@ impl Default for SavedSettings {
             text_action_mode: TextActionMode::default(),
             translation_delivery: TranslationDelivery::default(),
             history_enabled: true,
+            hotkeys: HotkeyBindings::default(),
             transcription_providers: Vec::new(),
             translation_providers: Vec::new(),
         }
@@ -211,6 +213,12 @@ impl<'de> Deserialize<'de> for SavedSettings {
             &mut settings.translation_delivery,
         );
         read(&document, "history_enabled", &mut settings.history_enabled);
+        let has_hotkeys = document.contains_key("hotkeys");
+        read(&document, "hotkeys", &mut settings.hotkeys);
+        if !has_hotkeys {
+            settings.hotkeys.correct_layout.enabled = settings.layout_enabled;
+            settings.hotkeys.translate.enabled = settings.translation_enabled;
+        }
         read(
             &document,
             "transcription_providers",
@@ -250,6 +258,7 @@ impl SavedSettings {
             text_action_mode: state.text_action_mode,
             translation_delivery: state.translation_delivery,
             history_enabled: state.history_enabled,
+            hotkeys: state.hotkeys.clone(),
             transcription_providers: state.transcription_chain.clone(),
             translation_providers: state.translation_chain.clone(),
         }
@@ -272,6 +281,11 @@ impl SavedSettings {
                 } else {
                     TranslationLanguage::Russian
                 };
+        }
+        if rust_app_core::hotkeys::validate(&self.hotkeys).is_err() {
+            self.hotkeys = HotkeyBindings::default();
+            self.hotkeys.correct_layout.enabled = self.layout_enabled;
+            self.hotkeys.translate.enabled = self.translation_enabled;
         }
         self.schema_version = SETTINGS_SCHEMA_VERSION;
         self
@@ -331,7 +345,8 @@ pub(crate) fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod settings_document_tests {
     use rust_protocol::{
-        DictationLanguage, SpeechOutputMode, TranslationLanguage, TranslationTier,
+        DictationLanguage, HotkeyAction, HotkeyBindings, HotkeySpec, SpeechOutputMode,
+        TranslationLanguage, TranslationTier,
     };
 
     use crate::speech_backend::SpeechBackend;
@@ -396,6 +411,28 @@ mod settings_document_tests {
             settings.writing_slate_surface,
             defaults.writing_slate_surface
         );
+        let mut expected_hotkeys = HotkeyBindings::default();
+        expected_hotkeys.correct_layout.enabled = settings.layout_enabled;
+        expected_hotkeys.translate.enabled = settings.translation_enabled;
+        assert_eq!(settings.hotkeys, expected_hotkeys);
+    }
+
+    #[test]
+    fn customized_hotkeys_survive_a_settings_round_trip() {
+        let mut saved = SavedSettings::default();
+        saved.hotkeys.binding_mut(HotkeyAction::Translate).spec =
+            HotkeySpec::control_alt(b'G' as u16);
+        saved.hotkeys.binding_mut(HotkeyAction::InsertLast).enabled = false;
+
+        let state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &saved,
+        );
+        let document = serde_json::to_vec_pretty(&SavedSettings::from_state(&state)).unwrap();
+
+        assert_eq!(parse_settings(&document).hotkeys, saved.hotkeys);
     }
 
     #[test]
@@ -482,5 +519,27 @@ mod settings_document_tests {
             TranslationLanguage::Russian
         );
         assert!(!settings.history_enabled);
+    }
+
+    #[test]
+    fn invalid_persisted_hotkeys_are_repaired_as_one_atomic_set() {
+        let settings = parse_settings(
+            br#"{
+                "translation_enabled": true,
+                "hotkeys": {
+                    "dictate": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":32},"enabled":true},
+                    "insert_last": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":86},"enabled":true},
+                    "correct_layout": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":75},"enabled":true},
+                    "translate": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":86},"enabled":true},
+                    "pause_resume": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":80},"enabled":true}
+                }
+            }"#,
+        );
+
+        assert_eq!(
+            settings.hotkeys.translate.spec,
+            HotkeySpec::control_alt(b'F' as u16)
+        );
+        assert!(settings.hotkeys.translate.enabled);
     }
 }

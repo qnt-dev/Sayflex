@@ -212,7 +212,12 @@ export component HotkeysPage inherits VerticalLayout {
     in property <[HotkeyRow]> rows;
     in property <string> summary;
     in property <bool> summary-signal: false;
+    in property <int> capture-index: -1;
+    in property <string> capture-label: "";
     callback toggle-row(int, bool);
+    callback change-row(int);
+    callback reset-row(int);
+    callback cancel-capture();
     callback set-mode(string, string);
 
     spacing: 0px;
@@ -220,7 +225,7 @@ export component HotkeysPage inherits VerticalLayout {
     ListHead {
         index: "08 / 08";
         title: "Hotkeys";
-        lede: "Held, not toggled: the action lasts exactly as long as the keys are down.";
+        lede: "Change a shortcut, then press its new key combination. Changes apply only after Windows accepts them.";
         claim: root.summary;
         claim-signal: root.summary-signal;
     }
@@ -234,9 +239,37 @@ export component HotkeysPage inherits VerticalLayout {
     Rectangle {
         vertical-stretch: 1;
 
+        if root.capture-index >= 0 : Rectangle {
+            z: 2;
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: 46px;
+            background: Sheet.ink;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 10px;
+                spacing: 12px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: "PRESS SHORTCUT  ·  " + root.capture-label + "  ·  ESC CANCELS";
+                    color: Sheet.on-ink;
+                    font-size: Sheet.label-size;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                RowAction {
+                    label: "Cancel";
+                    clicked => { root.cancel-capture(); }
+                }
+            }
+        }
+
         list := ListView {
+            y: root.capture-index >= 0 ? 54px : 0px;
             width: 100%;
-            height: 100%;
+            height: parent.height - self.y;
             viewport-y <=> root.scroll-y;
             viewport-height <=> root.scroll-content-height;
             // The widget's own scrollbar appears only while the pointer is
@@ -254,10 +287,11 @@ export component HotkeysPage inherits VerticalLayout {
                     title: row.name;
                     detail: row.detail;
                     tone: row.tone;
-                    controls-width: 186px;
+                    controls-width: 246px;
 
                     Toggle {
                         checked: row.enabled;
+                        enabled: row.toggle-enabled;
                         on-label: "On";
                         off-label: "Off";
                         toggled(next) => { root.toggle-row(index, next); }
@@ -271,6 +305,14 @@ export component HotkeysPage inherits VerticalLayout {
                         label: "Change";
                         enabled: row.locked-reason == "";
                         reason: row.locked-reason;
+                        clicked => { root.change-row(index); }
+                    }
+
+                    RowAction {
+                        label: "Reset";
+                        enabled: !row.is-default && row.locked-reason == "";
+                        reason: row.is-default ? "Already using the default" : row.locked-reason;
+                        clicked => { root.reset-row(index); }
                     }
                 }
 

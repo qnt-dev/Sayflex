@@ -20,18 +20,28 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rust_protocol::{InputHostCommand, InputHostEvent, PROTOCOL_VERSION, SessionId, Transcript};
+use rust_protocol::{
+    HotkeyConfiguration, InputHostCommand, InputHostEvent, PROTOCOL_VERSION, RequestId, SessionId,
+    Transcript,
+};
 use windows_sys::Win32::{
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
     UI::{
         Input::KeyboardAndMouse::{VK_F, VK_V},
         WindowsAndMessaging::{
             DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
-            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_HOTKEY,
-            WM_QUIT,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP,
+            WM_HOTKEY, WM_QUIT,
         },
     },
 };
+
+const WM_APPLY_HOTKEYS: u32 = WM_APP + 0x53;
+
+struct HotkeyControl {
+    operation_id: RequestId,
+    configuration: HotkeyConfiguration,
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Asked by the release check, which otherwise cannot find out what a
@@ -116,7 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = PeekMessageW(&mut queue_probe, ptr::null_mut(), 0, 0, PM_NOREMOVE);
     }
     let hook_thread_id = unsafe { GetCurrentThreadId() };
-    let _registered_hotkeys = hotkeys::RegisteredHotkeys::register_for_current_thread();
+    let mut registered_hotkeys = hotkeys::RegisteredHotkeys::register_for_current_thread(
+        HotkeyConfiguration::default().bindings,
+    )?;
     let module = unsafe { GetModuleHandleW(ptr::null()) };
     let hook =
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hotkeys::keyboard_hook), module, 0) };
@@ -125,9 +137,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _hook_guard = HookGuard(hook);
     let command_events = events.clone();
+    let hotkey_events = events.clone();
+    let (hotkey_controls, hotkey_requests) = mpsc::channel::<HotkeyControl>();
     thread::Builder::new()
         .name("input-host-json-input".to_owned())
-        .spawn(move || read_commands(hook_thread_id, command_events, insertion))?;
+        .spawn(move || read_commands(hook_thread_id, command_events, insertion, hotkey_controls))?;
     let _ = events.send(InputHostEvent::Ready {
         protocol_version: PROTOCOL_VERSION,
     });
@@ -142,8 +156,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(io::Error::last_os_error().into());
         }
         if message.message == WM_HOTKEY
-            && hotkeys::dispatch_registered_hotkey(message.wParam as i32)
+            && let Some(action) = registered_hotkeys.action_for_id(message.wParam as i32)
         {
+            let _ = hotkeys::dispatch_registered_action(action);
+            continue;
+        }
+        if message.message == WM_APPLY_HOTKEYS {
+            while let Ok(request) = hotkey_requests.try_recv() {
+                match registered_hotkeys.apply(request.configuration.bindings.clone()) {
+                    Ok(()) => {
+                        let _ = hotkey_events.send(InputHostEvent::HotkeysApplied {
+                            operation_id: request.operation_id,
+                            configuration: request.configuration,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = hotkey_events.send(InputHostEvent::HotkeysRejected {
+                            operation_id: request.operation_id,
+                            action: Some(error.action),
+                            reason: error.reason,
+                            message: error.message,
+                        });
+                    }
+                }
+            }
             continue;
         }
         unsafe {
@@ -345,6 +381,7 @@ fn read_commands(
     hook_thread_id: u32,
     events: mpsc::Sender<InputHostEvent>,
     insertion: insertion::InsertionService,
+    hotkey_controls: mpsc::Sender<HotkeyControl>,
 ) {
     let stdin = io::stdin();
     for line in BufReader::new(stdin.lock()).lines() {
@@ -366,6 +403,26 @@ fn read_commands(
             }
         };
         match command {
+            InputHostCommand::SetHotkeys {
+                operation_id,
+                configuration,
+            } => {
+                if hotkey_controls
+                    .send(HotkeyControl {
+                        operation_id,
+                        configuration,
+                    })
+                    .is_err()
+                    || unsafe { PostThreadMessageW(hook_thread_id, WM_APPLY_HOTKEYS, 0, 0) } == 0
+                {
+                    let _ = events.send(InputHostEvent::HotkeysRejected {
+                        operation_id,
+                        action: None,
+                        reason: rust_protocol::HotkeyRejection::RegistrationFailed,
+                        message: "The input thread is not available.".to_owned(),
+                    });
+                }
+            }
             InputHostCommand::InsertTranscript {
                 transcript,
                 target,

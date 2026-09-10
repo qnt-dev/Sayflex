@@ -1,6 +1,7 @@
 pub mod credentials;
 pub mod diagnostics;
 pub mod dictation;
+pub mod hotkeys;
 mod layout;
 pub mod lifecycle;
 pub mod product;

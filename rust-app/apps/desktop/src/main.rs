@@ -26,12 +26,13 @@ use rust_app_core::{
 };
 use rust_protocol::{
     BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, DictationLanguage,
-    HistoryEntry, InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId,
-    SessionId, SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot,
-    TextActionIntent, Transcript, TranscriptionProviderEntry, TranscriptionProviderStatus,
-    TranslationHistoryEntry, TranslationLanguage, TranslationLanguagePolicy,
-    TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
-    TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
+    HistoryEntry, HotkeyAction, HotkeyBindings, HotkeyConfiguration, InputHostCommand,
+    InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId, SpeechOutputMode,
+    SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript,
+    TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationHistoryEntry,
+    TranslationLanguage, TranslationLanguagePolicy, TranslationModelSummary,
+    TranslationProviderEntry, TranslationProviderStatus, TranslationResult, TranslationTier,
+    TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize};
 use settings_document::{SavedSettings, data_root, load_settings, save_settings};
@@ -369,6 +370,9 @@ struct AppState {
     writing_slate_surface: WritingSlateSurface,
     companion_home_position: Option<(i32, i32)>,
     input_ready: bool,
+    hotkeys: HotkeyBindings,
+    pending_hotkeys: Option<(RequestId, HotkeyBindings)>,
+    input_paused: bool,
     /// The speech process has completed its protocol handshake. This is
     /// deliberately separate from `speech_ready`: a cloud-first route can
     /// record as soon as the process is alive, without waiting for a local
@@ -474,6 +478,9 @@ impl AppState {
             writing_slate_surface: saved_settings.writing_slate_surface,
             companion_home_position: saved_settings.companion_home_position,
             input_ready: false,
+            hotkeys: saved_settings.hotkeys.clone(),
+            pending_hotkeys: None,
+            input_paused: false,
             speech_worker_ready: false,
             speech_ready: false,
             indicator_session: None,
@@ -1616,6 +1623,17 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
         InputHostEvent::Ready { protocol_version } => {
             if protocol_version == PROTOCOL_VERSION {
                 state.borrow_mut().input_ready = true;
+                let operation_id = RequestId::new();
+                let bindings = state.borrow().hotkeys.clone();
+                state.borrow_mut().pending_hotkeys = Some((operation_id, bindings.clone()));
+                if let Err(error) = workers.input.send(&InputHostCommand::SetHotkeys {
+                    operation_id,
+                    configuration: HotkeyConfiguration { bindings },
+                }) {
+                    state.borrow_mut().pending_hotkeys = None;
+                    set_status_problem(settings, &format!("Could not apply shortcuts: {error}"));
+                    return;
+                }
                 set_runtime_status(settings, "Input ready");
             } else {
                 state.borrow_mut().input_ready = false;
@@ -1625,6 +1643,50 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     "Input worker protocol mismatch. Reinstall the complete application.",
                 );
             }
+        }
+        InputHostEvent::HotkeysApplied {
+            operation_id,
+            configuration,
+        } => {
+            let applied = {
+                let mut state = state.borrow_mut();
+                if commit_hotkeys_if_pending(&mut state, operation_id, configuration.bindings) {
+                    let _ = save_settings(&state);
+                    true
+                } else {
+                    false
+                }
+            };
+            if applied {
+                sync_action_settings(settings, state);
+                set_indicator_status(settings, "Shortcuts updated.");
+            }
+        }
+        InputHostEvent::HotkeysRejected {
+            operation_id,
+            message,
+            ..
+        } => {
+            let rejected = {
+                let mut state = state.borrow_mut();
+                reject_hotkeys_if_pending(&mut state, operation_id)
+            };
+            if rejected {
+                sync_action_settings(settings, state);
+                set_status_problem(settings, &message);
+            }
+        }
+        InputHostEvent::PauseChanged { paused } => {
+            state.borrow_mut().input_paused = paused;
+            sync_action_settings(settings, state);
+            set_indicator_status(
+                settings,
+                if paused {
+                    "Input features paused. Use the pause shortcut again to resume."
+                } else {
+                    "Input features resumed."
+                },
+            );
         }
         InputHostEvent::DictationBegin {
             session_id,
@@ -2099,6 +2161,36 @@ speculative_reuse={} method={} delivery={}",
             set_indicator_status(settings, &format!("{code}: {message}"));
         }
     }
+}
+
+fn commit_hotkeys_if_pending(
+    state: &mut AppState,
+    operation_id: RequestId,
+    bindings: HotkeyBindings,
+) -> bool {
+    if !state
+        .pending_hotkeys
+        .as_ref()
+        .is_some_and(|(pending, proposed)| *pending == operation_id && *proposed == bindings)
+    {
+        return false;
+    }
+    state.pending_hotkeys = None;
+    state.hotkeys = bindings;
+    state.layout_enabled = state.hotkeys.binding(HotkeyAction::CorrectLayout).enabled;
+    state.translation_enabled = state.hotkeys.binding(HotkeyAction::Translate).enabled;
+    true
+}
+
+fn reject_hotkeys_if_pending(state: &mut AppState, operation_id: RequestId) -> bool {
+    let matches = state
+        .pending_hotkeys
+        .as_ref()
+        .is_some_and(|(pending, _)| *pending == operation_id);
+    if matches {
+        state.pending_hotkeys = None;
+    }
+    matches
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4154,6 +4246,60 @@ mod provider_path_readiness_tests {
         state.translation_providers = vec![translation_status("deepl", 0, false)];
         assert!(!state.translation_path_ready());
         assert!(!state.translation_waits_for_local());
+    }
+}
+
+#[cfg(test)]
+mod hotkey_ack_tests {
+    use rust_protocol::{HotkeyAction, HotkeySpec, RequestId, SpeechOutputMode};
+
+    use super::{
+        AppState, SavedSettings, SpeechBackend, commit_hotkeys_if_pending,
+        reject_hotkeys_if_pending,
+    };
+
+    fn state() -> AppState {
+        AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        )
+    }
+
+    #[test]
+    fn a_rejected_binding_is_never_promoted_to_persisted_state() {
+        let mut state = state();
+        let committed = state.hotkeys.clone();
+        let mut proposed = committed.clone();
+        proposed.binding_mut(HotkeyAction::Translate).spec = HotkeySpec::control_alt(b'G' as u16);
+        let operation_id = RequestId::new();
+        state.pending_hotkeys = Some((operation_id, proposed));
+
+        assert!(reject_hotkeys_if_pending(&mut state, operation_id));
+        assert_eq!(state.hotkeys, committed);
+        assert!(state.pending_hotkeys.is_none());
+    }
+
+    #[test]
+    fn only_the_matching_ack_promotes_the_exact_proposal() {
+        let mut state = state();
+        let mut proposed = state.hotkeys.clone();
+        proposed.binding_mut(HotkeyAction::Translate).enabled = true;
+        let operation_id = RequestId::new();
+        state.pending_hotkeys = Some((operation_id, proposed.clone()));
+
+        assert!(!commit_hotkeys_if_pending(
+            &mut state,
+            RequestId::new(),
+            proposed.clone()
+        ));
+        assert!(commit_hotkeys_if_pending(
+            &mut state,
+            operation_id,
+            proposed.clone()
+        ));
+        assert_eq!(state.hotkeys, proposed);
     }
 }
 

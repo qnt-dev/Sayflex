@@ -198,6 +198,8 @@ export component SettingsWindow inherits Window {
     in-out property <length> hotkeys-scroll-shown-height: 0px;
     in property <string> hotkeys-summary: "";
     in property <bool> hotkeys-summary-signal: false;
+    in-out property <int> hotkey-capture-index: -1;
+    in-out property <string> hotkey-capture-label: "";
 
     // ── Visuals ──
     in-out property <int> selected-visualizer: 0;
@@ -252,6 +254,9 @@ export component SettingsWindow inherits Window {
     callback set-translation-secondary-language(string);
     callback open-translator();
     callback set-hotkey-enabled(int, bool);
+    callback change-hotkey(int);
+    callback reset-hotkey(int);
+    callback cancel-hotkey-capture();
     callback move-provider(int, int);
     callback toggle-provider(int);
     callback use-provider-only(int);
@@ -537,7 +542,12 @@ export component SettingsWindow inherits Window {
                     rows: root.hotkey-rows;
                     summary: root.hotkeys-summary;
                     summary-signal: root.hotkeys-summary-signal;
+                    capture-index: root.hotkey-capture-index;
+                    capture-label: root.hotkey-capture-label;
                     toggle-row(index, next) => { root.set-hotkey-enabled(index, next); }
+                    change-row(index) => { root.change-hotkey(index); }
+                    reset-row(index) => { root.reset-hotkey(index); }
+                    cancel-capture => { root.cancel-hotkey-capture(); }
                     set-mode(menu, value) => { root.set-text-action-mode(value); }
                 }
             }
@@ -649,7 +659,12 @@ export component SettingsWindow inherits Window {
                             rows: root.hotkey-rows;
                             summary: root.hotkeys-summary;
                             summary-signal: root.hotkeys-summary-signal;
+                            capture-index: root.hotkey-capture-index;
+                            capture-label: root.hotkey-capture-label;
                             toggle-row(index, next) => { root.set-hotkey-enabled(index, next); }
+                            change-row(index) => { root.change-hotkey(index); }
+                            reset-row(index) => { root.reset-hotkey(index); }
+                            cancel-capture => { root.cancel-hotkey-capture(); }
                             set-mode(menu, value) => { root.set-text-action-mode(value); }
                         }
                     }

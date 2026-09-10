@@ -3,9 +3,7 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// Version 20 tells the translation worker whether the local route is enabled.
-// A cloud-only configuration must not load and retain a multi-gigabyte local
-// model it cannot route to.
+// Version 22 adds atomic, editable hotkey configuration and acknowledgements.
 // All packaged processes must agree on this schema before exchanging commands.
 /// The shape of every message in this file, as one number.
 ///
@@ -16,7 +14,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -665,6 +663,19 @@ pub enum InputHostEvent {
     TextCopied {
         request_id: RequestId,
     },
+    HotkeysApplied {
+        operation_id: RequestId,
+        configuration: HotkeyConfiguration,
+    },
+    HotkeysRejected {
+        operation_id: RequestId,
+        action: Option<HotkeyAction>,
+        reason: HotkeyRejection,
+        message: String,
+    },
+    PauseChanged {
+        paused: bool,
+    },
     Failed {
         #[serde(default)]
         session_id: Option<SessionId>,
@@ -700,9 +711,154 @@ pub enum InsertionDelivery {
     Dispatched,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyAction {
+    Dictate,
+    InsertLast,
+    CorrectLayout,
+    Translate,
+    PauseResume,
+}
+
+impl HotkeyAction {
+    pub const ALL: [Self; 5] = [
+        Self::Dictate,
+        Self::InsertLast,
+        Self::CorrectLayout,
+        Self::Translate,
+        Self::PauseResume,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HotkeyModifiers {
+    pub control: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub windows: bool,
+}
+
+impl HotkeyModifiers {
+    #[must_use]
+    pub const fn control_alt() -> Self {
+        Self {
+            control: true,
+            alt: true,
+            shift: false,
+            windows: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        !self.control && !self.alt && !self.shift && !self.windows
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HotkeySpec {
+    pub modifiers: HotkeyModifiers,
+    /// Windows virtual-key code. SayFlex is Windows-only for this release.
+    pub virtual_key: u16,
+}
+
+impl HotkeySpec {
+    #[must_use]
+    pub const fn control_alt(virtual_key: u16) -> Self {
+        Self {
+            modifiers: HotkeyModifiers::control_alt(),
+            virtual_key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotkeyBinding {
+    pub spec: HotkeySpec,
+    pub enabled: bool,
+}
+
+impl HotkeyBinding {
+    #[must_use]
+    pub const fn enabled(spec: HotkeySpec) -> Self {
+        Self {
+            spec,
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotkeyBindings {
+    pub dictate: HotkeyBinding,
+    pub insert_last: HotkeyBinding,
+    pub correct_layout: HotkeyBinding,
+    pub translate: HotkeyBinding,
+    pub pause_resume: HotkeyBinding,
+}
+
+impl Default for HotkeyBindings {
+    fn default() -> Self {
+        Self {
+            dictate: HotkeyBinding::enabled(HotkeySpec::control_alt(0x20)),
+            insert_last: HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'V'))),
+            correct_layout: HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'K'))),
+            translate: HotkeyBinding {
+                spec: HotkeySpec::control_alt(u16::from(b'F')),
+                enabled: false,
+            },
+            pause_resume: HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'P'))),
+        }
+    }
+}
+
+impl HotkeyBindings {
+    #[must_use]
+    pub const fn binding(&self, action: HotkeyAction) -> &HotkeyBinding {
+        match action {
+            HotkeyAction::Dictate => &self.dictate,
+            HotkeyAction::InsertLast => &self.insert_last,
+            HotkeyAction::CorrectLayout => &self.correct_layout,
+            HotkeyAction::Translate => &self.translate,
+            HotkeyAction::PauseResume => &self.pause_resume,
+        }
+    }
+
+    #[must_use]
+    pub fn binding_mut(&mut self, action: HotkeyAction) -> &mut HotkeyBinding {
+        match action {
+            HotkeyAction::Dictate => &mut self.dictate,
+            HotkeyAction::InsertLast => &mut self.insert_last,
+            HotkeyAction::CorrectLayout => &mut self.correct_layout,
+            HotkeyAction::Translate => &mut self.translate,
+            HotkeyAction::PauseResume => &mut self.pause_resume,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct HotkeyConfiguration {
+    #[serde(default)]
+    pub bindings: HotkeyBindings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyRejection {
+    Invalid,
+    Duplicate,
+    Busy,
+    RegistrationFailed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum InputHostCommand {
+    SetHotkeys {
+        operation_id: RequestId,
+        configuration: HotkeyConfiguration,
+    },
     InsertTranscript {
         transcript: Transcript,
         target: TargetSnapshot,
@@ -1061,10 +1217,11 @@ pub enum CompanionRendererEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompanionRendererCommand, DictationCommand, DictationLanguage, InputHostEvent,
-        InsertionDelivery, InsertionMethod, RequestId, SelectionCaptureTiming, SessionId,
-        SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency,
-        TranslationLanguage, TranslationResult, TranslationTier, TranslationWorkerEvent,
+        CompanionRendererCommand, DictationCommand, DictationLanguage, HotkeyAction,
+        HotkeyConfiguration, InputHostCommand, InputHostEvent, InsertionDelivery, InsertionMethod,
+        RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerEvent, TargetSnapshot,
+        TextActionIntent, Transcript, TranscriptionLatency, TranslationLanguage, TranslationResult,
+        TranslationTier, TranslationWorkerEvent,
     };
 
     #[test]
@@ -1076,6 +1233,29 @@ mod tests {
         let decoded: DictationCommand = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn hotkey_configuration_round_trips_with_action_identity() {
+        let operation_id = RequestId::new();
+        let configuration = HotkeyConfiguration::default();
+        let command = InputHostCommand::SetHotkeys {
+            operation_id,
+            configuration: configuration.clone(),
+        };
+
+        let json = serde_json::to_string(&command).unwrap();
+        let decoded: InputHostCommand = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, command);
+        assert_eq!(
+            configuration
+                .bindings
+                .binding(HotkeyAction::Translate)
+                .spec
+                .virtual_key,
+            u16::from(b'F')
+        );
     }
 
     #[test]
@@ -1402,8 +1582,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 21,
-            "every fingerprint below was written for protocol 21: if a shape \
+            PROTOCOL_VERSION, 22,
+            "every fingerprint below was written for protocol 22: if a shape \
              changes, this number changes with it"
         );
     }
@@ -1822,6 +2002,17 @@ mod complete_wire_schema_tests {
             InputHostEvent::Recovered { session_id },
             InputHostEvent::SelectionReplaced { request_id },
             InputHostEvent::TextCopied { request_id },
+            InputHostEvent::HotkeysApplied {
+                operation_id: request_id,
+                configuration: HotkeyConfiguration::default(),
+            },
+            InputHostEvent::HotkeysRejected {
+                operation_id: request_id,
+                action: Some(HotkeyAction::Translate),
+                reason: HotkeyRejection::RegistrationFailed,
+                message: "message".to_owned(),
+            },
+            InputHostEvent::PauseChanged { paused: true },
             InputHostEvent::Failed {
                 session_id: Some(session_id),
                 code: "code".to_owned(),
@@ -1833,6 +2024,10 @@ mod complete_wire_schema_tests {
     fn input_commands() -> Vec<InputHostCommand> {
         let request_id = RequestId::new();
         vec![
+            InputHostCommand::SetHotkeys {
+                operation_id: request_id,
+                configuration: HotkeyConfiguration::default(),
+            },
             InputHostCommand::InsertTranscript {
                 transcript: transcript(),
                 target: target(),
@@ -2126,12 +2321,15 @@ mod complete_wire_schema_tests {
         InputHostEvent::SelectionInputReleased { .. } => 6, InputHostEvent::SelectionInputReleaseFailed { .. } => 7,
         InputHostEvent::SelectionCaptureFailed { .. } => 8, InputHostEvent::InsertionCompleted { .. } => 9,
         InputHostEvent::Recovered { .. } => 10, InputHostEvent::SelectionReplaced { .. } => 11,
-        InputHostEvent::TextCopied { .. } => 12, InputHostEvent::Failed { .. } => 13
+        InputHostEvent::TextCopied { .. } => 12, InputHostEvent::HotkeysApplied { .. } => 13,
+        InputHostEvent::HotkeysRejected { .. } => 14, InputHostEvent::PauseChanged { .. } => 15,
+        InputHostEvent::Failed { .. } => 16
     );
     index_fn!(input_command_index, InputHostCommand,
-        InputHostCommand::InsertTranscript { .. } => 0, InputHostCommand::CopyTranscript { .. } => 1,
-        InputHostCommand::CopyText { .. } => 2, InputHostCommand::ReplaceSelection { .. } => 3,
-        InputHostCommand::CancelSelection { .. } => 4, InputHostCommand::Shutdown => 5
+        InputHostCommand::SetHotkeys { .. } => 0, InputHostCommand::InsertTranscript { .. } => 1,
+        InputHostCommand::CopyTranscript { .. } => 2, InputHostCommand::CopyText { .. } => 3,
+        InputHostCommand::ReplaceSelection { .. } => 4, InputHostCommand::CancelSelection { .. } => 5,
+        InputHostCommand::Shutdown => 6
     );
     index_fn!(translation_command_index, TranslationWorkerCommand,
         TranslationWorkerCommand::Initialize { .. } => 0, TranslationWorkerCommand::EnsureModel { .. } => 1,
@@ -2246,8 +2444,8 @@ mod complete_wire_schema_tests {
         let companion_commands = companion_commands();
         let companion_events = companion_events();
 
-        assert_complete(&input_events, input_event_index, 14);
-        assert_complete(&input_commands, input_command_index, 6);
+        assert_complete(&input_events, input_event_index, 17);
+        assert_complete(&input_commands, input_command_index, 7);
         assert_complete(&translation_commands, translation_command_index, 13);
         assert_complete(&translation_events, translation_event_index, 12);
         assert_complete(&speech_commands, speech_command_index, 17);
@@ -2268,7 +2466,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0xec7b_2eea_5279_7e22,
+            0xc9e8_ea62_efed_a419,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

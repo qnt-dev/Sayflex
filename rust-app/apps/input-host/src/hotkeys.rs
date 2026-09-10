@@ -12,15 +12,17 @@ use std::{
 };
 
 use rust_protocol::{
-    InputHostEvent, RequestId, SelectionCaptureTiming, SessionId, TargetSnapshot, TextActionIntent,
+    HotkeyAction, HotkeyBindings, HotkeyRejection, HotkeySpec, InputHostEvent, RequestId,
+    SelectionCaptureTiming, SessionId, TargetSnapshot, TextActionIntent,
 };
 use windows_sys::Win32::{
     Foundation::{GetLastError, LPARAM, LRESULT, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
-            VK_CONTROL, VK_F, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
-            VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_V,
+            GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+            RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_F, VK_K, VK_LCONTROL, VK_LMENU,
+            VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
+            VK_SPACE, VK_V,
         },
         WindowsAndMessaging::{
             CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
@@ -58,10 +60,13 @@ static LAST_PHYSICAL_CHANGE_US: AtomicU64 = AtomicU64::new(0);
 static LAST_HOOK_EVENT_US: AtomicU64 = AtomicU64::new(0);
 static SELECTION_BUSY: AtomicBool = AtomicBool::new(false);
 static REGISTERED_COMMANDS: AtomicU32 = AtomicU32::new(0);
+static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
 
 pub const HOTKEY_ID_CORRECT_LAYOUT: i32 = 0x5141;
 pub const HOTKEY_ID_INSERT_LAST: i32 = 0x5142;
 pub const HOTKEY_ID_TRANSLATE: i32 = 0x5143;
+pub const HOTKEY_ID_PAUSE_RESUME: i32 = 0x5144;
+const HOTKEY_ID_ALTERNATE_OFFSET: i32 = 0x0100;
 
 #[cfg(debug_assertions)]
 static TRACE_EVENTS: OnceLock<std::sync::mpsc::SyncSender<HookTrace>> = OnceLock::new();
@@ -91,6 +96,7 @@ enum HookAction {
     DictationEnded { gesture_id: u64, reason: EndReason },
     InsertLastRequested,
     SelectionRequested { intent: TextActionIntent },
+    PauseToggled,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -131,6 +137,7 @@ struct HotkeyState {
     selection_k_down: bool,
     insert_v_down: bool,
     adaptive_t_down: bool,
+    bindings: HotkeyBindings,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -273,77 +280,332 @@ fn dispatch_hook_action(action: HookAction) -> bool {
     sent
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyApplyError {
+    pub action: HotkeyAction,
+    pub reason: HotkeyRejection,
+    pub message: String,
+}
+
+impl std::fmt::Display for HotkeyApplyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HotkeyApplyError {}
+
+trait RegistrationBackend {
+    fn register(&mut self, id: i32, spec: HotkeySpec) -> Result<(), u32>;
+    fn unregister(&mut self, id: i32);
+}
+
+struct Win32RegistrationBackend;
+
+impl RegistrationBackend for Win32RegistrationBackend {
+    fn register(&mut self, id: i32, spec: HotkeySpec) -> Result<(), u32> {
+        let mut modifiers = MOD_NOREPEAT;
+        if spec.modifiers.control {
+            modifiers |= MOD_CONTROL;
+        }
+        if spec.modifiers.alt {
+            modifiers |= MOD_ALT;
+        }
+        if spec.modifiers.shift {
+            modifiers |= MOD_SHIFT;
+        }
+        if spec.modifiers.windows {
+            modifiers |= MOD_WIN;
+        }
+        if unsafe {
+            RegisterHotKey(
+                std::ptr::null_mut(),
+                id,
+                modifiers,
+                u32::from(spec.virtual_key),
+            )
+        } != 0
+        {
+            Ok(())
+        } else {
+            Err(unsafe { GetLastError() })
+        }
+    }
+
+    fn unregister(&mut self, id: i32) {
+        unsafe {
+            let _ = UnregisterHotKey(std::ptr::null_mut(), id);
+        }
+    }
+}
+
 pub struct RegisteredHotkeys {
-    registrations: Vec<(i32, u32)>,
+    backend: Box<dyn RegistrationBackend>,
+    registrations: Vec<(HotkeyAction, i32, HotkeySpec)>,
+    bindings: HotkeyBindings,
 }
 
 impl RegisteredHotkeys {
-    pub fn register_for_current_thread() -> Self {
-        let mut registrations = Vec::with_capacity(3);
-        for (id, trigger, mask, name) in [
-            (
-                HOTKEY_ID_CORRECT_LAYOUT,
-                u32::from(VK_K),
-                INPUT_K,
-                "correct_layout",
-            ),
-            (
-                HOTKEY_ID_INSERT_LAST,
-                u32::from(VK_V),
-                INPUT_V,
-                "insert_last",
-            ),
-            (HOTKEY_ID_TRANSLATE, u32::from(VK_F), INPUT_F, "translate"),
-        ] {
-            let registered = unsafe {
-                RegisterHotKey(
-                    std::ptr::null_mut(),
-                    id,
-                    MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
-                    trigger,
-                )
-            } != 0;
-            if registered {
-                REGISTERED_COMMANDS.fetch_or(mask, Ordering::AcqRel);
-                registrations.push((id, mask));
-                crate::diagnostic_line(&format!("hotkey registration={name} result=success"));
-            } else {
-                crate::diagnostic_line(&format!(
-                    "hotkey registration={name} result=fallback_hook win32={}",
-                    unsafe { GetLastError() }
-                ));
+    pub fn register_for_current_thread(bindings: HotkeyBindings) -> Result<Self, HotkeyApplyError> {
+        rust_app_core::hotkeys::validate(&bindings).map_err(validation_error)?;
+        let mut registered = Self {
+            backend: Box::new(Win32RegistrationBackend),
+            registrations: Vec::new(),
+            bindings: bindings.clone(),
+        };
+        // A conflicting auxiliary shortcut must not kill dictation startup.
+        // The desktop submits the persisted set after the protocol handshake
+        // and receives a typed rejection for anything Windows will not accept.
+        for action in registered_actions() {
+            let binding = bindings.binding(action);
+            if !binding.enabled {
+                continue;
+            }
+            let id = hotkey_id(action, false);
+            match registered.backend.register(id, binding.spec) {
+                Ok(()) => registered.registrations.push((action, id, binding.spec)),
+                Err(code) => crate::diagnostic_line(&format!(
+                    "hotkey startup=unavailable action={action:?} error={code}"
+                )),
             }
         }
-        Self { registrations }
+        refresh_registered_command_mask(&registered.registrations);
+        set_hook_bindings(bindings)?;
+        Ok(registered)
+    }
+
+    #[cfg(test)]
+    fn with_backend(
+        backend: Box<dyn RegistrationBackend>,
+        bindings: HotkeyBindings,
+    ) -> Result<Self, HotkeyApplyError> {
+        rust_app_core::hotkeys::validate(&bindings).map_err(validation_error)?;
+        let mut registered = Self {
+            backend,
+            registrations: Vec::new(),
+            bindings: bindings.clone(),
+        };
+        registered.install(&bindings)?;
+        set_hook_bindings(bindings.clone())?;
+        registered.bindings = bindings;
+        Ok(registered)
+    }
+
+    pub fn apply(&mut self, bindings: HotkeyBindings) -> Result<(), HotkeyApplyError> {
+        rust_app_core::hotkeys::validate(&bindings).map_err(validation_error)?;
+        if hook_gesture_active() {
+            return Err(HotkeyApplyError {
+                action: HotkeyAction::Dictate,
+                reason: HotkeyRejection::Busy,
+                message: "Finish the active dictation before changing shortcuts.".to_owned(),
+            });
+        }
+
+        // Register every changed chord under the inactive id bank first. The
+        // old set remains live until all new registrations have succeeded, so
+        // failure needs no best-effort rollback and never leaves a half-set.
+        let mut staged = Vec::new();
+        for action in registered_actions() {
+            let previous = self.bindings.binding(action);
+            let replacement = bindings.binding(action);
+            let unchanged = previous == replacement
+                && (!replacement.enabled
+                    || self
+                        .registrations
+                        .iter()
+                        .any(|(registered_action, _, spec)| {
+                            *registered_action == action && *spec == replacement.spec
+                        }));
+            if unchanged || !replacement.enabled {
+                continue;
+            }
+            let uses_primary = self.registrations.iter().any(|(registered_action, id, _)| {
+                *registered_action == action && *id == hotkey_id(action, false)
+            });
+            let id = hotkey_id(action, uses_primary);
+            if let Err(code) = self.backend.register(id, replacement.spec) {
+                for (_, staged_id, _) in staged.drain(..) {
+                    self.backend.unregister(staged_id);
+                }
+                return Err(registration_error(action, code));
+            }
+            staged.push((action, id, replacement.spec));
+        }
+
+        if let Err(error) = set_hook_bindings(bindings.clone()) {
+            for (_, staged_id, _) in staged.drain(..) {
+                self.backend.unregister(staged_id);
+            }
+            return Err(error);
+        }
+
+        let mut retained = Vec::with_capacity(self.registrations.len() + staged.len());
+        for registration @ (action, id, spec) in self.registrations.drain(..) {
+            let replacement = bindings.binding(action);
+            if replacement.enabled && replacement.spec == spec {
+                retained.push(registration);
+            } else {
+                self.backend.unregister(id);
+            }
+        }
+        retained.extend(staged);
+        self.registrations = retained;
+        refresh_registered_command_mask(&self.registrations);
+        self.bindings = bindings;
+        Ok(())
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn bindings(&self) -> &HotkeyBindings {
+        &self.bindings
+    }
+
+    #[must_use]
+    pub fn action_for_id(&self, id: i32) -> Option<HotkeyAction> {
+        self.registrations
+            .iter()
+            .find_map(|(action, registered_id, _)| (*registered_id == id).then_some(*action))
+    }
+
+    #[cfg(test)]
+    fn install(&mut self, bindings: &HotkeyBindings) -> Result<(), HotkeyApplyError> {
+        for action in registered_actions() {
+            let binding = bindings.binding(action);
+            if !binding.enabled {
+                continue;
+            }
+            let id = hotkey_id(action, false);
+            self.backend
+                .register(id, binding.spec)
+                .map_err(|code| registration_error(action, code))?;
+            self.registrations.push((action, id, binding.spec));
+        }
+        refresh_registered_command_mask(&self.registrations);
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        for (_, id, _) in self.registrations.drain(..) {
+            self.backend.unregister(id);
+        }
+        refresh_registered_command_mask(&self.registrations);
     }
 }
 
 impl Drop for RegisteredHotkeys {
     fn drop(&mut self) {
-        for (id, mask) in self.registrations.drain(..) {
-            unsafe {
-                let _ = UnregisterHotKey(std::ptr::null_mut(), id);
-            }
-            REGISTERED_COMMANDS.fetch_and(!mask, Ordering::AcqRel);
-        }
+        self.clear();
     }
 }
 
-pub fn dispatch_registered_hotkey(id: i32) -> bool {
-    registered_hotkey_action(id).is_some_and(dispatch_hook_action)
+const fn hotkey_id(action: HotkeyAction, alternate: bool) -> i32 {
+    let base = match action {
+        HotkeyAction::CorrectLayout => HOTKEY_ID_CORRECT_LAYOUT,
+        HotkeyAction::InsertLast => HOTKEY_ID_INSERT_LAST,
+        HotkeyAction::Translate => HOTKEY_ID_TRANSLATE,
+        HotkeyAction::PauseResume => HOTKEY_ID_PAUSE_RESUME,
+        HotkeyAction::Dictate => unreachable!(),
+    };
+    if alternate {
+        base + HOTKEY_ID_ALTERNATE_OFFSET
+    } else {
+        base
+    }
 }
 
-const fn registered_hotkey_action(id: i32) -> Option<HookAction> {
-    match id {
-        HOTKEY_ID_CORRECT_LAYOUT => Some(HookAction::SelectionRequested {
+const fn registered_mask(action: HotkeyAction) -> u32 {
+    match action {
+        HotkeyAction::CorrectLayout => INPUT_K,
+        HotkeyAction::InsertLast => INPUT_V,
+        HotkeyAction::Translate => INPUT_F,
+        HotkeyAction::PauseResume => 0,
+        HotkeyAction::Dictate => unreachable!(),
+    }
+}
+
+const fn registered_actions() -> [HotkeyAction; 4] {
+    [
+        HotkeyAction::CorrectLayout,
+        HotkeyAction::InsertLast,
+        HotkeyAction::Translate,
+        HotkeyAction::PauseResume,
+    ]
+}
+
+fn refresh_registered_command_mask(registrations: &[(HotkeyAction, i32, HotkeySpec)]) {
+    let mask = registrations
+        .iter()
+        .fold(0, |mask, (action, _, _)| mask | registered_mask(*action));
+    REGISTERED_COMMANDS.store(mask, Ordering::Release);
+}
+
+fn validation_error(error: rust_app_core::hotkeys::HotkeyValidationError) -> HotkeyApplyError {
+    HotkeyApplyError {
+        action: error.action,
+        reason: error.reason,
+        message: error.message,
+    }
+}
+
+fn registration_error(action: HotkeyAction, code: u32) -> HotkeyApplyError {
+    HotkeyApplyError {
+        action,
+        reason: HotkeyRejection::RegistrationFailed,
+        message: format!(
+            "Windows refused {action:?}; the shortcut may be used by another application (error {code})."
+        ),
+    }
+}
+
+pub fn dispatch_registered_action(action: HotkeyAction) -> bool {
+    let hook_action = hook_action_for(action);
+    if hook_action == HookAction::PauseToggled {
+        INPUT_PAUSED.fetch_xor(true, Ordering::AcqRel);
+        return dispatch_hook_action(HookAction::PauseToggled);
+    }
+    if INPUT_PAUSED.load(Ordering::Acquire) {
+        return true;
+    }
+    dispatch_hook_action(hook_action)
+}
+
+fn hook_gesture_active() -> bool {
+    HOOK_STATE.with(|state| !matches!(state.borrow().gesture, GestureState::Idle))
+}
+
+fn set_hook_bindings(bindings: HotkeyBindings) -> Result<(), HotkeyApplyError> {
+    if hook_gesture_active() {
+        return Err(HotkeyApplyError {
+            action: HotkeyAction::Dictate,
+            reason: HotkeyRejection::Busy,
+            message: "Finish the active dictation before changing shortcuts.".to_owned(),
+        });
+    }
+    HOOK_STATE.with(|state| state.borrow_mut().bindings = bindings);
+    Ok(())
+}
+
+const fn hook_action_for(action: HotkeyAction) -> HookAction {
+    match action {
+        HotkeyAction::CorrectLayout => HookAction::SelectionRequested {
             intent: TextActionIntent::CorrectLayout,
-        }),
-        HOTKEY_ID_INSERT_LAST => Some(HookAction::InsertLastRequested),
-        HOTKEY_ID_TRANSLATE => Some(HookAction::SelectionRequested {
+        },
+        HotkeyAction::InsertLast => HookAction::InsertLastRequested,
+        HotkeyAction::Translate => HookAction::SelectionRequested {
             intent: TextActionIntent::Translate,
-        }),
-        _ => None,
+        },
+        HotkeyAction::PauseResume => HookAction::PauseToggled,
+        HotkeyAction::Dictate => unreachable!(),
     }
+}
+
+#[cfg(test)]
+fn registered_hotkey_action(id: i32) -> Option<HookAction> {
+    registered_actions().into_iter().find_map(|action| {
+        (id == hotkey_id(action, false) || id == hotkey_id(action, true))
+            .then_some(hook_action_for(action))
+    })
 }
 
 fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHostEvent>) {
@@ -427,6 +689,11 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
                         "selection_capture result=thread_start_failed error={error}"
                     ));
                 }
+            }
+            HookAction::PauseToggled => {
+                let _ = events.send(InputHostEvent::PauseChanged {
+                    paused: INPUT_PAUSED.load(Ordering::Acquire),
+                });
             }
         }
     }
@@ -789,21 +1056,28 @@ impl HotkeyState {
         self.adaptive_t_down &= self.keys.is_down(VK_F);
         match self.gesture {
             GestureState::Active { gesture_id }
-                if !self.keys.command_modifiers() || !self.keys.is_down(VK_SPACE) =>
+                if !self.keys.dictation_chord_held(self.bindings.dictate.spec) =>
             {
-                let reason = if !self.keys.is_down(VK_SPACE) {
+                let reason = if !self.keys.is_down(self.bindings.dictate.spec.virtual_key) {
                     EndReason::TriggerReleased
                 } else {
                     EndReason::RequiredModifierReleased
                 };
-                self.gesture = if self.keys.dictation_chord_released() {
+                self.gesture = if self
+                    .keys
+                    .dictation_chord_released(self.bindings.dictate.spec)
+                {
                     GestureState::Idle
                 } else {
                     GestureState::Draining { gesture_id }
                 };
                 Some(HookAction::DictationEnded { gesture_id, reason })
             }
-            GestureState::Draining { .. } if self.keys.dictation_chord_released() => {
+            GestureState::Draining { .. }
+                if self
+                    .keys
+                    .dictation_chord_released(self.bindings.dictate.spec) =>
+            {
                 self.gesture = GestureState::Idle;
                 None
             }
@@ -818,21 +1092,39 @@ impl HotkeyState {
         key_up: bool,
         registered_commands: u32,
     ) -> HookDecision {
+        self.process_event_at_pause_state(
+            virtual_key,
+            key_down,
+            key_up,
+            registered_commands,
+            INPUT_PAUSED.load(Ordering::Acquire),
+        )
+    }
+
+    fn process_event_at_pause_state(
+        &mut self,
+        virtual_key: u16,
+        key_down: bool,
+        key_up: bool,
+        registered_commands: u32,
+        paused: bool,
+    ) -> HookDecision {
         let state_before = self.gesture.name();
         let was_down = self.keys.is_down(virtual_key);
         self.keys.set(virtual_key, key_down, key_up);
         let repeated = key_down && was_down;
         let mut suppress = false;
         let mut action = None;
+        let dictate = self.bindings.dictate;
 
         match self.gesture {
             GestureState::Idle => {
-                if virtual_key == VK_SPACE
+                if dictate.enabled
+                    && !paused
+                    && virtual_key == dictate.spec.virtual_key
                     && key_down
                     && !repeated
-                    && self.keys.command_modifiers()
-                    && !self.keys.shift()
-                    && !self.keys.windows()
+                    && self.keys.dictation_chord_held(dictate.spec)
                 {
                     let gesture_id = self.next_gesture_id.max(1);
                     self.next_gesture_id = gesture_id.saturating_add(1);
@@ -842,20 +1134,20 @@ impl HotkeyState {
                 }
             }
             GestureState::Active { gesture_id } => {
-                if virtual_key == VK_SPACE {
+                if virtual_key == dictate.spec.virtual_key {
                     suppress = true;
                 }
-                let trigger_released = virtual_key == VK_SPACE && key_up;
+                let trigger_released = virtual_key == dictate.spec.virtual_key && key_up;
                 let required_modifier_released = key_up
-                    && (is_command_control(virtual_key) || is_command_alt(virtual_key))
-                    && !self.keys.command_modifiers();
+                    && modifier_belongs_to(dictate.spec, virtual_key)
+                    && !self.keys.required_modifiers_down(dictate.spec);
                 if trigger_released || required_modifier_released {
                     let reason = if trigger_released {
                         EndReason::TriggerReleased
                     } else {
                         EndReason::RequiredModifierReleased
                     };
-                    self.gesture = if self.keys.dictation_chord_released() {
+                    self.gesture = if self.keys.dictation_chord_released(dictate.spec) {
                         GestureState::Idle
                     } else {
                         GestureState::Draining { gesture_id }
@@ -864,10 +1156,10 @@ impl HotkeyState {
                 }
             }
             GestureState::Draining { gesture_id: _ } => {
-                if virtual_key == VK_SPACE {
+                if virtual_key == dictate.spec.virtual_key {
                     suppress = true;
                 }
-                if self.keys.dictation_chord_released() {
+                if self.keys.dictation_chord_released(dictate.spec) {
                     self.gesture = GestureState::Idle;
                 }
             }
@@ -883,7 +1175,11 @@ impl HotkeyState {
             };
         }
 
-        if registered_commands & INPUT_K == 0 && virtual_key == VK_K {
+        if self.bindings.correct_layout.enabled
+            && self.bindings.correct_layout.spec == HotkeySpec::control_alt(VK_K)
+            && registered_commands & INPUT_K == 0
+            && virtual_key == VK_K
+        {
             if self.selection_k_down {
                 suppress = true;
                 if key_up {
@@ -902,7 +1198,11 @@ impl HotkeyState {
                 });
             }
         }
-        if registered_commands & INPUT_V == 0 && virtual_key == VK_V {
+        if self.bindings.insert_last.enabled
+            && self.bindings.insert_last.spec == HotkeySpec::control_alt(VK_V)
+            && registered_commands & INPUT_V == 0
+            && virtual_key == VK_V
+        {
             if self.insert_v_down {
                 suppress = true;
                 if key_up {
@@ -919,7 +1219,11 @@ impl HotkeyState {
                 action = Some(HookAction::InsertLastRequested);
             }
         }
-        if registered_commands & INPUT_F == 0 && virtual_key == VK_F {
+        if self.bindings.translate.enabled
+            && self.bindings.translate.spec == HotkeySpec::control_alt(VK_F)
+            && registered_commands & INPUT_F == 0
+            && virtual_key == VK_F
+        {
             if self.adaptive_t_down {
                 suppress = true;
                 if key_up {
@@ -1044,8 +1348,28 @@ impl PhysicalKeys {
         self.any(&[VK_LWIN, VK_RWIN])
     }
 
-    fn dictation_chord_released(&self) -> bool {
-        !self.command_control() && !self.command_alt() && !self.is_down(VK_SPACE)
+    fn required_modifiers_down(&self, spec: HotkeySpec) -> bool {
+        (!spec.modifiers.control || self.command_control())
+            && (!spec.modifiers.alt || self.command_alt())
+            && (!spec.modifiers.shift || self.shift())
+            && (!spec.modifiers.windows || self.windows())
+    }
+
+    fn dictation_chord_held(&self, spec: HotkeySpec) -> bool {
+        self.required_modifiers_down(spec)
+            && self.is_down(spec.virtual_key)
+            && (spec.modifiers.control == self.command_control())
+            && (spec.modifiers.alt == self.command_alt())
+            && (spec.modifiers.shift == self.shift())
+            && (spec.modifiers.windows == self.windows())
+    }
+
+    fn dictation_chord_released(&self, spec: HotkeySpec) -> bool {
+        !self.is_down(spec.virtual_key)
+            && (!spec.modifiers.control || !self.control())
+            && (!spec.modifiers.alt || !self.alt())
+            && (!spec.modifiers.shift || !self.shift())
+            && (!spec.modifiers.windows || !self.windows())
     }
 
     fn input_mask(&self) -> u32 {
@@ -1084,6 +1408,13 @@ fn is_command_control(virtual_key: u16) -> bool {
 
 fn is_command_alt(virtual_key: u16) -> bool {
     matches!(virtual_key, VK_MENU | VK_LMENU)
+}
+
+fn modifier_belongs_to(spec: HotkeySpec, virtual_key: u16) -> bool {
+    (spec.modifiers.control && is_command_control(virtual_key))
+        || (spec.modifiers.alt && is_command_alt(virtual_key))
+        || (spec.modifiers.shift && matches!(virtual_key, VK_SHIFT | VK_LSHIFT | VK_RSHIFT))
+        || (spec.modifiers.windows && matches!(virtual_key, VK_LWIN | VK_RWIN))
 }
 
 fn unix_ms() -> u64 {
@@ -1230,21 +1561,28 @@ const fn action_gesture_id(action: HookAction) -> Option<u64> {
     match action {
         HookAction::DictationStarted { gesture_id }
         | HookAction::DictationEnded { gesture_id, .. } => Some(gesture_id),
-        HookAction::InsertLastRequested | HookAction::SelectionRequested { .. } => None,
+        HookAction::InsertLastRequested
+        | HookAction::SelectionRequested { .. }
+        | HookAction::PauseToggled => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, time::Duration};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::HashMap,
+        rc::Rc,
+        time::Duration,
+    };
 
-    use rust_protocol::TextActionIntent;
+    use rust_protocol::{HotkeyAction, HotkeyBindings, HotkeySpec, TextActionIntent};
 
     use super::{
         EndReason, EventOrigin, GestureState, HOTKEY_ID_CORRECT_LAYOUT, HOTKEY_ID_INSERT_LAST,
         HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_F, INPUT_K,
-        INPUT_V, PhysicalKeys, classify_event, monotonic_us, registered_hotkey_action,
-        selection_chord_mask, wait_for_mask_clear_using,
+        INPUT_V, PhysicalKeys, RegisteredHotkeys, RegistrationBackend, classify_event,
+        monotonic_us, registered_hotkey_action, selection_chord_mask, wait_for_mask_clear_using,
     };
 
     use crate::inject::SYNTHETIC_MARKER;
@@ -1255,6 +1593,101 @@ mod tests {
         },
         WindowsAndMessaging::LLKHF_INJECTED,
     };
+
+    #[derive(Clone, Default)]
+    struct FakeRegistrationBackend {
+        active: Rc<RefCell<HashMap<i32, HotkeySpec>>>,
+        fail_spec: Rc<Cell<Option<HotkeySpec>>>,
+    }
+
+    impl RegistrationBackend for FakeRegistrationBackend {
+        fn register(&mut self, id: i32, spec: HotkeySpec) -> Result<(), u32> {
+            if self.fail_spec.get() == Some(spec) {
+                return Err(1409);
+            }
+            self.active.borrow_mut().insert(id, spec);
+            Ok(())
+        }
+
+        fn unregister(&mut self, id: i32) {
+            self.active.borrow_mut().remove(&id);
+        }
+    }
+
+    #[test]
+    fn a_failed_rebind_restores_every_previous_registration() {
+        let backend = FakeRegistrationBackend::default();
+        let observer = backend.clone();
+        let mut registered =
+            RegisteredHotkeys::with_backend(Box::new(backend), HotkeyBindings::default()).unwrap();
+        let previous = observer.active.borrow().clone();
+        let mut replacement = HotkeyBindings::default();
+        replacement.correct_layout.spec = HotkeySpec::control_alt(u16::from(b'H'));
+        replacement.translate.spec = HotkeySpec::control_alt(u16::from(b'G'));
+        replacement.translate.enabled = true;
+        observer.fail_spec.set(Some(replacement.translate.spec));
+
+        let error = registered.apply(replacement).unwrap_err();
+
+        assert_eq!(error.action, HotkeyAction::Translate);
+        assert_eq!(*observer.active.borrow(), previous);
+        assert_eq!(registered.bindings(), &HotkeyBindings::default());
+    }
+
+    #[test]
+    fn a_disabled_action_releases_its_registered_chord() {
+        let backend = FakeRegistrationBackend::default();
+        let observer = backend.clone();
+        let mut registered =
+            RegisteredHotkeys::with_backend(Box::new(backend), HotkeyBindings::default()).unwrap();
+        let mut replacement = HotkeyBindings::default();
+        replacement.translate.enabled = false;
+
+        registered.apply(replacement).unwrap();
+
+        assert!(
+            !observer
+                .active
+                .borrow()
+                .contains_key(&super::HOTKEY_ID_TRANSLATE)
+        );
+        assert!(
+            observer
+                .active
+                .borrow()
+                .contains_key(&super::HOTKEY_ID_INSERT_LAST)
+        );
+    }
+
+    #[test]
+    fn a_custom_dictation_trigger_owns_the_hold_gesture() {
+        let mut state = HotkeyState::default();
+        state.bindings.dictate.spec = HotkeySpec::control_alt(u16::from(b'G'));
+        event(&mut state, VK_LCONTROL, true);
+        event(&mut state, VK_LMENU, true);
+
+        assert!(event(&mut state, VK_SPACE, true).action.is_none());
+        let begin = event(&mut state, u16::from(b'G'), true);
+        let end = event(&mut state, u16::from(b'G'), false);
+
+        assert!(matches!(
+            begin.action,
+            Some(HookAction::DictationStarted { .. })
+        ));
+        assert_eq!(gesture_id(begin.action), gesture_id(end.action));
+    }
+
+    #[test]
+    fn paused_input_leaves_the_dictation_chord_untouched() {
+        let mut state = HotkeyState::default();
+        state.process_event_at_pause_state(VK_LCONTROL, true, false, 0, true);
+        state.process_event_at_pause_state(VK_LMENU, true, false, 0, true);
+
+        let decision = state.process_event_at_pause_state(VK_SPACE, true, false, 0, true);
+
+        assert!(!decision.suppress);
+        assert!(decision.action.is_none());
+    }
 
     fn event(state: &mut HotkeyState, key: u16, down: bool) -> super::HookDecision {
         state.process_event(key, down, !down, 0)
@@ -1400,6 +1833,7 @@ mod tests {
         ];
         for (key, expected) in cases {
             let mut state = HotkeyState::default();
+            state.bindings.translate.enabled = true;
             event(&mut state, VK_LCONTROL, true);
             event(&mut state, VK_LMENU, true);
             let first = event(&mut state, key, true);
@@ -1412,6 +1846,19 @@ mod tests {
             assert!(release.suppress);
             assert!(release.action.is_none());
         }
+    }
+
+    #[test]
+    fn a_disabled_command_is_not_resurrected_by_the_hook_fallback() {
+        let mut state = HotkeyState::default();
+        state.bindings.correct_layout.enabled = false;
+        event(&mut state, VK_LCONTROL, true);
+        event(&mut state, VK_LMENU, true);
+
+        let key = event(&mut state, VK_K, true);
+
+        assert!(!key.suppress);
+        assert!(key.action.is_none());
     }
 
     #[test]
@@ -1444,6 +1891,10 @@ mod tests {
             Some(HookAction::SelectionRequested {
                 intent: TextActionIntent::Translate,
             })
+        );
+        assert_eq!(
+            registered_hotkey_action(super::HOTKEY_ID_PAUSE_RESUME),
+            Some(HookAction::PauseToggled)
         );
         assert_eq!(registered_hotkey_action(i32::MAX), None);
     }

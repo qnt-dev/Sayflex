@@ -34,6 +34,7 @@ unicode-segmentation = "1.13.3"
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 windows = { version = "0.62.2", features = [
     "Win32_System_Com",
+    "Win32_System_Ole",
     "Win32_UI_Accessibility",
 ] }
 windows-sys = { version = "0.61.2", features = [

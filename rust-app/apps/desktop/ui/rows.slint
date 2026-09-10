@@ -67,13 +67,17 @@ export struct HistoryRow {
 
 // One command SayFlex registers.
 export struct HotkeyRow {
+    action: string,
     keys: string,
     name: string,
     detail: string,
     state: string,
     tone: string,
     enabled: bool,
-    // Set when the combination is fixed in this build, with the reason.
+    toggle-enabled: bool,
+    is-default: bool,
+    // Set while Windows is applying a replacement, or when an action cannot
+    // be edited. Empty means the Change button is available.
     locked-reason: string,
     // Names a menu of modes when the command has a choice about what it does:
     // `mode` is which menu, `mode-value` the words on the row, `mode-key` the

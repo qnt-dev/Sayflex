@@ -4,17 +4,31 @@
 //! state and a command to a worker, and every `sync_` function turns state back
 //! into what the window shows. The rules those changes obey live elsewhere.
 
-use std::{cell::RefCell, rc::Rc, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Instant,
+};
 
-use rust_app_core::{LayoutDirection, build_layout_candidates};
+use rust_app_core::{
+    LayoutDirection, build_layout_candidates,
+    hotkeys::{format_hotkey, validate as validate_hotkeys},
+};
 use rust_protocol::{
-    CompanionRendererCommand, DictationLanguage, HistoryEntry, InputHostCommand, RequestId,
+    CompanionRendererCommand, DictationLanguage, HistoryEntry, HotkeyAction, HotkeyBindings,
+    HotkeyConfiguration, HotkeyModifiers, HotkeySpec, InputHostCommand, RequestId,
     SpeechOutputMode, SpeechWorkerCommand, TargetSnapshot, TranslationLanguage,
     TranslationLanguagePolicy, TranslationWorkerCommand,
 };
 use slint::{
     ComponentHandle, Model, ModelRc, PhysicalPosition, SharedString, VecModel,
-    winit_030::WinitWindowAccessor,
+    winit_030::{
+        EventResult, WinitWindowAccessor,
+        winit::{
+            event::{ElementState, WindowEvent},
+            keyboard::{KeyCode, ModifiersState, PhysicalKey},
+        },
+    },
 };
 
 use crate::{
@@ -183,6 +197,7 @@ pub(crate) fn sync_action_settings(
     );
     settings.set_dictation_language(state.dictation_language.code().unwrap_or("auto").into());
     settings.set_dictation_language_label(state.dictation_language.display_name().into());
+    settings.set_dictate_hotkey(format_hotkey(state.hotkeys.dictate.spec).into());
     settings.set_output_mode_locked(!state.speech_translation_supported());
     settings.set_dictation_subtitle(
         if state.speech_path_ready() {
@@ -312,15 +327,9 @@ pub(crate) fn sync_visualizer_copy(settings: &SettingsWindow, style: VisualizerS
     );
 }
 
-/// The five commands SayFlex registers.
-///
-/// The combinations are fixed in this build — `input-host` registers K, V and F
-/// at start-up and the dictate gesture is recognised by the low-level hook — so
-/// the row says so on its Change button rather than the page quietly not
-/// offering one. Switching a command off is a different thing from changing its
-/// combination, and only the first is possible here.
 fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
-    const FIXED: &str = "Fixed in this version";
+    let pending = state.pending_hotkeys.is_some();
+    let defaults = HotkeyBindings::default();
     let held = |on: bool| {
         if on {
             (tone::RESTING, "Held")
@@ -329,103 +338,250 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         }
     };
 
-    let mut rows = Vec::with_capacity(5);
-    rows.push(HotkeyRow {
-        keys: "Ctrl + Alt + Space".into(),
-        name: "Dictate".into(),
-        detail: "Records while held · transcribes and inserts on release".into(),
-        state: "Held".into(),
-        tone: tone::ACTIVE.into(),
-        enabled: true,
-        locked_reason: FIXED.into(),
-        mode: "".into(),
-        mode_value: "".into(),
-        mode_key: "".into(),
-    });
-    rows.push(HotkeyRow {
-        keys: "Ctrl + Alt + V".into(),
-        name: "Insert last".into(),
-        detail: "Places the newest transcript where the caret is now".into(),
-        state: "Held".into(),
-        tone: tone::RESTING.into(),
-        enabled: true,
-        locked_reason: FIXED.into(),
-        mode: "".into(),
-        mode_value: "".into(),
-        mode_key: "".into(),
-    });
-
-    let (layout_tone, layout_state) = held(state.layout_enabled);
-    rows.push(HotkeyRow {
-        keys: "Ctrl + Alt + K".into(),
-        name: "Correct layout".into(),
-        detail: if state.layout_enabled {
-            "Offers RU/EN candidates for the selection · never automatic".into()
-        } else {
-            // Not "left to other applications": input-host registers this
-            // combination at start-up and never releases it, so SayFlex still
-            // receives the keys and simply does nothing with them.
-            "Switched off · SayFlex ignores it but still holds the combination".into()
-        },
-        state: layout_state.into(),
-        tone: layout_tone.into(),
-        enabled: state.layout_enabled,
-        locked_reason: FIXED.into(),
-        mode: "".into(),
-        mode_value: "".into(),
-        mode_key: "".into(),
-    });
-
-    let (action_tone, action_state) = held(state.translation_enabled);
-    rows.push(HotkeyRow {
-        keys: "Ctrl + Alt + F".into(),
-        name: "Act on selection".into(),
-        detail: if state.translation_enabled {
-            "Captures the selection once and acts on it".into()
-        } else {
-            "Switched off · SayFlex ignores it but still holds the combination".into()
-        },
-        state: action_state.into(),
-        tone: action_tone.into(),
-        enabled: state.translation_enabled,
-        locked_reason: FIXED.into(),
-        mode: "text-action".into(),
-        mode_value: match state.text_action_mode {
-            TextActionMode::Adaptive => "Decide from the text".into(),
-            TextActionMode::AlwaysPalette => "Always ask".into(),
-        },
-        mode_key: match state.text_action_mode {
-            TextActionMode::Adaptive => "adaptive".into(),
-            TextActionMode::AlwaysPalette => "palette".into(),
-        },
-    });
-
-    rows.push(HotkeyRow {
-        keys: "Ctrl + Alt + P".into(),
-        name: "Pause input features".into(),
-        detail: "Not implemented in this version".into(),
-        state: "Not held".into(),
-        tone: tone::OFF.into(),
-        enabled: false,
-        locked_reason: "Not implemented in this version".into(),
-        mode: "".into(),
-        mode_value: "".into(),
-        mode_key: "".into(),
-    });
-    rows
+    HotkeyAction::ALL
+        .into_iter()
+        .map(|action| {
+            let binding = *state.hotkeys.binding(action);
+            let (row_tone, row_state) = if action == HotkeyAction::PauseResume {
+                if state.input_paused {
+                    (tone::ACTIVE, "Paused")
+                } else {
+                    (tone::RESTING, "Ready")
+                }
+            } else {
+                held(binding.enabled)
+            };
+            let (name, detail) = match action {
+                HotkeyAction::Dictate => (
+                    "Dictate",
+                    "Records while held · transcribes and inserts on release",
+                ),
+                HotkeyAction::InsertLast => (
+                    "Insert last",
+                    "Places the newest transcript where the caret is now",
+                ),
+                HotkeyAction::CorrectLayout => (
+                    "Correct layout",
+                    if binding.enabled {
+                        "Offers RU/EN candidates for the selection · never automatic"
+                    } else {
+                        "Switched off · the shortcut is released back to Windows"
+                    },
+                ),
+                HotkeyAction::Translate => (
+                    "Act on selection",
+                    if binding.enabled {
+                        "Captures the selection once and acts on it"
+                    } else {
+                        "Switched off · the shortcut is released back to Windows"
+                    },
+                ),
+                HotkeyAction::PauseResume => (
+                    "Pause input features",
+                    "Always available as the recovery shortcut; press again to resume",
+                ),
+            };
+            HotkeyRow {
+                action: hotkey_action_key(action).into(),
+                keys: format_hotkey(binding.spec).into(),
+                name: name.into(),
+                detail: detail.into(),
+                state: if pending {
+                    "Applying".into()
+                } else {
+                    row_state.into()
+                },
+                tone: if pending {
+                    tone::WORKING.into()
+                } else {
+                    row_tone.into()
+                },
+                enabled: binding.enabled,
+                toggle_enabled: !pending && action != HotkeyAction::PauseResume,
+                is_default: binding == *defaults.binding(action),
+                locked_reason: if pending {
+                    "Waiting for Windows".into()
+                } else {
+                    "".into()
+                },
+                mode: if action == HotkeyAction::Translate {
+                    "text-action".into()
+                } else {
+                    "".into()
+                },
+                mode_value: if action == HotkeyAction::Translate {
+                    match state.text_action_mode {
+                        TextActionMode::Adaptive => "Decide from the text".into(),
+                        TextActionMode::AlwaysPalette => "Always ask".into(),
+                    }
+                } else {
+                    "".into()
+                },
+                mode_key: if action == HotkeyAction::Translate {
+                    match state.text_action_mode {
+                        TextActionMode::Adaptive => "adaptive".into(),
+                        TextActionMode::AlwaysPalette => "palette".into(),
+                    }
+                } else {
+                    "".into()
+                },
+            }
+        })
+        .collect()
 }
 
-fn hotkeys_summary(_state: &AppState) -> String {
-    // Four combinations are registered at start-up and never released, whatever
-    // the switches say: `input-host` calls RegisterHotKey for K, V and F once,
-    // and the dictate gesture is recognised by the low-level hook. Switching a
-    // command off stops SayFlex acting on its keys; it does not give them back
-    // to Windows.
-    //
-    // The line used to count the switches and report "Two of five held" above
-    // rows that each said SayFlex still holds the combination. Until the
-    // registration is actually dynamic, the true number is four.
-    "Four of five held · pause is not implemented".to_owned()
+fn hotkeys_summary(state: &AppState) -> String {
+    let enabled = HotkeyAction::ALL
+        .into_iter()
+        .filter(|action| state.hotkeys.binding(*action).enabled)
+        .count();
+    if state.input_paused {
+        format!("Paused · {enabled} shortcuts configured")
+    } else if state.pending_hotkeys.is_some() {
+        "Waiting for Windows to accept the new shortcuts".to_owned()
+    } else {
+        format!("{enabled} of 5 shortcuts active")
+    }
+}
+
+const fn hotkey_action_at(index: i32) -> Option<HotkeyAction> {
+    match index {
+        0 => Some(HotkeyAction::Dictate),
+        1 => Some(HotkeyAction::InsertLast),
+        2 => Some(HotkeyAction::CorrectLayout),
+        3 => Some(HotkeyAction::Translate),
+        4 => Some(HotkeyAction::PauseResume),
+        _ => None,
+    }
+}
+
+const fn hotkey_action_key(action: HotkeyAction) -> &'static str {
+    match action {
+        HotkeyAction::Dictate => "dictate",
+        HotkeyAction::InsertLast => "insert_last",
+        HotkeyAction::CorrectLayout => "correct_layout",
+        HotkeyAction::Translate => "translate",
+        HotkeyAction::PauseResume => "pause_resume",
+    }
+}
+
+fn submit_hotkey_bindings(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Rc<Workers>,
+    bindings: HotkeyBindings,
+) -> bool {
+    if let Err(error) = validate_hotkeys(&bindings) {
+        set_status_problem(settings, &error.message);
+        return false;
+    }
+    {
+        let state = state.borrow();
+        if !state.input_ready {
+            set_status_problem(settings, "Input service is not ready yet.");
+            return false;
+        }
+        if state.pending_hotkeys.is_some() {
+            set_status_problem(settings, "Wait for the current shortcut change to finish.");
+            return false;
+        }
+    }
+
+    let operation_id = RequestId::new();
+    if let Err(error) = workers.input.send(&InputHostCommand::SetHotkeys {
+        operation_id,
+        configuration: HotkeyConfiguration {
+            bindings: bindings.clone(),
+        },
+    }) {
+        set_status_problem(settings, &format!("Could not apply shortcuts: {error}"));
+        return false;
+    }
+    state.borrow_mut().pending_hotkeys = Some((operation_id, bindings));
+    sync_action_settings(settings, state);
+    true
+}
+
+fn captured_modifiers(state: ModifiersState) -> HotkeyModifiers {
+    HotkeyModifiers {
+        control: state.control_key(),
+        alt: state.alt_key(),
+        shift: state.shift_key(),
+        windows: state.super_key(),
+    }
+}
+
+fn virtual_key_for_code(code: KeyCode) -> Option<u16> {
+    Some(match code {
+        KeyCode::KeyA => u16::from(b'A'),
+        KeyCode::KeyB => u16::from(b'B'),
+        KeyCode::KeyC => u16::from(b'C'),
+        KeyCode::KeyD => u16::from(b'D'),
+        KeyCode::KeyE => u16::from(b'E'),
+        KeyCode::KeyF => u16::from(b'F'),
+        KeyCode::KeyG => u16::from(b'G'),
+        KeyCode::KeyH => u16::from(b'H'),
+        KeyCode::KeyI => u16::from(b'I'),
+        KeyCode::KeyJ => u16::from(b'J'),
+        KeyCode::KeyK => u16::from(b'K'),
+        KeyCode::KeyL => u16::from(b'L'),
+        KeyCode::KeyM => u16::from(b'M'),
+        KeyCode::KeyN => u16::from(b'N'),
+        KeyCode::KeyO => u16::from(b'O'),
+        KeyCode::KeyP => u16::from(b'P'),
+        KeyCode::KeyQ => u16::from(b'Q'),
+        KeyCode::KeyR => u16::from(b'R'),
+        KeyCode::KeyS => u16::from(b'S'),
+        KeyCode::KeyT => u16::from(b'T'),
+        KeyCode::KeyU => u16::from(b'U'),
+        KeyCode::KeyV => u16::from(b'V'),
+        KeyCode::KeyW => u16::from(b'W'),
+        KeyCode::KeyX => u16::from(b'X'),
+        KeyCode::KeyY => u16::from(b'Y'),
+        KeyCode::KeyZ => u16::from(b'Z'),
+        KeyCode::Digit0 => u16::from(b'0'),
+        KeyCode::Digit1 => u16::from(b'1'),
+        KeyCode::Digit2 => u16::from(b'2'),
+        KeyCode::Digit3 => u16::from(b'3'),
+        KeyCode::Digit4 => u16::from(b'4'),
+        KeyCode::Digit5 => u16::from(b'5'),
+        KeyCode::Digit6 => u16::from(b'6'),
+        KeyCode::Digit7 => u16::from(b'7'),
+        KeyCode::Digit8 => u16::from(b'8'),
+        KeyCode::Digit9 => u16::from(b'9'),
+        KeyCode::Space => 0x20,
+        KeyCode::Enter => 0x0D,
+        KeyCode::Tab => 0x09,
+        KeyCode::ArrowLeft => 0x25,
+        KeyCode::ArrowUp => 0x26,
+        KeyCode::ArrowRight => 0x27,
+        KeyCode::ArrowDown => 0x28,
+        KeyCode::F1 => 0x70,
+        KeyCode::F2 => 0x71,
+        KeyCode::F3 => 0x72,
+        KeyCode::F4 => 0x73,
+        KeyCode::F5 => 0x74,
+        KeyCode::F6 => 0x75,
+        KeyCode::F7 => 0x76,
+        KeyCode::F8 => 0x77,
+        KeyCode::F9 => 0x78,
+        KeyCode::F10 => 0x79,
+        KeyCode::F11 => 0x7A,
+        KeyCode::F12 => 0x7B,
+        KeyCode::F13 => 0x7C,
+        KeyCode::F14 => 0x7D,
+        KeyCode::F15 => 0x7E,
+        KeyCode::F16 => 0x7F,
+        KeyCode::F17 => 0x80,
+        KeyCode::F18 => 0x81,
+        KeyCode::F19 => 0x82,
+        KeyCode::F20 => 0x83,
+        KeyCode::F21 => 0x84,
+        KeyCode::F22 => 0x85,
+        KeyCode::F23 => 0x86,
+        KeyCode::F24 => 0x87,
+        _ => return None,
+    })
 }
 
 /// Whether anything is actually coming down the wire.
@@ -1568,31 +1724,145 @@ pub(crate) fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
         settings.on_set_translation_enabled(move |enabled| {
-            state.borrow_mut().translation_enabled = enabled;
-            let _ = save_settings(&state.borrow());
-            sync_action_settings(&settings_weak, &state);
+            let mut bindings = state.borrow().hotkeys.clone();
+            bindings.binding_mut(HotkeyAction::Translate).enabled = enabled;
+            let _ = submit_hotkey_bindings(&settings_weak, &state, &workers, bindings);
         });
     }
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
-        // The old Text tools page was these switches with the combinations
-        // taken away from them, so each one now lives on the command it
-        // belongs to. The indexes are the rows built by `hotkey_rows`.
+        let workers = Rc::clone(workers);
         settings.on_set_hotkey_enabled(move |index, enabled| {
-            {
-                let mut state = state.borrow_mut();
-                match index {
-                    2 => state.layout_enabled = enabled,
-                    3 => state.translation_enabled = enabled,
-                    // Dictate, insert-last and pause are registered
-                    // unconditionally in this build; the row says so.
-                    _ => return,
-                }
+            let Some(action) = hotkey_action_at(index) else {
+                return;
+            };
+            if action == HotkeyAction::PauseResume {
+                set_status_problem(
+                    &settings_weak,
+                    "The pause/resume recovery shortcut must stay enabled.",
+                );
+                return;
             }
-            let _ = save_settings(&state.borrow());
-            sync_action_settings(&settings_weak, &state);
+            let mut bindings = state.borrow().hotkeys.clone();
+            bindings.binding_mut(action).enabled = enabled;
+            let _ = submit_hotkey_bindings(&settings_weak, &state, &workers, bindings);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        settings.on_change_hotkey(move |index| {
+            let Some(action) = hotkey_action_at(index) else {
+                return;
+            };
+            if let Some(settings) = settings_weak.upgrade() {
+                settings.set_hotkey_capture_index(index);
+                settings.set_hotkey_capture_label(
+                    match action {
+                        HotkeyAction::Dictate => "Dictate",
+                        HotkeyAction::InsertLast => "Insert last",
+                        HotkeyAction::CorrectLayout => "Correct layout",
+                        HotkeyAction::Translate => "Act on selection",
+                        HotkeyAction::PauseResume => "Pause / resume",
+                    }
+                    .into(),
+                );
+            }
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        settings.on_cancel_hotkey_capture(move || {
+            if let Some(settings) = settings_weak.upgrade() {
+                settings.set_hotkey_capture_index(-1);
+                settings.set_hotkey_capture_label("".into());
+            }
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_reset_hotkey(move |index| {
+            let Some(action) = hotkey_action_at(index) else {
+                return;
+            };
+            let mut bindings = state.borrow().hotkeys.clone();
+            bindings.binding_mut(action).spec = HotkeyBindings::default().binding(action).spec;
+            let _ = submit_hotkey_bindings(&settings_weak, &state, &workers, bindings);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        let modifiers = Rc::new(Cell::new(ModifiersState::default()));
+        settings.window().on_winit_window_event(move |_, event| {
+            if let WindowEvent::ModifiersChanged(next) = event {
+                modifiers.set(next.state());
+                return EventResult::Propagate;
+            }
+            let Some(settings) = settings_weak.upgrade() else {
+                return EventResult::Propagate;
+            };
+            let index = settings.get_hotkey_capture_index();
+            if index < 0 {
+                return EventResult::Propagate;
+            }
+            let WindowEvent::KeyboardInput { event, .. } = event else {
+                return EventResult::Propagate;
+            };
+            if event.state != ElementState::Pressed || event.repeat {
+                return EventResult::PreventDefault;
+            }
+            let PhysicalKey::Code(code) = event.physical_key else {
+                set_status_problem(
+                    &settings_weak,
+                    "That key cannot be used as a global shortcut.",
+                );
+                return EventResult::PreventDefault;
+            };
+            if code == KeyCode::Escape {
+                settings.set_hotkey_capture_index(-1);
+                settings.set_hotkey_capture_label("".into());
+                return EventResult::PreventDefault;
+            }
+            if matches!(
+                code,
+                KeyCode::ControlLeft
+                    | KeyCode::ControlRight
+                    | KeyCode::AltLeft
+                    | KeyCode::AltRight
+                    | KeyCode::ShiftLeft
+                    | KeyCode::ShiftRight
+                    | KeyCode::SuperLeft
+                    | KeyCode::SuperRight
+            ) {
+                return EventResult::PreventDefault;
+            }
+            let Some(action) = hotkey_action_at(index) else {
+                settings.set_hotkey_capture_index(-1);
+                return EventResult::PreventDefault;
+            };
+            let Some(virtual_key) = virtual_key_for_code(code) else {
+                set_status_problem(
+                    &settings_weak,
+                    "Use a letter, number, function key, Space, Tab, Enter, or arrow key.",
+                );
+                return EventResult::PreventDefault;
+            };
+            let mut bindings = state.borrow().hotkeys.clone();
+            bindings.binding_mut(action).spec = HotkeySpec {
+                modifiers: captured_modifiers(modifiers.get()),
+                virtual_key,
+            };
+            if submit_hotkey_bindings(&settings_weak, &state, &workers, bindings) {
+                settings.set_hotkey_capture_index(-1);
+                settings.set_hotkey_capture_label("".into());
+            }
+            EventResult::PreventDefault
         });
     }
     {
@@ -2078,5 +2348,32 @@ pub(crate) fn precreate_action_windows(
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod hotkey_capture_tests {
+    use rust_protocol::HotkeyAction;
+    use slint::winit_030::winit::keyboard::KeyCode;
+
+    use super::{hotkey_action_at, virtual_key_for_code};
+
+    #[test]
+    fn every_hotkey_row_has_a_stable_typed_action() {
+        assert_eq!(hotkey_action_at(0), Some(HotkeyAction::Dictate));
+        assert_eq!(hotkey_action_at(1), Some(HotkeyAction::InsertLast));
+        assert_eq!(hotkey_action_at(2), Some(HotkeyAction::CorrectLayout));
+        assert_eq!(hotkey_action_at(3), Some(HotkeyAction::Translate));
+        assert_eq!(hotkey_action_at(4), Some(HotkeyAction::PauseResume));
+        assert_eq!(hotkey_action_at(5), None);
+    }
+
+    #[test]
+    fn physical_capture_uses_windows_virtual_keys_not_localized_text() {
+        assert_eq!(virtual_key_for_code(KeyCode::KeyA), Some(u16::from(b'A')));
+        assert_eq!(virtual_key_for_code(KeyCode::Digit7), Some(u16::from(b'7')));
+        assert_eq!(virtual_key_for_code(KeyCode::Space), Some(0x20));
+        assert_eq!(virtual_key_for_code(KeyCode::F12), Some(0x7B));
+        assert_eq!(virtual_key_for_code(KeyCode::AudioVolumeUp), None);
     }
 }
