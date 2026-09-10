@@ -91,6 +91,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-app
+      - name: Install pinned cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
       - name: Generate dependency notices
         run: ./scripts/generate-third-party-notices.ps1
       - name: Import public signing certificate
