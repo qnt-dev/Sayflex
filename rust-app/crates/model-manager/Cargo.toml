@@ -7,8 +7,8 @@ license.workspace = true
 
 [dependencies]
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
-rust-app-core = { version = "0.6.1", path = "../app-core" }
-rust-speech-api = { version = "0.6.1", path = "../speech-api" }
+rust-app-core = { version = "0.6.2", path = "../app-core" }
+rust-speech-api = { version = "0.6.2", path = "../speech-api" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

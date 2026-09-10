@@ -1,8 +1,8 @@
 use std::{
     mem,
     sync::{
-        Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -71,7 +71,11 @@ impl RecordedAudio {
 
 #[derive(Clone)]
 pub struct AudioSnapshotSource {
-    commands: Sender<CaptureCommand>,
+    /// The recorder may replace its capture pipeline when the Windows default
+    /// input device changes. Speculation keeps this handle for the lifetime of
+    /// the worker, so it must resolve the current pipeline at each snapshot
+    /// rather than retaining the sender that happened to exist at startup.
+    commands: Arc<RwLock<Sender<CaptureCommand>>>,
 }
 
 impl AudioSnapshotSource {
@@ -81,7 +85,8 @@ impl AudioSnapshotSource {
         source_start_sample: usize,
     ) -> Option<RecordedAudio> {
         let (reply, response) = mpsc::sync_channel(1);
-        self.commands
+        let commands = self.commands.read().ok()?.clone();
+        commands
             .send(CaptureCommand::Snapshot {
                 session_id,
                 source_start_sample,
@@ -221,18 +226,104 @@ enum CaptureCommand {
 }
 
 pub struct AudioRecorder {
+    pipeline: CapturePipeline,
+    snapshot_commands: Arc<RwLock<Sender<CaptureCommand>>>,
+    events: Sender<SpeechWorkerEvent>,
+}
+
+struct CapturePipeline {
     stream: Stream,
     commands: Sender<CaptureCommand>,
     counters: Arc<CaptureCounters>,
     sample_rate_hz: u32,
+    device_id: String,
+    faulted: Arc<AtomicBool>,
 }
 
 impl AudioRecorder {
     pub fn open(events: Sender<SpeechWorkerEvent>) -> Result<Self> {
+        let pipeline = CapturePipeline::open(events.clone())?;
+        let snapshot_commands = Arc::new(RwLock::new(pipeline.commands.clone()));
+        Ok(Self {
+            pipeline,
+            snapshot_commands,
+            events,
+        })
+    }
+
+    pub fn snapshot_source(&self) -> AudioSnapshotSource {
+        AudioSnapshotSource {
+            commands: Arc::clone(&self.snapshot_commands),
+        }
+    }
+
+    /// Rebinds capture when the Windows default microphone changed or the
+    /// current stream reported a device fault.
+    ///
+    /// CPAL streams are bound to the endpoint they were created from. Keeping
+    /// one for the whole process means changing the system default can leave
+    /// SayFlex recording the old endpoint indefinitely, even when that stream
+    /// remains technically alive. Checking at the start of a dictation keeps
+    /// the idle path free and adds no work to the real-time callback.
+    fn refresh_default_device(&mut self) -> Result<()> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
             .context("no default microphone is available")?;
+        let default_id = device
+            .id()
+            .context("could not identify the default microphone")?
+            .to_string();
+        if !capture_pipeline_needs_replacement(
+            &self.pipeline.device_id,
+            Some(&default_id),
+            self.pipeline.faulted.load(Ordering::Acquire),
+        ) {
+            return Ok(());
+        }
+
+        let replacement = CapturePipeline::open_device(device, default_id, self.events.clone())?;
+        *self
+            .snapshot_commands
+            .write()
+            .map_err(|_| anyhow::anyhow!("microphone snapshot route is unavailable"))? =
+            replacement.commands.clone();
+        self.pipeline = replacement;
+        Ok(())
+    }
+
+    pub fn begin(&mut self, session_id: SessionId) -> Result<()> {
+        self.refresh_default_device()?;
+        self.pipeline.begin(session_id)
+    }
+
+    pub fn end(&self, session_id: SessionId) -> Result<RecordedAudio> {
+        self.pipeline.end(session_id)
+    }
+
+    pub fn cancel(&self, session_id: SessionId) -> bool {
+        self.pipeline.cancel(session_id)
+    }
+}
+
+impl CapturePipeline {
+    fn open(events: Sender<SpeechWorkerEvent>) -> Result<Self> {
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .context("no default microphone is available")?;
+        let device_id = device
+            .id()
+            .context("could not identify the default microphone")?
+            .to_string();
+        Self::open_device(device, device_id, events)
+    }
+
+    fn open_device(
+        device: cpal::Device,
+        device_id: String,
+        events: Sender<SpeechWorkerEvent>,
+    ) -> Result<Self> {
         let supported = device
             .default_input_config()
             .context("could not read the default microphone format")?;
@@ -248,6 +339,7 @@ impl AudioRecorder {
             callback_samples: AtomicU64::new(0),
             last_audible_sample: AtomicU64::new(0),
         });
+        let faulted = Arc::new(AtomicBool::new(false));
         let (commands, command_receiver) = mpsc::channel();
         let consumer_events = events.clone();
         let consumer_counters = Arc::clone(&counters);
@@ -270,6 +362,7 @@ impl AudioRecorder {
                 channels,
                 producer,
                 Arc::clone(&counters),
+                Arc::clone(&faulted),
                 events,
             )?,
             SampleFormat::I16 => build_stream::<i16>(
@@ -278,6 +371,7 @@ impl AudioRecorder {
                 channels,
                 producer,
                 Arc::clone(&counters),
+                Arc::clone(&faulted),
                 events,
             )?,
             SampleFormat::I32 => build_stream::<i32>(
@@ -286,6 +380,7 @@ impl AudioRecorder {
                 channels,
                 producer,
                 Arc::clone(&counters),
+                Arc::clone(&faulted),
                 events,
             )?,
             SampleFormat::U16 => build_stream::<u16>(
@@ -294,6 +389,7 @@ impl AudioRecorder {
                 channels,
                 producer,
                 Arc::clone(&counters),
+                Arc::clone(&faulted),
                 events,
             )?,
             other => bail!("unsupported microphone sample format: {other}"),
@@ -303,16 +399,12 @@ impl AudioRecorder {
             commands,
             counters,
             sample_rate_hz,
+            device_id,
+            faulted,
         })
     }
 
-    pub fn snapshot_source(&self) -> AudioSnapshotSource {
-        AudioSnapshotSource {
-            commands: self.commands.clone(),
-        }
-    }
-
-    pub fn begin(&self, session_id: SessionId) -> Result<()> {
+    fn begin(&self, session_id: SessionId) -> Result<()> {
         let (reply, response) = mpsc::sync_channel(1);
         self.commands
             .send(CaptureCommand::Begin { session_id, reply })
@@ -322,16 +414,18 @@ impl AudioRecorder {
             .context("audio capture worker did not acknowledge begin")?
             .map_err(anyhow::Error::msg)?;
         if let Err(error) = self.stream.play() {
+            self.faulted.store(true, Ordering::Release);
             let _ = self.cancel(session_id);
             return Err(error).context("could not start microphone capture");
         }
         Ok(())
     }
 
-    pub fn end(&self, session_id: SessionId) -> Result<RecordedAudio> {
+    fn end(&self, session_id: SessionId) -> Result<RecordedAudio> {
         self.wait_for_post_release_audio();
         self.stream
             .pause()
+            .inspect_err(|_| self.faulted.store(true, Ordering::Release))
             .context("could not stop microphone capture")?;
         let (reply, response) = mpsc::sync_channel(1);
         self.commands
@@ -355,8 +449,10 @@ impl AudioRecorder {
         }
     }
 
-    pub fn cancel(&self, session_id: SessionId) -> bool {
-        let _ = self.stream.pause();
+    fn cancel(&self, session_id: SessionId) -> bool {
+        if self.stream.pause().is_err() {
+            self.faulted.store(true, Ordering::Release);
+        }
         let (reply, response) = mpsc::sync_channel(1);
         if self
             .commands
@@ -369,7 +465,7 @@ impl AudioRecorder {
     }
 }
 
-impl Drop for AudioRecorder {
+impl Drop for CapturePipeline {
     fn drop(&mut self) {
         let _ = self.stream.pause();
         let _ = self.commands.send(CaptureCommand::Shutdown);
@@ -382,6 +478,7 @@ fn build_stream<T>(
     channels: usize,
     mut producer: Producer<f32>,
     counters: Arc<CaptureCounters>,
+    faulted: Arc<AtomicBool>,
     events: Sender<SpeechWorkerEvent>,
 ) -> Result<Stream>
 where
@@ -421,6 +518,7 @@ where
                     .store(callback_end, Ordering::Release);
             },
             move |error| {
+                faulted.store(true, Ordering::Release);
                 let _ = error_events.send(SpeechWorkerEvent::Failed {
                     session_id: None,
                     code: "microphone_stream".to_owned(),
@@ -431,6 +529,14 @@ where
             None,
         )
         .context("could not create microphone stream")
+}
+
+fn capture_pipeline_needs_replacement(
+    opened_device_id: &str,
+    default_device_id: Option<&str>,
+    stream_faulted: bool,
+) -> bool {
+    stream_faulted || default_device_id != Some(opened_device_id)
 }
 
 fn post_release_target_sample(released_at: u64, last_audible: u64, sample_rate_hz: u32) -> u64 {
@@ -690,8 +796,9 @@ mod tests {
     use rust_protocol::SessionId;
 
     use super::{
-        RecordedAudio, SPECTRUM_WINDOW_SAMPLES, SpectrumAnalyzer, post_release_target_sample,
-        resample_bandlimited, spectrum_band_frequency,
+        RecordedAudio, SPECTRUM_WINDOW_SAMPLES, SpectrumAnalyzer,
+        capture_pipeline_needs_replacement, post_release_target_sample, resample_bandlimited,
+        spectrum_band_frequency,
     };
     use rust_protocol::AUDIO_SPECTRUM_BANDS;
 
@@ -699,6 +806,30 @@ mod tests {
     fn resampler_preserves_duration() {
         let source = vec![0.0_f32; 48_000];
         assert_eq!(resample_bandlimited(&source, 48_000, 16_000).len(), 16_000);
+    }
+
+    #[test]
+    fn capture_is_rebound_only_for_a_new_or_failed_default_device() {
+        assert!(!capture_pipeline_needs_replacement(
+            "microphone-a",
+            Some("microphone-a"),
+            false
+        ));
+        assert!(capture_pipeline_needs_replacement(
+            "microphone-a",
+            Some("microphone-b"),
+            false
+        ));
+        assert!(capture_pipeline_needs_replacement(
+            "microphone-a",
+            None,
+            false
+        ));
+        assert!(capture_pipeline_needs_replacement(
+            "microphone-a",
+            Some("microphone-a"),
+            true
+        ));
     }
 
     #[test]

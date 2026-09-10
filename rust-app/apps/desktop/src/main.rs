@@ -25,21 +25,21 @@ use rust_app_core::{
     dictation::{CompletionDelivery, HistoryUpdate, plan_completion},
 };
 use rust_protocol::{
-    BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, HistoryEntry, InputHostCommand,
-    InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId, SpeechOutputMode,
-    SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript,
-    TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationHistoryEntry,
-    TranslationLanguage, TranslationLanguagePolicy, TranslationModelSummary,
-    TranslationProviderEntry, TranslationProviderStatus, TranslationResult, TranslationTier,
-    TranslationWorkerCommand, TranslationWorkerEvent,
+    BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, DictationLanguage,
+    HistoryEntry, InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId,
+    SessionId, SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot,
+    TextActionIntent, Transcript, TranscriptionProviderEntry, TranscriptionProviderStatus,
+    TranslationHistoryEntry, TranslationLanguage, TranslationLanguagePolicy,
+    TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
+    TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize};
 use settings_document::{SavedSettings, data_root, load_settings, save_settings};
 use settings_view::{
-    precreate_action_windows, prepend_history_row, set_indicator_status, set_runtime_status,
-    set_status_problem, show_layout_chooser, sync_action_settings, sync_history, sync_models,
-    sync_output_mode, sync_translation_models, wire_action_palette, wire_chooser, wire_settings,
-    wire_translator, wire_tray,
+    install_precise_wheel, precreate_action_windows, prepend_history_row, set_indicator_status,
+    set_runtime_status, set_status_problem, show_layout_chooser, sync_action_settings,
+    sync_history, sync_models, sync_output_mode, sync_translation_models, wire_action_palette,
+    wire_chooser, wire_settings, wire_translator, wire_tray,
 };
 use slint::winit_030::{
     WinitWindowAccessor,
@@ -360,6 +360,7 @@ struct AppState {
     speech_backend_preference: SpeechBackendPreference,
     speech_backend_active: Option<SpeechBackend>,
     output_mode: SpeechOutputMode,
+    dictation_language: DictationLanguage,
     fast_release_previews: bool,
     visualizer_style: VisualizerStyle,
     circular_spectrum_palette: CircularSpectrumPalette,
@@ -464,6 +465,7 @@ impl AppState {
             speech_backend_preference: saved_settings.speech_backend_preference,
             speech_backend_active: Some(speech_backend_active),
             output_mode,
+            dictation_language: saved_settings.dictation_language,
             fast_release_previews: saved_settings.fast_release_previews,
             visualizer_style: saved_settings.visualizer_style,
             circular_spectrum_palette: saved_settings.circular_spectrum_palette,
@@ -520,6 +522,33 @@ impl AppState {
                 .transcription_chain
                 .iter()
                 .any(|entry| entry.id == "local" && entry.enabled)
+    }
+
+    /// Whether at least one enabled transcription route can honour
+    /// `TranslateToEnglish`.
+    ///
+    /// This is a property of the whole configured route, not just of the
+    /// selected local Whisper model. Groq and OpenAI-compatible endpoints can
+    /// translate even when the local model is deliberately disabled; Azure,
+    /// Cloudflare and Deepgram only transcribe and are skipped for that
+    /// request shape by the worker.
+    fn speech_translation_supported(&self) -> bool {
+        let local_supports = self
+            .models
+            .iter()
+            .find(|model| model.catalog_id == self.selected_model_id)
+            .is_some_and(|model| model.supports_speech_translation);
+        if self.transcription_chain.is_empty() {
+            return local_supports;
+        }
+        self.transcription_chain
+            .iter()
+            .filter(|entry| entry.enabled)
+            .any(|entry| match entry.id.as_str() {
+                "groq" | "custom" => true,
+                "local" => local_supports,
+                _ => false,
+            })
     }
 
     fn local_translation_enabled(&self) -> bool {
@@ -829,8 +858,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .selected_model_id
         .clone()
         .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+    let openai_route_enabled = saved_settings
+        .transcription_providers
+        .iter()
+        .any(|provider| provider.enabled && matches!(provider.id.as_str(), "groq" | "custom"));
     let output_mode = if selected_model_id == DEFAULT_MODEL
         && saved_settings.output_mode == SpeechOutputMode::TranslateToEnglish
+        && !openai_route_enabled
     {
         SpeechOutputMode::OriginalLanguage
     } else {
@@ -857,6 +891,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     workers.speech.send(&SpeechWorkerCommand::Initialize {
         selected_model_id,
         output_mode,
+        dictation_language: saved_settings.dictation_language,
         history_enabled: saved_settings.history_enabled,
         fast_release_previews: saved_settings.fast_release_previews,
         prepare_local_model: state.borrow().local_speech_enabled(),
@@ -987,6 +1022,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !env::args().any(|argument| argument == "--background") {
         settings.show()?;
         configure_standard_app_window(&settings, "Settings");
+        install_precise_wheel(&settings);
     }
     tray.show()?;
     slint::run_event_loop()?;
@@ -1504,6 +1540,7 @@ fn handle_worker_exit(
                         .send(&SpeechWorkerCommand::Initialize {
                             selected_model_id: state.selected_model_id.clone(),
                             output_mode: state.output_mode,
+                            dictation_language: state.dictation_language,
                             history_enabled: state.history_enabled,
                             fast_release_previews: state.fast_release_previews,
                             prepare_local_model: state.local_speech_enabled(),
@@ -2478,6 +2515,7 @@ fn fallback_and_initialize_speech(
         workers.speech.send(&SpeechWorkerCommand::Initialize {
             selected_model_id: state.selected_model_id.clone(),
             output_mode: state.output_mode,
+            dictation_language: state.dictation_language,
             history_enabled: state.history_enabled,
             fast_release_previews: state.fast_release_previews,
             prepare_local_model: state.local_speech_enabled(),
@@ -3981,7 +4019,10 @@ mod selection_release_gate_tests {
 
 #[cfg(test)]
 mod provider_path_readiness_tests {
-    use rust_protocol::{SpeechOutputMode, TranscriptionProviderStatus, TranslationProviderStatus};
+    use rust_protocol::{
+        ModelSummary, SpeechOutputMode, TranscriptionProviderEntry, TranscriptionProviderStatus,
+        TranslationProviderStatus,
+    };
 
     use super::{AppState, SavedSettings, SpeechBackend};
 
@@ -4015,6 +4056,29 @@ mod provider_path_readiness_tests {
             detail: String::new(),
             has_credential: id != "local",
             credential_hint: None,
+        }
+    }
+
+    fn local_model(supports_speech_translation: bool) -> ModelSummary {
+        ModelSummary {
+            catalog_id: "whisper-large-v3-turbo".to_owned(),
+            display_name: "Whisper".to_owned(),
+            description: String::new(),
+            size_bytes: 1,
+            installed: true,
+            selected: true,
+            recommended: true,
+            supports_speech_translation,
+        }
+    }
+
+    fn configured(id: &str) -> TranscriptionProviderEntry {
+        TranscriptionProviderEntry {
+            id: id.to_owned(),
+            enabled: true,
+            endpoint: None,
+            model: None,
+            account: None,
         }
     }
 
@@ -4052,6 +4116,24 @@ mod provider_path_readiness_tests {
         state.transcription_providers = vec![speech_status("groq", 0, false)];
         assert!(!state.speech_path_ready());
         assert!(!state.speech_waits_for_local());
+    }
+
+    #[test]
+    fn groq_can_translate_speech_even_when_the_local_model_cannot() {
+        let mut state = state();
+        state.models = vec![local_model(false)];
+        state.transcription_chain = vec![configured("groq")];
+
+        assert!(state.speech_translation_supported());
+    }
+
+    #[test]
+    fn transcription_only_services_do_not_unlock_speech_translation() {
+        let mut state = state();
+        state.models = vec![local_model(false)];
+        state.transcription_chain = vec![configured("deepgram"), configured("azure")];
+
+        assert!(!state.speech_translation_supported());
     }
 
     #[test]

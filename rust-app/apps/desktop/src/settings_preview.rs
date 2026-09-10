@@ -72,6 +72,7 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     // whole thing including its title bar rather than the page inside a piece
     // of chrome that belongs to a different design.
     crate::configure_standard_app_window(&settings, "Settings preview");
+    crate::settings_view::install_precise_wheel(&settings);
     slint::run_event_loop()?;
     animation_timer.stop();
     Ok(())
@@ -202,6 +203,21 @@ fn wire(settings: &SettingsWindow) {
                     "Decide from the text"
                 }
                 .into(),
+            );
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_set_dictation_language(move |value| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            settings.set_dictation_language(value.clone());
+            settings.set_dictation_language_label(
+                rust_protocol::DictationLanguage::from_code(&value)
+                    .unwrap_or_default()
+                    .display_name()
+                    .into(),
             );
         });
     }

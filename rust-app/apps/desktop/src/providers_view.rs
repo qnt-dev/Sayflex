@@ -573,6 +573,17 @@ pub(crate) fn apply_provider_chain(
         // do not retain a stale "local ready" fact in the desktop.
         state.borrow_mut().speech_ready = false;
     }
+    let reset_output_mode = {
+        let mut state = state.borrow_mut();
+        if state.output_mode == rust_protocol::SpeechOutputMode::TranslateToEnglish
+            && !state.speech_translation_supported()
+        {
+            state.output_mode = rust_protocol::SpeechOutputMode::OriginalLanguage;
+            true
+        } else {
+            false
+        }
+    };
     if let Err(error) = workers
         .speech
         .send(&SpeechWorkerCommand::SetTranscriptionProviders { providers })
@@ -582,6 +593,16 @@ pub(crate) fn apply_provider_chain(
             &format!("The transcription order could not be applied: {error}"),
         );
         return;
+    }
+    if reset_output_mode {
+        let _ = workers.speech.send(&SpeechWorkerCommand::SetOutputMode {
+            output_mode: rust_protocol::SpeechOutputMode::OriginalLanguage,
+        });
+        crate::settings_view::sync_output_mode(settings, state);
+        set_indicator_status(
+            settings,
+            "Speech translation was turned off because no enabled provider supports it.",
+        );
     }
     let _ = save_settings(&state.borrow());
     sync_providers(settings, state);

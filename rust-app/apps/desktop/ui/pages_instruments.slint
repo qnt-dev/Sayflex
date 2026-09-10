@@ -93,6 +93,8 @@ export component DictationPage inherits HorizontalLayout {
     in property <string> output-mode;
     in property <string> output-mode-value;
     in property <bool> output-locked: false;
+    in property <string> dictation-language;
+    in property <string> dictation-language-value;
     in property <string> release-mode;
     in property <string> release-mode-value;
     /// Whether the release mode can be chosen at all. The CPU engine ignores
@@ -104,6 +106,7 @@ export component DictationPage inherits HorizontalLayout {
 
     callback select-backend(int);
     callback set-output-mode(string);
+    callback set-dictation-language(string);
     callback set-release-mode(string);
     callback set-keeping-history(bool);
 
@@ -221,6 +224,30 @@ export component DictationPage inherits HorizontalLayout {
         SideNote {
             height: 46px;
             text: root.engine-note;
+        }
+
+        GroupLabel { text: "SPOKEN LANGUAGE"; height: 30px; }
+        MenuButton {
+            text: root.dictation-language;
+            value: root.dictation-language-value;
+            options: [
+                { value: "auto", label: "Auto-detect", note: "Best when you switch languages often" },
+                { value: "ru", label: "Russian", note: "More reliable for short Russian phrases" },
+                { value: "en", label: "English" },
+                { value: "uk", label: "Ukrainian" },
+                { value: "es", label: "Spanish" },
+                { value: "pt-BR", label: "Portuguese (Brazil)" },
+                { value: "de", label: "German" },
+                { value: "fr", label: "French" },
+                { value: "it", label: "Italian" },
+                { value: "zh-Hans", label: "Chinese (Simplified)" },
+                { value: "zh-Hant", label: "Chinese (Traditional)" },
+                { value: "ja", label: "Japanese" },
+                { value: "ko", label: "Korean" },
+                { value: "hi", label: "Hindi" },
+                { value: "ar", label: "Arabic" },
+            ];
+            chosen(value) => { root.set-dictation-language(value); }
         }
 
         GroupLabel { text: "OUTPUT"; height: 30px; }

@@ -16,13 +16,12 @@ cpal = "0.18.1"
 hound = "3.5.1"
 
 rtrb = "0.3.5"
-rust-app-core = { version = "0.6.1", path = "../../crates/app-core" }
-rust-cloud-speech = { version = "0.6.1", path = "../../crates/cloud-speech" }
-rust-model-manager = { version = "0.6.1", path = "../../crates/model-manager" }
-rust-platform-windows = { version = "0.6.1", path = "../../crates/platform-windows" }
-rust-protocol = { version = "0.6.1", path = "../../crates/protocol" }
+rust-app-core = { version = "0.6.2", path = "../../crates/app-core" }
+rust-cloud-speech = { version = "0.6.2", path = "../../crates/cloud-speech" }
+rust-model-manager = { version = "0.6.2", path = "../../crates/model-manager" }
+rust-platform-windows = { version = "0.6.2", path = "../../crates/platform-windows" }
+rust-protocol = { version = "0.6.2", path = "../../crates/protocol" }
 serde.workspace = true
-sys-locale = "0.3.2"
 serde_json.workspace = true
 thiserror.workspace = true
 whisper-rs = { version = "0.16.0" }

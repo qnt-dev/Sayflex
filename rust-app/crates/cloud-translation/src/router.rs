@@ -250,7 +250,10 @@ mod tests {
 
     use super::{AttemptOutcome, RequestExecutor, RouteOutcome, Router, Translation};
     use crate::{
-        ProviderEntry, ProviderId, chain::Chain, failure::ProviderFailure, request::RequestPlan,
+        ProviderEntry, ProviderId,
+        chain::Chain,
+        failure::{ProviderFailure, classify_response},
+        request::RequestPlan,
     };
 
     struct Scripted {
@@ -416,6 +419,51 @@ mod tests {
             }
             other => panic!("expected the second service to answer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deepls_real_quota_response_reaches_the_next_configured_provider() {
+        let mut router = Router::new(chain(&[
+            ProviderId::DEEPL,
+            ProviderId::GOOGLE,
+            ProviderId::LOCAL,
+        ]));
+        let deepl_456 = classify_response(
+            ProviderId::DEEPL,
+            456,
+            None,
+            r#"{"message":"Quota exceeded"}"#,
+        );
+        let executor = Scripted::new(vec![Err(deepl_456), Ok("привет".to_owned())]);
+
+        let outcome = router.translate(
+            Translation {
+                text: "hello",
+                source: Some("en"),
+                target: "ru",
+            },
+            Instant::now(),
+            &key,
+            &executor,
+            &|| false,
+        );
+
+        match outcome {
+            RouteOutcome::Translated {
+                provider, attempts, ..
+            } => {
+                assert_eq!(provider.as_str(), ProviderId::GOOGLE);
+                assert!(matches!(
+                    attempts.as_slice(),
+                    [super::Attempt {
+                        outcome: AttemptOutcome::Failed(ProviderFailure::QuotaExhausted { .. }),
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("DeepL quota should fall through, got {other:?}"),
+        }
+        assert_eq!(executor.seen.borrow().len(), 2);
     }
 
     #[test]

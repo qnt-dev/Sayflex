@@ -31,8 +31,8 @@ use rust_cloud_speech::{
 };
 use rust_platform_windows::credentials::DpapiCipher;
 use rust_protocol::{
-    RequestId, SessionId, SpeechOutputMode, SpeechWorkerEvent, Transcript, TranscriptionLatency,
-    TranscriptionProviderEntry, TranscriptionProviderStatus,
+    DictationLanguage, RequestId, SessionId, SpeechOutputMode, SpeechWorkerEvent, Transcript,
+    TranscriptionLatency, TranscriptionProviderEntry, TranscriptionProviderStatus,
 };
 
 use crate::{audio::RecordedAudio, history_actor::HistoryCommand, inference::InferenceHandle};
@@ -51,6 +51,8 @@ pub enum TranscriptionCommand {
     },
     /// Asks for the current list and its availability.
     ReportStatus,
+    /// Replaces the explicit language hint. `Auto` becomes no hint at all.
+    SetLanguage(DictationLanguage),
     /// A finished recording to transcribe.
     Finalize {
         recording: Box<RecordedAudio>,
@@ -151,7 +153,7 @@ pub fn start(
                 inference,
                 prefers_cloud: worker_prefers_cloud,
                 cancelled: worker_cancelled,
-                language: system_language(),
+                language: DictationLanguage::Auto,
             };
             if let Some(message) = state.credentials.take_recovery_message() {
                 let _ = state.events.send(SpeechWorkerEvent::Failed {
@@ -175,22 +177,8 @@ pub fn start(
     })
 }
 
-/// The fallback language for services that cannot detect one themselves.
-///
-/// This is deliberately not forwarded to providers that support automatic
-/// detection. The Windows UI language is useful as a last resort for Azure's
-/// fixed-language endpoint, but says nothing reliable about what the user is
-/// speaking to Groq or Deepgram.
-fn system_language() -> Option<LanguageHint> {
-    sys_locale::get_locale().and_then(|locale| LanguageHint::new(&locale))
-}
-
-fn reported_language(provider: &ProviderId, fallback: Option<&LanguageHint>) -> String {
-    if provider.as_str() == ProviderId::AZURE {
-        fallback.map_or_else(|| "unknown".to_owned(), |hint| hint.primary().to_owned())
-    } else {
-        "auto".to_owned()
-    }
+fn reported_language(fallback: Option<&LanguageHint>) -> String {
+    fallback.map_or_else(|| "auto".to_owned(), |hint| hint.primary().to_owned())
 }
 
 struct State {
@@ -204,7 +192,7 @@ struct State {
     inference: InferenceHandle,
     prefers_cloud: Arc<AtomicBool>,
     cancelled: CancelledSession,
-    language: Option<LanguageHint>,
+    language: DictationLanguage,
 }
 
 impl State {
@@ -276,6 +264,10 @@ impl State {
                 self.report_status();
             }
             TranscriptionCommand::ReportStatus => self.report_status(),
+            TranscriptionCommand::SetLanguage(language) => {
+                self.language = language;
+                self.report_status();
+            }
             TranscriptionCommand::Finalize {
                 recording,
                 output_mode,
@@ -312,7 +304,7 @@ impl State {
             audio_duration_ms: recording.duration_ms,
             upload_bytes: wav.len() as u64,
             translate_to_english: output_mode == SpeechOutputMode::TranslateToEnglish,
-            language: self.language.clone(),
+            language: self.language.locale().and_then(LanguageHint::new),
         };
         let started = Instant::now();
         let credentials = &self.credentials;
@@ -339,7 +331,7 @@ impl State {
                 let transcript = Transcript {
                     session_id,
                     text,
-                    language: reported_language(&provider, request.language.as_ref()),
+                    language: reported_language(request.language.as_ref()),
                     audio_duration_ms: recording.duration_ms,
                     processing_duration_ms: crate::elapsed_ms(started),
                     provider: Some(provider.to_string()),
@@ -476,28 +468,16 @@ fn describe(unavailable: &Option<rust_cloud_speech::Unavailable>) -> String {
 
 #[cfg(test)]
 mod language_policy_tests {
-    use rust_cloud_speech::{LanguageHint, ProviderId};
+    use rust_cloud_speech::LanguageHint;
 
     use super::reported_language;
 
     #[test]
-    fn an_english_windows_locale_is_not_reported_as_groqs_detected_language() {
-        let windows_locale = LanguageHint::new("en-US");
+    fn automatic_and_explicit_languages_are_reported_honestly() {
+        let explicit = LanguageHint::new("ru-RU");
 
-        assert_eq!(
-            reported_language(&ProviderId::new(ProviderId::GROQ), windows_locale.as_ref()),
-            "auto"
-        );
-        assert_eq!(
-            reported_language(
-                &ProviderId::new(ProviderId::DEEPGRAM),
-                windows_locale.as_ref()
-            ),
-            "auto"
-        );
-        assert_eq!(
-            reported_language(&ProviderId::new(ProviderId::AZURE), windows_locale.as_ref()),
-            "en"
-        );
+        assert_eq!(reported_language(None), "auto");
+        assert_eq!(reported_language(explicit.as_ref()), "ru");
+        assert_eq!(reported_language(explicit.as_ref()), "ru");
     }
 }

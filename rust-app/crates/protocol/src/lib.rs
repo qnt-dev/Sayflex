@@ -16,7 +16,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -454,6 +454,136 @@ pub enum SpeechOutputMode {
     TranslateToEnglish,
 }
 
+/// What language the microphone is expected to hear.
+///
+/// This is deliberately independent of the Windows display language and of
+/// text-translation direction. `Auto` lets capable providers and the local
+/// Whisper model detect the recording; a named language is an explicit hint
+/// from the person speaking and is forwarded only where the provider accepts
+/// one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationLanguage {
+    #[default]
+    Auto,
+    English,
+    Russian,
+    Ukrainian,
+    Spanish,
+    PortugueseBrazil,
+    German,
+    French,
+    Italian,
+    ChineseSimplified,
+    ChineseTraditional,
+    Japanese,
+    Korean,
+    Hindi,
+    Arabic,
+}
+
+impl DictationLanguage {
+    pub const ALL: [Self; 15] = [
+        Self::Auto,
+        Self::English,
+        Self::Russian,
+        Self::Ukrainian,
+        Self::Spanish,
+        Self::PortugueseBrazil,
+        Self::German,
+        Self::French,
+        Self::Italian,
+        Self::ChineseSimplified,
+        Self::ChineseTraditional,
+        Self::Japanese,
+        Self::Korean,
+        Self::Hindi,
+        Self::Arabic,
+    ];
+
+    #[must_use]
+    pub const fn code(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::English => Some("en"),
+            Self::Russian => Some("ru"),
+            Self::Ukrainian => Some("uk"),
+            Self::Spanish => Some("es"),
+            Self::PortugueseBrazil => Some("pt-BR"),
+            Self::German => Some("de"),
+            Self::French => Some("fr"),
+            Self::Italian => Some("it"),
+            Self::ChineseSimplified => Some("zh-Hans"),
+            Self::ChineseTraditional => Some("zh-Hant"),
+            Self::Japanese => Some("ja"),
+            Self::Korean => Some("ko"),
+            Self::Hindi => Some("hi"),
+            Self::Arabic => Some("ar"),
+        }
+    }
+
+    /// Locale passed to services that require a concrete speech-recognition
+    /// locale rather than a language family. OpenAI-compatible providers and
+    /// the local Whisper engine take the primary subtag from this value.
+    #[must_use]
+    pub const fn locale(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::English => Some("en-US"),
+            Self::Russian => Some("ru-RU"),
+            Self::Ukrainian => Some("uk-UA"),
+            Self::Spanish => Some("es-MX"),
+            Self::PortugueseBrazil => Some("pt-BR"),
+            Self::German => Some("de-DE"),
+            Self::French => Some("fr-FR"),
+            Self::Italian => Some("it-IT"),
+            Self::ChineseSimplified => Some("zh-CN"),
+            Self::ChineseTraditional => Some("zh-TW"),
+            Self::Japanese => Some("ja-JP"),
+            Self::Korean => Some("ko-KR"),
+            Self::Hindi => Some("hi-IN"),
+            Self::Arabic => Some("ar-SA"),
+        }
+    }
+
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto-detect",
+            Self::English => "English",
+            Self::Russian => "Russian",
+            Self::Ukrainian => "Ukrainian",
+            Self::Spanish => "Spanish",
+            Self::PortugueseBrazil => "Portuguese (Brazil)",
+            Self::German => "German",
+            Self::French => "French",
+            Self::Italian => "Italian",
+            Self::ChineseSimplified => "Chinese (Simplified)",
+            Self::ChineseTraditional => "Chinese (Traditional)",
+            Self::Japanese => "Japanese",
+            Self::Korean => "Korean",
+            Self::Hindi => "Hindi",
+            Self::Arabic => "Arabic",
+        }
+    }
+
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        if code.eq_ignore_ascii_case("auto") {
+            return Some(Self::Auto);
+        }
+        Self::ALL.into_iter().find(|language| {
+            language.code().is_some_and(|known| {
+                known.eq_ignore_ascii_case(code)
+                    || known
+                        .split('-')
+                        .next()
+                        .is_some_and(|base| base.eq_ignore_ascii_case(code))
+            })
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DictationEvent {
@@ -729,6 +859,7 @@ pub enum SpeechWorkerCommand {
     Initialize {
         selected_model_id: String,
         output_mode: SpeechOutputMode,
+        dictation_language: DictationLanguage,
         history_enabled: bool,
         fast_release_previews: bool,
         /// Whether the local Whisper route is enabled and should occupy
@@ -775,6 +906,9 @@ pub enum SpeechWorkerCommand {
     GetTranscriptionProviders,
     SetOutputMode {
         output_mode: SpeechOutputMode,
+    },
+    SetDictationLanguage {
+        language: DictationLanguage,
     },
     SetFastReleasePreviews {
         enabled: bool,
@@ -927,10 +1061,10 @@ pub enum CompanionRendererEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompanionRendererCommand, DictationCommand, InputHostEvent, InsertionDelivery,
-        InsertionMethod, RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerEvent,
-        TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency, TranslationLanguage,
-        TranslationResult, TranslationTier, TranslationWorkerEvent,
+        CompanionRendererCommand, DictationCommand, DictationLanguage, InputHostEvent,
+        InsertionDelivery, InsertionMethod, RequestId, SelectionCaptureTiming, SessionId,
+        SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency,
+        TranslationLanguage, TranslationResult, TranslationTier, TranslationWorkerEvent,
     };
 
     #[test]
@@ -942,6 +1076,21 @@ mod tests {
         let decoded: DictationCommand = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn spoken_language_keeps_ui_codes_separate_from_service_locales() {
+        assert_eq!(
+            DictationLanguage::from_code("ru"),
+            Some(DictationLanguage::Russian)
+        );
+        assert_eq!(DictationLanguage::Russian.code(), Some("ru"));
+        assert_eq!(DictationLanguage::Russian.locale(), Some("ru-RU"));
+        assert_eq!(
+            DictationLanguage::from_code("zh-Hant"),
+            Some(DictationLanguage::ChineseTraditional)
+        );
+        assert_eq!(DictationLanguage::Auto.locale(), None);
     }
 
     #[test]
@@ -1253,8 +1402,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 20,
-            "every fingerprint below was written for protocol 20: if a shape \
+            PROTOCOL_VERSION, 21,
+            "every fingerprint below was written for protocol 21: if a shape \
              changes, this number changes with it"
         );
     }
@@ -1817,6 +1966,7 @@ mod complete_wire_schema_tests {
             SpeechWorkerCommand::Initialize {
                 selected_model_id: "model".to_owned(),
                 output_mode: SpeechOutputMode::OriginalLanguage,
+                dictation_language: DictationLanguage::Russian,
                 history_enabled: true,
                 fast_release_previews: true,
                 prepare_local_model: true,
@@ -1845,6 +1995,9 @@ mod complete_wire_schema_tests {
             SpeechWorkerCommand::GetTranscriptionProviders,
             SpeechWorkerCommand::SetOutputMode {
                 output_mode: SpeechOutputMode::TranslateToEnglish,
+            },
+            SpeechWorkerCommand::SetDictationLanguage {
+                language: DictationLanguage::Ukrainian,
             },
             SpeechWorkerCommand::SetFastReleasePreviews { enabled: true },
             SpeechWorkerCommand::GetHistory { limit: 1 },
@@ -2003,9 +2156,10 @@ mod complete_wire_schema_tests {
         SpeechWorkerCommand::EnsureModel { .. } => 4, SpeechWorkerCommand::SelectModel { .. } => 5,
         SpeechWorkerCommand::CancelModelInstall => 6, SpeechWorkerCommand::SetTranscriptionProviders { .. } => 7,
         SpeechWorkerCommand::SetProviderCredential { .. } => 8, SpeechWorkerCommand::GetTranscriptionProviders => 9,
-        SpeechWorkerCommand::SetOutputMode { .. } => 10, SpeechWorkerCommand::SetFastReleasePreviews { .. } => 11,
-        SpeechWorkerCommand::GetHistory { .. } => 12, SpeechWorkerCommand::SetHistoryEnabled { .. } => 13,
-        SpeechWorkerCommand::ClearHistory => 14, SpeechWorkerCommand::Shutdown => 15
+        SpeechWorkerCommand::SetOutputMode { .. } => 10, SpeechWorkerCommand::SetDictationLanguage { .. } => 11,
+        SpeechWorkerCommand::SetFastReleasePreviews { .. } => 12, SpeechWorkerCommand::GetHistory { .. } => 13,
+        SpeechWorkerCommand::SetHistoryEnabled { .. } => 14, SpeechWorkerCommand::ClearHistory => 15,
+        SpeechWorkerCommand::Shutdown => 16
     );
     index_fn!(speech_event_index, SpeechWorkerEvent,
         SpeechWorkerEvent::Ready { .. } => 0, SpeechWorkerEvent::ModelDownloadProgress { .. } => 1,
@@ -2096,7 +2250,7 @@ mod complete_wire_schema_tests {
         assert_complete(&input_commands, input_command_index, 6);
         assert_complete(&translation_commands, translation_command_index, 13);
         assert_complete(&translation_events, translation_event_index, 12);
-        assert_complete(&speech_commands, speech_command_index, 16);
+        assert_complete(&speech_commands, speech_command_index, 17);
         assert_complete(&speech_events, speech_event_index, 15);
         assert_complete(&companion_commands, companion_command_index, 8);
         assert_complete(&companion_events, companion_event_index, 3);
@@ -2114,7 +2268,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x5807_3ac2_df3f_d04f,
+            0xec7b_2eea_5279_7e22,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

@@ -69,31 +69,37 @@ function New-IconFrame {
             [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
 
         $scale = [float]($Size / 256.0)
-        $shell = New-RoundedRectanglePath `
-            -X (12 * $scale) `
-            -Y (12 * $scale) `
-            -Width (232 * $scale) `
-            -Height (232 * $scale) `
-            -Radius (44 * $scale)
-        # Graphite ink, the same as the interface. A filled shape rather than a
-        # framed one: at sixteen pixels a stroke is a smudge.
-        $shellBrush = [Drawing.SolidBrush]::new(
+        # No tile behind the mark. Each pale capsule gets a graphite halo so
+        # the same transparent icon remains legible on both light and dark
+        # Windows surfaces; the centre capsule carries the one warm accent.
+        $outlineBrush = [Drawing.SolidBrush]::new(
             [Drawing.ColorTranslator]::FromHtml('#111317'))
-        try {
-            $graphics.FillPath($shellBrush, $shell)
-        }
-        finally {
-            $shellBrush.Dispose()
-            $shell.Dispose()
-        }
-
         $signalBrush = [Drawing.SolidBrush]::new(
             [Drawing.ColorTranslator]::FromHtml('#F5F5F2'))
-        $centres = @(64, 96, 128, 160, 192)
-        $heights = @(58, 104, 140, 104, 58)
+        $accentBrush = [Drawing.SolidBrush]::new(
+            [Drawing.ColorTranslator]::FromHtml('#EF5048'))
+        $centres = @(40, 84, 128, 172, 216)
+        $heights = @(62, 112, 158, 112, 62)
         try {
             for ($index = 0; $index -lt $centres.Count; $index++) {
-                $width = [float](18 * $scale)
+                $outlineWidth = [float](32 * $scale)
+                $outlineHeight = [float](($heights[$index] + 18) * $scale)
+                $outlineX = [float](($centres[$index] * $scale) - ($outlineWidth / 2))
+                $outlineY = [float](($Size - $outlineHeight) / 2)
+                $outline = New-RoundedRectanglePath `
+                    -X $outlineX `
+                    -Y $outlineY `
+                    -Width $outlineWidth `
+                    -Height $outlineHeight `
+                    -Radius ($outlineWidth / 2)
+                try {
+                    $graphics.FillPath($outlineBrush, $outline)
+                }
+                finally {
+                    $outline.Dispose()
+                }
+
+                $width = [float](22 * $scale)
                 $height = [float]($heights[$index] * $scale)
                 $x = [float](($centres[$index] * $scale) - ($width / 2))
                 $y = [float](($Size - $height) / 2)
@@ -104,7 +110,9 @@ function New-IconFrame {
                     -Height $height `
                     -Radius ($width / 2)
                 try {
-                    $graphics.FillPath($signalBrush, $bar)
+                    $graphics.FillPath(
+                        $(if ($index -eq 2) { $accentBrush } else { $signalBrush }),
+                        $bar)
                 }
                 finally {
                     $bar.Dispose()
@@ -112,20 +120,8 @@ function New-IconFrame {
             }
         }
         finally {
+            $outlineBrush.Dispose()
             $signalBrush.Dispose()
-        }
-
-        $accentBrush = [Drawing.SolidBrush]::new(
-            [Drawing.ColorTranslator]::FromHtml('#B8501C'))
-        try {
-            $graphics.FillRectangle(
-                $accentBrush,
-                [float](186 * $scale),
-                [float](186 * $scale),
-                [float](26 * $scale),
-                [float](26 * $scale))
-        }
-        finally {
             $accentBrush.Dispose()
         }
 

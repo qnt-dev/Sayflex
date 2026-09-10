@@ -10,7 +10,8 @@ use std::{
 };
 
 use rust_protocol::{
-    SessionId, SpeechOutputMode, SpeechWorkerEvent, Transcript, TranscriptionLatency,
+    DictationLanguage, SessionId, SpeechOutputMode, SpeechWorkerEvent, Transcript,
+    TranscriptionLatency,
 };
 
 use crate::{
@@ -43,6 +44,7 @@ enum InferenceCommand {
         path: PathBuf,
         selected: bool,
     },
+    SetLanguage(DictationLanguage),
     Preview {
         recording: RecordedAudio,
         output_mode: SpeechOutputMode,
@@ -119,6 +121,13 @@ impl InferenceHandle {
         self.reset_segmented_session();
         if let Err(error) = self.commands.send(InferenceCommand::Unload) {
             eprintln!("could not queue speech model unload: {error}");
+        }
+    }
+
+    pub fn set_language(&self, language: DictationLanguage) {
+        self.reset_segmented_session();
+        if let Err(error) = self.commands.send(InferenceCommand::SetLanguage(language)) {
+            eprintln!("could not queue speech language change: {error}");
         }
     }
 
@@ -272,6 +281,10 @@ fn inference_loop(
                         });
                     }
                 }
+            }
+            InferenceCommand::SetLanguage(language) => {
+                stable_prefix = None;
+                engine.set_language(language.locale());
             }
             InferenceCommand::Preview {
                 recording,

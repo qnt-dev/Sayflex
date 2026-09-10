@@ -80,6 +80,7 @@ pub struct WhisperEngine {
     context: Option<WhisperContext>,
     state: Option<WhisperState>,
     direct_translation_supported: bool,
+    language: Option<String>,
 }
 
 impl WhisperEngine {
@@ -88,8 +89,14 @@ impl WhisperEngine {
             loaded_path: None,
             context: None,
             state: None,
+            language: None,
             direct_translation_supported: false,
         }
+    }
+
+    pub fn set_language(&mut self, language: Option<&str>) {
+        self.language =
+            language.map(|language| language.split('-').next().unwrap_or(language).to_owned());
     }
 
     /// Loads the model and performs one silent pass. Once this returns, a user gesture never
@@ -241,7 +248,7 @@ impl WhisperEngine {
             .context("Whisper inference state is not prepared")?;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(inference_threads());
-        params.set_language(None);
+        params.set_language(self.language.as_deref());
         params.set_translate(output_mode == SpeechOutputMode::TranslateToEnglish);
         params.set_no_context(true);
         if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.is_empty()) {

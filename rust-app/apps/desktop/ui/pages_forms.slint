@@ -205,6 +205,9 @@ export component HotkeysPage inherits VerticalLayout {
     /// end of the text: the shell knows how much padding stands between the two
     /// and passes it in, because a page cannot ask the window anything.
     in property <length> rail-overhang: 0px;
+    in-out property <length> scroll-y: 0px;
+    in-out property <length> scroll-content-height: 0px;
+    out property <length> scroll-shown-height: list.visible-height;
 
     in property <[HotkeyRow]> rows;
     in property <string> summary;
@@ -234,6 +237,8 @@ export component HotkeysPage inherits VerticalLayout {
         list := ListView {
             width: 100%;
             height: 100%;
+            viewport-y <=> root.scroll-y;
+            viewport-height <=> root.scroll-content-height;
             // The widget's own scrollbar appears only while the pointer is
             // over it, which is no use for saying there is more below, and it
             // is drawn in the widget style rather than this one. It also keeps

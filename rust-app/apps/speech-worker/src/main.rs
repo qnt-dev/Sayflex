@@ -208,7 +208,7 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
     if protocol_smoke {
         return run_protocol_smoke(&events, &catalog, &installer);
     }
-    let recorder = AudioRecorder::open(events.clone())?;
+    let mut recorder = AudioRecorder::open(events.clone())?;
     let inference = InferenceHandle::start(events.clone(), history.clone())?;
     let models = model_actor::start(
         catalog.clone(),
@@ -252,6 +252,7 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
             SpeechWorkerCommand::Initialize {
                 selected_model_id: requested,
                 output_mode: requested_output_mode,
+                dictation_language: requested_dictation_language,
                 history_enabled,
                 fast_release_previews: requested_fast_release_previews,
                 prepare_local_model,
@@ -260,6 +261,10 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                     enabled: history_enabled,
                 });
                 output_mode = requested_output_mode;
+                inference.set_language(requested_dictation_language);
+                transcription.send(TranscriptionCommand::SetLanguage(
+                    requested_dictation_language,
+                ));
                 fast_release_previews = previews_allowed(requested_fast_release_previews);
                 selected_model_id = if catalog.find(&requested).is_some() {
                     requested
@@ -400,6 +405,10 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                 output_mode: requested,
             } => {
                 output_mode = requested;
+            }
+            SpeechWorkerCommand::SetDictationLanguage { language } => {
+                inference.set_language(language);
+                transcription.send(TranscriptionCommand::SetLanguage(language));
             }
             SpeechWorkerCommand::SetFastReleasePreviews { enabled } => {
                 fast_release_previews = previews_allowed(enabled);

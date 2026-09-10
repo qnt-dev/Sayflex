@@ -8,8 +8,8 @@
 use std::{error::Error, fs, path::PathBuf};
 
 use rust_protocol::{
-    SpeechOutputMode, TranscriptionProviderEntry, TranslationLanguage, TranslationProviderEntry,
-    TranslationTier,
+    DictationLanguage, SpeechOutputMode, TranscriptionProviderEntry, TranslationLanguage,
+    TranslationProviderEntry, TranslationTier,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -40,6 +40,7 @@ pub(crate) struct SavedSettings {
     pub(crate) selected_model_id: Option<String>,
     pub(crate) speech_backend_preference: SpeechBackendPreference,
     pub(crate) output_mode: SpeechOutputMode,
+    pub(crate) dictation_language: DictationLanguage,
     pub(crate) fast_release_previews: bool,
     pub(crate) visualizer_style: VisualizerStyle,
     pub(crate) circular_spectrum_palette: CircularSpectrumPalette,
@@ -70,6 +71,7 @@ impl Default for SavedSettings {
             selected_model_id: None,
             speech_backend_preference: SpeechBackendPreference::default(),
             output_mode: SpeechOutputMode::default(),
+            dictation_language: DictationLanguage::default(),
             fast_release_previews: true,
             visualizer_style: VisualizerStyle::default(),
             circular_spectrum_palette: CircularSpectrumPalette::default(),
@@ -127,6 +129,11 @@ impl<'de> Deserialize<'de> for SavedSettings {
             &mut settings.speech_backend_preference,
         );
         read(&document, "output_mode", &mut settings.output_mode);
+        read(
+            &document,
+            "dictation_language",
+            &mut settings.dictation_language,
+        );
         read(
             &document,
             "fast_release_previews",
@@ -225,6 +232,7 @@ impl SavedSettings {
             selected_model_id: Some(state.selected_model_id.clone()),
             speech_backend_preference: state.speech_backend_preference,
             output_mode: state.output_mode,
+            dictation_language: state.dictation_language,
             fast_release_previews: state.fast_release_previews,
             visualizer_style: state.visualizer_style,
             circular_spectrum_palette: state.circular_spectrum_palette,
@@ -322,7 +330,9 @@ pub(crate) fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod settings_document_tests {
-    use rust_protocol::{SpeechOutputMode, TranslationLanguage, TranslationTier};
+    use rust_protocol::{
+        DictationLanguage, SpeechOutputMode, TranslationLanguage, TranslationTier,
+    };
 
     use crate::speech_backend::SpeechBackend;
 
@@ -437,6 +447,7 @@ mod settings_document_tests {
     fn a_saved_document_reads_back_as_the_same_settings() {
         let saved = SavedSettings {
             translation_enabled: true,
+            dictation_language: DictationLanguage::Russian,
             translation_secondary_language: TranslationLanguage::Ukrainian,
             companion_home_position: Some((-640, 320)),
             visualizer_style: VisualizerStyle::default(),

@@ -55,6 +55,32 @@ component NavItem inherits Rectangle {
     }
 }
 
+component SettingsNavigation inherits VerticalLayout {
+    in property <int> active-page;
+    callback select-page(int);
+
+    width: Sheet.nav-width;
+    spacing: 6px;
+
+    Text {
+        text: "Tools";
+        color: Sheet.muted;
+        font-size: Sheet.detail-size;
+        height: 22px;
+    }
+
+    NavItem { label: "Overview"; active: root.active-page == 0; clicked => { root.select-page(0); } }
+    NavItem { label: "Dictation"; active: root.active-page == 1; clicked => { root.select-page(1); } }
+    NavItem { label: "Translation"; active: root.active-page == 2; clicked => { root.select-page(2); } }
+    NavItem { label: "Models"; active: root.active-page == 3; clicked => { root.select-page(3); } }
+    NavItem { label: "Providers"; active: root.active-page == 4; clicked => { root.select-page(4); } }
+    NavItem { label: "Visuals"; active: root.active-page == 5; clicked => { root.select-page(5); } }
+    NavItem { label: "History"; active: root.active-page == 6; clicked => { root.select-page(6); } }
+    NavItem { label: "Hotkeys"; active: root.active-page == 7; clicked => { root.select-page(7); } }
+
+    Rectangle { vertical-stretch: 1; }
+}
+
 export component SettingsWindow inherits Window {
     title: "SayFlex";
     icon: @image-url("../assets/tray-icon.svg");
@@ -74,6 +100,12 @@ export component SettingsWindow inherits Window {
 
     // ── what page, and what the frame says ──
     in-out property <int> active-page: 0;
+    // The native wheel adapter needs the same geometry the outer Flickable
+    // uses. Keeping it on the window makes wheel mice and touchpads follow one
+    // deterministic path instead of Slint's gesture-start heuristic.
+    in-out property <length> workspace-scroll-y: 0px;
+    out property <length> workspace-scroll-content-height: work.viewport-height;
+    out property <length> workspace-scroll-shown-height: work.height;
     in property <string> today: "";
     in property <string> app-version: "";
     in-out property <string> runtime-status: "Starting workers…";
@@ -115,6 +147,8 @@ export component SettingsWindow inherits Window {
     in-out property <string> output-mode: "original";
     in-out property <string> output-mode-label: "Original language";
     in property <bool> output-mode-locked: false;
+    in-out property <string> dictation-language: "auto";
+    in-out property <string> dictation-language-label: "Auto-detect";
     in-out property <string> release-mode: "fastest";
     in-out property <string> release-mode-label: "Fastest";
     in property <bool> release-mode-locked: false;
@@ -150,6 +184,22 @@ export component SettingsWindow inherits Window {
     in property <[HistoryRow]> history-rows;
     in property <string> history-scope: "";
     in property <[HotkeyRow]> hotkey-rows;
+    in-out property <length> models-scroll-y: 0px;
+    in-out property <length> models-scroll-content-height: 0px;
+    in-out property <length> models-scroll-shown-height: 0px;
+    in-out property <length> providers-scroll-y: 0px;
+    in-out property <length> providers-scroll-content-height: 0px;
+    in-out property <length> providers-scroll-shown-height: 0px;
+    in-out property <length> history-scroll-y: 0px;
+    in-out property <length> history-scroll-content-height: 0px;
+    in-out property <length> history-scroll-shown-height: 0px;
+    in-out property <length> hotkeys-scroll-y: 0px;
+    in-out property <length> hotkeys-scroll-content-height: 0px;
+    in-out property <length> hotkeys-scroll-shown-height: 0px;
+    animate workspace-scroll-y, models-scroll-y, providers-scroll-y, history-scroll-y, hotkeys-scroll-y {
+        duration: 90ms;
+        easing: ease-out;
+    }
     in property <string> hotkeys-summary: "";
     in property <bool> hotkeys-summary-signal: false;
 
@@ -189,6 +239,7 @@ export component SettingsWindow inherits Window {
     callback clear-history();
     callback set-history-enabled(bool);
     callback set-output-mode(string);
+    callback set-dictation-language(string);
     callback set-release-mode(string);
     callback select-speech-backend(int);
     callback select-visualizer(int);
@@ -249,7 +300,7 @@ export component SettingsWindow inherits Window {
                 spacing: 16px;
                 alignment: end;
                 Text {
-                    text: "SAYFLEX";
+                    text: "SayFlex";
                     color: Sheet.muted;
                     font-size: Sheet.label-size;
                     font-weight: 650;
@@ -282,19 +333,35 @@ export component SettingsWindow inherits Window {
             vertical-stretch: 1;
 
         work := Flickable {
+            visible: !self.page-owns-scroll;
             width: 100%;
             height: 100%;
             viewport-width: max(self.width, Sheet.workspace-min-width);
+            viewport-y <=> root.workspace-scroll-y;
+            // Exactly one object owns vertical wheel input. Models, Providers,
+            // History and Hotkeys contain a virtualized ListView and scroll
+            // themselves; making this outer Flickable scrollable as well made
+            // it capture the first wheel events, move a short distance, then
+            // hand control to the list only after Slint's capture timeout.
+            // That was the visible stop-start motion the thumb drag did not
+            // have. Form pages have no inner vertical scroller, so the outer
+            // workspace remains their owner.
+            property <bool> page-owns-scroll: root.active-page == 3
+                || root.active-page == 4
+                || root.active-page == 6
+                || root.active-page == 7;
             // The fixed floor only describes the smallest page. Form pages can
             // grow when settings are added (Translation now does), so the
             // scroll extent must come from the active page's actual layout.
             // Otherwise the page draws past a 474px viewport, the last rows are
             // clipped, and the rail quite truthfully believes there is nowhere
             // to scroll.
-            viewport-height: max(
-                self.height,
-                max(Sheet.workspace-min-height, page.preferred-height + 30px)
-            );
+            viewport-height: self.page-owns-scroll
+                ? self.height
+                : max(
+                    self.height,
+                    max(Sheet.workspace-min-height, page.preferred-height + 30px)
+                );
 
         HorizontalLayout {
             width: parent.viewport-width;
@@ -304,27 +371,13 @@ export component SettingsWindow inherits Window {
             padding-top: 30px;
             spacing: Sheet.workspace-gap;
 
-            VerticalLayout {
-                width: Sheet.nav-width;
-                spacing: 6px;
-
-                Text {
-                    text: "Tools";
-                    color: Sheet.muted;
-                    font-size: Sheet.detail-size;
-                    height: 22px;
+            SettingsNavigation {
+                active-page: root.active-page;
+                select-page(index) => {
+                    root.active-page = index;
+                    work.viewport-x = 0px;
+                    work.viewport-y = 0px;
                 }
-
-                NavItem { label: "Overview"; active: root.active-page == 0; clicked => { root.active-page = 0; work.viewport-x = 0px; work.viewport-y = 0px; } }
-                NavItem { label: "Dictation"; active: root.active-page == 1; clicked => { root.active-page = 1; work.viewport-x = 0px; work.viewport-y = 0px; } }
-                NavItem { label: "Translation"; active: root.active-page == 2; clicked => { root.active-page = 2; work.viewport-x = 0px; work.viewport-y = 0px; } }
-                NavItem { label: "Models"; active: root.active-page == 3; clicked => { root.active-page = 3; work.viewport-x = 0px; work.viewport-y = 0px; } }
-                NavItem { label: "Providers"; active: root.active-page == 4; clicked => { root.active-page = 4; work.viewport-x = 0px; work.viewport-y = 0px; } }
-                NavItem { label: "Visuals"; active: root.active-page == 5; clicked => { root.active-page = 5; work.viewport-x = 0px; work.viewport-y = 0px; } }
-                NavItem { label: "History"; active: root.active-page == 6; clicked => { root.active-page = 6; work.viewport-x = 0px; work.viewport-y = 0px; } }
-                NavItem { label: "Hotkeys"; active: root.active-page == 7; clicked => { root.active-page = 7; work.viewport-x = 0px; work.viewport-y = 0px; } }
-
-                Rectangle { vertical-stretch: 1; }
             }
 
             // The page fills the column. List pages own their row scrolling;
@@ -365,6 +418,8 @@ export component SettingsWindow inherits Window {
                     output-mode: root.output-mode-label;
                     output-mode-value: root.output-mode;
                     output-locked: root.output-mode-locked;
+                    dictation-language: root.dictation-language-label;
+                    dictation-language-value: root.dictation-language;
                     release-mode: root.release-mode-label;
                     release-mode-value: root.release-mode;
                     release-mode-locked: root.release-mode-locked;
@@ -373,6 +428,7 @@ export component SettingsWindow inherits Window {
                     hotkey: root.dictate-hotkey;
                     select-backend(index) => { root.select-speech-backend(index); }
                     set-output-mode(value) => { root.set-output-mode(value); }
+                    set-dictation-language(value) => { root.set-dictation-language(value); }
                     set-release-mode(value) => { root.set-release-mode(value); }
                     set-keeping-history(next) => { root.set-history-enabled(next); }
                 }
@@ -405,7 +461,7 @@ export component SettingsWindow inherits Window {
                     note-acted => { root.active-page = 3; }
                 }
 
-                if root.active-page == 3 : ModelsPage {
+                if root.active-page == 3 && !work.page-owns-scroll : ModelsPage {
                     // The rail belongs at the window edge, not beside the text.
                     rail-overhang: Sheet.rail-overhang;
                     rows: root.model-rows;
@@ -414,7 +470,7 @@ export component SettingsWindow inherits Window {
                     cancel-install(catalog-id) => { root.cancel-model-install(catalog-id); }
                 }
 
-                if root.active-page == 4 : ProvidersPage {
+                if root.active-page == 4 && !work.page-owns-scroll : ProvidersPage {
                     // The rail belongs at the window edge, not beside the text.
                     rail-overhang: Sheet.rail-overhang;
                     editing <=> root.provider-editing;
@@ -466,7 +522,7 @@ export component SettingsWindow inherits Window {
                     select-slate-surface(index) => { root.select-writing-slate-surface(index); }
                 }
 
-                if root.active-page == 6 : HistoryPage {
+                if root.active-page == 6 && !work.page-owns-scroll : HistoryPage {
                     hotkey: root.dictate-hotkey;
                     // The rail belongs at the window edge, not beside the text.
                     rail-overhang: Sheet.rail-overhang;
@@ -479,7 +535,7 @@ export component SettingsWindow inherits Window {
                     copy-history(index) => { root.copy-history(index); }
                 }
 
-                if root.active-page == 7 : HotkeysPage {
+                if root.active-page == 7 && !work.page-owns-scroll : HotkeysPage {
                     // The rail belongs at the window edge, not beside the text.
                     rail-overhang: Sheet.rail-overhang;
                     rows: root.hotkey-rows;
@@ -492,10 +548,134 @@ export component SettingsWindow inherits Window {
         }
         }
 
+            // List pages are not children of the form-page Flickable. Slint's
+            // Flickable consumes wheel input even when its vertical extent is
+            // already zero; nesting a ListView under it therefore made the
+            // first wheel events disappear. This clipped viewport owns only
+            // horizontal panning through its explicit rail. The ListView in
+            // each page is the sole vertical wheel owner.
+            if work.page-owns-scroll : Rectangle {
+                clip: true;
+                property <length> content-width: max(self.width, Sheet.workspace-min-width);
+                property <length> horizontal-offset: 0px;
+
+                HorizontalLayout {
+                    x: -parent.horizontal-offset;
+                    width: parent.content-width;
+                    height: parent.height;
+                    padding-left: Sheet.workspace-pad;
+                    padding-right: Sheet.workspace-pad;
+                    padding-top: 30px;
+                    spacing: Sheet.workspace-gap;
+
+                    SettingsNavigation {
+                        active-page: root.active-page;
+                        select-page(index) => {
+                            root.active-page = index;
+                            work.viewport-x = 0px;
+                            work.viewport-y = 0px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        min-width: Sheet.page-min-width;
+                        min-height: Sheet.page-min-height;
+                        spacing: 0px;
+
+                        if root.active-page == 3 : models-list-page := ModelsPage {
+                            rail-overhang: Sheet.rail-overhang;
+                            scroll-y <=> root.models-scroll-y;
+                            scroll-content-height <=> root.models-scroll-content-height;
+                            changed scroll-shown-height => {
+                                if (root.models-scroll-shown-height != self.scroll-shown-height) {
+                                    root.models-scroll-shown-height = self.scroll-shown-height;
+                                }
+                            }
+                            rows: root.model-rows;
+                            summary: root.models-summary;
+                            choose(catalog-id) => { root.choose-model(catalog-id); }
+                            cancel-install(catalog-id) => { root.cancel-model-install(catalog-id); }
+                        }
+
+                        if root.active-page == 4 : providers-list-page := ProvidersPage {
+                            rail-overhang: Sheet.rail-overhang;
+                            scroll-y <=> root.providers-scroll-y;
+                            scroll-content-height <=> root.providers-scroll-content-height;
+                            changed scroll-shown-height => {
+                                if (root.providers-scroll-shown-height != self.scroll-shown-height) {
+                                    root.providers-scroll-shown-height = self.scroll-shown-height;
+                                }
+                            }
+                            editing <=> root.provider-editing;
+                            rows: root.provider-rows;
+                            audio-leaves-device: root.audio-leaves-device || root.text-leaves-device;
+                            claim: root.provider-claim;
+                            toggle-provider(index) => { root.toggle-provider(index); }
+                            use-provider-only(index) => { root.use-provider-only(index); }
+                            move-provider(from, to) => { root.move-provider(from, to); }
+                            problem <=> root.provider-problem;
+                            problem-for <=> root.provider-problem-for;
+                            save-provider(id, secret, extra) => {
+                                root.save-provider(id, secret, extra);
+                            }
+                            forget-provider-key(id) => { root.forget-provider-key(id); }
+                        }
+
+                        if root.active-page == 6 : history-list-page := HistoryPage {
+                            hotkey: root.dictate-hotkey;
+                            rail-overhang: Sheet.rail-overhang;
+                            scroll-y <=> root.history-scroll-y;
+                            scroll-content-height <=> root.history-scroll-content-height;
+                            changed scroll-shown-height => {
+                                if (root.history-scroll-shown-height != self.scroll-shown-height) {
+                                    root.history-scroll-shown-height = self.scroll-shown-height;
+                                }
+                            }
+                            rows: root.history-rows;
+                            keeping: root.history-enabled;
+                            scope: root.history-scope;
+                            set-keeping(next) => { root.set-history-enabled(next); }
+                            clear-history => { root.clear-history(); }
+                            refresh-history => { root.refresh-history(); }
+                            copy-history(index) => { root.copy-history(index); }
+                        }
+
+                        if root.active-page == 7 : hotkeys-list-page := HotkeysPage {
+                            rail-overhang: Sheet.rail-overhang;
+                            scroll-y <=> root.hotkeys-scroll-y;
+                            scroll-content-height <=> root.hotkeys-scroll-content-height;
+                            changed scroll-shown-height => {
+                                if (root.hotkeys-scroll-shown-height != self.scroll-shown-height) {
+                                    root.hotkeys-scroll-shown-height = self.scroll-shown-height;
+                                }
+                            }
+                            rows: root.hotkey-rows;
+                            summary: root.hotkeys-summary;
+                            summary-signal: root.hotkeys-summary-signal;
+                            toggle-row(index, next) => { root.set-hotkey-enabled(index, next); }
+                            set-mode(menu, value) => { root.set-text-action-mode(value); }
+                        }
+                    }
+                }
+
+                ScrollRail {
+                    horizontal: true;
+                    x: 0;
+                    y: parent.height - 9px;
+                    track: parent.width;
+                    content: parent.content-width;
+                    shown: parent.width;
+                    offset: parent.horizontal-offset;
+                    scrolled(next) => { parent.horizontal-offset = next; }
+                }
+            }
+
             // Rails, so that a window smaller than the workspace says so.
             // They appear only when there is somewhere to go, are drawn in the
             // same graphite as everything else, and can be dragged.
             ScrollRail {
+                visible: !work.page-owns-scroll;
                 x: parent.width - 9px;
                 y: 0;
                 track: work.height;
@@ -506,6 +686,7 @@ export component SettingsWindow inherits Window {
             }
 
             ScrollRail {
+                visible: !work.page-owns-scroll;
                 horizontal: true;
                 x: 0;
                 y: parent.height - 9px;
@@ -547,13 +728,13 @@ export component SettingsWindow inherits Window {
                         alignment: end;
                         spacing: 0px;
                         Text {
-                            text: "SAY";
+                            text: "Say";
                             color: Sheet.ink;
                             font-size: 13px;
                             font-weight: 700;
                         }
                         Text {
-                            text: "FLEX";
+                            text: "Flex";
                             color: Sheet.ink;
                             font-size: 13px;
                             font-weight: 700;
