@@ -8,8 +8,8 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.100"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-rust-model-manager = { version = "0.6.2", path = "../model-manager" }
-rust-protocol = { version = "0.6.2", path = "../protocol" }
+rust-model-manager = { version = "0.6.3", path = "../model-manager" }
+rust-protocol = { version = "0.6.3", path = "../protocol" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

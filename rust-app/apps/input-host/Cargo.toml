@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rust-app-core = { version = "0.6.2", path = "../../crates/app-core" }
-rust-platform-windows = { version = "0.6.2", path = "../../crates/platform-windows" }
-rust-protocol = { version = "0.6.2", path = "../../crates/protocol" }
+rust-app-core = { version = "0.6.3", path = "../../crates/app-core" }
+rust-platform-windows = { version = "0.6.3", path = "../../crates/platform-windows" }
+rust-protocol = { version = "0.6.3", path = "../../crates/protocol" }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

@@ -69,13 +69,11 @@ function New-IconFrame {
             [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
 
         $scale = [float]($Size / 256.0)
-        # No tile behind the mark. Each pale capsule gets a graphite halo so
-        # the same transparent icon remains legible on both light and dark
-        # Windows surfaces; the centre capsule carries the one warm accent.
+        # No tile behind the mark. Every capsule is the SayFlex red requested
+        # for the waveform; the graphite halo keeps the transparent icon
+        # legible on both light and dark Windows surfaces.
         $outlineBrush = [Drawing.SolidBrush]::new(
             [Drawing.ColorTranslator]::FromHtml('#111317'))
-        $signalBrush = [Drawing.SolidBrush]::new(
-            [Drawing.ColorTranslator]::FromHtml('#F5F5F2'))
         $accentBrush = [Drawing.SolidBrush]::new(
             [Drawing.ColorTranslator]::FromHtml('#EF5048'))
         $centres = @(40, 84, 128, 172, 216)
@@ -110,9 +108,7 @@ function New-IconFrame {
                     -Height $height `
                     -Radius ($width / 2)
                 try {
-                    $graphics.FillPath(
-                        $(if ($index -eq 2) { $accentBrush } else { $signalBrush }),
-                        $bar)
+                    $graphics.FillPath($accentBrush, $bar)
                 }
                 finally {
                     $bar.Dispose()
@@ -121,7 +117,6 @@ function New-IconFrame {
         }
         finally {
             $outlineBrush.Dispose()
-            $signalBrush.Dispose()
             $accentBrush.Dispose()
         }
 

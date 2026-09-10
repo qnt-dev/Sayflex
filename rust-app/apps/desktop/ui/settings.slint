@@ -675,7 +675,12 @@ export component SettingsWindow inherits Window {
             // They appear only when there is somewhere to go, are drawn in the
             // same graphite as everything else, and can be dragged.
             ScrollRail {
-                visible: !work.page-owns-scroll;
+                // A use-site binding replaces ScrollRail's own `visible`
+                // binding.  Testing only the page owner therefore left a
+                // full-width thumb on every form page even when the content
+                // fitted exactly — the long grey strip above the footer.
+                visible: !work.page-owns-scroll
+                    && work.viewport-height > work.height + 0.5px;
                 x: parent.width - 9px;
                 y: 0;
                 track: work.height;
@@ -686,7 +691,8 @@ export component SettingsWindow inherits Window {
             }
 
             ScrollRail {
-                visible: !work.page-owns-scroll;
+                visible: !work.page-owns-scroll
+                    && work.viewport-width > work.width + 0.5px;
                 horizontal: true;
                 x: 0;
                 y: parent.height - 9px;

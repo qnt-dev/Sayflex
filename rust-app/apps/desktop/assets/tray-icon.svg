@@ -1,14 +1,14 @@
 <!--
-  A transparent sound mark. The dark outline keeps it legible on light Windows
-  surfaces; the pale signal remains visible on dark ones, and the centre bar is
-  the single warm SayFlex accent. There is deliberately no tile behind it.
+  A transparent red sound mark. The dark outline keeps the whole waveform
+  legible on light and dark Windows surfaces. There is deliberately no tile
+  behind it.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
   <g stroke="#111317" stroke-width="10">
-    <rect x="29" y="97" width="22" height="62" rx="11" fill="#f5f5f2" />
-    <rect x="73" y="72" width="22" height="112" rx="11" fill="#f5f5f2" />
+    <rect x="29" y="97" width="22" height="62" rx="11" fill="#ef5048" />
+    <rect x="73" y="72" width="22" height="112" rx="11" fill="#ef5048" />
     <rect x="117" y="49" width="22" height="158" rx="11" fill="#ef5048" />
-    <rect x="161" y="72" width="22" height="112" rx="11" fill="#f5f5f2" />
-    <rect x="205" y="97" width="22" height="62" rx="11" fill="#f5f5f2" />
+    <rect x="161" y="72" width="22" height="112" rx="11" fill="#ef5048" />
+    <rect x="205" y="97" width="22" height="62" rx="11" fill="#ef5048" />
   </g>
 </svg>
