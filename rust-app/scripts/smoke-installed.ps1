@@ -19,6 +19,12 @@ if ([string]::IsNullOrWhiteSpace($StagedDirectory)) {
 if ([string]::IsNullOrWhiteSpace($ReceiptPath)) {
     $ReceiptPath = Join-Path $rustRoot 'dist\smoke-receipt.json'
 }
+$installerHash = if (-not [string]::IsNullOrWhiteSpace($InstallerPath) -and
+    (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
+    (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
+} else {
+    $null
+}
 
 $checks = [ordered]@{}
 function Set-SmokeResult([string]$Id, [string]$Status, [string]$Detail) {
@@ -85,7 +91,6 @@ if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
         throw 'Witnessed evidence requires the exact installer path.'
     }
     $evidence = Get-Content -LiteralPath $EvidencePath -Raw | ConvertFrom-Json
-    $installerHash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
     $evidenceFailures = @(Get-SmokeEvidenceFailures `
         -Evidence $evidence `
         -ExpectedVersion "$($manifest.version)" `
@@ -112,7 +117,7 @@ $receipt = [ordered]@{
     staged_directory = [System.IO.Path]::GetFullPath($StagedDirectory)
     created_utc = [DateTime]::UtcNow.ToString('o')
     witnessed_utc = if ($evidence) { $evidence.witnessed_utc } else { $null }
-    installer_sha256 = if ($evidence) { $evidence.installer_sha256 } else { $null }
+    installer_sha256 = $installerHash
     checks = $checks
 }
 

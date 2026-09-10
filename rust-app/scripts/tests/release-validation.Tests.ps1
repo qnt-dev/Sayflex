@@ -122,4 +122,11 @@ Describe 'SayFlex installed smoke runner wiring' {
         $runner | Should Match 'Import-Module \$validationModule -Force'
         $runner | Should Match 'Get-SmokeEvidenceFailures'
     }
+
+    It 'records the exact installer hash without requiring witnessed evidence' {
+        $runner = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\smoke-installed.ps1') -Raw
+
+        $runner | Should Match '\$installerHash = if \(-not \[string\]::IsNullOrWhiteSpace\(\$InstallerPath\)'
+        $runner | Should Match 'installer_sha256 = \$installerHash'
+    }
 }
