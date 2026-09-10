@@ -14,7 +14,7 @@ use rust_protocol::{
 };
 use slint::{
     ComponentHandle, Model, ModelRc, PhysicalPosition, SharedString, VecModel,
-    winit_030::{EventResult, WinitWindowAccessor, winit},
+    winit_030::WinitWindowAccessor,
 };
 
 use crate::{
@@ -45,98 +45,6 @@ use crate::{
     },
     worker_supervisor::Workers,
 };
-
-/// Installs deterministic wheel handling for every settings page.
-///
-/// Slint 1.17 treats a mouse-wheel notch as the beginning of a gesture and can
-/// leave the first isolated notch at zero. That is useful for touchpads, but on
-/// Windows wheel mice it made both the outer form viewport and the virtualized
-/// lists move only after another notch arrived. The native event is consumed
-/// once and routed to the sole vertical viewport that owns the active page.
-pub(crate) fn install_precise_wheel(settings: &SettingsWindow) {
-    let weak = settings.as_weak();
-    settings
-        .window()
-        .on_winit_window_event(move |window, event| {
-            let winit::event::WindowEvent::MouseWheel { delta, .. } = event else {
-                return EventResult::Propagate;
-            };
-            let Some(settings) = weak.upgrade() else {
-                return EventResult::Propagate;
-            };
-            let delta = wheel_delta_pixels(delta, window.scale_factor());
-            if delta == 0.0 {
-                return EventResult::Propagate;
-            }
-            let (current, content, shown, set): (f32, f32, f32, fn(&SettingsWindow, f32)) =
-                match settings.get_active_page() {
-                    3 => (
-                        settings.get_models_scroll_y(),
-                        settings.get_models_scroll_content_height(),
-                        settings.get_models_scroll_shown_height(),
-                        SettingsWindow::set_models_scroll_y,
-                    ),
-                    4 => (
-                        settings.get_providers_scroll_y(),
-                        settings.get_providers_scroll_content_height(),
-                        settings.get_providers_scroll_shown_height(),
-                        SettingsWindow::set_providers_scroll_y,
-                    ),
-                    6 => (
-                        settings.get_history_scroll_y(),
-                        settings.get_history_scroll_content_height(),
-                        settings.get_history_scroll_shown_height(),
-                        SettingsWindow::set_history_scroll_y,
-                    ),
-                    7 => (
-                        settings.get_hotkeys_scroll_y(),
-                        settings.get_hotkeys_scroll_content_height(),
-                        settings.get_hotkeys_scroll_shown_height(),
-                        SettingsWindow::set_hotkeys_scroll_y,
-                    ),
-                    _ => (
-                        settings.get_workspace_scroll_y(),
-                        settings.get_workspace_scroll_content_height(),
-                        settings.get_workspace_scroll_shown_height(),
-                        SettingsWindow::set_workspace_scroll_y,
-                    ),
-                };
-            set(
-                &settings,
-                next_list_scroll_position(current, content, shown, delta),
-            );
-            EventResult::PreventDefault
-        });
-}
-
-fn wheel_delta_pixels(delta: &winit::event::MouseScrollDelta, scale_factor: f32) -> f32 {
-    match delta {
-        winit::event::MouseScrollDelta::LineDelta(_, vertical) => vertical * 60.0,
-        winit::event::MouseScrollDelta::PixelDelta(position) => {
-            position.y as f32 / scale_factor.max(0.1)
-        }
-    }
-}
-
-fn next_list_scroll_position(current: f32, content: f32, shown: f32, delta: f32) -> f32 {
-    (current + delta).clamp((shown - content).min(0.0), 0.0)
-}
-
-#[cfg(test)]
-mod list_wheel_tests {
-    use super::next_list_scroll_position;
-
-    #[test]
-    fn the_first_wheel_notch_moves_and_both_ends_are_bounded() {
-        assert_eq!(next_list_scroll_position(0.0, 900.0, 400.0, -60.0), -60.0);
-        assert_eq!(
-            next_list_scroll_position(-480.0, 900.0, 400.0, -60.0),
-            -500.0
-        );
-        assert_eq!(next_list_scroll_position(-20.0, 900.0, 400.0, 60.0), 0.0);
-        assert_eq!(next_list_scroll_position(0.0, 300.0, 400.0, -60.0), 0.0);
-    }
-}
 
 /// Both lists, in the order the page shows them: speech models, then the
 /// translator. One list because the page is about models, and because a
@@ -1815,7 +1723,6 @@ pub(crate) fn wire_tray(
             if let Some(settings) = settings.upgrade() {
                 let _ = settings.show();
                 configure_standard_app_window(&settings, "Settings");
-                install_precise_wheel(&settings);
                 settings.window().request_redraw();
             }
         });

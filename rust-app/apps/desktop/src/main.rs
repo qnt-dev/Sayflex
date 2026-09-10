@@ -36,10 +36,10 @@ use rust_protocol::{
 use serde::{Deserialize, Serialize};
 use settings_document::{SavedSettings, data_root, load_settings, save_settings};
 use settings_view::{
-    install_precise_wheel, precreate_action_windows, prepend_history_row, set_indicator_status,
-    set_runtime_status, set_status_problem, show_layout_chooser, sync_action_settings,
-    sync_history, sync_models, sync_output_mode, sync_translation_models, wire_action_palette,
-    wire_chooser, wire_settings, wire_translator, wire_tray,
+    precreate_action_windows, prepend_history_row, set_indicator_status, set_runtime_status,
+    set_status_problem, show_layout_chooser, sync_action_settings, sync_history, sync_models,
+    sync_output_mode, sync_translation_models, wire_action_palette, wire_chooser, wire_settings,
+    wire_translator, wire_tray,
 };
 use slint::winit_030::{
     WinitWindowAccessor,
@@ -1022,7 +1022,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !env::args().any(|argument| argument == "--background") {
         settings.show()?;
         configure_standard_app_window(&settings, "Settings");
-        install_precise_wheel(&settings);
     }
     tray.show()?;
     slint::run_event_loop()?;

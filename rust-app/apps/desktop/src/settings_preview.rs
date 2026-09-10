@@ -72,7 +72,6 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     // whole thing including its title bar rather than the page inside a piece
     // of chrome that belongs to a different design.
     crate::configure_standard_app_window(&settings, "Settings preview");
-    crate::settings_view::install_precise_wheel(&settings);
     slint::run_event_loop()?;
     animation_timer.stop();
     Ok(())
