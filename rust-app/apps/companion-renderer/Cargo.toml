@@ -10,8 +10,8 @@ pet_orb = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_orb" }
 pet_particles = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_particles" }
 pet_platform = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_platform" }
 pet_render = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_render" }
-rust-app-core = { version = "0.6.3", path = "../../crates/app-core" }
-rust-protocol = { version = "0.6.3", path = "../../crates/protocol" }
+rust-app-core = { version = "0.7.0", path = "../../crates/app-core" }
+rust-protocol = { version = "0.7.0", path = "../../crates/protocol" }
 serde_json.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]

@@ -15,7 +15,11 @@ use std::{
 
 use rust_protocol::AUDIO_SPECTRUM_BANDS;
 use serde::{Deserialize, Serialize};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+
+use pet_orb::OrbActor;
+use pet_particles::Vec2;
+use pet_render::{Canvas, Sprite, SpriteSource};
 
 use crate::{RecordingIndicator, SettingsWindow, SlateLine, flow_sphere};
 
@@ -187,6 +191,10 @@ impl VisualizerStyle {
     pub(crate) const fn uses_external_renderer(self) -> bool {
         matches!(self, Self::CompanionOrb)
     }
+
+    pub(crate) const fn has_live_settings_preview(self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -214,7 +222,87 @@ pub(crate) struct IndicatorAnimation {
     pub(crate) flow_sphere_palette: flow_sphere::FlowSpherePalette,
     pub(crate) last_frame: Instant,
     pub(crate) flow_sphere_renderer: Option<flow_sphere::FlowSphereRenderer>,
+    companion_preview_renderer: Option<CompanionPreviewRenderer>,
     pub(crate) writing_slate: WritingSlateAnimation,
+}
+
+const COMPANION_PREVIEW_WIDTH: u32 = 290;
+const COMPANION_PREVIEW_HEIGHT: u32 = 168;
+const COMPANION_PREVIEW_SCALE: f32 = 0.115;
+const COMPANION_PREVIEW_GROW_START: f32 = 0.08;
+const COMPANION_PREVIEW_GROW_FRAMES: usize = 18;
+const COMPANION_PREVIEW_MOTION_RADIUS: f32 = 15.0;
+
+/// The settings page embeds the same autonomous actor and particle renderer as
+/// the companion process. Only the canvas size and scale differ: this is a
+/// preview, not a second desktop overlay.
+struct CompanionPreviewRenderer {
+    actor: OrbActor,
+    growth_frames: Vec<Sprite>,
+    canvas: Canvas,
+    anchor: Vec2,
+}
+
+impl CompanionPreviewRenderer {
+    fn new() -> Result<Self, String> {
+        let source =
+            SpriteSource::load_bytes(include_bytes!("../../../../desktop-pet/assets/orb.png"), 10)
+                .map_err(|error| format!("could not decode the companion orb: {error}"))?;
+        let growth_frames = (0..COMPANION_PREVIEW_GROW_FRAMES)
+            .map(|index| {
+                let progress = index as f32 / (COMPANION_PREVIEW_GROW_FRAMES - 1) as f32;
+                let scale = COMPANION_PREVIEW_SCALE
+                    * (COMPANION_PREVIEW_GROW_START
+                        + (1.0 - COMPANION_PREVIEW_GROW_START) * progress);
+                source.scaled(scale)
+            })
+            .collect::<Vec<_>>();
+        let sprite = growth_frames
+            .last()
+            .expect("the companion preview has at least one growth frame");
+        let anchor = Vec2::new(
+            COMPANION_PREVIEW_WIDTH as f32 / 2.0,
+            COMPANION_PREVIEW_HEIGHT as f32 / 2.0,
+        );
+        let rest = anchor + Vec2::new(COMPANION_PREVIEW_MOTION_RADIUS, 0.0);
+        let actor = OrbActor::new(
+            rest,
+            COMPANION_PREVIEW_MOTION_RADIUS,
+            sprite.width() as f32 / 2.0,
+            COMPANION_PREVIEW_SCALE,
+        );
+        Ok(Self {
+            actor,
+            growth_frames,
+            canvas: Canvas::new(COMPANION_PREVIEW_WIDTH, COMPANION_PREVIEW_HEIGHT),
+            anchor,
+        })
+    }
+
+    fn render(&mut self, level: f32) -> Image {
+        self.actor
+            .update(1.0 / 60.0, self.anchor, 1.0 + level.clamp(0.0, 1.0) * 0.5);
+        self.canvas.clear();
+        self.actor.draw_behind(&mut self.canvas);
+        self.actor
+            .draw_sprite(&mut self.canvas, &self.growth_frames);
+        self.actor.draw_front(&mut self.canvas);
+        self.actor.draw_flash(&mut self.canvas);
+
+        let mut pixels =
+            SharedPixelBuffer::<Rgba8Pixel>::new(COMPANION_PREVIEW_WIDTH, COMPANION_PREVIEW_HEIGHT);
+        for (source, target) in self
+            .canvas
+            .pixels()
+            .chunks_exact(4)
+            .zip(pixels.make_mut_bytes().chunks_exact_mut(4))
+        {
+            // pet_render is premultiplied BGRA for UpdateLayeredWindow; Slint
+            // accepts the same premultiplication with RGBA channel order.
+            target.copy_from_slice(&[source[2], source[1], source[0], source[3]]);
+        }
+        Image::from_rgba8_premultiplied(pixels)
+    }
 }
 
 #[derive(Clone)]
@@ -430,6 +518,7 @@ impl IndicatorAnimation {
             flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
             last_frame: Instant::now(),
             flow_sphere_renderer: None,
+            companion_preview_renderer: None,
             writing_slate: WritingSlateAnimation::default(),
         }
     }
@@ -440,6 +529,11 @@ impl IndicatorAnimation {
             self.flow_sphere_renderer = Some(flow_sphere::FlowSphereRenderer::start());
         } else if style != VisualizerStyle::FlowSphere {
             self.flow_sphere_renderer = None;
+        }
+        if style == VisualizerStyle::CompanionOrb && self.companion_preview_renderer.is_none() {
+            self.companion_preview_renderer = CompanionPreviewRenderer::new().ok();
+        } else if style != VisualizerStyle::CompanionOrb {
+            self.companion_preview_renderer = None;
         }
     }
 
@@ -582,10 +676,7 @@ impl IndicatorAnimation {
         let selected = VisualizerStyle::from_index(settings.get_selected_visualizer());
         if !settings.window().is_visible()
             || settings.get_active_page() != 5
-            || matches!(
-                selected,
-                None | Some(VisualizerStyle::Off | VisualizerStyle::CompanionOrb)
-            )
+            || selected.is_none_or(|style| !style.has_live_settings_preview())
         {
             if self.mode != IndicatorMode::Hidden {
                 self.stop();
@@ -632,6 +723,12 @@ impl IndicatorAnimation {
         settings.set_visual_preview_mic_middle_height(frame.mic_middle_height);
         settings.set_visual_preview_mic_inner_height(frame.mic_inner_height);
         settings.set_visual_preview_mic_near_height(frame.mic_near_height);
+
+        if style == VisualizerStyle::CompanionOrb
+            && let Some(renderer) = self.companion_preview_renderer.as_mut()
+        {
+            settings.set_visual_preview_companion_frame(renderer.render(self.display_level));
+        }
 
         if style == VisualizerStyle::FlowSphere
             && let Some(renderer) = &self.flow_sphere_renderer
@@ -927,9 +1024,10 @@ mod indicator_animation_tests {
     use slint::VecModel;
 
     use super::{
-        CircularSpectrumPalette, IndicatorAnimation, IndicatorMode, RecordingSurface, SlateLine,
-        VisualizerStyle, WritingSlateAnimation, WritingSlateSurface, flow_sphere,
-        indicator_preview_slate_surface_for_argument, indicator_preview_style_for_argument,
+        CircularSpectrumPalette, CompanionPreviewRenderer, IndicatorAnimation, IndicatorMode,
+        RecordingSurface, SlateLine, VisualizerStyle, WritingSlateAnimation, WritingSlateSurface,
+        flow_sphere, indicator_preview_slate_surface_for_argument,
+        indicator_preview_style_for_argument,
     };
 
     fn animation() -> IndicatorAnimation {
@@ -965,6 +1063,34 @@ mod indicator_animation_tests {
         }
         assert_eq!(VisualizerStyle::Off.recording_surface(), None);
         assert!(!VisualizerStyle::Off.uses_transparent_window());
+    }
+
+    #[test]
+    fn every_enabled_visualizer_has_a_live_settings_preview() {
+        for index in 0..8 {
+            let style = VisualizerStyle::from_index(index).expect("known visualizer index");
+            assert!(style.has_live_settings_preview(), "{style:?}");
+        }
+        assert!(!VisualizerStyle::Off.has_live_settings_preview());
+
+        let mut companion = CompanionPreviewRenderer::new().expect("embedded companion asset");
+        let frame = companion.render(0.5);
+        assert_eq!(frame.size().width, super::COMPANION_PREVIEW_WIDTH);
+        assert_eq!(frame.size().height, super::COMPANION_PREVIEW_HEIGHT);
+    }
+
+    #[test]
+    fn broadcast_mic_uses_the_transparent_recording_surface_contract() {
+        i_slint_backend_testing::init_no_event_loop();
+        let (indicator, _) = super::new_indicator().expect("recording indicator");
+        indicator.set_visualizer_style(VisualizerStyle::BroadcastMic.index());
+        indicator.set_broadcast_mic_palette(super::BroadcastMicPalette::Red.index());
+        indicator.set_prepared(true);
+        assert!(indicator.get_transparent_surface());
+        assert_eq!(indicator.get_broadcast_mic_palette(), 2);
+
+        indicator.set_visualizer_style(VisualizerStyle::VoiceOrb.index());
+        assert!(!indicator.get_transparent_surface());
     }
 
     #[test]

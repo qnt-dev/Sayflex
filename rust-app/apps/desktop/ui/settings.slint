@@ -8,10 +8,10 @@
 import { Sheet } from "sheet.slint";
 import { Fact } from "parts.slint";
 import { ModelRow, ProviderRow, HistoryRow, HotkeyRow } from "rows.slint";
-import { RowAction, ScrollRail } from "controls.slint";
+import { MenuButton, RowAction, ScrollRail } from "controls.slint";
 import { ModelsPage, ProvidersPage, HistoryPage } from "pages_lists.slint";
 import { TranslationPage, HotkeysPage } from "pages_forms.slint";
-import { OverviewPage, DictationPage, VisualsPage } from "pages_instruments.slint";
+import { OverviewPage, DictationPage, VisualsPage, AboutPage } from "pages_instruments.slint";
 import { SlateLine } from "recording_visual.slint";
 
 component NavItem inherits Rectangle {
@@ -19,7 +19,17 @@ component NavItem inherits Rectangle {
     in property <bool> active: false;
     callback clicked();
 
+    forward-focus: focus;
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-enabled: true;
+    accessible-checkable: true;
+    accessible-checked: root.active;
+    accessible-action-default => { root.clicked(); }
+
     height: 42px;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Sheet.ink;
     background: root.active
         ? Sheet.ink
         : (touch.has-hover ? Sheet.raised : transparent);
@@ -51,7 +61,19 @@ component NavItem inherits Rectangle {
 
     touch := TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.clicked(); }
+        clicked => { focus.focus(); root.clicked(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
     }
 }
 
@@ -63,26 +85,27 @@ component SettingsNavigation inherits VerticalLayout {
     spacing: 6px;
 
     Text {
-        text: "Tools";
+        text: @tr("Tools");
         color: Sheet.muted;
         font-size: Sheet.detail-size;
         height: 22px;
     }
 
-    NavItem { label: "Overview"; active: root.active-page == 0; clicked => { root.select-page(0); } }
-    NavItem { label: "Dictation"; active: root.active-page == 1; clicked => { root.select-page(1); } }
-    NavItem { label: "Translation"; active: root.active-page == 2; clicked => { root.select-page(2); } }
-    NavItem { label: "Models"; active: root.active-page == 3; clicked => { root.select-page(3); } }
-    NavItem { label: "Providers"; active: root.active-page == 4; clicked => { root.select-page(4); } }
-    NavItem { label: "Visuals"; active: root.active-page == 5; clicked => { root.select-page(5); } }
-    NavItem { label: "History"; active: root.active-page == 6; clicked => { root.select-page(6); } }
-    NavItem { label: "Hotkeys"; active: root.active-page == 7; clicked => { root.select-page(7); } }
+    NavItem { label: @tr("Overview"); active: root.active-page == 0; clicked => { root.select-page(0); } }
+    NavItem { label: @tr("Dictation"); active: root.active-page == 1; clicked => { root.select-page(1); } }
+    NavItem { label: @tr("Translation"); active: root.active-page == 2; clicked => { root.select-page(2); } }
+    NavItem { label: @tr("Models"); active: root.active-page == 3; clicked => { root.select-page(3); } }
+    NavItem { label: @tr("Providers"); active: root.active-page == 4; clicked => { root.select-page(4); } }
+    NavItem { label: @tr("Visuals"); active: root.active-page == 5; clicked => { root.select-page(5); } }
+    NavItem { label: @tr("History"); active: root.active-page == 6; clicked => { root.select-page(6); } }
+    NavItem { label: @tr("Hotkeys"); active: root.active-page == 7; clicked => { root.select-page(7); } }
+    NavItem { label: @tr("About"); active: root.active-page == 8; clicked => { root.select-page(8); } }
 
     Rectangle { vertical-stretch: 1; }
 }
 
 export component SettingsWindow inherits Window {
-    title: "SayFlex";
+    title: @tr("SayFlex");
     icon: @image-url("../assets/tray-icon.svg");
     // Small enough to be worth dragging to. The pages are still drawn at the
     // size they were designed for; the workspace scrolls to whatever is left,
@@ -108,8 +131,10 @@ export component SettingsWindow inherits Window {
     out property <length> workspace-scroll-shown-height: work.height;
     in property <string> today: "";
     in property <string> app-version: "";
-    in-out property <string> runtime-status: "Starting workers…";
-    in-out property <string> indicator-status: "Idle";
+    in-out property <string> ui-locale: "system";
+    in property <string> ui-locale-label: @tr("System language");
+    in-out property <string> runtime-status: @tr("Starting workers…");
+    in-out property <string> indicator-status: @tr("Idle");
     /// Whether the line above reports something that went wrong, rather than
     /// something that is merely happening. Set by the same code that writes the
     /// message, because only that code knows.
@@ -127,10 +152,10 @@ export component SettingsWindow inherits Window {
     /// the key is the only thing that knows the send succeeded — and until this
     /// existed it had no way to close the form it had promised to close.
     in-out property <string> provider-editing: "";
-    in property <string> departure-badge: "LOCAL · PRIVATE";
+    in property <string> departure-badge: @tr("LOCAL · PRIVATE");
 
     // ── Overview ──
-    in property <string> overview-statement: "Starting up";
+    in property <string> overview-statement: @tr("Starting up");
     in property <string> overview-sub: "";
     in property <[Fact]> overview-facts;
     in property <string> overview-note;
@@ -138,19 +163,19 @@ export component SettingsWindow inherits Window {
     in property <bool> overview-note-signal: false;
 
     // ── Dictation ──
-    in property <string> dictation-subtitle: "Local speech";
+    in property <string> dictation-subtitle: @tr("Local speech");
     in property <string> dictation-readout: "";
     in property <string> dictation-caption: "";
     in-out property <int> speech-backend-index: 0;
     in property <bool> speech-backend-verified: false;
     in property <string> speech-backend-detail: "";
     in-out property <string> output-mode: "original";
-    in-out property <string> output-mode-label: "Original language";
+    in-out property <string> output-mode-label: @tr("Original language");
     in property <bool> output-mode-locked: false;
     in-out property <string> dictation-language: "auto";
-    in-out property <string> dictation-language-label: "Auto-detect";
+    in-out property <string> dictation-language-label: @tr("Auto-detect");
     in-out property <string> release-mode: "fastest";
-    in-out property <string> release-mode-label: "Fastest";
+    in-out property <string> release-mode-label: @tr("Fastest");
     in property <bool> release-mode-locked: false;
     in property <string> release-mode-note: "";
     in-out property <bool> history-enabled: true;
@@ -161,9 +186,9 @@ export component SettingsWindow inherits Window {
     in property <bool> translation-ready: false;
     in property <string> translation-model-name: "";
     in-out property <string> translation-delivery: "preview";
-    in property <string> translation-delivery-label: "Show a preview";
+    in property <string> translation-delivery-label: @tr("Show a preview");
     in-out property <string> text-action-mode: "adaptive";
-    in property <string> text-action-mode-label: "Decide from the text";
+    in property <string> text-action-mode-label: @tr("Decide from the text");
     in-out property <bool> translation-warm: true;
     in-out property <int> translation-blur-radius: 3;
     in-out property <string> translation-primary-language: "English";
@@ -214,6 +239,7 @@ export component SettingsWindow inherits Window {
     in property <[float]> visual-preview-spectrum;
     in property <[SlateLine]> visual-preview-slate-lines;
     in property <image> visual-preview-flow-sphere-frame;
+    in property <image> visual-preview-companion-frame;
     in property <bool> visual-preview-processing: false;
     in property <float> visual-preview-signal-opacity: 0.8;
     in property <float> visual-preview-disc-opacity: 1;
@@ -257,22 +283,28 @@ export component SettingsWindow inherits Window {
     callback change-hotkey(int);
     callback reset-hotkey(int);
     callback cancel-hotkey-capture();
+    callback set-ui-locale(string);
     callback move-provider(int, int);
     callback toggle-provider(int);
     callback use-provider-only(int);
     callback save-provider(string, string, string);
+    callback edit-provider(string);
+    callback update-provider-draft(string, string, string);
+    callback discard-provider-draft(string);
     callback forget-provider-key(string);
     /// What the last save was refused for, and which row asked. Written by the
     /// one owner in Rust so the form cannot decide it locally and be wrong.
     in-out property <string> provider-problem;
     in-out property <string> provider-problem-for;
+    in-out property <string> provider-draft-secret;
+    in-out property <string> provider-draft-extra;
     callback quit-requested();
 
     // The page's own number, written once from the order the navigation is
     // built from rather than typed into eight places — and the same number the
     // heading shows, because two numbering schemes for one page read as a bug
     // whether or not both were deliberate.
-    property <[string]> page-numbers: ["01", "02", "03", "04", "05", "06", "07", "08"];
+    property <[string]> page-numbers: ["01", "02", "03", "04", "05", "06", "07", "08", "09"];
 
     VerticalLayout {
         spacing: 0px;
@@ -300,8 +332,35 @@ export component SettingsWindow inherits Window {
             HorizontalLayout {
                 spacing: 16px;
                 alignment: end;
+                MenuButton {
+                    compact: true;
+                    text: root.ui-locale-label;
+                    value: root.ui-locale;
+                    current-index: root.ui-locale == "system" ? 0
+                        : root.ui-locale == "en" ? 1
+                        : root.ui-locale == "ru" ? 2
+                        : root.ui-locale == "uk" ? 3
+                        : root.ui-locale == "es" ? 4
+                        : root.ui-locale == "pt-BR" ? 5
+                        : root.ui-locale == "de" ? 6
+                        : root.ui-locale == "fr" ? 7
+                        : root.ui-locale == "it" ? 8 : 9;
+                    options: [
+                        { value: "system", label: @tr("System language"), note: @tr("Follow Windows"), reason: "", danger: false, separator: false },
+                        { value: "en", label: @tr("English"), note: "", reason: "", danger: false, separator: false },
+                        { value: "ru", label: "Русский", note: "", reason: "", danger: false, separator: false },
+                        { value: "uk", label: "Українська", note: "", reason: "", danger: false, separator: false },
+                        { value: "es", label: @tr("Español"), note: "", reason: "", danger: false, separator: false },
+                        { value: "pt-BR", label: @tr("Português (Brasil)"), note: "", reason: "", danger: false, separator: false },
+                        { value: "de", label: @tr("Deutsch"), note: "", reason: "", danger: false, separator: false },
+                        { value: "fr", label: @tr("Français"), note: "", reason: "", danger: false, separator: false },
+                        { value: "it", label: @tr("Italiano"), note: "", reason: "", danger: false, separator: false },
+                        { value: "ko", label: "한국어", note: "", reason: "", danger: false, separator: false },
+                    ];
+                    chosen(value) => { root.set-ui-locale(value); }
+                }
                 Text {
-                    text: "SayFlex";
+                    text: @tr("SayFlex");
                     color: Sheet.muted;
                     font-size: Sheet.label-size;
                     font-weight: 650;
@@ -483,9 +542,16 @@ export component SettingsWindow inherits Window {
                     move-provider(from, to) => { root.move-provider(from, to); }
                     problem <=> root.provider-problem;
                     problem-for <=> root.provider-problem-for;
+                    draft-secret <=> root.provider-draft-secret;
+                    draft-extra <=> root.provider-draft-extra;
                     save-provider(id, secret, extra) => {
                         root.save-provider(id, secret, extra);
                     }
+                    edit-provider(id) => { root.edit-provider(id); }
+                    update-provider-draft(id, secret, extra) => {
+                        root.update-provider-draft(id, secret, extra);
+                    }
+                    discard-provider-draft(id) => { root.discard-provider-draft(id); }
                     forget-provider-key(id) => { root.forget-provider-key(id); }
                 }
 
@@ -502,6 +568,7 @@ export component SettingsWindow inherits Window {
                     preview-spectrum: root.visual-preview-spectrum;
                     preview-slate-lines: root.visual-preview-slate-lines;
                     preview-flow-sphere-frame: root.visual-preview-flow-sphere-frame;
+                    preview-companion-frame: root.visual-preview-companion-frame;
                     preview-processing: root.visual-preview-processing;
                     preview-signal-opacity: root.visual-preview-signal-opacity;
                     preview-disc-opacity: root.visual-preview-disc-opacity;
@@ -549,6 +616,10 @@ export component SettingsWindow inherits Window {
                     reset-row(index) => { root.reset-hotkey(index); }
                     cancel-capture => { root.cancel-hotkey-capture(); }
                     set-mode(menu, value) => { root.set-text-action-mode(value); }
+                }
+
+                if root.active-page == 8 : AboutPage {
+                    version: root.app-version;
                 }
             }
         }
@@ -622,9 +693,16 @@ export component SettingsWindow inherits Window {
                             move-provider(from, to) => { root.move-provider(from, to); }
                             problem <=> root.provider-problem;
                             problem-for <=> root.provider-problem-for;
+                            draft-secret <=> root.provider-draft-secret;
+                            draft-extra <=> root.provider-draft-extra;
                             save-provider(id, secret, extra) => {
                                 root.save-provider(id, secret, extra);
                             }
+                            edit-provider(id) => { root.edit-provider(id); }
+                            update-provider-draft(id, secret, extra) => {
+                                root.update-provider-draft(id, secret, extra);
+                            }
+                            discard-provider-draft(id) => { root.discard-provider-draft(id); }
                             forget-provider-key(id) => { root.forget-provider-key(id); }
                         }
 
@@ -745,13 +823,13 @@ export component SettingsWindow inherits Window {
                         alignment: end;
                         spacing: 0px;
                         Text {
-                            text: "Say";
+                            text: @tr("Say");
                             color: Sheet.ink;
                             font-size: 13px;
                             font-weight: 700;
                         }
                         Text {
-                            text: "Flex";
+                            text: @tr("Flex");
                             color: Sheet.ink;
                             font-size: 13px;
                             font-weight: 700;
@@ -768,7 +846,7 @@ export component SettingsWindow inherits Window {
                     property <bool> anything-leaves:
                         root.audio-leaves-device || root.text-leaves-device;
                     Text {
-                        text: parent.anything-leaves ? root.departure-badge : "LOCAL · PRIVATE";
+                        text: parent.anything-leaves ? root.departure-badge : @tr("LOCAL · PRIVATE");
                         color: parent.anything-leaves ? Sheet.signal-text : Sheet.muted;
                         font-size: Sheet.label-size;
                         font-weight: parent.anything-leaves ? 700 : 400;
@@ -825,7 +903,7 @@ export component SettingsWindow inherits Window {
                 VerticalLayout {
                     alignment: end;
                     RowAction {
-                        label: "Quit SayFlex";
+                        label: @tr("Quit SayFlex");
                         clicked => { root.quit-requested(); }
                     }
                 }

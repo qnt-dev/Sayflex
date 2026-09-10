@@ -5,7 +5,13 @@
 //! preference. Kept apart from the interface it configures: this is a file
 //! format, and it changes for different reasons than a window does.
 
-use std::{error::Error, fs, path::PathBuf};
+use std::{
+    error::Error,
+    fs::{self, File},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use rust_protocol::{
     DictationLanguage, HotkeyBindings, SpeechOutputMode, TranscriptionProviderEntry,
@@ -16,7 +22,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{
     AppState, BroadcastMicPalette, CircularSpectrumPalette, DEFAULT_TRANSLATION_BLUR_RADIUS,
     MAX_TRANSLATION_BLUR_RADIUS, TextActionMode, TranslationDelivery, VisualizerStyle,
-    WritingSlateSurface, flow_sphere, speech_backend::SpeechBackendPreference,
+    WritingSlateSurface, flow_sphere, localization::UiLocale,
+    speech_backend::SpeechBackendPreference,
 };
 
 pub(crate) fn data_root() -> PathBuf {
@@ -25,6 +32,115 @@ pub(crate) fn data_root() -> PathBuf {
 
 fn settings_path() -> PathBuf {
     data_root().join("settings.json")
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SettingsStorage {
+    primary: PathBuf,
+}
+
+impl SettingsStorage {
+    pub(crate) fn new(primary: PathBuf) -> Self {
+        Self { primary }
+    }
+
+    fn temporary(&self) -> PathBuf {
+        self.primary.with_extension("tmp")
+    }
+
+    fn previous(&self) -> PathBuf {
+        self.primary.with_extension("previous")
+    }
+
+    /// Reads the newest valid candidate left by either a completed or an
+    /// interrupted replacement. Invalid candidates are retained under a
+    /// diagnostic name instead of being silently overwritten.
+    pub(crate) fn load_recovering(&self) -> SavedSettings {
+        let previous = self.previous();
+        let temporary = self.temporary();
+        let mut candidates = [&self.primary, &previous, &temporary]
+            .into_iter()
+            .filter_map(|path| {
+                let bytes = fs::read(path).ok()?;
+                let modified = fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(UNIX_EPOCH);
+                Some((path.to_path_buf(), bytes, modified))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
+        let mut invalid = Vec::new();
+        let mut valid = Vec::new();
+        for (path, bytes, modified) in candidates {
+            match parse_settings_checked(&bytes) {
+                Ok(settings) => valid.push((path, bytes, modified, settings)),
+                Err(error) => invalid.push((path, error)),
+            }
+        }
+        for (path, error) in invalid {
+            self.quarantine(&path, &error);
+        }
+
+        let Some((source, bytes, _, settings)) = valid.into_iter().next() else {
+            return SavedSettings::default();
+        };
+        if source != self.primary
+            && let Err(error) = self.replace_bytes_atomically(&bytes)
+        {
+            rust_app_core::diagnostics::log_line(&format!(
+                "settings recovery=loaded source={} reinstall=failed error={error}",
+                source.display()
+            ));
+        }
+        settings
+    }
+
+    pub(crate) fn replace_atomically(&self, settings: &SavedSettings) -> io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(settings).map_err(io::Error::other)?;
+        self.replace_bytes_atomically(&bytes)
+    }
+
+    fn replace_bytes_atomically(&self, bytes: &[u8]) -> io::Result<()> {
+        if let Some(parent) = self.primary.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = self.temporary();
+        let mut file = File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+
+        let previous = self.previous();
+        // On failure the fully flushed temporary candidate remains available
+        // for startup recovery. ReplaceFileW replaces an existing backup as
+        // part of the same operation; deleting it first would create a window
+        // in which a failed replacement had also destroyed the last known-good
+        // document.
+        rust_platform_windows::replace_file_atomically(&self.primary, &temporary, &previous)?;
+        Ok(())
+    }
+
+    fn quarantine(&self, path: &Path, error: &serde_json::Error) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis());
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("settings");
+        let diagnostic = path.with_file_name(format!("{name}.corrupt-{stamp}"));
+        match fs::rename(path, &diagnostic) {
+            Ok(()) => rust_app_core::diagnostics::log_line(&format!(
+                "settings result=unreadable source={} retained={} error={error}",
+                path.display(),
+                diagnostic.display()
+            )),
+            Err(rename_error) => rust_app_core::diagnostics::log_line(&format!(
+                "settings result=unreadable source={} retain=failed error={error}; rename_error={rename_error}",
+                path.display()
+            )),
+        }
+    }
 }
 
 /// Version of the on-disk settings document.
@@ -37,6 +153,7 @@ pub(crate) const SETTINGS_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct SavedSettings {
     pub(crate) schema_version: u32,
+    pub(crate) ui_locale: UiLocale,
     pub(crate) selected_model_id: Option<String>,
     pub(crate) speech_backend_preference: SpeechBackendPreference,
     pub(crate) output_mode: SpeechOutputMode,
@@ -69,6 +186,7 @@ impl Default for SavedSettings {
     fn default() -> Self {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
+            ui_locale: UiLocale::System,
             selected_model_id: None,
             speech_backend_preference: SpeechBackendPreference::default(),
             output_mode: SpeechOutputMode::default(),
@@ -120,6 +238,7 @@ impl<'de> Deserialize<'de> for SavedSettings {
         let document = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
         let mut settings = Self::default();
         read(&document, "schema_version", &mut settings.schema_version);
+        read(&document, "ui_locale", &mut settings.ui_locale);
         read(
             &document,
             "selected_model_id",
@@ -237,6 +356,7 @@ impl SavedSettings {
     pub(crate) fn from_state(state: &AppState) -> Self {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
+            ui_locale: state.ui_locale,
             selected_model_id: Some(state.selected_model_id.clone()),
             speech_backend_preference: state.speech_backend_preference,
             output_mode: state.output_mode,
@@ -295,9 +415,10 @@ impl SavedSettings {
 /// Reads a settings document. Unknown fields are ignored, missing fields take
 /// their default, and an unreadable document falls back to defaults rather
 /// than blocking startup.
+#[cfg(test)]
 pub(crate) fn parse_settings(bytes: &[u8]) -> SavedSettings {
-    match serde_json::from_slice::<SavedSettings>(bytes) {
-        Ok(settings) => settings.sanitized(),
+    match parse_settings_checked(bytes) {
+        Ok(settings) => settings,
         Err(error) => {
             rust_app_core::diagnostics::log_line(&format!(
                 "settings result=unreadable error={error} recovery=defaults"
@@ -307,53 +428,34 @@ pub(crate) fn parse_settings(bytes: &[u8]) -> SavedSettings {
     }
 }
 
+fn parse_settings_checked(bytes: &[u8]) -> Result<SavedSettings, serde_json::Error> {
+    serde_json::from_slice::<SavedSettings>(bytes).map(SavedSettings::sanitized)
+}
+
 pub(crate) fn load_settings() -> SavedSettings {
-    match fs::read(settings_path()) {
-        Ok(bytes) => parse_settings(&bytes),
-        Err(_) => SavedSettings::default(),
-    }
+    SettingsStorage::new(settings_path()).load_recovering()
 }
 
 pub(crate) fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
-    let path = settings_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec_pretty(&SavedSettings::from_state(state))?;
-    let temporary = path.with_extension("tmp");
-    let backup = path.with_extension("previous");
-    fs::write(&temporary, bytes)?;
-    if backup.exists() {
-        fs::remove_file(&backup)?;
-    }
-    let had_previous = path.exists();
-    if had_previous {
-        fs::rename(&path, &backup)?;
-    }
-    if let Err(error) = fs::rename(&temporary, &path) {
-        if had_previous {
-            let _ = fs::rename(&backup, &path);
-        }
-        return Err(error.into());
-    }
-    if backup.exists() {
-        fs::remove_file(backup)?;
-    }
+    SettingsStorage::new(settings_path()).replace_atomically(&SavedSettings::from_state(state))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod settings_document_tests {
+    use std::{fs, thread, time::Duration};
+
     use rust_protocol::{
         DictationLanguage, HotkeyAction, HotkeyBindings, HotkeySpec, SpeechOutputMode,
         TranslationLanguage, TranslationTier,
     };
 
     use crate::speech_backend::SpeechBackend;
+    use tempfile::tempdir;
 
     use super::{
         AppState, BroadcastMicPalette, MAX_TRANSLATION_BLUR_RADIUS, SETTINGS_SCHEMA_VERSION,
-        SavedSettings, TextActionMode, VisualizerStyle, parse_settings,
+        SavedSettings, SettingsStorage, TextActionMode, VisualizerStyle, parse_settings,
     };
 
     /// Exactly what the 0.5.27 build wrote, before the document carried a
@@ -541,5 +643,75 @@ mod settings_document_tests {
             HotkeySpec::control_alt(b'F' as u16)
         );
         assert!(settings.hotkeys.translate.enabled);
+    }
+
+    fn history_setting(enabled: bool) -> SavedSettings {
+        SavedSettings {
+            history_enabled: enabled,
+            ..SavedSettings::default()
+        }
+    }
+
+    #[test]
+    fn a_missing_primary_recovers_the_newest_valid_temporary_candidate() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let storage = SettingsStorage::new(primary.clone());
+        fs::write(
+            primary.with_extension("previous"),
+            serde_json::to_vec(&history_setting(true)).unwrap(),
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(20));
+        fs::write(
+            primary.with_extension("tmp"),
+            serde_json::to_vec(&history_setting(false)).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = storage.load_recovering();
+
+        assert!(!loaded.history_enabled);
+        assert_eq!(parse_settings(&fs::read(primary).unwrap()), loaded);
+    }
+
+    #[test]
+    fn a_corrupt_primary_is_retained_and_a_valid_previous_is_restored() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let storage = SettingsStorage::new(primary.clone());
+        fs::write(&primary, b"{broken").unwrap();
+        fs::write(
+            primary.with_extension("previous"),
+            serde_json::to_vec(&history_setting(false)).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = storage.load_recovering();
+
+        assert!(!loaded.history_enabled);
+        assert!(primary.exists());
+        assert!(fs::read_dir(directory.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.corrupt-")
+        }));
+    }
+
+    #[test]
+    fn an_atomic_replace_keeps_the_previous_complete_document() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let storage = SettingsStorage::new(primary.clone());
+        storage.replace_atomically(&history_setting(true)).unwrap();
+        storage.replace_atomically(&history_setting(false)).unwrap();
+
+        assert!(!parse_settings(&fs::read(&primary).unwrap()).history_enabled);
+        assert!(
+            parse_settings(&fs::read(primary.with_extension("previous")).unwrap()).history_enabled
+        );
+        assert!(!primary.with_extension("tmp").exists());
     }
 }

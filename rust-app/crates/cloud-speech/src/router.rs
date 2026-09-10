@@ -102,6 +102,7 @@ pub const TOTAL_DEADLINE: Duration = Duration::from_secs(25);
 /// for the one after it, and for the local engine at the end.
 pub const PER_PROVIDER_LIMIT: Duration = Duration::from_secs(12);
 
+#[derive(Clone)]
 pub struct Router {
     chain: Chain,
     ledger: Ledger,
@@ -128,6 +129,15 @@ impl Router {
     #[must_use]
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
+    }
+
+    pub fn replace_ledger(&mut self, ledger: Ledger) {
+        self.ledger = ledger;
+    }
+
+    #[must_use]
+    pub fn into_ledger(self) -> Ledger {
+        self.ledger
     }
 
     pub fn ledger_mut(&mut self) -> &mut Ledger {

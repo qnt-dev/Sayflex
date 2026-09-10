@@ -7,9 +7,12 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
-rust-app-core = { version = "0.6.3", path = "../../crates/app-core" }
-rust-platform-windows = { version = "0.6.3", path = "../../crates/platform-windows" }
-rust-protocol = { version = "0.6.3", path = "../../crates/protocol" }
+pet_orb = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_orb" }
+pet_particles = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_particles" }
+pet_render = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_render" }
+rust-app-core = { version = "0.7.0", path = "../../crates/app-core" }
+rust-platform-windows = { version = "0.7.0", path = "../../crates/platform-windows" }
+rust-protocol = { version = "0.7.0", path = "../../crates/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 slint.workspace = true
@@ -20,6 +23,10 @@ slint-build.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.23"
+
+[dev-dependencies]
+i-slint-backend-testing = "1.17.1"
+tempfile.workspace = true
 
 [features]
 # Compiles Slint's CPU renderer in as well, so a build can be told

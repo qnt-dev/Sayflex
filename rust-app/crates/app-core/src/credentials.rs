@@ -49,7 +49,11 @@ impl<C: SecretCipher> CredentialStore<C> {
                     )),
                 ),
             },
-            Err(_) => (BTreeMap::new(), None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (BTreeMap::new(), None),
+            Err(error) => (
+                BTreeMap::new(),
+                Some(format!("Stored service keys could not be opened: {error}")),
+            ),
         };
         Self {
             path,
@@ -214,6 +218,19 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_credential_file_can_be_replaced_atomically() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("credentials.dat");
+        let mut store = CredentialStore::open(path.clone(), XorCipher);
+
+        store.set("groq", "first-secret-1234").unwrap();
+        store.set("groq", "replacement-secret-5678").unwrap();
+
+        let reopened = CredentialStore::open(path, XorCipher);
+        assert_eq!(reopened.secret("groq"), Some("replacement-secret-5678"));
+    }
+
+    #[test]
     fn settings_can_show_which_key_is_stored_without_showing_the_key() {
         let directory = tempdir().unwrap();
         let mut store = CredentialStore::open(directory.path().join("c.dat"), XorCipher);
@@ -257,6 +274,23 @@ mod tests {
         assert!(store.take_recovery_message().is_some());
         assert!(store.providers().is_empty());
         assert!(path.exists(), "the unreadable file is left alone");
+    }
+
+    #[test]
+    fn only_a_missing_file_is_an_empty_store() {
+        let directory = tempdir().unwrap();
+        let missing = directory.path().join("missing.dat");
+        let mut empty = CredentialStore::open(missing, XorCipher);
+        assert!(empty.take_recovery_message().is_none());
+
+        let not_a_file = directory.path().join("credentials.dat");
+        std::fs::create_dir(&not_a_file).unwrap();
+        let mut failed = CredentialStore::open(not_a_file.clone(), XorCipher);
+        assert!(failed.take_recovery_message().is_some());
+        assert!(
+            not_a_file.is_dir(),
+            "an I/O failure must not remove its source"
+        );
     }
 
     #[test]

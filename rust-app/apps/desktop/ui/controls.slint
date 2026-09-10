@@ -34,12 +34,18 @@ export component RowAction inherits Rectangle {
     in property <string> reason;
     callback clicked();
 
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+
     height: 26px;
     width: caption.preferred-width + 22px;
-    border-width: 1px;
-    border-color: root.enabled
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus ? Sheet.ink : (root.enabled
         ? (root.danger ? Sheet.signal : Sheet.hairline)
-        : Sheet.hairline-faint;
+        : Sheet.hairline-faint);
     background: touch.has-hover && root.enabled
         ? (root.danger ? Sheet.signal : Sheet.ink)
         : transparent;
@@ -60,7 +66,20 @@ export component RowAction inherits Rectangle {
     touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
-        clicked => { root.clicked(); }
+        clicked => { focus.focus(); root.clicked(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
     }
 
     if !root.enabled && root.reason != "" && touch.has-hover : Rectangle {
@@ -90,6 +109,13 @@ export component Grip inherits Rectangle {
     // How tall one row is, so a drag can be turned into a number of places.
     in property <length> row-height: 56px;
     callback moved(int);
+
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: @tr("Move item up or down");
+    accessible-enabled: root.can-rise || root.can-fall;
+    accessible-action-increment => { if (root.can-fall) { root.moved(1); } }
+    accessible-action-decrement => { if (root.can-rise) { root.moved(-1); } }
 
     width: 22px;
     background: focus.has-focus ? Sheet.raised-strong : (touch.has-hover ? Sheet.raised : transparent);
@@ -169,7 +195,7 @@ export component ConfirmAction inherits Rectangle {
             vertical-alignment: center;
         }
         if root.asking : RowAction {
-            label: "Yes";
+            label: @tr("Yes");
             danger: true;
             clicked => {
                 root.asking = false;
@@ -177,7 +203,7 @@ export component ConfirmAction inherits Rectangle {
             }
         }
         if root.asking : RowAction {
-            label: "No";
+            label: @tr("No");
             clicked => { root.asking = false; }
         }
     }
@@ -187,11 +213,19 @@ export component ConfirmAction inherits Rectangle {
 //
 // The label states what is true now, not what pressing it would do.
 export component Toggle inherits Rectangle {
-    in property <string> on-label: "On";
-    in property <string> off-label: "Off";
+    in property <string> on-label: @tr("On");
+    in property <string> off-label: @tr("Off");
     in property <bool> checked: false;
     in property <bool> enabled: true;
     callback toggled(bool);
+
+    forward-focus: focus;
+    accessible-role: switch;
+    accessible-label: root.checked ? root.on-label : root.off-label;
+    accessible-enabled: root.enabled;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => { if (root.enabled) { root.toggled(!root.checked); } }
 
     height: 22px;
     width: layout.preferred-width;
@@ -230,7 +264,24 @@ export component Toggle inherits Rectangle {
     TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
-        clicked => { root.toggled(!root.checked); }
+        clicked => { focus.focus(); root.toggled(!root.checked); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.toggled(!root.checked);
+                return accept;
+            }
+            reject
+        }
+    }
+    if focus.has-focus : Rectangle {
+        border-width: 2px;
+        border-color: Sheet.ink;
     }
 }
 
@@ -244,6 +295,13 @@ export component Stepper inherits Rectangle {
     in property <int> minimum: 0;
     in property <int> maximum: 8;
     callback changed(int);
+
+    accessible-role: spinbox;
+    accessible-label: @tr("Value");
+    accessible-value: root.value;
+    accessible-enabled: true;
+    accessible-action-increment => { if (root.value < root.maximum) { root.changed(root.value + 1); } }
+    accessible-action-decrement => { if (root.value > root.minimum) { root.changed(root.value - 1); } }
 
     height: 24px;
     width: layout.preferred-width;
@@ -283,6 +341,7 @@ export component Field inherits Rectangle {
     in property <bool> invalid: false;
     in-out property <string> value;
     callback accepted(string);
+    callback edited(string);
 
     height: 30px;
     border-width: 1px;
@@ -304,12 +363,14 @@ export component Field inherits Rectangle {
         input := TextInput {
             horizontal-stretch: 1;
             single-line: true;
+            accessible-label: root.placeholder;
             input-type: root.masked ? InputType.password : InputType.text;
             text <=> root.value;
             color: Sheet.ink;
             font-size: Sheet.detail-size;
             vertical-alignment: center;
             accepted => { root.accepted(self.text); }
+            edited => { root.edited(self.text); }
         }
     }
 }
@@ -332,7 +393,15 @@ export component ChoiceTile inherits Rectangle {
     in property <bool> busy: false;
     callback clicked();
 
-    border-width: 1px;
+    forward-focus: focus;
+    accessible-role: radio-button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+
+    border-width: focus.has-focus ? 2px : 1px;
     border-color: root.selected ? Sheet.ink : Sheet.hairline;
     background: root.selected
         ? Sheet.ink
@@ -352,7 +421,7 @@ export component ChoiceTile inherits Rectangle {
             wrap: word-wrap;
         }
         if root.detail != "" : Text {
-            text: root.busy ? "checking…" : root.detail;
+            text: root.busy ? @tr("checking…") : root.detail;
             color: root.selected ? Sheet.on-ink : Sheet.muted;
             font-size: Sheet.label-size;
             opacity: root.selected ? 0.75 : 1.0;
@@ -363,7 +432,20 @@ export component ChoiceTile inherits Rectangle {
     touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : not-allowed;
-        clicked => { root.clicked(); }
+        clicked => { focus.focus(); root.clicked(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
     }
 }
 
@@ -381,14 +463,49 @@ export component MenuButton inherits Rectangle {
     in property <string> value;
     in property <[MenuOption]> options;
     in property <bool> compact: false;
+    in property <int> current-index: 0;
+    property <int> active-index: 0;
     callback chosen(string);
+
+    function open-menu() {
+        if root.options.length == 0 {
+            return;
+        }
+        root.active-index = root.current-index.clamp(0, root.options.length - 1);
+        panel.show();
+    }
+
+    function close-menu() {
+        panel.close();
+        focus.focus();
+    }
+
+    function choose-active() {
+        if root.active-index < 0 || root.active-index >= root.options.length {
+            return;
+        }
+        if !root.options[root.active-index].separator
+            && root.options[root.active-index].reason == "" {
+            root.chosen(root.options[root.active-index].value);
+            root.close-menu();
+        }
+    }
+
+    forward-focus: focus;
+    accessible-role: combobox;
+    accessible-label: root.label == "" ? root.text : root.label;
+    accessible-value: root.text;
+    accessible-enabled: true;
+    accessible-expandable: true;
+    accessible-action-default => { root.open-menu(); }
+    accessible-action-expand => { root.open-menu(); }
 
     height: 30px;
     // Compact is the in-a-row form: it takes only the width its value needs.
     // The full form fills the settings column it is placed in.
     min-width: face.preferred-width + 26px;
     horizontal-stretch: root.compact ? 0 : 1;
-    border-width: 1px;
+    border-width: focus.has-focus ? 2px : 1px;
     border-color: root.compact ? Sheet.hairline-faint : Sheet.hairline;
     background: touch.has-hover ? Sheet.raised-strong : Sheet.raised;
 
@@ -434,7 +551,19 @@ export component MenuButton inherits Rectangle {
 
     touch := TouchArea {
         mouse-cursor: pointer;
-        clicked => { panel.show(); }
+        clicked => { focus.focus(); root.open-menu(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n" || event.text == Key.DownArrow) {
+                root.open-menu();
+                return accept;
+            }
+            reject
+        }
     }
 
     panel := PopupWindow {
@@ -443,80 +572,121 @@ export component MenuButton inherits Rectangle {
         width: max(root.width, 240px);
         height: items.preferred-height;
         close-policy: close-on-click-outside;
+        forward-focus: panel-focus;
 
-        Rectangle {
-            background: #c9ccd0;
-            border-width: 1px;
-            border-color: Sheet.ink;
+        panel-focus := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.UpArrow) {
+                    root.active-index = max(0, root.active-index - 1);
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.active-index = min(root.options.length - 1, root.active-index + 1);
+                    return accept;
+                }
+                if (event.text == " " || event.text == "\n") {
+                    root.choose-active();
+                    return accept;
+                }
+                if (event.text == Key.Escape) {
+                    root.close-menu();
+                    return accept;
+                }
+                reject
+            }
 
-            items := VerticalLayout {
-                padding-top: 5px;
-                padding-bottom: 5px;
+            Rectangle {
+                background: #c9ccd0;
+                border-width: 1px;
+                border-color: Sheet.ink;
 
-                for option in root.options : Rectangle {
-                    height: option.separator
-                        ? 9px
-                        : (option.note == "" && option.reason == "" ? 32px : 46px);
+                items := VerticalLayout {
+                    padding-top: 5px;
+                    padding-bottom: 5px;
 
-                    if option.separator : Rectangle {
-                        height: 1px;
-                        y: 4px;
-                        x: 11px;
-                        width: parent.width - 22px;
-                        background: Sheet.hairline;
-                    }
-
-                    if !option.separator : Rectangle {
-                        background: item-touch.has-hover && option.reason == ""
-                            ? Sheet.raised-strong
-                            : transparent;
-
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            spacing: 9px;
-
-                            // The choice in force is an ink block, the same
-                            // signal the navigation carries.
-                            Rectangle {
-                                width: 8px;
-                                height: 8px;
-                                y: 12px;
-                                background: option.value == root.value ? Sheet.ink : transparent;
-                                border-width: 1px;
-                                border-color: option.value == root.value
-                                    ? Sheet.ink
-                                    : Sheet.hairline;
+                    for option[index] in root.options : Rectangle {
+                        property <bool> is-current: option.value == root.value;
+                        changed is-current => {
+                            if self.is-current {
+                                root.active-index = index;
                             }
+                        }
+                        height: option.separator
+                            ? 9px
+                            : (option.note == "" && option.reason == "" ? 32px : 46px);
 
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 3px;
-                                Text {
-                                    text: option.label;
-                                    color: option.reason != ""
-                                        ? Sheet.muted
-                                        : (option.danger ? Sheet.signal-text : Sheet.ink);
-                                    font-size: Sheet.detail-size;
-                                    font-weight: option.value == root.value ? 650 : 400;
-                                }
-                                if option.note != "" || option.reason != "" : Text {
-                                    text: option.reason != "" ? option.reason : option.note;
-                                    color: option.reason != "" ? Sheet.signal-text : Sheet.muted;
-                                    font-size: Sheet.label-size;
-                                    wrap: no-wrap;
-                                    overflow: elide;
-                                }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
+                        if option.separator : Rectangle {
+                            height: 1px;
+                            y: 4px;
+                            x: 11px;
+                            width: parent.width - 22px;
+                            background: Sheet.hairline;
                         }
 
-                        item-touch := TouchArea {
-                            enabled: option.reason == "";
-                            mouse-cursor: option.reason == "" ? pointer : not-allowed;
-                            clicked => {
-                                root.chosen(option.value);
-                                panel.close();
+                        if !option.separator : Rectangle {
+                            accessible-role: list-item;
+                            accessible-label: option.label;
+                            accessible-enabled: option.reason == "";
+                            accessible-action-default => {
+                                if option.reason == "" {
+                                    root.chosen(option.value);
+                                    root.close-menu();
+                                }
+                            }
+                            background: (item-touch.has-hover || (panel-focus.has-focus && root.active-index == index)) && option.reason == ""
+                                ? Sheet.raised-strong
+                                : transparent;
+                            border-width: panel-focus.has-focus && root.active-index == index ? 1px : 0px;
+                            border-color: Sheet.ink;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 9px;
+
+                                // The choice in force is an ink block, the same
+                                // signal the navigation carries.
+                                Rectangle {
+                                    width: 8px;
+                                    height: 8px;
+                                    y: 12px;
+                                    background: option.value == root.value ? Sheet.ink : transparent;
+                                    border-width: 1px;
+                                    border-color: option.value == root.value
+                                        ? Sheet.ink
+                                        : Sheet.hairline;
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 3px;
+                                    Text {
+                                        text: option.label;
+                                        color: option.reason != ""
+                                            ? Sheet.muted
+                                            : (option.danger ? Sheet.signal-text : Sheet.ink);
+                                        font-size: Sheet.detail-size;
+                                        font-weight: option.value == root.value ? 650 : 400;
+                                    }
+                                    if option.note != "" || option.reason != "" : Text {
+                                        text: option.reason != "" ? option.reason : option.note;
+                                        color: option.reason != "" ? Sheet.signal-text : Sheet.muted;
+                                        font-size: Sheet.label-size;
+                                        wrap: no-wrap;
+                                        overflow: elide;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+
+                            item-touch := TouchArea {
+                                enabled: option.reason == "";
+                                mouse-cursor: option.reason == "" ? pointer : not-allowed;
+                                clicked => {
+                                    root.active-index = index;
+                                    root.chosen(option.value);
+                                    root.close-menu();
+                                }
                             }
                         }
                     }
@@ -572,6 +742,28 @@ export component ScrollRail inherits Rectangle {
     property <length> thumb-at: root.reach <= 0px
         ? 0px
         : root.offset / root.reach * root.thumb-travel;
+    property <length> keyboard-step: max(24px, root.shown / 6);
+
+    forward-focus: focus;
+    accessible-role: slider;
+    accessible-label: @tr("Scroll position");
+    accessible-enabled: root.reach > 0px;
+    accessible-orientation: root.horizontal ? Orientation.horizontal : Orientation.vertical;
+    accessible-value: root.offset / 1px;
+    accessible-value-minimum: 0;
+    accessible-value-maximum: root.reach / 1px;
+    accessible-value-step: root.keyboard-step / 1px;
+    accessible-action-set-value(value) => {
+        if (value.is-float()) {
+            root.scrolled(clamp(value.to-float() * 1px, 0px, root.reach));
+        }
+    }
+    accessible-action-increment => {
+        root.scrolled(min(root.reach, root.offset + root.keyboard-step));
+    }
+    accessible-action-decrement => {
+        root.scrolled(max(0px, root.offset - root.keyboard-step));
+    }
 
     /// How long the rail is. The use site knows, because it knows the thing
     /// being scrolled; the component cannot ask its parent for it.
@@ -612,6 +804,29 @@ export component ScrollRail inherits Rectangle {
                 0px,
                 root.reach,
             ));
+        }
+    }
+
+    focus := FocusScope {
+        enabled: root.reach > 0px;
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow || event.text == Key.RightArrow || event.text == Key.PageDown) {
+                root.scrolled(min(root.reach, root.offset + root.keyboard-step));
+                return accept;
+            }
+            if (event.text == Key.UpArrow || event.text == Key.LeftArrow || event.text == Key.PageUp) {
+                root.scrolled(max(0px, root.offset - root.keyboard-step));
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.scrolled(0px);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.scrolled(root.reach);
+                return accept;
+            }
+            reject
         }
     }
 }

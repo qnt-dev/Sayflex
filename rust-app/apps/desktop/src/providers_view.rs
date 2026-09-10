@@ -7,6 +7,7 @@
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
+use rust_app_core::provider_drafts::{ProviderDraftKey, ProviderKind as DraftProviderKind};
 use rust_protocol::{
     RequestId, SpeechWorkerCommand, TranscriptionProviderEntry, TranslationProviderEntry,
     TranslationWorkerCommand,
@@ -14,11 +15,13 @@ use rust_protocol::{
 use slint::{Model, ModelRc, VecModel};
 
 use crate::{
-    AppState, PendingCredential, ProviderRow, SettingsWindow, set_indicator_status,
+    AppState, PendingCredential, ProviderRow, SettingsWindow,
+    localization::{UiText, active_locale, render, text},
+    set_indicator_status,
     settings_document::save_settings,
     settings_projection::{
-        chain_positions, departure_badge, departures, privacy_claim, provider_row,
-        translation_provider_row,
+        chain_positions, departure_badge_localized, departures, privacy_claim_localized,
+        provider_row_localized, translation_provider_row_localized,
     },
     settings_view::set_status_problem,
     worker_supervisor::Workers,
@@ -70,7 +73,11 @@ pub(crate) fn set_provider_field_value(entry: &mut TranscriptionProviderEntry, v
 /// the form is drawn stops applying the moment anything else calls the same
 /// callback, and it cannot be tested without a window.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SaveRefused(pub String);
+pub(crate) enum SaveRefused {
+    KeyRequired,
+    FieldRequired(String),
+    InsecureEndpoint,
+}
 
 /// Checks one provider's configuration before any of it is stored.
 ///
@@ -90,24 +97,17 @@ pub(crate) fn check_provider_configuration(
     // reach here, and delete a stored key without being asked — beside a Remove
     // key button that does ask.
     if secret.is_empty() {
-        return Err(SaveRefused(
-            "A key is needed. To remove the one already stored, use Remove key.".to_owned(),
-        ));
+        return Err(SaveRefused::KeyRequired);
     }
 
     let label = provider_field_label(provider_id);
     if !label.is_empty() && extra.is_empty() {
-        return Err(SaveRefused(format!(
-            "{label} is needed as well as the key."
-        )));
+        return Err(SaveRefused::FieldRequired(label.to_owned()));
     }
 
     // A custom endpoint carries the key and the audio in the same request.
     if provider_id == "custom" && !extra.is_empty() && !extra.starts_with("https://") {
-        return Err(SaveRefused(
-            "The endpoint must be HTTPS: the key and the audio both travel in this request."
-                .to_owned(),
-        ));
+        return Err(SaveRefused::InsecureEndpoint);
     }
 
     Ok((
@@ -136,9 +136,7 @@ pub(crate) fn check_translation_provider_configuration(
     let extra = extra.trim();
 
     if secret.is_empty() {
-        return Err(SaveRefused(
-            "A key is needed. To remove the one already stored, use Remove key.".to_owned(),
-        ));
+        return Err(SaveRefused::KeyRequired);
     }
 
     Ok((
@@ -188,6 +186,12 @@ pub(crate) fn expire_pending_credentials(
         return;
     }
     for pending in expired {
+        if let Some((kind, provider_id)) = split_row_id(&pending.row_id) {
+            state
+                .borrow_mut()
+                .provider_drafts
+                .cancel_save(&draft_key(kind, provider_id), pending.operation_id);
+        }
         rust_app_core::diagnostics::log_line(&format!(
             "credential_store operation=unknown provider={} reason={reason}",
             pending.display_name
@@ -198,10 +202,9 @@ pub(crate) fn expire_pending_credentials(
             // late. The row reports what is actually in the store as soon as the
             // worker is heard from, and that is the thing to point at.
             settings.set_provider_problem(
-                format!(
-                    "No answer from the worker ({reason}), so whether the key was stored is \
-                     not known yet. The row shows what is really there once it answers, and \
-                     sending again is safe."
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::CredentialOutcomeUnknown,
                 )
                 .into(),
             );
@@ -212,7 +215,11 @@ pub(crate) fn expire_pending_credentials(
         }
         set_status_problem(
             settings,
-            &format!("{} did not confirm the key.", pending.display_name),
+            &render(
+                active_locale(state.borrow().ui_locale),
+                UiText::ProviderDidNotConfirm,
+                &[("provider", &pending.display_name)],
+            ),
         );
     }
     // Ask both stores what they actually hold, so the row settles the question
@@ -254,6 +261,12 @@ pub(crate) fn abandon_pending_credentials(
             .collect()
     };
     for pending in abandoned {
+        if let Some((kind, provider_id)) = split_row_id(&pending.row_id) {
+            state
+                .borrow_mut()
+                .provider_drafts
+                .cancel_save(&draft_key(kind, provider_id), pending.operation_id);
+        }
         rust_app_core::diagnostics::log_line(&format!(
             "credential_store operation=abandoned provider={} reason={reason}",
             pending.display_name
@@ -263,9 +276,9 @@ pub(crate) fn abandon_pending_credentials(
             // then died. The row reports what is really in the store once it is
             // back, and that is what to point at.
             settings.set_provider_problem(
-                format!(
-                    "The worker stopped before it said what happened to the key ({reason}). \
-                     The row shows what is really stored once it is back."
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::CredentialWorkerStopped,
                 )
                 .into(),
             );
@@ -298,21 +311,38 @@ pub(crate) fn settle_credential(
     let Some((kind, _)) = split_row_id(&pending.row_id) else {
         return;
     };
+    let key = draft_key(kind, provider_id);
 
     if !error.is_empty() {
+        state
+            .borrow_mut()
+            .provider_drafts
+            .acknowledge(&key, operation_id, false);
         // The form stays open, holding what was typed, with the store's own
         // words under it.
         if let Some(settings) = settings.upgrade() {
-            settings.set_provider_problem(format!("The key was not stored: {error}").into());
+            let locale = active_locale(state.borrow().ui_locale);
+            settings.set_provider_problem(
+                render(locale, UiText::KeyNotStored, &[("error", error)]).into(),
+            );
             settings.set_provider_problem_for(pending.row_id.clone().into());
             settings.set_provider_editing(pending.row_id.into());
         }
         set_status_problem(
             settings,
-            &format!("{} did not accept the key.", pending.display_name),
+            &render(
+                active_locale(state.borrow().ui_locale),
+                UiText::ProviderDidNotAccept,
+                &[("provider", &pending.display_name)],
+            ),
         );
         return;
     }
+
+    state
+        .borrow_mut()
+        .provider_drafts
+        .acknowledge(&key, operation_id, true);
 
     // Stored. Only now is the second field written, and only now does the form
     // close.
@@ -322,13 +352,19 @@ pub(crate) fn settle_credential(
     // not ask to lose. `Forget key` forgets the key.
     if pending.forget {
         if let Some(settings) = settings.upgrade() {
+            settings.set_provider_draft_secret("".into());
+            settings.set_provider_draft_extra("".into());
             settings.set_provider_problem("".into());
             settings.set_provider_problem_for("".into());
             settings.set_provider_editing("".into());
         }
         set_indicator_status(
             settings,
-            &format!("The key for {} has been removed.", pending.display_name),
+            &render(
+                active_locale(state.borrow().ui_locale),
+                UiText::ProviderKeyRemoved,
+                &[("provider", &pending.display_name)],
+            ),
         );
         match kind {
             Kind::Speech => apply_provider_chain(settings, state, workers),
@@ -362,13 +398,19 @@ pub(crate) fn settle_credential(
     let _ = save_settings(&state.borrow());
 
     if let Some(settings) = settings.upgrade() {
+        settings.set_provider_draft_secret("".into());
+        settings.set_provider_draft_extra("".into());
         settings.set_provider_problem("".into());
         settings.set_provider_problem_for("".into());
         settings.set_provider_editing("".into());
     }
     set_indicator_status(
         settings,
-        &format!("The key for {} is stored.", pending.display_name),
+        &render(
+            active_locale(state.borrow().ui_locale),
+            UiText::ProviderKeyStored,
+            &[("provider", &pending.display_name)],
+        ),
     );
     match kind {
         Kind::Speech => apply_provider_chain(settings, state, workers),
@@ -385,6 +427,123 @@ pub(crate) fn settle_credential(
 pub(crate) enum Kind {
     Speech,
     Text,
+}
+
+fn draft_key(kind: Kind, provider_id: &str) -> ProviderDraftKey {
+    ProviderDraftKey::new(
+        match kind {
+            Kind::Speech => DraftProviderKind::Speech,
+            Kind::Text => DraftProviderKind::Translation,
+        },
+        provider_id,
+    )
+}
+
+pub(crate) fn edit_provider_draft(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    row_id: &str,
+) {
+    let Some((kind, provider_id)) = split_row_id(row_id) else {
+        return;
+    };
+    let key = draft_key(kind, provider_id);
+    let extra = {
+        let app = state.borrow();
+        match kind {
+            Kind::Speech => app
+                .transcription_chain
+                .iter()
+                .find(|entry| entry.id == provider_id)
+                .map(provider_field_value)
+                .unwrap_or_default(),
+            Kind::Text => app
+                .translation_chain
+                .iter()
+                .find(|entry| entry.id == provider_id)
+                .and_then(|entry| entry.region.clone())
+                .unwrap_or_default(),
+        }
+    };
+    let (secret, extra) = {
+        let mut app = state.borrow_mut();
+        app.provider_drafts.ensure(key.clone(), extra);
+        let draft = app
+            .provider_drafts
+            .get(&key)
+            .expect("the draft was just ensured");
+        (draft.secret.clone(), draft.extra.clone())
+    };
+    if let Some(settings) = settings.upgrade() {
+        settings.set_provider_draft_secret(secret.into());
+        settings.set_provider_draft_extra(extra.into());
+        settings.set_provider_problem("".into());
+        settings.set_provider_problem_for("".into());
+        settings.set_provider_editing(row_id.into());
+    }
+}
+
+pub(crate) fn update_provider_draft(
+    state: &Rc<RefCell<AppState>>,
+    row_id: &str,
+    secret: &str,
+    extra: &str,
+) {
+    let Some((kind, provider_id)) = split_row_id(row_id) else {
+        return;
+    };
+    state.borrow_mut().provider_drafts.edit(
+        draft_key(kind, provider_id),
+        secret.to_owned(),
+        extra.to_owned(),
+    );
+}
+
+pub(crate) fn begin_provider_draft_save(
+    state: &Rc<RefCell<AppState>>,
+    row_id: &str,
+    operation_id: RequestId,
+) {
+    let Some((kind, provider_id)) = split_row_id(row_id) else {
+        return;
+    };
+    state
+        .borrow_mut()
+        .provider_drafts
+        .begin_save(draft_key(kind, provider_id), operation_id);
+}
+
+pub(crate) fn cancel_provider_draft_save(
+    state: &Rc<RefCell<AppState>>,
+    row_id: &str,
+    operation_id: RequestId,
+) {
+    let Some((kind, provider_id)) = split_row_id(row_id) else {
+        return;
+    };
+    state
+        .borrow_mut()
+        .provider_drafts
+        .cancel_save(&draft_key(kind, provider_id), operation_id);
+}
+
+pub(crate) fn discard_provider_draft(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    row_id: &str,
+) {
+    let Some((kind, provider_id)) = split_row_id(row_id) else {
+        return;
+    };
+    state
+        .borrow_mut()
+        .provider_drafts
+        .discard(&draft_key(kind, provider_id));
+    if let Some(settings) = settings.upgrade() {
+        settings.set_provider_draft_secret("".into());
+        settings.set_provider_draft_extra("".into());
+        settings.set_provider_editing("".into());
+    }
 }
 
 /// Reads back the prefix the projection put on a row id.
@@ -412,10 +571,16 @@ pub(crate) fn locate(state: &AppState, index: usize) -> Option<(Kind, usize)> {
 /// What to call a row in a message to the user.
 ///
 /// The two lists both have Azure, and they are not the same Azure.
-pub(crate) fn row_display_name(kind: Kind, id: &str) -> String {
+pub(crate) fn row_display_name_localized(
+    kind: Kind,
+    id: &str,
+    locale: crate::localization::UiLocale,
+) -> String {
     match kind {
-        Kind::Speech => provider_display_name(id),
-        Kind::Text => crate::settings_projection::translation_provider_display_name(id),
+        Kind::Speech => crate::settings_projection::provider_display_name_localized(id, locale),
+        Kind::Text => {
+            crate::settings_projection::translation_provider_display_name_localized(id, locale)
+        }
     }
 }
 
@@ -472,6 +637,7 @@ pub(crate) fn sync_providers(
         return;
     };
     let state = state.borrow();
+    let locale = active_locale(state.ui_locale);
     let has_credential = |id: &str| {
         state
             .transcription_providers
@@ -497,7 +663,7 @@ pub(crate) fn sync_providers(
                 .transcription_providers
                 .iter()
                 .find(|status| status.id == entry.id);
-            provider_row(entry, status, position, first_local, first_usable)
+            provider_row_localized(entry, status, position, first_local, first_usable, locale)
         })
         .collect();
 
@@ -513,7 +679,14 @@ pub(crate) fn sync_providers(
                     .translation_providers
                     .iter()
                     .find(|status| status.id == entry.id);
-                translation_provider_row(entry, status, position, text_local, text_usable)
+                translation_provider_row_localized(
+                    entry,
+                    status,
+                    position,
+                    text_local,
+                    text_usable,
+                    locale,
+                )
             }),
     );
 
@@ -525,8 +698,8 @@ pub(crate) fn sync_providers(
     );
     settings.set_audio_leaves_device(leaving.audio_leaves());
     settings.set_text_leaves_device(leaving.text_leaves());
-    settings.set_departure_badge(departure_badge(&leaving).into());
-    settings.set_provider_claim(privacy_claim(&leaving).into());
+    settings.set_departure_badge(departure_badge_localized(&leaving, locale).into());
+    settings.set_provider_claim(privacy_claim_localized(&leaving, locale).into());
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
     update_provider_rows(&settings, rows);
 }
@@ -590,7 +763,11 @@ pub(crate) fn apply_provider_chain(
     {
         set_indicator_status(
             settings,
-            &format!("The transcription order could not be applied: {error}"),
+            &render(
+                active_locale(state.borrow().ui_locale),
+                UiText::TranscriptionOrderFailed,
+                &[("error", &error.to_string())],
+            ),
         );
         return;
     }
@@ -601,7 +778,10 @@ pub(crate) fn apply_provider_chain(
         crate::settings_view::sync_output_mode(settings, state);
         set_indicator_status(
             settings,
-            "Speech translation was turned off because no enabled provider supports it.",
+            text(
+                active_locale(state.borrow().ui_locale),
+                UiText::SpeechTranslationDisabled,
+            ),
         );
     }
     let _ = save_settings(&state.borrow());
@@ -627,7 +807,11 @@ pub(crate) fn apply_translation_chain(
     {
         set_indicator_status(
             settings,
-            &format!("The translation order could not be applied: {error}"),
+            &render(
+                active_locale(state.borrow().ui_locale),
+                UiText::TranslationOrderFailed,
+                &[("error", &error.to_string())],
+            ),
         );
         return;
     }
@@ -715,9 +899,7 @@ mod translation_provider_tests {
     fn a_key_of_nothing_but_spaces_is_refused_rather_than_treated_as_a_deletion() {
         assert_eq!(
             check_translation_provider_configuration("deepl", "   ", ""),
-            Err(SaveRefused(
-                "A key is needed. To remove the one already stored, use Remove key.".to_owned()
-            ))
+            Err(SaveRefused::KeyRequired)
         );
     }
 
@@ -756,7 +938,7 @@ mod transcription_provider_tests {
     }
 
     use super::{
-        check_provider_configuration, provider_display_name, provider_field_label,
+        SaveRefused, check_provider_configuration, provider_display_name, provider_field_label,
         provider_field_value, set_provider_field_value,
     };
 
@@ -832,7 +1014,7 @@ mod transcription_provider_tests {
         let refused = check_provider_configuration("groq", "   ", "")
             .expect_err("a blank key is not a deletion");
 
-        assert!(refused.0.contains("Remove key"));
+        assert_eq!(refused, SaveRefused::KeyRequired);
     }
 
     #[test]
@@ -843,7 +1025,7 @@ mod transcription_provider_tests {
         let refused = check_provider_configuration("custom", "sk-live-1234", "http://example.test")
             .expect_err("the key and the audio both travel in this request");
 
-        assert!(refused.0.contains("HTTPS"));
+        assert_eq!(refused, SaveRefused::InsecureEndpoint);
     }
 
     #[test]
@@ -851,7 +1033,7 @@ mod transcription_provider_tests {
         let refused = check_provider_configuration("azure", "sk-live-1234", "  ")
             .expect_err("Azure answers 403 without a region");
 
-        assert!(refused.0.contains("Region"));
+        assert_eq!(refused, SaveRefused::FieldRequired("Region".to_owned()));
     }
 
     #[test]

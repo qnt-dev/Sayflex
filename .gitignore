@@ -9,6 +9,7 @@
 .worktrees/
 artifacts/
 dist/
+/target/
 /models/
 *.user
 *.suo

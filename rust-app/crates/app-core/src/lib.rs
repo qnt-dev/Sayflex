@@ -5,6 +5,7 @@ pub mod hotkeys;
 mod layout;
 pub mod lifecycle;
 pub mod product;
+pub mod provider_drafts;
 mod session_registry;
 pub mod worker_stream;
 

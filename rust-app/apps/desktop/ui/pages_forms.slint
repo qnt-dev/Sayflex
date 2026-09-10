@@ -44,9 +44,9 @@ export component TranslationPage inherits VerticalLayout {
 
     ListHead {
         index: "03 / 08";
-        title: "Translation";
-        lede: "Detects the selected text, then follows the Text provider order. Network providers send that text to their service; the local model keeps it here.";
-        claim: root.ready ? "Ready" : "Not ready";
+        title: @tr("Translation");
+        lede: @tr("Detects the selected text, then follows the Text provider order. Network providers send that text to their service; the local model keeps it here.");
+        claim: root.ready ? @tr("Ready") : @tr("Not ready");
     }
 
     if root.note-text != "" : Note {
@@ -57,21 +57,21 @@ export component TranslationPage inherits VerticalLayout {
     }
 
     FormRow {
-        label: "Translation";
-        hint: "Whether the selection shortcut may translate";
+        label: @tr("Translation");
+        hint: @tr("Whether the selection shortcut may translate");
         Toggle {
             checked: root.enabled;
-            on-label: "Enabled";
-            off-label: "Disabled";
+            on-label: @tr("Enabled");
+            off-label: @tr("Disabled");
             toggled(next) => { root.set-enabled(next); }
         }
     }
 
     FormRow {
-        label: "Model";
-        hint: "Chosen on the Models page";
+        label: @tr("Model");
+        hint: @tr("Chosen on the Models page");
         Text {
-            text: root.model-name == "" ? "None installed" : root.model-name;
+            text: root.model-name == "" ? @tr("None installed") : root.model-name;
             color: root.model-name == "" ? Sheet.signal-text : Sheet.ink;
             font-size: Sheet.body-size;
             font-weight: 650;
@@ -80,104 +80,133 @@ export component TranslationPage inherits VerticalLayout {
     }
 
     FormRow {
-        label: "Primary language";
-        hint: "Foreign text is translated into this language";
+        label: @tr("Primary language");
+        hint: @tr("Foreign text is translated into this language");
         MenuButton {
             compact: true;
             text: root.primary-language;
             value: root.primary-language-value;
+            current-index: root.primary-language-value == "en" ? 0
+                : root.primary-language-value == "ru" ? 1
+                : root.primary-language-value == "uk" ? 2
+                : root.primary-language-value == "es" ? 3
+                : root.primary-language-value == "pt-BR" ? 4
+                : root.primary-language-value == "de" ? 5
+                : root.primary-language-value == "fr" ? 6
+                : root.primary-language-value == "it" ? 7
+                : root.primary-language-value == "zh-Hans" ? 8
+                : root.primary-language-value == "zh-Hant" ? 9
+                : root.primary-language-value == "ja" ? 10
+                : root.primary-language-value == "ko" ? 11
+                : root.primary-language-value == "hi" ? 12 : 13;
             options: [
-                { value: "en", label: "English", note: "Primary language" },
-                { value: "ru", label: "Russian", note: "Primary language" },
-                { value: "uk", label: "Ukrainian", note: "Primary language" },
-                { value: "es", label: "Spanish", note: "Primary language" },
-                { value: "pt-BR", label: "Portuguese (Brazil)", note: "Primary language" },
-                { value: "de", label: "German", note: "Primary language" },
-                { value: "fr", label: "French", note: "Primary language" },
-                { value: "it", label: "Italian", note: "Primary language" },
-                { value: "zh-Hans", label: "Chinese (Simplified)", note: "Primary language" },
-                { value: "zh-Hant", label: "Chinese (Traditional)", note: "Primary language" },
-                { value: "ja", label: "Japanese", note: "Primary language" },
-                { value: "ko", label: "Korean", note: "Primary language" },
-                { value: "hi", label: "Hindi", note: "Primary language" },
-                { value: "ar", label: "Arabic", note: "Primary language" },
+                { value: "en", label: @tr("English"), note: @tr("Primary language") },
+                { value: "ru", label: @tr("Russian"), note: @tr("Primary language") },
+                { value: "uk", label: @tr("Ukrainian"), note: @tr("Primary language") },
+                { value: "es", label: @tr("Spanish"), note: @tr("Primary language") },
+                { value: "pt-BR", label: @tr("Portuguese (Brazil)"), note: @tr("Primary language") },
+                { value: "de", label: @tr("German"), note: @tr("Primary language") },
+                { value: "fr", label: @tr("French"), note: @tr("Primary language") },
+                { value: "it", label: @tr("Italian"), note: @tr("Primary language") },
+                { value: "zh-Hans", label: @tr("Chinese (Simplified)"), note: @tr("Primary language") },
+                { value: "zh-Hant", label: @tr("Chinese (Traditional)"), note: @tr("Primary language") },
+                { value: "ja", label: @tr("Japanese"), note: @tr("Primary language") },
+                { value: "ko", label: @tr("Korean"), note: @tr("Primary language") },
+                { value: "hi", label: @tr("Hindi"), note: @tr("Primary language") },
+                { value: "ar", label: @tr("Arabic"), note: @tr("Primary language") },
             ];
             chosen(value) => { root.set-primary-language(value); }
         }
     }
 
     FormRow {
-        label: "Secondary language";
-        hint: "Primary-language text is translated into this one";
+        label: @tr("Secondary language");
+        hint: @tr("Primary-language text is translated into this one");
         MenuButton {
             compact: true;
             text: root.secondary-language;
             value: root.secondary-language-value;
+            current-index: root.secondary-language-value == "en" ? 0
+                : root.secondary-language-value == "ru" ? 1
+                : root.secondary-language-value == "uk" ? 2
+                : root.secondary-language-value == "es" ? 3
+                : root.secondary-language-value == "pt-BR" ? 4
+                : root.secondary-language-value == "de" ? 5
+                : root.secondary-language-value == "fr" ? 6
+                : root.secondary-language-value == "it" ? 7
+                : root.secondary-language-value == "zh-Hans" ? 8
+                : root.secondary-language-value == "zh-Hant" ? 9
+                : root.secondary-language-value == "ja" ? 10
+                : root.secondary-language-value == "ko" ? 11
+                : root.secondary-language-value == "hi" ? 12 : 13;
             options: [
-                { value: "en", label: "English", note: "Secondary language" },
-                { value: "ru", label: "Russian", note: "Secondary language" },
-                { value: "uk", label: "Ukrainian", note: "Secondary language" },
-                { value: "es", label: "Spanish", note: "Secondary language" },
-                { value: "pt-BR", label: "Portuguese (Brazil)", note: "Secondary language" },
-                { value: "de", label: "German", note: "Secondary language" },
-                { value: "fr", label: "French", note: "Secondary language" },
-                { value: "it", label: "Italian", note: "Secondary language" },
-                { value: "zh-Hans", label: "Chinese (Simplified)", note: "Secondary language" },
-                { value: "zh-Hant", label: "Chinese (Traditional)", note: "Secondary language" },
-                { value: "ja", label: "Japanese", note: "Secondary language" },
-                { value: "ko", label: "Korean", note: "Secondary language" },
-                { value: "hi", label: "Hindi", note: "Secondary language" },
-                { value: "ar", label: "Arabic", note: "Secondary language" },
+                { value: "en", label: @tr("English"), note: @tr("Secondary language") },
+                { value: "ru", label: @tr("Russian"), note: @tr("Secondary language") },
+                { value: "uk", label: @tr("Ukrainian"), note: @tr("Secondary language") },
+                { value: "es", label: @tr("Spanish"), note: @tr("Secondary language") },
+                { value: "pt-BR", label: @tr("Portuguese (Brazil)"), note: @tr("Secondary language") },
+                { value: "de", label: @tr("German"), note: @tr("Secondary language") },
+                { value: "fr", label: @tr("French"), note: @tr("Secondary language") },
+                { value: "it", label: @tr("Italian"), note: @tr("Secondary language") },
+                { value: "zh-Hans", label: @tr("Chinese (Simplified)"), note: @tr("Secondary language") },
+                { value: "zh-Hant", label: @tr("Chinese (Traditional)"), note: @tr("Secondary language") },
+                { value: "ja", label: @tr("Japanese"), note: @tr("Secondary language") },
+                { value: "ko", label: @tr("Korean"), note: @tr("Secondary language") },
+                { value: "hi", label: @tr("Hindi"), note: @tr("Secondary language") },
+                { value: "ar", label: @tr("Arabic"), note: @tr("Secondary language") },
             ];
             chosen(value) => { root.set-secondary-language(value); }
         }
     }
 
     FormRow {
-        label: "Engine";
-        hint: "Faster to answer, and holds memory to be";
+        label: @tr("Engine");
+        hint: @tr("Faster to answer, and holds memory to be");
         Toggle {
             checked: root.warm;
-            on-label: "Kept warm";
-            off-label: "Started on demand";
+            on-label: @tr("Kept warm");
+            off-label: @tr("Started on demand");
             toggled(next) => { root.set-warm(next); }
         }
     }
 
     FormRow {
-        label: "Result";
-        hint: "What happens to it once it exists";
+        label: @tr("Result");
+        hint: @tr("What happens to it once it exists");
         MenuButton {
             compact: true;
             text: root.delivery;
             value: root.delivery-value;
+            current-index: root.delivery-value == "preview" ? 0
+                : root.delivery-value == "replace" ? 1 : 2;
             options: [
-                { value: "preview", label: "Show a preview", note: "Nothing is replaced until you say so" },
-                { value: "replace", label: "Replace the selection", note: "The original goes to the clipboard first" },
-                { value: "copy", label: "Copy it", note: "The selection is left exactly as it was" },
+                { value: "preview", label: @tr("Show a preview"), note: @tr("Nothing is replaced until you say so") },
+                { value: "replace", label: @tr("Replace the selection"), note: @tr("The original goes to the clipboard first") },
+                { value: "copy", label: @tr("Copy it"), note: @tr("The selection is left exactly as it was") },
             ];
             chosen(value) => { root.set-delivery(value); }
         }
     }
 
     FormRow {
-        label: "On selected text";
-        hint: "What Ctrl + Alt + F does with what it finds";
+        label: @tr("On selected text");
+        hint: @tr("What Ctrl + Alt + F does with what it finds");
         MenuButton {
             compact: true;
             text: root.text-action;
             value: root.text-action-value;
+            current-index: root.text-action-value == "adaptive" ? 0 : 1;
             options: [
-                { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
-                { value: "palette", label: "Always ask", note: "Shows the palette every time, whatever the text looks like" },
+                { value: "adaptive", label: @tr("Decide from the text"), note: @tr("Translates foreign text, offers layout candidates for the rest") },
+                { value: "palette", label: @tr("Always ask"), note: @tr("Shows the palette every time, whatever the text looks like") },
             ];
             chosen(value) => { root.set-text-action(value); }
         }
     }
 
     FormRow {
-        label: "Preview blur";
-        hint: "The backdrop behind the preview";
+        label: @tr("Preview blur");
+        hint: @tr("The backdrop behind the preview");
         Stepper {
             value: root.blur-radius;
             minimum: 0;
@@ -190,7 +219,7 @@ export component TranslationPage inherits VerticalLayout {
         height: 54px;
         alignment: start;
         RowAction {
-            label: "Open the translator";
+            label: @tr("Open the translator");
             clicked => { root.open-translator(); }
         }
     }
@@ -224,8 +253,8 @@ export component HotkeysPage inherits VerticalLayout {
 
     ListHead {
         index: "08 / 08";
-        title: "Hotkeys";
-        lede: "Change a shortcut, then press its new key combination. Changes apply only after Windows accepts them.";
+        title: @tr("Hotkeys");
+        lede: @tr("Change a shortcut, then press its new key combination. Changes apply only after Windows accepts them.");
         claim: root.summary;
         claim-signal: root.summary-signal;
     }
@@ -253,14 +282,14 @@ export component HotkeysPage inherits VerticalLayout {
                 spacing: 12px;
                 Text {
                     horizontal-stretch: 1;
-                    text: "PRESS SHORTCUT  ·  " + root.capture-label + "  ·  ESC CANCELS";
+                    text: @tr("PRESS SHORTCUT  ·  ") + root.capture-label + "  ·  ESC CANCELS";
                     color: Sheet.on-ink;
                     font-size: Sheet.label-size;
                     font-weight: 700;
                     vertical-alignment: center;
                 }
                 RowAction {
-                    label: "Cancel";
+                    label: @tr("Cancel");
                     clicked => { root.cancel-capture(); }
                 }
             }
@@ -292,8 +321,8 @@ export component HotkeysPage inherits VerticalLayout {
                     Toggle {
                         checked: row.enabled;
                         enabled: row.toggle-enabled;
-                        on-label: "On";
-                        off-label: "Off";
+                        on-label: @tr("On");
+                        off-label: @tr("Off");
                         toggled(next) => { root.toggle-row(index, next); }
                     }
 
@@ -302,16 +331,16 @@ export component HotkeysPage inherits VerticalLayout {
                     // the thing its design promised is a page that has been quietly
                     // reduced.
                     RowAction {
-                        label: "Change";
+                        label: @tr("Change");
                         enabled: row.locked-reason == "";
                         reason: row.locked-reason;
                         clicked => { root.change-row(index); }
                     }
 
                     RowAction {
-                        label: "Reset";
+                        label: @tr("Reset");
                         enabled: !row.is-default && row.locked-reason == "";
-                        reason: row.is-default ? "Already using the default" : row.locked-reason;
+                        reason: row.is-default ? @tr("Already using the default") : row.locked-reason;
                         clicked => { root.reset-row(index); }
                     }
                 }
@@ -323,16 +352,17 @@ export component HotkeysPage inherits VerticalLayout {
                     alignment: start;
                     spacing: 12px;
                     GroupLabel {
-                        text: "DOES";
+                        text: @tr("DOES");
                         vertical-alignment: center;
                     }
                     MenuButton {
                         compact: true;
                         text: row.mode-value;
                         value: row.mode-key;
+                        current-index: row.mode-key == "adaptive" ? 0 : 1;
                         options: [
-                            { value: "adaptive", label: "Decide from the text", note: "Translates foreign text, offers layout candidates for the rest" },
-                            { value: "palette", label: "Always ask", note: "Shows the palette every time" },
+                            { value: "adaptive", label: @tr("Decide from the text"), note: @tr("Translates foreign text, offers layout candidates for the rest") },
+                            { value: "palette", label: @tr("Always ask"), note: @tr("Shows the palette every time") },
                         ];
                         chosen(value) => { root.set-mode(row.mode, value); }
                     }

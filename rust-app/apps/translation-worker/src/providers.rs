@@ -9,7 +9,7 @@
 //! separately, and somebody willing to send a few seconds of audio to a service
 //! is not thereby willing to send the contents of their documents.
 
-use std::{path::PathBuf, time::Instant};
+use std::{collections::HashMap, path::PathBuf, time::Instant};
 
 use rust_app_core::credentials::CredentialStore;
 use rust_cloud_translation::{
@@ -25,6 +25,17 @@ pub struct Providers {
     /// `None` when no HTTP client could be built at all. The local engine still
     /// works, which is the point of having a list.
     executor: Option<HttpExecutor>,
+    revision: u64,
+}
+
+/// Immutable configuration and private routing state for one network walk.
+/// It can spend seconds outside the provider actor without holding the
+/// credential/configuration owner hostage.
+pub struct ProvidersSnapshot {
+    router: Router,
+    secrets: HashMap<String, String>,
+    executor: Option<HttpExecutor>,
+    revision: u64,
 }
 
 /// What the walk decided, in the terms the worker acts on.
@@ -48,6 +59,7 @@ impl Providers {
             router: Router::new(Chain::default_order()),
             credentials: CredentialStore::open(credentials_path, DpapiCipher),
             executor: HttpExecutor::new(DEFAULT_TIMEOUT).ok(),
+            revision: 0,
         }
     }
 
@@ -67,6 +79,7 @@ impl Providers {
         // offers it, switched off and last.
         chain.merge_known();
         *self.router.chain_mut() = chain;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Stores or clears one key. `None` clears it.
@@ -78,7 +91,36 @@ impl Providers {
         // A key the user has just corrected deserves another attempt without
         // waiting out a cooldown the old one earned.
         self.router.forget(&ProviderId::new(id));
+        self.revision = self.revision.wrapping_add(1);
         result.map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> ProvidersSnapshot {
+        let secrets = self
+            .credentials
+            .providers()
+            .into_iter()
+            .filter_map(|id| {
+                self.credentials
+                    .secret(id)
+                    .map(|secret| (id.to_owned(), secret.to_owned()))
+            })
+            .collect();
+        ProvidersSnapshot {
+            router: self.router.clone(),
+            secrets,
+            executor: self.executor.clone(),
+            revision: self.revision,
+        }
+    }
+
+    /// Adopts only request-learned cooldown/refusal state, and only if no
+    /// configuration or key changed while that request was in flight.
+    pub fn adopt(&mut self, snapshot: ProvidersSnapshot) {
+        if self.revision == snapshot.revision {
+            self.router.replace_ledger(snapshot.router.into_ledger());
+        }
     }
 
     /// Whether the walk has to happen at all, or the worker can go straight to
@@ -109,7 +151,9 @@ impl Providers {
             })
             .collect()
     }
+}
 
+impl ProvidersSnapshot {
     pub fn translate(
         &mut self,
         text: &str,
@@ -118,10 +162,6 @@ impl Providers {
         is_current: &impl Fn() -> bool,
     ) -> Routed {
         let Some(executor) = self.executor.as_ref() else {
-            // No HTTP client could be built at all — a broken TLS store, no
-            // memory. Falling through to the local engine regardless of the
-            // list was an override of the user's own arrangement: somebody who
-            // switched the local engine off did so on purpose.
             return if self
                 .router
                 .chain()
@@ -132,12 +172,11 @@ impl Providers {
                 Routed::UseLocalEngine
             } else {
                 Routed::Exhausted {
-                    detail: "No network client could be created, and the local engine is                              switched off in the translation order."
+                    detail: "No network client could be created, and the local engine is switched off in the translation order."
                         .to_owned(),
                 }
             };
         };
-        let credentials = &self.credentials;
         let outcome = self.router.translate(
             Translation {
                 text,
@@ -145,11 +184,20 @@ impl Providers {
                 target,
             },
             Instant::now(),
-            &|id: &ProviderId| credentials.secret(id.as_str()).map(str::to_owned),
+            &|id: &ProviderId| self.secrets.get(id.as_str()).cloned(),
             executor,
             &|| !is_current(),
         );
-        self.report_attempts(&outcome);
+        for attempt in attempts_of(&outcome) {
+            let mut reason = describe_outcome(&attempt.outcome);
+            if let Some(secret) = self.secrets.get(attempt.provider.as_str()) {
+                reason = redact_secret(&reason, secret);
+            }
+            eprintln!(
+                "translation provider={} result=not_used reason={reason}",
+                attempt.provider.as_str()
+            );
+        }
         match outcome {
             RouteOutcome::Translated { provider, text, .. } => Routed::Translated {
                 provider: provider.as_str().to_owned(),
@@ -169,23 +217,6 @@ impl Providers {
                     },
                 ),
             },
-        }
-    }
-
-    /// Puts every step of the walk in the diagnostics, with any key the service
-    /// echoed back removed first.
-    fn report_attempts(&self, outcome: &RouteOutcome) {
-        for attempt in attempts_of(outcome) {
-            let mut reason = describe_outcome(&attempt.outcome);
-            if let Some(secret) = self.credentials.secret(attempt.provider.as_str()) {
-                reason = redact_secret(&reason, secret);
-            }
-            // Standard error is the worker's diagnostics channel; standard
-            // output carries protocol messages only.
-            eprintln!(
-                "translation provider={} result=not_used reason={reason}",
-                attempt.provider.as_str()
-            );
         }
     }
 }

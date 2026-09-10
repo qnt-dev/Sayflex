@@ -25,6 +25,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 /// stranger's decision to make.
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
+#[derive(Clone)]
 pub struct HttpExecutor {
     client: Client,
 }
@@ -62,9 +63,9 @@ impl RequestExecutor for HttpExecutor {
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(parse_retry_after);
-        // The body is read even for an error status: all three services explain
-        // themselves there, and for Google the body is the only thing that
-        // separates a wrong key from a spent allowance.
+        // The body is read even for an error status: both services explain
+        // themselves there, and the detail distinguishes a wrong key from a
+        // spent allowance.
         let mut body = String::new();
         response
             .take(MAX_RESPONSE_BYTES)
@@ -75,7 +76,7 @@ impl RequestExecutor for HttpExecutor {
         // looking at the status meant a 500 whose body happened to fit the
         // shape was accepted as a success, and — worse — that any unparseable
         // 200 became `Empty`, which stops the walk: one proxy login page from
-        // DeepL and Azure, Google and the local engine were never asked.
+        // DeepL, Azure, and the local engine were never asked.
         if !(200..300).contains(&status) {
             return Err(classify_response(
                 plan.provider.as_str(),
@@ -147,7 +148,7 @@ mod tests {
     fn a_broken_answer_and_an_empty_one_are_told_apart_and_both_move_on() {
         // The failure this replaces: any 200 that could not be read became
         // `Empty`, and `Empty` ends the walk — so one login page from a captive
-        // proxy meant Azure, Google and the local engine were never asked.
+        // proxy meant Azure and the local engine were never asked.
         for broken in [
             "<html><body>Sign in to your proxy</body></html>",
             "{\"unexpected\":\"schema\"}",

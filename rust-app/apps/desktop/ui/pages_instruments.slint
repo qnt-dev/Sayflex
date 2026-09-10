@@ -12,6 +12,7 @@ import { Sheet } from "sheet.slint";
 import { Fact, ListHead, StageHeading, FactList, Note, GroupLabel, SideNote, PageLede, ClaimLine } from "parts.slint";
 import { RowAction, Toggle, ChoiceTile, MenuButton, MenuOption } from "controls.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
+import { AboutSlint } from "std-widgets.slint";
 
 // ── Overview ─────────────────────────────────────────────
 export component OverviewPage inherits VerticalLayout {
@@ -30,7 +31,7 @@ export component OverviewPage inherits VerticalLayout {
 
     ListHead {
         index: "01 / 08";
-        title: "Overview";
+        title: @tr("Overview");
         claim: root.claim;
         claim-signal: root.audio-leaves-device;
     }
@@ -69,7 +70,7 @@ export component OverviewPage inherits VerticalLayout {
     Text {
         height: 64px;
         vertical-alignment: bottom;
-        text: "SayFlex " + root.version + " · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it.";
+        text: @tr("SayFlex ") + root.version + " · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it.";
         color: Sheet.muted;
         font-size: Sheet.detail-size;
         wrap: word-wrap;
@@ -118,7 +119,7 @@ export component DictationPage inherits HorizontalLayout {
 
         StageHeading {
             index: "02 / 08";
-            title: "Dictation";
+            title: @tr("Dictation");
             subtitle: root.subtitle;
         }
 
@@ -179,7 +180,7 @@ export component DictationPage inherits HorizontalLayout {
         width: 262px;
         spacing: 0px;
 
-        GroupLabel { text: "ENGINE"; height: 24px; }
+        GroupLabel { text: @tr("ENGINE"); height: 24px; }
 
         // Auto, CUDA, Vulkan, CPU: the four the application really has. Seeing
         // them at once matters more here than saving the space, because the
@@ -189,15 +190,15 @@ export component DictationPage inherits HorizontalLayout {
             spacing: 7px;
             Row {
                 ChoiceTile {
-                    label: "Auto";
-                    detail: "Fastest that works";
+                    label: @tr("Auto");
+                    detail: @tr("Fastest that works");
                     selected: root.backend == 0;
                     busy: root.backend == 0 && !root.backend-verified;
                     clicked => { root.select-backend(0); }
                 }
                 ChoiceTile {
-                    label: "CUDA";
-                    detail: "NVIDIA";
+                    label: @tr("CUDA");
+                    detail: @tr("NVIDIA");
                     selected: root.backend == 1;
                     busy: root.backend == 1 && !root.backend-verified;
                     clicked => { root.select-backend(1); }
@@ -205,15 +206,15 @@ export component DictationPage inherits HorizontalLayout {
             }
             Row {
                 ChoiceTile {
-                    label: "Vulkan";
-                    detail: "Any modern GPU";
+                    label: @tr("Vulkan");
+                    detail: @tr("Any modern GPU");
                     selected: root.backend == 2;
                     busy: root.backend == 2 && !root.backend-verified;
                     clicked => { root.select-backend(2); }
                 }
                 ChoiceTile {
-                    label: "CPU";
-                    detail: "Always available";
+                    label: @tr("CPU");
+                    detail: @tr("Always available");
                     selected: root.backend == 3;
                     busy: root.backend == 3 && !root.backend-verified;
                     clicked => { root.select-backend(3); }
@@ -226,60 +227,76 @@ export component DictationPage inherits HorizontalLayout {
             text: root.engine-note;
         }
 
-        GroupLabel { text: "SPOKEN LANGUAGE"; height: 30px; }
+        GroupLabel { text: @tr("SPOKEN LANGUAGE"); height: 30px; }
         MenuButton {
             text: root.dictation-language;
             value: root.dictation-language-value;
+            current-index: root.dictation-language-value == "auto" ? 0
+                : root.dictation-language-value == "ru" ? 1
+                : root.dictation-language-value == "en" ? 2
+                : root.dictation-language-value == "uk" ? 3
+                : root.dictation-language-value == "es" ? 4
+                : root.dictation-language-value == "pt-BR" ? 5
+                : root.dictation-language-value == "de" ? 6
+                : root.dictation-language-value == "fr" ? 7
+                : root.dictation-language-value == "it" ? 8
+                : root.dictation-language-value == "zh-Hans" ? 9
+                : root.dictation-language-value == "zh-Hant" ? 10
+                : root.dictation-language-value == "ja" ? 11
+                : root.dictation-language-value == "ko" ? 12
+                : root.dictation-language-value == "hi" ? 13 : 14;
             options: [
-                { value: "auto", label: "Auto-detect", note: "Best when you switch languages often" },
-                { value: "ru", label: "Russian", note: "More reliable for short Russian phrases" },
-                { value: "en", label: "English" },
-                { value: "uk", label: "Ukrainian" },
-                { value: "es", label: "Spanish" },
-                { value: "pt-BR", label: "Portuguese (Brazil)" },
-                { value: "de", label: "German" },
-                { value: "fr", label: "French" },
-                { value: "it", label: "Italian" },
-                { value: "zh-Hans", label: "Chinese (Simplified)" },
-                { value: "zh-Hant", label: "Chinese (Traditional)" },
-                { value: "ja", label: "Japanese" },
-                { value: "ko", label: "Korean" },
-                { value: "hi", label: "Hindi" },
-                { value: "ar", label: "Arabic" },
+                { value: "auto", label: @tr("Auto-detect"), note: @tr("Best when you switch languages often") },
+                { value: "ru", label: @tr("Russian"), note: @tr("More reliable for short Russian phrases") },
+                { value: "en", label: @tr("English") },
+                { value: "uk", label: @tr("Ukrainian") },
+                { value: "es", label: @tr("Spanish") },
+                { value: "pt-BR", label: @tr("Portuguese (Brazil)") },
+                { value: "de", label: @tr("German") },
+                { value: "fr", label: @tr("French") },
+                { value: "it", label: @tr("Italian") },
+                { value: "zh-Hans", label: @tr("Chinese (Simplified)") },
+                { value: "zh-Hant", label: @tr("Chinese (Traditional)") },
+                { value: "ja", label: @tr("Japanese") },
+                { value: "ko", label: @tr("Korean") },
+                { value: "hi", label: @tr("Hindi") },
+                { value: "ar", label: @tr("Arabic") },
             ];
             chosen(value) => { root.set-dictation-language(value); }
         }
 
-        GroupLabel { text: "OUTPUT"; height: 30px; }
+        GroupLabel { text: @tr("OUTPUT"); height: 30px; }
         MenuButton {
             text: root.output-mode;
             value: root.output-mode-value;
+            current-index: root.output-mode-value == "original" ? 0 : 1;
             // The unavailable choice stays in the list and says why. Removing
             // it would leave the user wondering whether the feature exists.
             options: [
-                { value: "original", label: "Original language", note: "Whatever you spoke, written as spoken" },
+                { value: "original", label: @tr("Original language"), note: @tr("Whatever you spoke, written as spoken") },
                 {
                     value: "english",
-                    label: "Translate to English",
-                    note: "Only for models trained for it",
-                    reason: root.output-locked ? "This model was not trained for it" : "",
+                    label: @tr("Translate to English"),
+                    note: @tr("Only for models trained for it"),
+                    reason: root.output-locked ? @tr("This model was not trained for it") : "",
                 },
             ];
             chosen(value) => { root.set-output-mode(value); }
         }
 
-        GroupLabel { text: "RELEASE"; height: 30px; }
+        GroupLabel { text: @tr("RELEASE"); height: 30px; }
         MenuButton {
             text: root.release-mode;
             value: root.release-mode-value;
+            current-index: root.release-mode-value == "fastest" ? 0 : 1;
             options: [
                 {
                     value: "fastest",
-                    label: "Fastest",
-                    note: "Prepares results during natural pauses",
+                    label: @tr("Fastest"),
+                    note: @tr("Prepares results during natural pauses"),
                     reason: root.release-mode-locked ? root.release-mode-note : "",
                 },
-                { value: "efficient", label: "Efficient", note: "Less GPU and battery, slightly slower" },
+                { value: "efficient", label: @tr("Efficient"), note: @tr("Less GPU and battery, slightly slower") },
             ];
             chosen(value) => { root.set-release-mode(value); }
         }
@@ -287,11 +304,11 @@ export component DictationPage inherits HorizontalLayout {
             text: root.release-mode-note;
         }
 
-        GroupLabel { text: "HISTORY"; height: 30px; }
+        GroupLabel { text: @tr("HISTORY"); height: 30px; }
         Toggle {
             checked: root.keeping-history;
-            on-label: "Kept on this device";
-            off-label: "Not kept";
+            on-label: @tr("Kept on this device");
+            off-label: @tr("Not kept");
             toggled(next) => { root.set-keeping-history(next); }
         }
 
@@ -299,7 +316,7 @@ export component DictationPage inherits HorizontalLayout {
 
         SideNote {
             height: 34px;
-            text: "Hold " + root.hotkey + " anywhere in Windows.";
+            text: @tr("Hold ") + root.hotkey + " anywhere in Windows.";
         }
     }
 }
@@ -318,6 +335,7 @@ export component VisualsPage inherits HorizontalLayout {
     in property <[float]> preview-spectrum;
     in property <[SlateLine]> preview-slate-lines;
     in property <image> preview-flow-sphere-frame;
+    in property <image> preview-companion-frame;
     in property <bool> preview-processing: false;
     in property <float> preview-signal-opacity: 0.8;
     in property <float> preview-disc-opacity: 1;
@@ -347,7 +365,7 @@ export component VisualsPage inherits HorizontalLayout {
 
         StageHeading {
             index: "06 / 08";
-            title: "Visuals";
+            title: @tr("Visuals");
             subtitle: root.subtitle;
         }
 
@@ -362,7 +380,7 @@ export component VisualsPage inherits HorizontalLayout {
                     background: transparent;
 
                     Text {
-                        text: root.selected == 8 ? "no overlay" : "";
+                        text: root.selected == 8 ? @tr("no overlay") : "";
                         color: Sheet.muted;
                         font-size: Sheet.detail-size;
                         letter-spacing: 1.6px;
@@ -401,12 +419,11 @@ export component VisualsPage inherits HorizontalLayout {
                     }
 
                     if root.selected == 7 : Image {
-                        width: 116px;
-                        height: 116px;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        source: @image-url("../../../../desktop-pet/assets/orb.png");
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.preview-companion-frame;
                         image-fit: contain;
+                        accessible-label: @tr("Companion orb");
                     }
                 }
             }
@@ -427,7 +444,7 @@ export component VisualsPage inherits HorizontalLayout {
         width: 262px;
         spacing: 0px;
 
-        GroupLabel { text: "STYLE"; height: 24px; }
+        GroupLabel { text: @tr("STYLE"); height: 24px; }
 
         // All eight the product draws, and off. A style that exists in the
         // application and not here would be deleted by omission.
@@ -435,19 +452,19 @@ export component VisualsPage inherits HorizontalLayout {
             height: 190px;
             spacing: 6px;
             Row {
-                ChoiceTile { label: "Voice orb"; selected: root.selected == 0; clicked => { root.select-visualizer(0); } }
-                ChoiceTile { label: "Spectrum"; selected: root.selected == 1; clicked => { root.select-visualizer(1); } }
-                ChoiceTile { label: "Fluid ribbon"; selected: root.selected == 2; clicked => { root.select-visualizer(2); } }
+                ChoiceTile { label: @tr("Voice orb"); selected: root.selected == 0; clicked => { root.select-visualizer(0); } }
+                ChoiceTile { label: @tr("Spectrum"); selected: root.selected == 1; clicked => { root.select-visualizer(1); } }
+                ChoiceTile { label: @tr("Fluid ribbon"); selected: root.selected == 2; clicked => { root.select-visualizer(2); } }
             }
             Row {
-                ChoiceTile { label: "Broadcast mic"; selected: root.selected == 3; clicked => { root.select-visualizer(3); } }
-                ChoiceTile { label: "Circular"; selected: root.selected == 4; clicked => { root.select-visualizer(4); } }
-                ChoiceTile { label: "Flow sphere"; selected: root.selected == 5; clicked => { root.select-visualizer(5); } }
+                ChoiceTile { label: @tr("Broadcast mic"); selected: root.selected == 3; clicked => { root.select-visualizer(3); } }
+                ChoiceTile { label: @tr("Circular"); selected: root.selected == 4; clicked => { root.select-visualizer(4); } }
+                ChoiceTile { label: @tr("Flow sphere"); selected: root.selected == 5; clicked => { root.select-visualizer(5); } }
             }
             Row {
-                ChoiceTile { label: "Writing slate"; selected: root.selected == 6; clicked => { root.select-visualizer(6); } }
-                ChoiceTile { label: "Companion orb"; selected: root.selected == 7; clicked => { root.select-visualizer(7); } }
-                ChoiceTile { label: "Off"; selected: root.selected == 8; clicked => { root.select-visualizer(8); } }
+                ChoiceTile { label: @tr("Writing slate"); selected: root.selected == 6; clicked => { root.select-visualizer(6); } }
+                ChoiceTile { label: @tr("Companion orb"); selected: root.selected == 7; clicked => { root.select-visualizer(7); } }
+                ChoiceTile { label: @tr("Off"); selected: root.selected == 8; clicked => { root.select-visualizer(8); } }
             }
         }
 
@@ -458,56 +475,116 @@ export component VisualsPage inherits HorizontalLayout {
 
         // A palette belongs to the style that has one, so it appears only when
         // that style is chosen rather than sitting greyed out for the others.
-        if root.selected == 3 : GroupLabel { text: "COLOUR"; height: 30px; }
+        if root.selected == 3 : GroupLabel { text: @tr("COLOUR"); height: 30px; }
         if root.selected == 3 : MenuButton {
-            text: root.broadcast-mic-palette == 0 ? "White"
-                : root.broadcast-mic-palette == 1 ? "Blue" : "Red";
+            text: root.broadcast-mic-palette == 0 ? @tr("White")
+                : root.broadcast-mic-palette == 1 ? @tr("Blue") : @tr("Red");
             value: root.broadcast-mic-palette == 0 ? "0" : root.broadcast-mic-palette == 1 ? "1" : "2";
+            current-index: root.broadcast-mic-palette;
             options: [
-                { value: "0", label: "White" },
-                { value: "1", label: "Blue" },
-                { value: "2", label: "Red" },
+                { value: "0", label: @tr("White") },
+                { value: "1", label: @tr("Blue") },
+                { value: "2", label: @tr("Red") },
             ];
             chosen(value) => { root.select-broadcast-mic-palette(value == "0" ? 0 : value == "1" ? 1 : 2); }
         }
 
-        if root.selected == 4 : GroupLabel { text: "PALETTE"; height: 30px; }
+        if root.selected == 4 : GroupLabel { text: @tr("PALETTE"); height: 30px; }
         if root.selected == 4 : MenuButton {
-            text: root.circular-palette == 0 ? "Sunset"
-                : root.circular-palette == 1 ? "Arctic" : "Monochrome";
+            text: root.circular-palette == 0 ? @tr("Sunset")
+                : root.circular-palette == 1 ? @tr("Arctic") : @tr("Monochrome");
             value: root.circular-palette == 0 ? "0" : root.circular-palette == 1 ? "1" : "2";
+            current-index: root.circular-palette;
             options: [
-                { value: "0", label: "Sunset" },
-                { value: "1", label: "Arctic" },
-                { value: "2", label: "Monochrome" },
+                { value: "0", label: @tr("Sunset") },
+                { value: "1", label: @tr("Arctic") },
+                { value: "2", label: @tr("Monochrome") },
             ];
             chosen(value) => { root.select-circular-palette(value == "0" ? 0 : value == "1" ? 1 : 2); }
         }
 
-        if root.selected == 5 : GroupLabel { text: "PALETTE"; height: 30px; }
+        if root.selected == 5 : GroupLabel { text: @tr("PALETTE"); height: 30px; }
         if root.selected == 5 : MenuButton {
-            text: root.sphere-palette == 0 ? "Reference" : "Black and yellow";
+            text: root.sphere-palette == 0 ? @tr("Reference") : @tr("Black and yellow");
             value: root.sphere-palette == 0 ? "0" : "1";
+            current-index: root.sphere-palette;
             options: [
-                { value: "0", label: "Reference" },
-                { value: "1", label: "Black and yellow" },
+                { value: "0", label: @tr("Reference") },
+                { value: "1", label: @tr("Black and yellow") },
             ];
             chosen(value) => { root.select-sphere-palette(value == "0" ? 0 : 1); }
         }
 
-        if root.selected == 6 : GroupLabel { text: "SURFACE"; height: 30px; }
+        if root.selected == 6 : GroupLabel { text: @tr("SURFACE"); height: 30px; }
         if root.selected == 6 : MenuButton {
-            text: root.slate-surface == 0 ? "Dark panel"
-                : root.slate-surface == 1 ? "Matte glass" : "Blue glass";
+            text: root.slate-surface == 0 ? @tr("Dark panel")
+                : root.slate-surface == 1 ? @tr("Matte glass") : @tr("Blue glass");
             value: root.slate-surface == 0 ? "0" : root.slate-surface == 1 ? "1" : "2";
+            current-index: root.slate-surface;
             options: [
-                { value: "0", label: "Dark panel" },
-                { value: "1", label: "Matte glass" },
-                { value: "2", label: "Blue glass" },
+                { value: "0", label: @tr("Dark panel") },
+                { value: "1", label: @tr("Matte glass") },
+                { value: "2", label: @tr("Blue glass") },
             ];
             chosen(value) => { root.select-slate-surface(value == "0" ? 0 : value == "1" ? 1 : 2); }
         }
 
         Rectangle { vertical-stretch: 1; }
     }
+}
+
+// ── About ───────────────────────────────────────────────
+//
+// Slint's attribution is a real, reachable surface rather than an unused
+// import. The project notice remains beside it so the renderer and the product
+// are attributed independently.
+export component AboutPage inherits VerticalLayout {
+    in property <string> version;
+
+    spacing: 0px;
+
+    ListHead {
+        index: "09 / 09";
+        title: @tr("About");
+        lede: @tr("SayFlex uses Slint for its interface. Dependency and model notices are included with the installed application.");
+    }
+
+    Rectangle { height: 24px; }
+
+    HorizontalLayout {
+        spacing: 28px;
+
+        Rectangle {
+            width: 300px;
+            height: 150px;
+            background: Sheet.raised;
+            border-width: 1px;
+            border-color: Sheet.hairline;
+            AboutSlint { }
+        }
+
+        VerticalLayout {
+            alignment: start;
+            spacing: 10px;
+            Text {
+                text: @tr("SayFlex ") + root.version;
+                color: Sheet.ink;
+                font-size: Sheet.title-size;
+                font-weight: 650;
+            }
+            Text {
+                text: @tr("Windows tools for dictation and translation.");
+                color: Sheet.muted;
+                font-size: Sheet.body-size;
+            }
+            Text {
+                text: @tr("Open-source notices are installed as THIRD_PARTY_NOTICES.md.");
+                color: Sheet.muted;
+                font-size: Sheet.detail-size;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    Rectangle { vertical-stretch: 1; }
 }

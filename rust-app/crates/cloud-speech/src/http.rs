@@ -26,6 +26,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// unbounded body from it would hand a stranger the worker's memory.
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
+#[derive(Clone)]
 pub struct HttpExecutor {
     client: Client,
 }

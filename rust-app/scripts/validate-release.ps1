@@ -9,10 +9,14 @@ param(
     # Compare the installed copy against this staged one. Only meaningful after
     # installing: during a publish the installed copy is still the previous
     # release, so this would always fail.
-    [switch]$Installed
+    [switch]$Installed,
+    # Public artifacts must prove Authenticode on every executable and the
+    # exact installer named by -InstallerPath. Developer builds may omit it.
+    [switch]$RequireSignature
 )
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'release-validation.psm1') -Force
 if ([string]::IsNullOrWhiteSpace($AppDirectory)) {
     $AppDirectory = Join-Path $PSScriptRoot '..\dist\app'
 }
@@ -162,6 +166,18 @@ foreach ($name in $required) {
     }
 }
 
+if ($RequireSignature) {
+    foreach ($name in $required | Where-Object { $_.EndsWith('.exe') }) {
+        $path = Join-Path $appRoot $name
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            $failures.Add(
+                "$name does not carry a valid Authenticode signature (status: $($signature.Status))"
+            )
+        }
+    }
+}
+
 # 2. The installed set matches the staged set, hash for hash.
 #
 #    Only when asked for with -Installed. Comparing them during a publish is a
@@ -266,24 +282,13 @@ if ($desktopBuildId -ne $buildManifest.git_commit) {
 $installerChecked = $false
 if (-not [string]::IsNullOrWhiteSpace($InstallerPath)) {
     $installerChecked = $true
-    if (-not (Test-Path -LiteralPath $InstallerPath)) {
-        $failures.Add("the installer named on the command line is not there: $InstallerPath")
-    } else {
-        $installer = Get-Item -LiteralPath $InstallerPath
-        $sidecar = "$($installer.FullName).sha256"
-        if (-not (Test-Path -LiteralPath $sidecar)) {
-            $failures.Add("$($installer.Name) has no .sha256 beside it")
-        } else {
-            $recorded = ((Get-Content -LiteralPath $sidecar -Raw) -split '\s+')[0].ToLowerInvariant()
-            $actual = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($recorded -ne $actual) {
-                $failures.Add("$($installer.Name) does not match its .sha256")
-            }
-            if ($installer.Name -notlike "*-$expectedVersion-*") {
-                $failures.Add("$($installer.Name) is not the $expectedVersion installer")
-            }
-        }
-    }
+    Get-InstallerArtifactFailures `
+        -InstallerPath $InstallerPath `
+        -ExpectedVersion $expectedVersion `
+        -RequireSignature:$RequireSignature |
+        ForEach-Object { $failures.Add($_) }
+} elseif ($RequireSignature) {
+    $failures.Add('-RequireSignature also requires the exact -InstallerPath')
 }
 
 if ($failures.Count -gt 0) {
@@ -293,6 +298,7 @@ if ($failures.Count -gt 0) {
 
 $checked = @('file set', 'build manifest', 'binary build identity', 'Cargo.lock', 'backend manifest', 'versions', "protocol $protocol")
 if ($installerChecked) { $checked += 'installer checksum' }
+if ($RequireSignature) { $checked += 'Authenticode signatures' }
 if ($Installed) { $checked += 'installed hashes'; $checked += 'uninstall registration' }
 Write-Host "SayFlex $expectedVersion checked: $($checked -join ', ')."
 if (-not $installerChecked) {

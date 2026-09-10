@@ -84,6 +84,7 @@ pub struct Translation<'a> {
     pub target: &'a str,
 }
 
+#[derive(Clone)]
 pub struct Router {
     chain: Chain,
     ledger: Ledger,
@@ -110,6 +111,15 @@ impl Router {
     #[must_use]
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
+    }
+
+    pub fn replace_ledger(&mut self, ledger: Ledger) {
+        self.ledger = ledger;
+    }
+
+    #[must_use]
+    pub fn into_ledger(self) -> Ledger {
+        self.ledger
     }
 
     pub fn forget(&mut self, id: &ProviderId) {
@@ -179,7 +189,16 @@ impl Router {
                 continue;
             };
 
-            match executor.execute(&plan, budget) {
+            let response = executor.execute(&plan, budget);
+            // A request can be superseded while the HTTP call is blocked. The
+            // pre-flight check above cannot protect the result that returns
+            // later: accepting it would let an older selection overwrite the
+            // new translation and would also teach the shared ledger from a
+            // request the user no longer owns.
+            if cancel.is_cancelled() {
+                return RouteOutcome::Cancelled { attempts };
+            }
+            match response {
                 Ok(translated) => {
                     self.ledger.record_success(&id);
                     return RouteOutcome::Translated {
@@ -245,6 +264,10 @@ fn remaining_budget(now: Instant, deadline: Instant) -> Option<Duration> {
 mod tests {
     use std::{
         cell::RefCell,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         time::{Duration, Instant},
     };
 
@@ -289,6 +312,21 @@ mod tests {
         }
     }
 
+    struct CancelsBeforeReturning {
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl RequestExecutor for CancelsBeforeReturning {
+        fn execute(
+            &self,
+            _plan: &RequestPlan,
+            _budget: Duration,
+        ) -> Result<String, ProviderFailure> {
+            self.cancelled.store(true, Ordering::Release);
+            Ok("stale answer".to_owned())
+        }
+    }
+
     fn chain(ids: &[&str]) -> Chain {
         Chain::new(
             ids.iter()
@@ -303,6 +341,29 @@ mod tests {
 
     fn key(_id: &ProviderId) -> Option<String> {
         Some("279a2e9d-83b3-c416-7e2d-f721593e42a0:fx".to_owned())
+    }
+
+    #[test]
+    fn a_request_cancelled_during_http_cannot_publish_or_change_the_ledger() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let executor = CancelsBeforeReturning {
+            cancelled: Arc::clone(&cancelled),
+        };
+        let mut router = Router::new(chain(&[ProviderId::DEEPL, ProviderId::LOCAL]));
+
+        let outcome = router.translate(
+            Translation {
+                text: "newer work now owns the popup",
+                source: Some("en"),
+                target: "ru",
+            },
+            Instant::now(),
+            &key,
+            &executor,
+            &|| cancelled.load(Ordering::Acquire),
+        );
+
+        assert!(matches!(outcome, RouteOutcome::Cancelled { .. }));
     }
 
     #[test]
@@ -354,7 +415,7 @@ mod tests {
     fn the_first_service_that_answers_ends_the_walk() {
         let mut router = Router::new(chain(&[
             ProviderId::DEEPL,
-            ProviderId::GOOGLE,
+            ProviderId::AZURE,
             ProviderId::LOCAL,
         ]));
         let executor = Scripted::new(vec![Ok("привет".to_owned())]);
@@ -390,7 +451,7 @@ mod tests {
     fn a_spent_allowance_moves_on_to_the_next_service() {
         let mut router = Router::new(chain(&[
             ProviderId::DEEPL,
-            ProviderId::GOOGLE,
+            ProviderId::AZURE,
             ProviderId::LOCAL,
         ]));
         let executor = Scripted::new(vec![
@@ -414,7 +475,7 @@ mod tests {
             RouteOutcome::Translated {
                 provider, attempts, ..
             } => {
-                assert_eq!(provider.as_str(), ProviderId::GOOGLE);
+                assert_eq!(provider.as_str(), ProviderId::AZURE);
                 assert_eq!(attempts.len(), 1);
             }
             other => panic!("expected the second service to answer, got {other:?}"),
@@ -425,7 +486,7 @@ mod tests {
     fn deepls_real_quota_response_reaches_the_next_configured_provider() {
         let mut router = Router::new(chain(&[
             ProviderId::DEEPL,
-            ProviderId::GOOGLE,
+            ProviderId::AZURE,
             ProviderId::LOCAL,
         ]));
         let deepl_456 = classify_response(
@@ -452,7 +513,7 @@ mod tests {
             RouteOutcome::Translated {
                 provider, attempts, ..
             } => {
-                assert_eq!(provider.as_str(), ProviderId::GOOGLE);
+                assert_eq!(provider.as_str(), ProviderId::AZURE);
                 assert!(matches!(
                     attempts.as_slice(),
                     [super::Attempt {
@@ -496,7 +557,7 @@ mod tests {
         // the same languages, and the local engine is usually last in the list.
         let mut router = Router::new(chain(&[
             ProviderId::DEEPL,
-            ProviderId::GOOGLE,
+            ProviderId::AZURE,
             ProviderId::LOCAL,
         ]));
         let executor = Scripted::new(vec![Err(ProviderFailure::Empty), Ok("привет".to_owned())]);
@@ -515,7 +576,7 @@ mod tests {
 
         match outcome {
             RouteOutcome::Translated { provider, .. } => {
-                assert_eq!(provider.as_str(), ProviderId::GOOGLE);
+                assert_eq!(provider.as_str(), ProviderId::AZURE);
             }
             other => panic!("expected the next service to answer, got {other:?}"),
         }
@@ -529,7 +590,7 @@ mod tests {
         // know, which is the other way a plan cannot be built.
         let mut router = Router::new(chain(&[
             "mystery-service",
-            ProviderId::GOOGLE,
+            ProviderId::AZURE,
             ProviderId::LOCAL,
         ]));
         let executor = Scripted::new(vec![Ok("привет".to_owned())]);
@@ -550,13 +611,13 @@ mod tests {
             RouteOutcome::Translated {
                 provider, attempts, ..
             } => {
-                assert_eq!(provider.as_str(), ProviderId::GOOGLE);
+                assert_eq!(provider.as_str(), ProviderId::AZURE);
                 assert!(
                     attempts.is_empty(),
                     "a row this build does not know is never a candidate: {attempts:?}"
                 );
             }
-            other => panic!("expected Google to answer, got {other:?}"),
+            other => panic!("expected Azure to answer, got {other:?}"),
         }
         assert_eq!(
             executor.seen.borrow().len(),
@@ -591,7 +652,7 @@ mod tests {
         // The local engine is always in the list, even when the stored order
         // does not mention it, so a walk with no time left does not end in
         // nothing — it ends where it would have ended anyway, one step sooner.
-        let mut router = Router::new(chain(&[ProviderId::DEEPL, ProviderId::GOOGLE]));
+        let mut router = Router::new(chain(&[ProviderId::DEEPL, ProviderId::AZURE]));
         let executor = Scripted::new(vec![Ok("too late".to_owned())]);
         let long_ago = Instant::now() - super::TOTAL_DEADLINE - Duration::from_secs(1);
 

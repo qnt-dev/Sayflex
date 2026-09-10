@@ -6,6 +6,7 @@ mod inference;
 mod model_actor;
 mod speculation;
 mod transcription;
+mod transcription_mailbox;
 
 use std::{
     env, fs,

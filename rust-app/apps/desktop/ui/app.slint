@@ -53,6 +53,7 @@ component ActionButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
+    forward-focus: focus;
     height: 34px;
     accessible-role: button;
     accessible-label: root.label;
@@ -103,7 +104,21 @@ component ActionButton inherits Rectangle {
     touch := TouchArea {
         enabled: root.enabled;
         clicked => {
+            focus.focus();
             root.clicked();
+        }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            reject
         }
     }
 }
@@ -117,7 +132,7 @@ component Eyebrow inherits Text {
 }
 
 export component RecordingIndicator inherits Window {
-    in property <string> indicator-title: "SayFlex Recording Indicator";
+    in property <string> indicator-title: @tr("SayFlex Recording Indicator");
     title: root.indicator-title;
     icon: @image-url("../assets/tray-icon.svg");
     width: root.visualizer-style == 6
@@ -166,6 +181,9 @@ export component RecordingIndicator inherits Window {
     in property <float> visual-scale: 1;
     in property <float> visual-opacity: 1;
     in-out property <bool> prepared: false;
+    // Testable native-surface contract: styles from Broadcast Mic onward do
+    // not use the opaque panel that belongs to the first three styles.
+    out property <bool> transparent-surface: root.visualizer-style >= 3;
 
     RecordingVisual {
         width: 100%;
@@ -200,7 +218,7 @@ export component RecordingIndicator inherits Window {
 }
 
 export component SelectionChooser inherits Window {
-    title: "Correct keyboard layout";
+    title: @tr("Correct keyboard layout");
     width: 590px;
     height: 117px + root.source-panel-height * 1px + root.candidate-labels.length * 61px;
     no-frame: true;
@@ -231,13 +249,13 @@ export component SelectionChooser inherits Window {
                 height: 24px;
                 vertical-stretch: 0;
                 Text {
-                    text: "Correct keyboard layout";
+                    text: @tr("Correct keyboard layout");
                     color: Theme.text;
                     font-size: 16px;
                     font-weight: 720;
                 }
                 Rectangle { horizontal-stretch: 1; }
-                Eyebrow { text: "SELECT A RESULT"; }
+                Eyebrow { text: @tr("SELECT A RESULT"); }
             }
 
             Rectangle {
@@ -267,6 +285,10 @@ export component SelectionChooser inherits Window {
                 border-width: 1px;
                 border-color: option-touch.has-hover ? Theme.orange : Theme.line;
                 background: option-touch.has-hover ? Theme.orange-soft : Theme.panel;
+                accessible-role: button;
+                accessible-label: label;
+                accessible-enabled: true;
+                accessible-action-default => { root.choose-candidate(index); }
 
                 HorizontalLayout {
                     padding-left: 11px;
@@ -289,7 +311,7 @@ export component SelectionChooser inherits Window {
                         }
                     }
                     Text {
-                        text: "ENTER";
+                        text: @tr("ENTER");
                         color: Theme.text-faint;
                         font-size: 8px;
                         vertical-alignment: center;
@@ -307,7 +329,7 @@ export component SelectionChooser inherits Window {
                 height: 30px;
                 vertical-stretch: 0;
                 Text {
-                    text: "Original selection remains active";
+                    text: @tr("Original selection remains active");
                     color: Theme.text-faint;
                     font-size: 9px;
                     vertical-alignment: center;
@@ -316,7 +338,7 @@ export component SelectionChooser inherits Window {
                 ActionButton {
                     width: 80px;
                     height: 30px;
-                    label: "CANCEL";
+                    label: @tr("CANCEL");
                     clicked => {
                         root.cancel();
                     }
@@ -327,7 +349,7 @@ export component SelectionChooser inherits Window {
 }
 
 export component ActionPalette inherits Window {
-    title: "Text actions";
+    title: @tr("Text actions");
     icon: @image-url("../assets/tray-icon.svg");
     width: 520px;
     height: 115px + root.source-panel-height * 1px;
@@ -360,13 +382,13 @@ export component ActionPalette inherits Window {
                 height: 23px;
                 vertical-stretch: 0;
                 Text {
-                    text: "Text actions";
+                    text: @tr("Text actions");
                     color: Theme.text;
                     font-size: 16px;
                     font-weight: 720;
                 }
                 Rectangle { horizontal-stretch: 1; }
-                Eyebrow { text: "CTRL + ALT + T"; }
+                Eyebrow { text: @tr("CTRL + ALT + F"); }
             }
 
             Rectangle {
@@ -396,7 +418,7 @@ export component ActionPalette inherits Window {
                 ActionButton {
                     horizontal-stretch: 1;
                     height: 40px;
-                    label: "TRANSLATE";
+                    label: @tr("TRANSLATE");
                     accent: true;
                     enabled: root.translation-enabled;
                     clicked => { root.translate(); }
@@ -404,14 +426,14 @@ export component ActionPalette inherits Window {
                 ActionButton {
                     horizontal-stretch: 1;
                     height: 40px;
-                    label: "CORRECT LAYOUT";
+                    label: @tr("CORRECT LAYOUT");
                     enabled: root.layout-enabled;
                     clicked => { root.correct-layout(); }
                 }
                 ActionButton {
                     width: 74px;
                     height: 40px;
-                    label: "CANCEL";
+                    label: @tr("CANCEL");
                     clicked => { root.cancel(); }
                 }
             }
@@ -422,7 +444,7 @@ export component ActionPalette inherits Window {
 export component TranslationPreview inherits Window {
     // Kept for diagnostics and accessibility only. The window is frameless, so
     // no title or chrome is rendered to the user.
-    title: "Translation preview";
+    title: @tr("Translation preview");
     preferred-width: root.card-width * 1px;
     preferred-height: root.main-card-height * 1px
         + (root.view-mode == 1 ? root.original-card-height * 1px + 18px : 0px);
@@ -447,6 +469,8 @@ export component TranslationPreview inherits Window {
     in-out property <float> card-width: 252;
     in property <image> glass-backdrop;
     in-out property <float> original-card-height: 96;
+    in-out property <string> source-language-label: @tr("AUTO");
+    in-out property <string> target-language-label: "";
     /// What the original actually needs, measured rather than estimated.
     ///
     /// The height was worked out in Rust from a fixed forty-eight characters a
@@ -478,6 +502,7 @@ export component TranslationPreview inherits Window {
     callback view-mode-changed(int);
     callback reset-scroll();
     callback scroll-by(float);
+    callback retry-translation(bool);
     reset-scroll => {
         result-scroll.viewport-y = 0px;
     }
@@ -630,9 +655,17 @@ export component TranslationPreview inherits Window {
                 : orig-touch.has-hover
                     ? Theme.red-soft
                     : root.dark-text ? #ffffff42 : #0c0f1450;
+            accessible-role: button;
+            accessible-label: @tr("Show original text");
+            accessible-enabled: true;
+            accessible-action-default => {
+                root.view-mode = root.view-mode == 1 ? 0 : 1;
+                root.reset-scroll();
+                root.view-mode-changed(root.view-mode);
+            }
 
             Text {
-                text: "ORIG";
+                text: @tr("ORIG");
                 color: root.view-mode == 1 ? #0b0e13 : root.dark-text ? #111820 : #dedad3;
                 opacity: root.view-mode == 1 ? 1 : (orig-touch.has-hover ? 0.92 : 0.62);
                 font-size: 9px;
@@ -664,9 +697,17 @@ export component TranslationPreview inherits Window {
                 : dual-touch.has-hover
                     ? Theme.red-soft
                     : root.dark-text ? #ffffff42 : #0c0f1450;
+            accessible-role: button;
+            accessible-label: @tr("Show interleaved original and translation");
+            accessible-enabled: true;
+            accessible-action-default => {
+                root.view-mode = root.view-mode == 2 ? 0 : 2;
+                root.reset-scroll();
+                root.view-mode-changed(root.view-mode);
+            }
 
             Text {
-                text: "DUAL";
+                text: @tr("DUAL");
                 color: root.view-mode == 2 ? #0b0e13 : root.dark-text ? #111820 : #dedad3;
                 opacity: root.view-mode == 2 ? 1 : (dual-touch.has-hover ? 0.92 : 0.62);
                 font-size: 9px;
@@ -680,6 +721,74 @@ export component TranslationPreview inherits Window {
                     root.reset-scroll();
                     root.view-mode-changed(root.view-mode);
                 }
+            }
+        }
+
+        Text {
+            x: 116px;
+            y: 8px;
+            width: max(0px, parent.width - 236px);
+            height: 22px;
+            text: root.target-language-label == ""
+                ? root.source-language-label
+                : root.source-language-label + " → " + root.target-language-label;
+            color: root.dark-text ? #111820 : #dedad3;
+            opacity: 0.72;
+            font-size: 9px;
+            font-weight: 620;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        swap-button := Rectangle {
+            x: parent.width - 116px;
+            y: 7px;
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: root.dark-text ? #10182070 : #d7d3cc48;
+            background: swap-touch.has-hover ? Theme.red-soft : root.dark-text ? #ffffff42 : #0c0f1450;
+            accessible-role: button;
+            accessible-label: @tr("Swap source and target languages");
+            accessible-enabled: root.target-language-label != "";
+            accessible-action-default => { if (root.target-language-label != "") { root.retry-translation(true); } }
+            Text {
+                text: "⇄";
+                color: root.dark-text ? #111820 : #dedad3;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            swap-touch := TouchArea {
+                enabled: root.target-language-label != "";
+                clicked => { root.retry-translation(true); }
+            }
+        }
+
+        retry-button := Rectangle {
+            x: parent.width - 86px;
+            y: 7px;
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: root.dark-text ? #10182070 : #d7d3cc48;
+            background: retry-touch.has-hover ? Theme.red-soft : root.dark-text ? #ffffff42 : #0c0f1450;
+            accessible-role: button;
+            accessible-label: @tr("Retry translation");
+            accessible-enabled: root.target-language-label != "";
+            accessible-action-default => { if (root.target-language-label != "") { root.retry-translation(false); } }
+            Text {
+                text: "↻";
+                color: root.dark-text ? #111820 : #dedad3;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            retry-touch := TouchArea {
+                enabled: root.target-language-label != "";
+                clicked => { root.retry-translation(false); }
             }
         }
 
@@ -776,7 +885,7 @@ export component TranslationPreview inherits Window {
         drag-area := TouchArea {
             x: 114px;
             y: 0;
-            width: parent.width - self.x - 54px;
+            width: max(0px, parent.width - self.x - 122px);
             height: 36px;
             pointer-event(event) => {
                 if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
@@ -800,9 +909,16 @@ export component TranslationPreview inherits Window {
                 : pin-touch.has-hover
                     ? Theme.red-soft
                     : root.dark-text ? #ffffff42 : #0c0f1450;
+            accessible-role: button;
+            accessible-label: root.pinned ? @tr("Unpin translation") : @tr("Pin translation");
+            accessible-enabled: true;
+            accessible-action-default => {
+                root.pinned = !root.pinned;
+                root.pin-state-changed(root.pinned);
+            }
 
             Text {
-                text: "PIN";
+                text: @tr("PIN");
                 color: root.pinned ? #0b0e13 : root.dark-text ? #111820 : #dedad3;
                 opacity: root.pinned ? 1 : (pin-touch.has-hover ? 0.92 : 0.62);
                 font-size: 10px;
@@ -918,7 +1034,7 @@ export component TranslationPreview inherits Window {
 }
 
 export component TranslatorWindow inherits Window {
-    title: "Local translator";
+    title: @tr("Local translator");
     icon: @image-url("../assets/tray-icon.svg");
     width: 740px;
     height: 590px;
@@ -927,7 +1043,7 @@ export component TranslatorWindow inherits Window {
 
     in-out property <string> source-text;
     in-out property <string> result-text;
-    in-out property <string> status-text: "Choose a translation model in Settings.";
+    in-out property <string> status-text: @tr("Choose a translation model in Settings.");
     in-out property <bool> processing: false;
     callback translate();
     callback copy-result();
@@ -944,15 +1060,15 @@ export component TranslatorWindow inherits Window {
             vertical-stretch: 0;
             VerticalLayout {
                 spacing: 1px;
-                Eyebrow { height: 13px; text: "LOCAL TRANSLATOR"; }
+                Eyebrow { height: 13px; text: @tr("LOCAL TRANSLATOR"); }
                 Text {
-                    text: "English ↔ Russian";
+                    text: @tr("English ↔ Russian");
                     color: Theme.text;
                     font-size: 21px;
                     font-weight: 740;
                 }
                 Text {
-                    text: "Direction is detected automatically";
+                    text: @tr("Direction is detected automatically");
                     color: Theme.text-muted;
                     font-size: 9px;
                 }
@@ -961,7 +1077,7 @@ export component TranslatorWindow inherits Window {
             ActionButton {
                 width: 104px;
                 height: 32px;
-                label: "SWAP TEXT";
+                label: @tr("SWAP TEXT");
                 clicked => { root.swap-text(); }
             }
         }
@@ -993,7 +1109,7 @@ export component TranslatorWindow inherits Window {
                 y: 10px;
                 width: parent.width - 24px;
                 height: parent.height - 20px;
-                text: root.processing ? "Translating locally…" : root.result-text;
+                text: root.processing ? @tr("Translating locally…") : root.result-text;
                 color: root.processing ? Theme.text-muted : Theme.text;
                 font-size: 13px;
                 wrap: word-wrap;
@@ -1014,13 +1130,13 @@ export component TranslatorWindow inherits Window {
             Rectangle { horizontal-stretch: 1; }
             ActionButton {
                 width: 104px;
-                label: "COPY RESULT";
+                label: @tr("COPY RESULT");
                 enabled: !root.processing && root.result-text != "";
                 clicked => { root.copy-result(); }
             }
             ActionButton {
                 width: 110px;
-                label: "TRANSLATE";
+                label: @tr("TRANSLATE");
                 accent: true;
                 enabled: !root.processing;
                 clicked => { root.translate(); }
@@ -1045,26 +1161,26 @@ export component AppTray inherits SystemTrayIcon {
 
     Menu {
         MenuItem {
-            title: "Open settings";
+            title: @tr("Open settings");
             activated => {
                 root.open-settings();
             }
         }
         MenuItem {
-            title: "Open translator";
+            title: @tr("Open translator");
             activated => {
                 root.open-translator();
             }
         }
         MenuItem {
-            title: "Copy latest transcript";
+            title: @tr("Copy latest transcript");
             activated => {
                 root.copy-last();
             }
         }
         MenuSeparator {}
         MenuItem {
-            title: "Quit";
+            title: @tr("Quit");
             activated => {
                 root.quit-requested();
             }

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod history;
+mod provider_actor;
 mod providers;
 mod runtime;
 
@@ -9,7 +10,6 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU64, Ordering},
         mpsc::{self, Sender},
     },
     thread::{self, JoinHandle},
@@ -30,6 +30,7 @@ use rust_translation_engine::{
     detect_language,
 };
 
+use crate::provider_actor::ProviderActorHandle;
 use crate::providers::{Providers, Routed};
 
 #[derive(Clone)]
@@ -60,119 +61,6 @@ impl EventWriter {
         self.events
             .send(event.clone())
             .map_err(|error| anyhow!("translation event stream closed: {error}"))
-    }
-}
-
-struct TranslationCoordinator {
-    generation: Arc<AtomicU64>,
-    current_request: Arc<Mutex<Option<RequestId>>>,
-    threads: Vec<JoinHandle<()>>,
-}
-
-impl TranslationCoordinator {
-    fn new() -> Self {
-        Self {
-            generation: Arc::new(AtomicU64::new(0)),
-            current_request: Arc::new(Mutex::new(None)),
-            threads: Vec::new(),
-        }
-    }
-
-    fn submit(
-        &mut self,
-        state: Arc<Mutex<WorkerState>>,
-        providers: Arc<Mutex<Providers>>,
-        writer: EventWriter,
-        asked: Asked,
-    ) -> Result<()> {
-        let Asked {
-            request_id,
-            text,
-            source_language,
-            target_language,
-            language_policy,
-        } = asked;
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        *recover_lock(&self.current_request) = Some(request_id);
-        let current_generation = Arc::clone(&self.generation);
-        let current_request = Arc::clone(&self.current_request);
-        let thread = thread::Builder::new()
-            .name(format!("translation-{}", short_id(request_id)))
-            .spawn(move || {
-                // Deliberately not holding the worker's state here. The walk
-                // can spend twelve seconds on the network, and while it did,
-                // every other command — a model install, a history read, a
-                // change to the list itself — waited behind it on one mutex.
-                let result = translate_request(
-                    &state,
-                    &providers,
-                    &writer,
-                    Asked {
-                        request_id,
-                        text,
-                        source_language,
-                        target_language,
-                        language_policy,
-                    },
-                    || current_generation.load(Ordering::Acquire) == generation,
-                );
-                let cancelled = current_generation.load(Ordering::Acquire) != generation
-                    || result.as_ref().err().is_some_and(|error| {
-                        error.downcast_ref::<TranslationCancelled>().is_some()
-                    });
-                if cancelled {
-                    let _ = writer.send(&TranslationWorkerEvent::Cancelled { request_id });
-                } else if let Err(error) = result {
-                    let has_model = recover_lock(&state).selected_tier.is_some();
-                    let _ = writer.send(&TranslationWorkerEvent::Failed {
-                        request_id: Some(request_id),
-                        catalog_id: None,
-                        code: if has_model {
-                            "translation_failed"
-                        } else {
-                            "model_required"
-                        }
-                        .to_owned(),
-                        message: format!("{error:#}"),
-                        retryable: has_model,
-                    });
-                }
-                let mut active = recover_lock(&current_request);
-                if *active == Some(request_id) {
-                    *active = None;
-                }
-            })?;
-        self.threads.push(thread);
-        Ok(())
-    }
-
-    fn cancel(&self, request_id: RequestId) {
-        if *recover_lock(&self.current_request) == Some(request_id) {
-            self.generation.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    fn cancel_all(&self) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn reap(&mut self) {
-        let mut index = 0;
-        while index < self.threads.len() {
-            if self.threads[index].is_finished() {
-                let thread = self.threads.swap_remove(index);
-                let _ = thread.join();
-            } else {
-                index += 1;
-            }
-        }
-    }
-
-    fn shutdown(mut self) {
-        self.cancel_all();
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
-        }
     }
 }
 
@@ -411,9 +299,6 @@ fn main() -> Result<()> {
     // Its own lock, not the worker's. A translation out on the network holds
     // this one for as long as the walk takes; nothing else in the worker should
     // have to wait for that.
-    let providers = Arc::new(Mutex::new(Providers::new(
-        data_root().join("translation-credentials.dat"),
-    )));
     // Taken before any installation can hold the lock: cancelling must not
     // have to wait for the operation it is cancelling.
     let cancellation = recover_lock(&state).fetcher.cancellation();
@@ -421,7 +306,9 @@ fn main() -> Result<()> {
     let (writer, output_thread) = EventWriter::start()?;
     let (installs, install_thread) =
         InstallActor::start(Arc::clone(&state), writer.clone(), cancellation)?;
-    let mut coordinator = TranslationCoordinator::new();
+    let coordinator = ProviderActorHandle::start(Providers::new(
+        data_root().join("translation-credentials.dat"),
+    ))?;
     for line in BufReader::new(stdin.lock()).lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -443,13 +330,11 @@ fn main() -> Result<()> {
         if matches!(command, TranslationWorkerCommand::Shutdown) {
             break;
         }
-        coordinator.reap();
         if let Err(error) = handle_command(
             command,
             Arc::clone(&state),
-            &providers,
             &writer,
-            &mut coordinator,
+            &coordinator,
             &installs,
         ) {
             writer.send(&TranslationWorkerEvent::Failed {
@@ -461,22 +346,27 @@ fn main() -> Result<()> {
             })?;
         }
     }
-    coordinator.shutdown();
+    let provider_stopped = coordinator.shutdown();
     installs.cancel();
     installs.send(InstallCommand::Shutdown);
     drop(installs);
     let _ = install_thread.join();
     drop(writer);
-    let _ = output_thread.join();
+    if provider_stopped {
+        let _ = output_thread.join();
+    } else {
+        // A blocked provider still owns an EventWriter. Joining its output
+        // thread would reintroduce the same unbounded shutdown wait.
+        drop(output_thread);
+    }
     Ok(())
 }
 
 fn handle_command(
     command: TranslationWorkerCommand,
     state: Arc<Mutex<WorkerState>>,
-    providers: &Arc<Mutex<Providers>>,
     writer: &EventWriter,
-    coordinator: &mut TranslationCoordinator,
+    coordinator: &ProviderActorHandle,
     installs: &InstallActor,
 ) -> Result<()> {
     match command {
@@ -515,7 +405,6 @@ fn handle_command(
         } => {
             coordinator.submit(
                 state,
-                Arc::clone(providers),
                 writer.clone(),
                 Asked {
                     request_id,
@@ -531,13 +420,9 @@ fn handle_command(
         }
         TranslationWorkerCommand::SetTranslationProviders { providers: entries } => {
             let local_enabled = local_translation_enabled(&entries);
-            {
-                let mut providers = recover_lock(providers);
-                providers.set_entries(&entries);
-                writer.send(&TranslationWorkerEvent::TranslationProviders {
-                    statuses: providers.statuses(),
-                })?;
-            }
+            writer.send(&TranslationWorkerEvent::TranslationProviders {
+                statuses: coordinator.set_entries(&entries),
+            })?;
             if !local_enabled {
                 installs.cancel();
             }
@@ -550,8 +435,7 @@ fn handle_command(
             provider_id,
             secret,
         } => {
-            let mut providers = recover_lock(providers);
-            let outcome = providers.set_credential(&provider_id, secret.as_deref());
+            let (outcome, statuses) = coordinator.set_credential(&provider_id, secret.as_deref());
             // Answered either way, because a window is waiting on it and a
             // silence is indistinguishable from a success.
             writer.send(&TranslationWorkerEvent::CredentialSaved {
@@ -559,16 +443,14 @@ fn handle_command(
                 provider_id: provider_id.clone(),
                 error: outcome.err().unwrap_or_default(),
             })?;
-            writer.send(&TranslationWorkerEvent::TranslationProviders {
-                statuses: providers.statuses(),
-            })?;
+            writer.send(&TranslationWorkerEvent::TranslationProviders { statuses })?;
         }
         TranslationWorkerCommand::GetTranslationProviders => {
-            let mut providers = recover_lock(providers);
+            let (trouble, statuses) = coordinator.statuses();
             // A key file this account cannot decrypt is a thing the user has to
             // be told about: it means the profile moved, every key is gone, and
             // the rows will simply say they need one.
-            if let Some(trouble) = providers.recovery_message() {
+            if let Some(trouble) = trouble {
                 writer.send(&TranslationWorkerEvent::Failed {
                     request_id: None,
                     catalog_id: None,
@@ -577,9 +459,7 @@ fn handle_command(
                     retryable: false,
                 })?;
             }
-            writer.send(&TranslationWorkerEvent::TranslationProviders {
-                statuses: providers.statuses(),
-            })?;
+            writer.send(&TranslationWorkerEvent::TranslationProviders { statuses })?;
         }
         TranslationWorkerCommand::GetHistory { limit } => {
             let state = recover_lock(&state);
@@ -810,7 +690,7 @@ fn resolve_direction(
 
 fn translate_request(
     state: &Arc<Mutex<WorkerState>>,
-    providers: &Arc<Mutex<Providers>>,
+    providers: Option<&mut providers::ProvidersSnapshot>,
     writer: &EventWriter,
     asked: Asked,
     is_current: impl Fn() -> bool,
@@ -845,24 +725,15 @@ fn translate_request(
     // the request goes straight down the path it always did, without so much as
     // building a client.
     //
-    // Only the list is locked for the walk, never the worker's state: a
-    // translation that is out on the network must not stop a model finishing
-    // its install or the history being read.
-    let routed = {
-        // Waiting for the lock is itself a wait: a walk already out on the
-        // network holds it until the service it is talking to answers or its
-        // six seconds run out. Whoever waited behind it may have been
-        // superseded in the meantime — the user typed again, or cancelled — and
-        // there is no reason to spend somebody's allowance on a translation
-        // nobody is waiting for any more.
-        let mut providers = recover_lock(providers);
-        if !is_current() {
-            return Err(TranslationCancelled.into());
-        }
-        providers
-            .routing_required()
-            .then(|| providers.translate(&text, Some(source.code()), target.code(), &is_current))
-    };
+    // The control actor already captured this immutable provider snapshot. It
+    // remains responsive to credentials and status requests while this thread
+    // performs network I/O, and later adopts the request ledger only if its
+    // configuration revision is still current.
+    if !is_current() {
+        return Err(TranslationCancelled.into());
+    }
+    let routed = providers
+        .map(|snapshot| snapshot.translate(&text, Some(source.code()), target.code(), &is_current));
     if let Some(routed) = routed {
         match routed {
             Routed::Translated {
@@ -1017,10 +888,6 @@ fn unix_ms() -> u64 {
 
 fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn short_id(request_id: RequestId) -> String {
-    request_id.to_string().chars().take(8).collect()
 }
 
 #[cfg(test)]

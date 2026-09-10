@@ -33,8 +33,8 @@ export component ModelsPage inherits VerticalLayout {
 
     ListHead {
         index: "04 / 08";
-        title: "Models";
-        lede: "Downloaded once, verified by SHA-256, then used from disk. An interrupted download resumes where it stopped.";
+        title: @tr("Models");
+        lede: @tr("Downloaded once, verified by SHA-256, then used from disk. An interrupted download resumes where it stopped.");
         claim: root.summary;
     }
 
@@ -120,11 +120,16 @@ export component ProvidersPage inherits VerticalLayout {
     /// form does not inherit this one's complaint.
     in-out property <string> problem-for;
     in-out property <string> problem;
+    in-out property <string> draft-secret;
+    in-out property <string> draft-extra;
     callback toggle-provider(int);
     callback move-provider(int, int);
     callback use-provider-only(int);
     /// The whole configuration of one provider, sent together.
     callback save-provider(string, string, string);
+    callback edit-provider(string);
+    callback update-provider-draft(string, string, string);
+    callback discard-provider-draft(string);
     /// Deleting a stored key stays its own command, asked for in place.
     callback forget-provider-key(string);
 
@@ -132,8 +137,8 @@ export component ProvidersPage inherits VerticalLayout {
 
     ListHead {
         index: "05 / 08";
-        title: "Provider order";
-        lede: "Two separate lists. The first enabled row is used; failures move down. Choose Only for cloud-only use, or move a cloud service above This computer to keep local fallback.";
+        title: @tr("Provider order");
+        lede: @tr("Two separate lists. The first enabled row is used; failures move down. Choose Only for cloud-only use, or move a cloud service above This computer to keep local fallback.");
         claim: root.claim;
         claim-signal: root.audio-leaves-device;
     }
@@ -165,8 +170,8 @@ export component ProvidersPage inherits VerticalLayout {
                 // separate allowances, drawn as one list so they scroll together.
                 if index == 0 || root.rows[index - 1].section != row.section : GroupLabel {
                     text: row.section == "SPEECH"
-                        ? "SPEECH — WHAT TRANSCRIBES A RECORDING"
-                        : "TEXT — WHAT TRANSLATES A SELECTION";
+                        ? @tr("SPEECH — WHAT TRANSCRIBES A RECORDING")
+                        : @tr("TEXT — WHAT TRANSLATES A SELECTION");
                     // One height for every heading. A height that varied with the
                     // row's index made the list's own estimate of how tall an item
                     // is wrong, and the first heading was scrolled out of sight
@@ -195,22 +200,26 @@ export component ProvidersPage inherits VerticalLayout {
 
                     Toggle {
                         checked: row.enabled;
-                        on-label: "On";
-                        off-label: "Off";
+                        on-label: @tr("On");
+                        off-label: @tr("Off");
                         toggled(next) => { root.toggle-provider(index); }
                     }
 
                     RowAction {
-                        label: "Only";
+                        label: @tr("Only");
                         enabled: !row.needs-key || row.key-hint != "";
-                        reason: "Add a key before making this the only provider";
+                        reason: @tr("Add a key before making this the only provider");
                         clicked => { root.use-provider-only(index); }
                     }
 
                     if row.needs-key : RowAction {
-                        label: row.key-hint == "" ? "Add key" : "Replace key";
+                        label: row.key-hint == "" ? @tr("Add key") : @tr("Replace key");
                         clicked => {
-                            root.editing = root.editing == row.id ? "" : row.id;
+                            if (root.editing == row.id) {
+                                root.discard-provider-draft(row.id);
+                            } else {
+                                root.edit-provider(row.id);
+                            }
                         }
                     }
                 }
@@ -227,11 +236,15 @@ export component ProvidersPage inherits VerticalLayout {
                         padding-top: 4px;
                         spacing: 9px;
 
-                        GroupLabel { text: row.key-hint == "" ? "API KEY" : "REPLACE THE KEY"; }
+                        GroupLabel { text: row.key-hint == "" ? @tr("API KEY") : @tr("REPLACE THE KEY"); }
                         key := Field {
                             width: 340px;
-                            placeholder: "Paste the key";
+                            placeholder: @tr("Paste the key");
                             masked: true;
+                            value <=> root.draft-secret;
+                            edited(value) => {
+                                root.update-provider-draft(row.id, value, root.draft-extra);
+                            }
                         }
 
                         if row.field-label != "" : GroupLabel { text: row.field-label; }
@@ -246,12 +259,15 @@ export component ProvidersPage inherits VerticalLayout {
                             placeholder: row.field-label == "Endpoint"
                                 ? "https://speech.example.com/v1"
                                 : "";
-                            value: row.field-value;
+                            value <=> root.draft-extra;
+                            edited(value) => {
+                                root.update-provider-draft(row.id, root.draft-secret, value);
+                            }
                         }
 
                         FieldNote {
                             width: 460px;
-                            text: "Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters.";
+                            text: @tr("Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters.");
                         }
 
                         if root.problem != "" && root.problem-for == row.id : FieldNote {
@@ -264,7 +280,7 @@ export component ProvidersPage inherits VerticalLayout {
                             spacing: 9px;
                             alignment: start;
                             RowAction {
-                                label: "Save";
+                                label: @tr("Save");
                                 clicked => {
                                     // One call. Every rule — a key that is only
                                     // spaces, a missing region, an endpoint that is
@@ -272,21 +288,20 @@ export component ProvidersPage inherits VerticalLayout {
                                     // Rust, which either stores both fields together
                                     // or stores neither and says why. The form stays
                                     // open until it hears that it succeeded.
-                                    root.save-provider(row.id, key.value, extra.value);
+                                    root.save-provider(row.id, root.draft-secret, root.draft-extra);
                                 }
                             }
                             RowAction {
-                                label: "Cancel";
+                                label: @tr("Cancel");
                                 clicked => {
-                                    key.value = "";
                                     root.problem = "";
                                     root.problem-for = "";
-                                    root.editing = "";
+                                    root.discard-provider-draft(row.id);
                                 }
                             }
                             if row.key-hint != "" : ConfirmAction {
-                                label: "Remove key";
-                                question: "Remove the stored key?";
+                                label: @tr("Remove key");
+                                question: @tr("Remove the stored key?");
                                 confirmed => {
                                     root.forget-provider-key(row.id);
                                     root.editing = "";
@@ -339,10 +354,10 @@ export component HistoryPage inherits VerticalLayout {
 
     ListHead {
         index: "07 / 08";
-        title: "History";
+        title: @tr("History");
         lede: root.keeping
-            ? "Kept on this device only. Insert-last works from the newest entry."
-            : "Not kept. Insert-last still works for the newest one, which is held in memory until the application closes.";
+            ? @tr("Kept on this device only. Insert-last works from the newest entry.")
+            : @tr("Not kept. Insert-last still works for the newest one, which is held in memory until the application closes.");
         claim: root.scope;
     }
 
@@ -352,18 +367,18 @@ export component HistoryPage inherits VerticalLayout {
         alignment: start;
         Toggle {
             checked: root.keeping;
-            on-label: "Kept on this device";
-            off-label: "Not kept";
+            on-label: @tr("Kept on this device");
+            off-label: @tr("Not kept");
             toggled(next) => { root.set-keeping(next); }
         }
         Rectangle { horizontal-stretch: 1; }
         RowAction {
-            label: "Refresh";
+            label: @tr("Refresh");
             clicked => { root.refresh-history(); }
         }
         ConfirmAction {
-            label: "Clear history";
-            question: "Delete every entry from disk?";
+            label: @tr("Clear history");
+            question: @tr("Delete every entry from disk?");
             confirmed => { root.clear-history(); }
         }
     }
@@ -404,15 +419,15 @@ export component HistoryPage inherits VerticalLayout {
                     spacing: 9px;
 
                     Text {
-                        text: root.keeping ? "Nothing kept yet" : "History is switched off";
+                        text: root.keeping ? @tr("Nothing kept yet") : @tr("History is switched off");
                         color: Sheet.ink;
                         font-size: 15px;
                         font-weight: 650;
                     }
                     Text {
                         text: root.keeping
-                            ? "Every dictation you finish is written here — the words, how long the audio ran, how long it took, and whether it was transcribed on this machine or by a service. It stays on this device and nowhere else."
-                            : "Nothing is being written to disk. Insert-last still works for the newest dictation, which is held in memory until SayFlex closes.";
+                            ? @tr("Every dictation you finish is written here — the words, how long the audio ran, how long it took, and whether it was transcribed on this machine or by a service. It stays on this device and nowhere else.")
+                            : @tr("Nothing is being written to disk. Insert-last still works for the newest dictation, which is held in memory until SayFlex closes.");
                         color: Sheet.muted;
                         font-size: Sheet.detail-size;
                         wrap: word-wrap;
@@ -463,8 +478,8 @@ export component HistoryPage inherits VerticalLayout {
                         }
                         Text {
                             text: root.keeping
-                                ? "Hold " + root.hotkey + " anywhere in Windows to start one."
-                                : "Switch it on above and dictations from then on are kept.";
+                                ? @tr("Hold ") + root.hotkey + @tr(" anywhere in Windows to start one.")
+                                : @tr("Switch it on above and dictations from then on are kept.");
                             color: Sheet.ink;
                             font-size: Sheet.detail-size;
                             font-weight: 600;
@@ -490,11 +505,11 @@ export component HistoryPage inherits VerticalLayout {
             for row[index] in root.rows : ListRow {
                 title: row.text;
                 detail: row.detail;
-                state-text: row.origin == "remote" ? "Sent to a service" : "On this device";
+                state-text: row.origin == "remote" ? @tr("Sent to a service") : @tr("On this device");
                 tone: row.origin == "remote" ? "refused" : "resting";
 
                 RowAction {
-                    label: "Copy";
+                    label: @tr("Copy");
                     clicked => { root.copy-history(index); }
                 }
             }

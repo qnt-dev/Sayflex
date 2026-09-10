@@ -1,0 +1,291 @@
+NoneInstalledYet|None installed yet
+OneInstalled|1 installed
+ManyInstalled|{count} installed
+NoCompatibleSpeechBackend|No compatible speech backend is active
+LocalSpeechReady|Local speech · ready
+LocalSpeechStarting|Local speech · starting
+SpeechServiceUnavailable|Speech service · unavailable
+ShownWhileRecording|{name} · shown while recording
+Applying|Applying
+WaitingForWindows|Waiting for Windows
+DecideFromText|Decide from the text
+AlwaysAsk|Always ask
+PausedShortcuts|Paused · {count} shortcuts configured
+ApplyingShortcuts|Waiting for Windows to accept the new shortcuts
+ActiveShortcuts|{count} of 5 shortcuts active
+NoSpeechModel|No speech model is installed, so nothing can be dictated yet.
+SpeechEngine|SPEECH ENGINE
+SpeechModel|SPEECH MODEL
+Translation|TRANSLATION
+History|HISTORY
+None|none
+NoneSelected|none selected
+Preference|preference: {value}
+Off|off
+Ready|ready
+Cold|cold
+KeptOnDevice|{count} kept on this device
+NotKept|not kept
+NothingKeptYet|Nothing kept yet
+AllKeptOnDevice|{count} kept · all on this device
+ShowingAllOnDevice|Showing {count} · all on this device
+SomeSentToService|{count} kept · {remote} went to a service
+ShowingSomeSent|Showing {count} · {remote} of them went to a service
+EnglishToCyrillic|English keys → Cyrillic layout
+CyrillicToLatin|Cyrillic keys → Latin layout
+SpeechSection|Speech
+TranslationSection|Translation
+Recommended|recommended
+RecommendedForSystemLanguage|recommended for your system language
+Cancel|Cancel
+InUse|In use
+Installed|Installed
+Use|Use
+NotInstalled|Not installed
+Install|Install
+SwitchedOff|Switched off
+NoKeyStored|No key stored
+KeyRefused|Key refused
+CoolingDown|Cooling down
+Unavailable|Unavailable
+NeverReached|Never reached
+StandingBy|Standing by
+ThisComputer|This computer
+GoogleUnsupported|Google Cloud Translation (unsupported)
+RunsOnComputer|Runs on this computer · nothing leaves it
+DeepLAvailability|Cloud translation · availability follows your DeepL account
+AzureRegionOptional|Cloud translation · region is optional for global resources
+LegacyProviderUnsupported|Kept from older settings · not supported by this version
+UnknownService|This build does not know this service
+KeyDetail|Key {hint}{extra} · {about}
+GroqAvailability|Cloud speech · availability follows your Groq account
+CloudflareAvailability|Cloud speech · availability follows your Cloudflare account
+AzureSpeechAvailability|Cloud speech · availability follows your Azure account
+DeepgramAvailability|Cloud speech · availability follows your Deepgram account
+CustomEndpoint|Any OpenAI-compatible address · HTTPS only
+NothingCanTranscribe|Nothing can transcribe right now
+NothingCanTranscribeTextLeaves|Nothing can transcribe · text leaves this device for {text}
+EverythingStays|Audio and text stay on this device
+AudioLeavesFor|Audio leaves this device for {audio}
+TextLeavesFor|Text leaves this device for {text}
+EverythingLeavesFor|Audio and text leave this device for {service}
+DifferentServices|Audio leaves for {audio}, text for {text}
+EverythingStaysBadge|EVERYTHING STAYS HERE
+AudioLeavesBadge|AUDIO LEAVES DEVICE
+TextLeavesBadge|TEXT LEAVES DEVICE
+EverythingLeavesBadge|AUDIO AND TEXT LEAVE
+Local|local
+TranslationCompletedLocal|Translation completed locally.
+TranslationCompletedProvider|Translated by {provider}.
+ViaProvider|via {provider}
+Prepared|prepared
+AudioDuration|{language} · {seconds}s audio · {milliseconds}ms release{prepared}{source}
+ProcessingDuration|{language} · {seconds}s audio · {milliseconds}ms processing{source}
+SentToService|Sent to a service
+OnThisDevice|On this device
+Fastest|Fastest
+Efficient|Efficient
+OriginalLanguage|Original language
+TranslateToEnglish|Translate to English
+ReadyTitle|Ready
+NotReady|Not ready
+StartingUp|Starting up
+ShowPreview|Show a preview
+ReplaceSelection|Replace the selection
+CopyIt|Copy it
+VoiceOrb|Voice orb
+Spectrum|Spectrum
+FluidRibbon|Fluid ribbon
+BroadcastMic|Broadcast mic
+Circular|Circular
+FlowSphere|Flow sphere
+WritingSlate|Writing slate
+CompanionOrb|Companion orb
+Dictation|Dictation
+CopyLatestTranscript|Copy latest transcript
+CorrectLayout|Correct keyboard layout
+TextActions|Text actions
+AlwaysAvailable|Always available
+Disabled|Disabled
+Enabled|Enabled
+Refresh|Refresh
+Save|Save
+RemoveKey|Remove key
+StartingWorkers|Starting workers…
+Translating|Translating locally…
+ChooseTranslationModel|Choose a translation model in Settings.
+NoOverlay|no overlay
+WhateverYouSpoke|Whatever you spoke, written as spoken
+OnSelectedText|On selected text
+OriginalSelectionActive|Original selection remains active
+SwitchOff|Switched off
+InputServiceNotReady|Input service is not ready yet.
+ShortcutChangeBusy|Wait for the current shortcut change to finish.
+CouldNotApplyShortcuts|Could not apply shortcuts: {error}
+ModelDownloadResume|A model is downloading. It resumes if it is interrupted.
+TranslationRouteNotReady|Translation is on, but no text route is ready yet.
+LayoutConversionUnavailable|No RU/EN layout conversion is available.
+InterfaceLanguageUnavailable|That interface language is not available.
+CheckingBackend|Checking backend
+SpokenLanguageUnsupported|That spoken language is not supported.
+EnterTextToTranslate|Enter text to translate.
+LocalTranslationLoading|The local translation model is still loading.
+NoTranslationProviderReady|No translation provider is ready. Choose a local model or configure a service in Settings.
+TranslatingNow|Translating…
+CouldNotTranslate|Could not translate: {error}
+CopiedToClipboard|Copied to clipboard.
+DirectionDetectAgain|Direction will be detected again when you translate.
+WorkerError|Worker error
+RecoveringWorker|Recovering worker
+WorkerUnavailable|Worker unavailable
+WorkerMismatch|Worker mismatch
+InputReady|Input ready
+ShortcutsUpdated|Shortcuts updated.
+InputWorkerNotReady|Input worker is not ready.
+FinishingPreviousDictation|Finishing the previous dictation…
+CouldNotStartRecording|Could not start recording: {error}
+Listening|Listening…
+CouldNotFinishRecording|Could not finish recording: {error}
+ProcessingLocally|Processing locally…
+LoadingLatestTranscript|Loading the latest transcript…
+ReadingSelectedText|Reading selected text…
+TranslationReadyBut|Translation ready, but {message}
+SelectionIssue|Selection: {message}
+ReplacementSent|Replacement was sent to the target.
+TranslationCopied|Translation copied to the clipboard.
+LayoutCorrectionDisabled|Keyboard-layout correction is disabled.
+AllTextActionsDisabled|All selected-text actions are disabled.
+TranslationDisabled|Translation is disabled in Actions.
+CouldNotStartTranslation|Could not start translation: {error}
+PreparingModel|Preparing model
+CloudSpeechReady|Cloud speech ready
+LoadingSpeechEngine|Loading and warming the local speech engine…
+InstallingModel|Installing {model}…
+CheckingFallback|Checking fallback
+ReadyHoldToSpeak|Ready · hold Ctrl + Alt + Space to speak.
+SpeechModelSelected|Speech model selected.
+TranscriptSavedTargetLost|Transcript saved to history; target was lost.
+TranscribedBy|Transcribed by {provider}.
+NoTranscriptToInsert|There is no transcript to insert yet.
+DownloadingModel|Downloading model… {percent}%
+DownloadingNamedModel|Downloading {model}: {percent}%
+TranslationCancelled|Translation cancelled.
+TechnicalFailure|{code}: {message}
+Account|Account
+Region|Region
+Endpoint|Endpoint
+InputPaused|Input features paused. Use the pause shortcut again to resume.
+InputResumed|Input features resumed.
+SpeechServiceStarting|Speech service is still starting.
+SpeechModelPreparing|Speech model is still being prepared.
+DictationStillProcessing|Dictation {session} is still processing; it will be inserted here when ready.
+InsertedTargetAdapter|Inserted {delivery} through the target adapter in {milliseconds} ms
+InsertedPrivateTransaction|Inserted {delivery} after the target read the private transaction in {milliseconds} ms
+VerifiedInsertion|Verified insertion {delivery} in {milliseconds} ms
+PasteDispatched|Paste dispatched {delivery} without target verification in {milliseconds} ms
+InputProtocolMismatch|Input worker protocol mismatch. Reinstall the complete application.
+SpeechProtocolMismatch|Speech worker protocol mismatch. Reinstall the complete application.
+CloudSpeechLocalDisabled|Cloud speech is ready. The local speech engine is disabled.
+BackendFallback|The speech backend was inconsistent; checking {backend} instead.
+BackendVerificationFailed|Speech backend verification failed: {error}
+NoCompatibleBackend|No compatible speech backend is available: {error}
+CloudTranslationStarting|Cloud translation is starting. The local model is disabled.
+CloudTranslationReady|Cloud translation ready. The local model is disabled.
+TranslationModelReady|Translation model ready in {milliseconds} ms.
+ReadyDirectionDetected|Ready · language direction is detected locally.
+TranslatingLocallyProgress|Translating locally… {chunk}/{total}
+TranslatingLocally|Translating locally…
+TranslationWaitingRelease|Translation ready; waiting for the shortcut to be released.
+CouldNotSwitchInterface|Could not switch the interface language: {error}
+BackendInitializationFailed|Speech backend initialization failed: {error}
+CheckingNamedBackend|Checking {backend} with the selected Whisper model…
+BackendChangeFailed|Speech backend could not be changed: {error}
+ModelCannotTranslate|This model was not trained to translate. Use the selection translator instead.
+KeyRequiredToRemove|A key is needed. To remove the one already stored, use Remove key.
+KeyNotStored|The key was not stored: {error}
+TranscriptionOrderFailed|The transcription order could not be applied: {error}
+HoldShortcut|Hold {shortcut} to dictate.
+CompanionProtocolMismatch|Companion Orb protocol mismatch. Reinstall the complete application.
+TranslationProtocolMismatch|Translation worker protocol mismatch. Reinstall the complete application.
+BackendFailureFallback|{code} on the selected backend; checking {backend} automatically.
+NoTranslationModelInstalled|No model installed. Choose Fast or Quality in Settings.
+SpeechTranslationDisabled|Speech translation was turned off because no enabled provider supports it.
+NoTranscriptionProviderReady|No transcription provider is ready. Enable a local model or configure a speech service in Settings.
+CompanionOrbStatus|Companion Orb: {message}
+CompanionOrbRestarted|Companion Orb restarted. Dictation continued normally.
+CompanionOrbUnavailable|Companion Orb is unavailable: {error}
+ListeningCompanionUnavailable|Listening; Companion Orb unavailable: {error}
+LatestTranscriptCopied|Latest transcript {session} copied. Shift+Insert is ready.
+ChooseTranslationRoute|Choose a local translation model or configure a text service in Settings first.
+LatestDictationCancelled|The latest dictation was cancelled and cannot be inserted.
+WarmingBackend|Warming up on {backend}. If it fails, the search moves to the next one down.
+VisualLevelDetail|Follows the level of your voice
+VisualBandsDetail|Thirty-two bands, thirty-one times a second
+VisualLineDetail|One line that thickens with the voice
+VisualMicrophoneDetail|Level bars beside a studio microphone
+VisualRingDetail|The spectrum wrapped into a ring
+VisualWordsDetail|The words as they are recognised
+VisualCompanionDetail|Stays where you put it, between dictations
+VisualNoneDetail|No overlay is drawn while recording
+VisualDisabledDetail|The microphone and transcription keep working; only the overlay is disabled.
+VisualExternalDetail|Drawn on its own native surface, so it can be transparent per pixel.
+VisualInternalDetail|Drawn by the application itself, over whatever you are typing into.
+CouldNotConfigureTranslationModel|Could not configure translation model: {error}
+LoadingSelectedTranslationModel|Loading the selected translation model…
+DownloadingTranslationModel|Downloading and verifying the translation model…
+CouldNotStartCompanion|Could not start Companion Orb: {error}
+CompanionActive|Companion Orb is active on the desktop.
+VisualizerUpdated|Visualizer updated. The next dictation uses the selected style.
+BroadcastColourUpdated|Broadcast microphone colour updated for the next dictation.
+CircularPaletteUpdated|Circular spectrum palette updated for the next dictation.
+FlowPaletteUpdated|Flow Sphere palette updated for the next dictation.
+SlateSurfaceUpdated|Writing Slate surface updated for the next dictation.
+HistoryCleared|Local voice and translation history cleared.
+ProviderKeyNeededForOnly|Add and save this provider's key before making it the only route.
+InstallCancelled|Install cancelled. The partial file is kept.
+CouldNotCancelInstall|Could not cancel the install: {error}
+ProviderKeySendFailed|The key could not be sent to the worker: {error}
+StoringProviderKey|Storing the key for {provider}…
+RemovingProviderKey|Removing the key for {provider}…
+ProviderKeyRemoveFailed|The key could not be removed: {error}
+PauseShortcutRequired|The pause/resume recovery shortcut must stay enabled.
+InvalidGlobalShortcut|That key cannot be used as a global shortcut.
+AllowedGlobalShortcutKeys|Use a letter, number, function key, Space, Tab, Enter, or arrow key.
+ProviderKeyRemoved|The key for {provider} has been removed.
+ProviderKeyStored|The key for {provider} is stored.
+TranslationOrderFailed|The translation order could not be applied: {error}
+ProviderKeyRequired|A key is needed. To remove the one already stored, use Remove key.
+ProviderFieldRequired|{field} is needed as well as the key.
+ProviderEndpointHttps|The endpoint must be HTTPS: the key and the audio both travel in this request.
+BackendVerified|{backend} verified by warm-up. The preference above is where the search starts.
+CpuPreviewUnavailable|Not available on the CPU engine: one pass at a time, and a preview is time the transcript waits.
+VisualFlowDetail|A point cloud that accelerates on voice onset
+VisualShownWhileRecording|{visual} · shown while recording
+DictateAction|Dictate
+InsertLastAction|Insert last
+ActOnSelectionAction|Act on selection
+PauseResumeAction|Pause / resume
+WorkerRestarted|Worker restarted automatically.
+WorkerRestartFailed|Worker restart failed. See the diagnostic log for details.
+DictationInsertionFailed|The latest dictation could not be inserted.
+CredentialOutcomeUnknown|No answer arrived from the worker, so whether the key was stored is not known yet. The row will show the stored state when the worker answers; sending again is safe.
+ProviderDidNotConfirm|{provider} did not confirm the key.
+CredentialWorkerStopped|The worker stopped before confirming the key. The row will show the stored state after recovery.
+ProviderDidNotAccept|{provider} did not accept the key.
+SystemLanguage|System language
+AutoDetect|Auto-detect
+AutoUpper|AUTO
+EnglishLanguage|English
+RussianLanguage|Russian
+UkrainianLanguage|Ukrainian
+SpanishLanguage|Spanish
+PortugueseBrazilLanguage|Portuguese (Brazil)
+GermanLanguage|German
+FrenchLanguage|French
+ItalianLanguage|Italian
+ChineseSimplifiedLanguage|Chinese (Simplified)
+ChineseTraditionalLanguage|Chinese (Traditional)
+JapaneseLanguage|Japanese
+KoreanLanguage|Korean
+HindiLanguage|Hindi
+ArabicLanguage|Arabic

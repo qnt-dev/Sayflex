@@ -45,7 +45,7 @@ struct ProviderState {
 
 /// Remembers what each provider did last, so the chain does not keep walking
 /// into the same wall.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Ledger {
     states: HashMap<ProviderId, ProviderState>,
 }

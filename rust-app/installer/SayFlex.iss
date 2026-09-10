@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.6.3"
+  #define AppVersion "0.7.0"
 #endif
 
 #define AppName "SayFlex"
@@ -30,9 +30,49 @@ UninstallDisplayIcon={app}\{#AppExeName}
 SetupLogging=yes
 SetupIconFile=..\..\resources\icons\sayflex.ico
 
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
+Name: "ukrainian"; MessagesFile: "compiler:Languages\Ukrainian.isl"
+Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
+Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
+Name: "german"; MessagesFile: "compiler:Languages\German.isl"
+Name: "french"; MessagesFile: "compiler:Languages\French.isl"
+Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
+Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
+
+[CustomMessages]
+english.AutostartTask=Start SayFlex with Windows
+russian.AutostartTask=Запускать SayFlex вместе с Windows
+ukrainian.AutostartTask=Запускати SayFlex разом із Windows
+spanish.AutostartTask=Iniciar SayFlex con Windows
+brazilianportuguese.AutostartTask=Iniciar o SayFlex com o Windows
+german.AutostartTask=SayFlex mit Windows starten
+french.AutostartTask=Démarrer SayFlex avec Windows
+italian.AutostartTask=Avvia SayFlex con Windows
+korean.AutostartTask=Windows 시작 시 SayFlex 실행
+english.DesktopIconTask=Create a desktop shortcut
+russian.DesktopIconTask=Создать ярлык на рабочем столе
+ukrainian.DesktopIconTask=Створити ярлик на робочому столі
+spanish.DesktopIconTask=Crear un acceso directo en el escritorio
+brazilianportuguese.DesktopIconTask=Criar um atalho na área de trabalho
+german.DesktopIconTask=Desktopverknüpfung erstellen
+french.DesktopIconTask=Créer un raccourci sur le bureau
+italian.DesktopIconTask=Crea un collegamento sul desktop
+korean.DesktopIconTask=바탕 화면 바로 가기 만들기
+english.LaunchTask=Launch SayFlex
+russian.LaunchTask=Запустить SayFlex
+ukrainian.LaunchTask=Запустити SayFlex
+spanish.LaunchTask=Iniciar SayFlex
+brazilianportuguese.LaunchTask=Iniciar o SayFlex
+german.LaunchTask=SayFlex starten
+french.LaunchTask=Lancer SayFlex
+italian.LaunchTask=Avvia SayFlex
+korean.LaunchTask=SayFlex 실행
+
 [Tasks]
-Name: "autostart"; Description: "Start SayFlex with Windows"; Flags: unchecked
-Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
+Name: "autostart"; Description: "{cm:AutostartTask}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:DesktopIconTask}"; Flags: unchecked
 
 [InstallDelete]
 Type: files; Name: "{autodesktop}\Rust Voice.lnk"
@@ -58,7 +98,7 @@ Name: "{autodesktop}\SayFlex"; Filename: "{app}\{#AppExeName}"; Tasks: desktopic
 Name: "{userstartup}\SayFlex"; Filename: "{app}\{#AppExeName}"; Parameters: "--background"; Tasks: autostart; AppUserModelID: "SayFlex.Desktop"
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "Launch SayFlex"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchTask}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 procedure RemoveLegacyApplicationFiles;

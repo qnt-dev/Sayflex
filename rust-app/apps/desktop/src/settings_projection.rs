@@ -15,7 +15,11 @@ use rust_protocol::{
     TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
 };
 
-use crate::{HistoryRow, ModelRow, ProviderRow, providers_view::provider_display_name};
+use crate::{
+    HistoryRow, ModelRow, ProviderRow,
+    localization::{UiLocale, UiText, render, text},
+    providers_view::provider_display_name,
+};
 
 /// How far along an install is, when one is running.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,19 +71,24 @@ fn human_size(bytes: u64) -> String {
 /// Cancel while a download runs. There is no Remove, because no command in the
 /// protocol removes a model and a button that cannot do its job is worse than
 /// no button.
-pub(crate) fn speech_model_row(model: &ModelSummary, download: Option<Download>) -> ModelRow {
-    let (state, tone, action, progress) = model_progress(model.installed, model.selected, download);
+pub(crate) fn speech_model_row_localized(
+    model: &ModelSummary,
+    download: Option<Download>,
+    locale: UiLocale,
+) -> ModelRow {
+    let (state, tone, action, progress) =
+        model_progress_localized(model.installed, model.selected, download, locale);
     ModelRow {
         catalog_id: model.catalog_id.clone().into(),
-        section: "Speech".into(),
+        section: text(locale, UiText::SpeechSection).into(),
         title: model.display_name.clone().into(),
         detail: format!(
             "{}{}",
             model.description,
             if model.recommended {
-                " · recommended"
+                format!(" · {}", text(locale, UiText::Recommended))
             } else {
-                ""
+                String::new()
             }
         )
         .into(),
@@ -95,24 +104,26 @@ pub(crate) fn speech_model_row(model: &ModelSummary, download: Option<Download>)
 }
 
 /// One row of the translation-model list.
-pub(crate) fn translation_model_row(
+pub(crate) fn translation_model_row_localized(
     model: &TranslationModelSummary,
     selected: bool,
     download: Option<Download>,
+    locale: UiLocale,
 ) -> ModelRow {
-    let (state, tone, action, progress) = model_progress(model.installed, selected, download);
+    let (state, tone, action, progress) =
+        model_progress_localized(model.installed, selected, download, locale);
     ModelRow {
         catalog_id: model.catalog_id.clone().into(),
-        section: "Translation".into(),
+        section: text(locale, UiText::TranslationSection).into(),
         title: model.display_name.clone().into(),
         detail: format!(
             "{} · {}{}",
             model.description,
             model.license,
             if model.recommended {
-                " · recommended for your system language"
+                format!(" · {}", text(locale, UiText::RecommendedForSystemLanguage))
             } else {
-                ""
+                String::new()
             }
         )
         .into(),
@@ -127,11 +138,21 @@ pub(crate) fn translation_model_row(
     }
 }
 
+#[cfg(test)]
 fn model_progress(
     installed: bool,
     selected: bool,
     download: Option<Download>,
-) -> (String, &'static str, &'static str, f32) {
+) -> (String, &'static str, String, f32) {
+    model_progress_localized(installed, selected, download, UiLocale::English)
+}
+
+fn model_progress_localized(
+    installed: bool,
+    selected: bool,
+    download: Option<Download>,
+    locale: UiLocale,
+) -> (String, &'static str, String, f32) {
     // A model on disk is not coming down the wire, whatever the last progress
     // report said. The lifecycle already clears the entry on every terminal
     // event; this is the rule stated where the row is drawn, so that forgetting
@@ -142,33 +163,68 @@ fn model_progress(
         return (
             format!("{} %", download.percent()),
             tone::WORKING,
-            "Cancel",
+            text(locale, UiText::Cancel).to_owned(),
             download.fraction(),
         );
     }
     if selected {
-        return ("In use".to_owned(), tone::ACTIVE, "", 0.0);
+        return (
+            text(locale, UiText::InUse).to_owned(),
+            tone::ACTIVE,
+            String::new(),
+            0.0,
+        );
     }
     if installed {
-        return ("Installed".to_owned(), tone::RESTING, "Use", 0.0);
+        return (
+            text(locale, UiText::Installed).to_owned(),
+            tone::RESTING,
+            text(locale, UiText::Use).to_owned(),
+            0.0,
+        );
     }
-    ("Not installed".to_owned(), tone::OFF, "Install", 0.0)
+    (
+        text(locale, UiText::NotInstalled).to_owned(),
+        tone::OFF,
+        text(locale, UiText::Install).to_owned(),
+        0.0,
+    )
 }
 
 /// One row of the transcription order.
 ///
-/// `status` is what the worker last reported about this entry, including its
-/// own words for why it cannot run. `unreachable` is this window's own
+/// `status` is what the worker last reported about this entry. Its typed state
+/// is localized for the state column; free-form diagnostic prose stays in the
+/// log instead of leaking English into another locale. `unreachable` is this window's own
 /// conclusion: the router hands the recording to the local engine as soon as it
 /// reaches an enabled one and stops there, so anything below that row is never
 /// asked. Leaving such a row looking ready would be the interface promising
 /// something the router does not do.
+#[cfg(test)]
 pub(crate) fn provider_row(
     entry: &TranscriptionProviderEntry,
     status: Option<&TranscriptionProviderStatus>,
     position: usize,
     first_local: Option<usize>,
     first_usable: Option<usize>,
+) -> ProviderRow {
+    provider_row_localized(
+        entry,
+        status,
+        position,
+        first_local,
+        first_usable,
+        UiLocale::English,
+    )
+}
+
+pub(crate) fn provider_row_localized(
+    entry: &TranscriptionProviderEntry,
+    status: Option<&TranscriptionProviderStatus>,
+    position: usize,
+    first_local: Option<usize>,
+    first_usable: Option<usize>,
+    locale: UiLocale,
 ) -> ProviderRow {
     let unreachable = first_local.is_some_and(|local| position > local);
     let has_credential = status.is_some_and(|status| status.has_credential);
@@ -177,29 +233,25 @@ pub(crate) fn provider_row(
         .unwrap_or_default();
     let unavailable_reason = !detail.is_empty();
 
-    let (state, tone) = row_state(
+    let (state, tone) = row_state_localized(
         entry.enabled,
         &entry.id,
         has_credential,
         &detail,
         unreachable,
         first_usable == Some(position),
+        locale,
     );
     let _ = unavailable_reason;
 
     ProviderRow {
         id: qualified_row_id("speech", &entry.id).into(),
-        section: "SPEECH".into(),
-        title: provider_display_name(&entry.id).into(),
-        // The worker's sentence when it says more than the state column
-        // already does. "Switched off" in both places is a row saying one
-        // thing twice and losing the line that told you what the service is.
-        detail: if detail.is_empty() || detail == state {
-            provider_detail(entry, status)
-        } else {
-            detail
-        }
-        .into(),
+        section: text(locale, UiText::SpeechSection).into(),
+        title: provider_display_name_localized(&entry.id, locale).into(),
+        // Stable localized capability text belongs here. The state column
+        // carries the localized failure class; arbitrary worker diagnostics
+        // remain in the log.
+        detail: provider_detail(entry, status, locale).into(),
         enabled: entry.enabled,
         available: status.is_some_and(|status| status.available),
         needs_key: entry.id != "local",
@@ -207,7 +259,13 @@ pub(crate) fn provider_row(
             .and_then(|status| status.credential_hint.clone())
             .unwrap_or_default()
             .into(),
-        field_label: crate::providers_view::provider_field_label(&entry.id).into(),
+        field_label: match entry.id.as_str() {
+            "cloudflare" => text(locale, UiText::Account),
+            "azure" => text(locale, UiText::Region),
+            "custom" => text(locale, UiText::Endpoint),
+            _ => "",
+        }
+        .into(),
         field_value: crate::providers_view::provider_field_value(entry).into(),
         state: state.into(),
         tone: tone.into(),
@@ -219,38 +277,39 @@ pub(crate) fn provider_row(
 ///
 /// The column is short words because it is a column: a sentence there either
 /// elides to nothing useful or pushes the row's controls off the edge. The
-/// worker's own sentence goes on the detail line, where there is room for it
-/// and where the eye is already reading.
+/// free-form worker sentence remains diagnostic-only; the detail line keeps
+/// stable localized capability text.
 ///
 /// Shared by both lists, because a row is a row: whether it is a service that
 /// transcribes or one that translates changes nothing about what "cooling down"
 /// looks like.
-fn row_state(
+fn row_state_localized(
     enabled: bool,
     id: &str,
     has_credential: bool,
     detail: &str,
     unreachable: bool,
     in_use: bool,
-) -> (&'static str, &'static str) {
+    locale: UiLocale,
+) -> (String, &'static str) {
     if !enabled {
-        ("Switched off", tone::OFF)
+        (text(locale, UiText::SwitchedOff).to_owned(), tone::OFF)
     } else if id != "local" && !has_credential {
-        ("No key stored", tone::OFF)
+        (text(locale, UiText::NoKeyStored).to_owned(), tone::OFF)
     } else if !detail.is_empty() {
         if detail.starts_with("Key refused") {
-            ("Key refused", tone::REFUSED)
+            (text(locale, UiText::KeyRefused).to_owned(), tone::REFUSED)
         } else if detail.contains("available again") || detail.starts_with("Waiting") {
-            ("Cooling down", tone::WORKING)
+            (text(locale, UiText::CoolingDown).to_owned(), tone::WORKING)
         } else {
-            ("Unavailable", tone::WORKING)
+            (text(locale, UiText::Unavailable).to_owned(), tone::WORKING)
         }
     } else if unreachable {
-        ("Never reached", tone::OFF)
+        (text(locale, UiText::NeverReached).to_owned(), tone::OFF)
     } else if in_use {
-        ("In use", tone::ACTIVE)
+        (text(locale, UiText::InUse).to_owned(), tone::ACTIVE)
     } else {
-        ("Standing by", tone::RESTING)
+        (text(locale, UiText::StandingBy).to_owned(), tone::RESTING)
     }
 }
 
@@ -262,38 +321,43 @@ pub(crate) fn qualified_row_id(kind: &str, id: &str) -> String {
     format!("{kind}:{id}")
 }
 
+pub(crate) fn provider_display_name_localized(id: &str, locale: UiLocale) -> String {
+    if id == "local" {
+        text(locale, UiText::ThisComputer).to_owned()
+    } else {
+        provider_display_name(id)
+    }
+}
+
 /// One row of the translation order.
-pub(crate) fn translation_provider_row(
+pub(crate) fn translation_provider_row_localized(
     entry: &TranslationProviderEntry,
     status: Option<&TranslationProviderStatus>,
     position: usize,
     first_local: Option<usize>,
     first_usable: Option<usize>,
+    locale: UiLocale,
 ) -> ProviderRow {
     let unreachable = first_local.is_some_and(|local| position > local);
     let has_credential = status.is_some_and(|status| status.has_credential);
     let detail = status
         .map(|status| status.detail.clone())
         .unwrap_or_default();
-    let (state, tone) = row_state(
+    let (state, tone) = row_state_localized(
         entry.enabled,
         &entry.id,
         has_credential,
         &detail,
         unreachable,
         first_usable == Some(position),
+        locale,
     );
 
     ProviderRow {
         id: qualified_row_id("text", &entry.id).into(),
-        section: "TEXT".into(),
-        title: translation_provider_display_name(&entry.id).into(),
-        detail: if detail.is_empty() || detail == state {
-            translation_provider_detail(entry, status)
-        } else {
-            detail
-        }
-        .into(),
+        section: text(locale, UiText::TranslationSection).into(),
+        title: translation_provider_display_name_localized(&entry.id, locale).into(),
+        detail: translation_provider_detail(entry, status, locale).into(),
         enabled: entry.enabled,
         available: status.is_some_and(|status| status.available),
         needs_key: entry.id != "local",
@@ -301,7 +365,12 @@ pub(crate) fn translation_provider_row(
             .and_then(|status| status.credential_hint.clone())
             .unwrap_or_default()
             .into(),
-        field_label: if entry.id == "azure" { "Region" } else { "" }.into(),
+        field_label: if entry.id == "azure" {
+            text(locale, UiText::Region)
+        } else {
+            ""
+        }
+        .into(),
         field_value: entry.region.clone().unwrap_or_default().into(),
         state: state.into(),
         tone: tone.into(),
@@ -310,31 +379,37 @@ pub(crate) fn translation_provider_row(
 }
 
 pub(crate) fn translation_provider_display_name(id: &str) -> String {
+    translation_provider_display_name_localized(id, UiLocale::English)
+}
+
+pub(crate) fn translation_provider_display_name_localized(id: &str, locale: UiLocale) -> String {
     match id {
-        "local" => "This computer".to_owned(),
+        "local" => text(locale, UiText::ThisComputer).to_owned(),
         "deepl" => "DeepL".to_owned(),
         "azure" => "Microsoft Azure Translator".to_owned(),
-        "google" => "Google Cloud Translation".to_owned(),
+        // Older settings may retain this unknown row. It is preserved but is
+        // not offered or routed by this build.
+        "google" => text(locale, UiText::GoogleUnsupported).to_owned(),
         other => other.to_owned(),
     }
 }
 
 /// What the service is, plus the masked tail of the key if one is stored.
 ///
-/// The free allowance each one publishes, because that is the thing a person
-/// choosing between them actually wants to know. No counter of what is left:
-/// nothing here is told, and a number this window invents is a number it then
-/// has to defend.
+/// Availability is deliberately worded without a numeric quota: commercial
+/// allowances vary by account, region and date, and the worker has no live
+/// remaining-quota value to report.
 fn translation_provider_detail(
     entry: &TranslationProviderEntry,
     status: Option<&TranslationProviderStatus>,
+    locale: UiLocale,
 ) -> String {
     let about = match entry.id.as_str() {
-        "local" => "Runs on this computer · nothing leaves it",
-        "deepl" => "Free tier: 500 000 characters a month",
-        "azure" => "Free tier F0: 2 million characters a month · needs a region",
-        "google" => "Free tier: 500 000 characters a month",
-        _ => "This build does not know this service",
+        "local" => text(locale, UiText::RunsOnComputer),
+        "deepl" => text(locale, UiText::DeepLAvailability),
+        "azure" => text(locale, UiText::AzureRegionOptional),
+        "google" => text(locale, UiText::LegacyProviderUnsupported),
+        _ => text(locale, UiText::UnknownService),
     };
     match status.and_then(|status| status.credential_hint.as_deref()) {
         Some(hint) if !hint.is_empty() => {
@@ -343,7 +418,11 @@ fn translation_provider_detail(
                 .as_deref()
                 .filter(|region| !region.is_empty())
                 .map_or_else(String::new, |region| format!(" · {region}"));
-            format!("Key {hint}{extra} · {about}")
+            render(
+                locale,
+                UiText::KeyDetail,
+                &[("hint", hint), ("extra", &extra), ("about", about)],
+            )
         }
         _ => about.to_owned(),
     }
@@ -356,8 +435,9 @@ fn translation_provider_detail(
 fn provider_detail(
     entry: &TranscriptionProviderEntry,
     status: Option<&TranscriptionProviderStatus>,
+    locale: UiLocale,
 ) -> String {
-    let about = provider_about(&entry.id, entry);
+    let about = provider_about(&entry.id, entry, locale);
     match status.and_then(|status| status.credential_hint.as_deref()) {
         Some(hint) if !hint.is_empty() => {
             let extra = entry
@@ -365,23 +445,27 @@ fn provider_detail(
                 .as_deref()
                 .filter(|account| !account.is_empty())
                 .map_or_else(String::new, |account| format!(" · {account}"));
-            format!("Key {hint}{extra} · {about}")
+            render(
+                locale,
+                UiText::KeyDetail,
+                &[("hint", hint), ("extra", &extra), ("about", &about)],
+            )
         }
         _ => about,
     }
 }
 
-fn provider_about(id: &str, entry: &TranscriptionProviderEntry) -> String {
+fn provider_about(id: &str, entry: &TranscriptionProviderEntry, locale: UiLocale) -> String {
     match id {
-        "local" => "Runs on this computer · nothing leaves it".to_owned(),
-        "groq" => "Free tier: 2 000 requests a day".to_owned(),
-        "cloudflare" => "Free tier: 10 000 neurons a day, shared across models".to_owned(),
-        "azure" => "Free tier F0: 5 hours a month · needs a region".to_owned(),
-        "deepgram" => "$200 of credit, no expiry".to_owned(),
+        "local" => text(locale, UiText::RunsOnComputer).to_owned(),
+        "groq" => text(locale, UiText::GroqAvailability).to_owned(),
+        "cloudflare" => text(locale, UiText::CloudflareAvailability).to_owned(),
+        "azure" => text(locale, UiText::AzureSpeechAvailability).to_owned(),
+        "deepgram" => text(locale, UiText::DeepgramAvailability).to_owned(),
         "custom" => entry
             .endpoint
             .clone()
-            .unwrap_or_else(|| "Any OpenAI-compatible address · HTTPS only".to_owned()),
+            .unwrap_or_else(|| text(locale, UiText::CustomEndpoint).to_owned()),
         other => other.to_owned(),
     }
 }
@@ -433,7 +517,12 @@ impl Departures {
 ///
 /// Both pages read it from here so the window cannot say two different things
 /// about the same arrangement.
+#[cfg(test)]
 pub(crate) fn privacy_claim(leaving: &Departures) -> String {
+    privacy_claim_localized(leaving, UiLocale::English)
+}
+
+pub(crate) fn privacy_claim_localized(leaving: &Departures, locale: UiLocale) -> String {
     // Composed from two independent facts rather than short-circuited on the
     // first. It used to return "Nothing can transcribe right now" and stop, so
     // an arrangement with no usable speech provider and DeepL switched on put
@@ -444,29 +533,42 @@ pub(crate) fn privacy_claim(leaving: &Departures) -> String {
         leaving.audio_to.as_deref(),
         leaving.text_to.as_deref(),
     ) {
-        (false, _, None) => "Nothing can transcribe right now".to_owned(),
-        (false, _, Some(text)) => {
-            format!("Nothing can transcribe · text leaves this device for {text}")
+        (false, _, None) => text(locale, UiText::NothingCanTranscribe).to_owned(),
+        (false, _, Some(service)) => render(
+            locale,
+            UiText::NothingCanTranscribeTextLeaves,
+            &[("text", service)],
+        ),
+        (true, None, None) => text(locale, UiText::EverythingStays).to_owned(),
+        (true, Some(service), None) => {
+            render(locale, UiText::AudioLeavesFor, &[("audio", service)])
         }
-        (true, None, None) => "Audio and text stay on this device".to_owned(),
-        (true, Some(audio), None) => format!("Audio leaves this device for {audio}"),
-        (true, None, Some(text)) => format!("Text leaves this device for {text}"),
-        (true, Some(audio), Some(text)) if audio == text => {
-            format!("Audio and text leave this device for {audio}")
+        (true, None, Some(service)) => render(locale, UiText::TextLeavesFor, &[("text", service)]),
+        (true, Some(audio), Some(text_service)) if audio == text_service => {
+            render(locale, UiText::EverythingLeavesFor, &[("service", audio)])
         }
-        (true, Some(audio), Some(text)) => format!("Audio leaves for {audio}, text for {text}"),
+        (true, Some(audio), Some(text_service)) => render(
+            locale,
+            UiText::DifferentServices,
+            &[("audio", audio), ("text", text_service)],
+        ),
     }
 }
 
 /// The short line along the bottom of the window.
 ///
 /// Three words at most, and never a claim the list does not support.
+#[cfg(test)]
 pub(crate) fn departure_badge(leaving: &Departures) -> &'static str {
+    departure_badge_localized(leaving, UiLocale::English)
+}
+
+pub(crate) fn departure_badge_localized(leaving: &Departures, locale: UiLocale) -> &'static str {
     match (leaving.audio_leaves(), leaving.text_leaves()) {
-        (false, false) => "EVERYTHING STAYS HERE",
-        (true, false) => "AUDIO LEAVES DEVICE",
-        (false, true) => "TEXT LEAVES DEVICE",
-        (true, true) => "AUDIO AND TEXT LEAVE",
+        (false, false) => text(locale, UiText::EverythingStaysBadge),
+        (true, false) => text(locale, UiText::AudioLeavesBadge),
+        (false, true) => text(locale, UiText::TextLeavesBadge),
+        (true, true) => text(locale, UiText::EverythingLeavesBadge),
     }
 }
 
@@ -499,8 +601,11 @@ pub(crate) fn departures(
 }
 
 /// The short word for where a translation came from, for the status line.
-pub(crate) fn translation_origin(provider: Option<&str>) -> String {
-    provider.map_or_else(|| "local".to_owned(), translation_provider_display_name)
+pub(crate) fn translation_origin_localized(provider: Option<&str>, locale: UiLocale) -> String {
+    provider.map_or_else(
+        || text(locale, UiText::Local).to_owned(),
+        |provider| translation_provider_display_name_localized(provider, locale),
+    )
 }
 
 /// The sentence the indicator shows when a translation finishes.
@@ -508,42 +613,74 @@ pub(crate) fn translation_origin(provider: Option<&str>) -> String {
 /// Read from the result rather than from a separate announcement: the
 /// announcement arrived first and this sentence overwrote it, so every
 /// translation reported itself as local however far it had actually travelled.
-pub(crate) fn translation_completed_sentence(provider: Option<&str>) -> String {
+pub(crate) fn translation_completed_sentence_localized(
+    provider: Option<&str>,
+    locale: UiLocale,
+) -> String {
     provider.map_or_else(
-        || "Translation completed locally.".to_owned(),
+        || text(locale, UiText::TranslationCompletedLocal).to_owned(),
         |provider| {
-            format!(
-                "Translated by {}.",
-                translation_provider_display_name(provider)
+            render(
+                locale,
+                UiText::TranslationCompletedProvider,
+                &[(
+                    "provider",
+                    &translation_provider_display_name_localized(provider, locale),
+                )],
             )
         },
     )
 }
 
 /// One dictation in the history list.
-pub(crate) fn history_row(entry: &HistoryEntry) -> HistoryRow {
+pub(crate) fn history_row_localized(entry: &HistoryEntry, locale: UiLocale) -> HistoryRow {
     let provider = entry.transcript.provider.as_deref();
     let source = provider.map_or_else(String::new, |provider| {
-        format!(" · via {}", provider_display_name(provider))
+        format!(
+            " · {}",
+            render(
+                locale,
+                UiText::ViaProvider,
+                &[(
+                    "provider",
+                    &provider_display_name_localized(provider, locale)
+                )]
+            )
+        )
     });
     let detail = if entry.transcript.latency.after_release_ms > 0 {
-        format!(
-            "{} · {:.1}s audio · {}ms release{}{source}",
-            entry.transcript.language,
-            entry.transcript.audio_duration_ms as f64 / 1000.0,
-            entry.transcript.latency.after_release_ms,
-            if entry.transcript.latency.speculative_reuse {
-                " · prepared"
-            } else {
-                ""
-            }
+        let language = entry.transcript.language.to_string();
+        let seconds = format!("{:.1}", entry.transcript.audio_duration_ms as f64 / 1000.0);
+        let milliseconds = entry.transcript.latency.after_release_ms.to_string();
+        let prepared = if entry.transcript.latency.speculative_reuse {
+            format!(" · {}", text(locale, UiText::Prepared))
+        } else {
+            String::new()
+        };
+        render(
+            locale,
+            UiText::AudioDuration,
+            &[
+                ("language", &language),
+                ("seconds", &seconds),
+                ("milliseconds", &milliseconds),
+                ("prepared", &prepared),
+                ("source", &source),
+            ],
         )
     } else {
-        format!(
-            "{} · {:.1}s audio · {}ms processing{source}",
-            entry.transcript.language,
-            entry.transcript.audio_duration_ms as f64 / 1000.0,
-            entry.transcript.processing_duration_ms
+        let language = entry.transcript.language.to_string();
+        let seconds = format!("{:.1}", entry.transcript.audio_duration_ms as f64 / 1000.0);
+        let milliseconds = entry.transcript.processing_duration_ms.to_string();
+        render(
+            locale,
+            UiText::ProcessingDuration,
+            &[
+                ("language", &language),
+                ("seconds", &seconds),
+                ("milliseconds", &milliseconds),
+                ("source", &source),
+            ],
         )
     };
     HistoryRow {
@@ -643,11 +780,14 @@ mod tests {
 
         assert_eq!(row.state, "Switched off");
         assert_ne!(row.detail, "Switched off");
-        assert!(row.detail.contains("2 000 requests a day"));
+        assert!(
+            row.detail
+                .contains("availability follows your Groq account")
+        );
     }
 
     #[test]
-    fn a_reason_the_state_column_abbreviates_is_kept() {
+    fn a_worker_reason_is_classified_without_leaking_free_form_english_into_the_detail() {
         let chain = [entry("groq", true)];
         let mut status = keyed("groq", 0);
         status.detail = "Key refused: the service rejected this token".to_owned();
@@ -655,7 +795,11 @@ mod tests {
         let row = provider_row(&chain[0], Some(&status), 0, local, usable);
 
         assert_eq!(row.state, "Key refused");
-        assert_eq!(row.detail, "Key refused: the service rejected this token");
+        assert!(
+            row.detail
+                .contains("availability follows your Groq account")
+        );
+        assert!(!row.detail.contains("service rejected this token"));
     }
 
     #[test]
@@ -771,19 +915,22 @@ mod tests {
     fn a_model_offers_one_verb_at_rest_and_cancel_while_it_runs() {
         let (state, tone, action, progress) = model_progress(false, false, None);
         assert_eq!(
-            (state.as_str(), tone, action),
+            (state.as_str(), tone, action.as_str()),
             ("Not installed", "off", "Install")
         );
         assert!((progress - 0.0).abs() < f32::EPSILON);
 
         let (state, tone, action, _) = model_progress(true, false, None);
         assert_eq!(
-            (state.as_str(), tone, action),
+            (state.as_str(), tone, action.as_str()),
             ("Installed", "resting", "Use")
         );
 
         let (state, tone, action, _) = model_progress(true, true, None);
-        assert_eq!((state.as_str(), tone, action), ("In use", "active", ""));
+        assert_eq!(
+            (state.as_str(), tone, action.as_str()),
+            ("In use", "active", "")
+        );
 
         let running = Download {
             downloaded_bytes: 43,
@@ -791,7 +938,7 @@ mod tests {
         };
         let (state, tone, action, progress) = model_progress(false, false, Some(running));
         assert_eq!(
-            (state.as_str(), tone, action),
+            (state.as_str(), tone, action.as_str()),
             ("43 %", "working", "Cancel")
         );
         assert!((progress - 0.43).abs() < 0.001);
@@ -811,7 +958,7 @@ mod tests {
         let (state, tone, action, progress) = model_progress(true, false, Some(finished));
 
         assert_eq!(
-            (state.as_str(), tone, action),
+            (state.as_str(), tone, action.as_str()),
             ("Installed", "resting", "Use")
         );
         assert!((progress - 0.0).abs() < f32::EPSILON);

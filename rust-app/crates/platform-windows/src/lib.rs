@@ -1,4 +1,5 @@
 use std::time::Duration;
+use std::{io, path::Path};
 
 #[derive(Clone, Debug)]
 pub struct BlurredBackdrop {
@@ -84,6 +85,69 @@ pub fn configure_process_error_mode() {
         let current = GetErrorMode();
         let _ = SetErrorMode(current | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     }
+}
+
+/// Replaces a durable file without exposing a moment where the primary path is
+/// absent. When a primary already exists Windows also writes its former bytes
+/// to `backup`, which gives startup recovery one known-good predecessor.
+#[cfg(windows)]
+pub fn replace_file_atomically(
+    primary: &Path,
+    replacement: &Path,
+    backup: &Path,
+) -> io::Result<()> {
+    use std::{os::windows::ffi::OsStrExt, ptr};
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH,
+        ReplaceFileW,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let primary_w = wide(primary);
+    let replacement_w = wide(replacement);
+    let backup_w = wide(backup);
+    // SAFETY: all strings are owned, NUL-terminated and remain alive through
+    // the call. The optional exclusion/reserved pointers are intentionally
+    // null as required by ReplaceFileW.
+    unsafe {
+        let result = if primary.exists() {
+            ReplaceFileW(
+                primary_w.as_ptr(),
+                replacement_w.as_ptr(),
+                backup_w.as_ptr(),
+                REPLACEFILE_WRITE_THROUGH,
+                ptr::null(),
+                ptr::null(),
+            )
+        } else {
+            MoveFileExW(
+                replacement_w.as_ptr(),
+                primary_w.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn replace_file_atomically(
+    primary: &Path,
+    replacement: &Path,
+    backup: &Path,
+) -> io::Result<()> {
+    if primary.exists() {
+        let _ = std::fs::remove_file(backup);
+        std::fs::rename(primary, backup)?;
+    }
+    std::fs::rename(replacement, primary)
 }
 
 #[cfg(not(windows))]
@@ -343,11 +407,31 @@ pub fn set_popup_pinned(_window_handle: u64, _pinned: bool) {}
 
 #[cfg(all(test, windows))]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
     use windows_sys::Win32::System::Diagnostics::Debug::{
         GetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SetErrorMode,
     };
 
-    use super::configure_process_error_mode;
+    use super::{configure_process_error_mode, replace_file_atomically};
+
+    #[test]
+    fn atomic_replace_overwrites_an_existing_backup_without_a_missing_backup_window() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let replacement = directory.path().join("settings.tmp");
+        let backup = directory.path().join("settings.previous");
+        fs::write(&primary, b"old-primary").unwrap();
+        fs::write(&replacement, b"new-primary").unwrap();
+        fs::write(&backup, b"older-backup").unwrap();
+
+        replace_file_atomically(&primary, &replacement, &backup).unwrap();
+
+        assert_eq!(fs::read(&primary).unwrap(), b"new-primary");
+        assert_eq!(fs::read(&backup).unwrap(), b"old-primary");
+        assert!(!replacement.exists());
+    }
 
     #[test]
     fn process_error_mode_preserves_existing_flags_and_suppresses_loader_dialogs() {
@@ -408,9 +492,98 @@ pub fn local_date_line() -> String {
     format!("{day} — {} {month}", now.wDay)
 }
 
+/// Formats the settings header date with Windows locale data for the selected
+/// SayFlex interface language. This keeps month and weekday names in step with
+/// an in-app locale override instead of always leaking English or following a
+/// different system language.
+#[cfg(windows)]
+pub fn local_date_line_for_locale(locale: &str) -> String {
+    use std::{os::windows::ffi::OsStrExt, ptr};
+
+    use windows_sys::Win32::{
+        Foundation::SYSTEMTIME, Globalization::GetDateFormatEx,
+        System::SystemInformation::GetLocalTime,
+    };
+
+    fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
+        value.encode_wide().chain(Some(0)).collect()
+    }
+
+    // SAFETY: GetLocalTime only writes the SYSTEMTIME it is given.
+    let now = unsafe {
+        let mut now = std::mem::zeroed::<SYSTEMTIME>();
+        GetLocalTime(&raw mut now);
+        now
+    };
+    let locale = wide(std::ffi::OsStr::new(locale));
+    let format = wide(std::ffi::OsStr::new("ddd '—' d MMMM"));
+    // SAFETY: all input strings are NUL-terminated and live through both
+    // calls. The first call asks Windows for the required buffer length.
+    let required = unsafe {
+        GetDateFormatEx(
+            locale.as_ptr(),
+            0,
+            &raw const now,
+            format.as_ptr(),
+            ptr::null_mut(),
+            0,
+            ptr::null(),
+        )
+    };
+    if required <= 1 {
+        return local_date_line();
+    }
+    let mut output = vec![0u16; required as usize];
+    // SAFETY: output has exactly the length returned by the sizing call.
+    let written = unsafe {
+        GetDateFormatEx(
+            locale.as_ptr(),
+            0,
+            &raw const now,
+            format.as_ptr(),
+            output.as_mut_ptr(),
+            required,
+            ptr::null(),
+        )
+    };
+    if written <= 1 {
+        return local_date_line();
+    }
+    String::from_utf16_lossy(&output[..written as usize - 1])
+}
+
+/// BCP-47 locale selected for the current Windows user.
+#[cfg(windows)]
+#[must_use]
+pub fn user_locale_name() -> String {
+    const LOCALE_NAME_MAX_LENGTH: usize = 85;
+    let mut buffer = [0u16; LOCALE_NAME_MAX_LENGTH];
+    let length = unsafe {
+        windows_sys::Win32::Globalization::GetUserDefaultLocaleName(
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+        )
+    };
+    if length <= 1 {
+        return "en".to_owned();
+    }
+    String::from_utf16_lossy(&buffer[..length as usize - 1])
+}
+
 #[cfg(not(windows))]
 pub fn local_date_line() -> String {
     String::new()
+}
+
+#[cfg(not(windows))]
+pub fn local_date_line_for_locale(_locale: &str) -> String {
+    local_date_line()
+}
+
+#[cfg(not(windows))]
+#[must_use]
+pub fn user_locale_name() -> String {
+    std::env::var("LANG").unwrap_or_else(|_| "en".to_owned())
 }
 
 /// Names this process to the shell.

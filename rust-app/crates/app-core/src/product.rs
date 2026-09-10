@@ -5,7 +5,7 @@ use std::{
 
 pub const DISPLAY_NAME: &str = "SayFlex";
 pub const DATA_DIRECTORY_NAME: &str = "SayFlex";
-pub const USER_AGENT_PRODUCT: &str = "SayFlex/0.5";
+pub const USER_AGENT_PRODUCT: &str = concat!("SayFlex/", env!("CARGO_PKG_VERSION"));
 
 // Compatibility-only names. They are deliberately kept out of every visible
 // product surface, but upgrades must not strand an existing model or history.

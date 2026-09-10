@@ -1,0 +1,1287 @@
+msgid ""
+msgstr ""
+"Language: uk\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Input features paused. Use the pause shortcut again to resume."
+msgstr "Функції введення призупинено. Натисніть сполучення паузи ще раз, щоб продовжити."
+msgid "Input features resumed."
+msgstr "Функції введення відновлено."
+msgid "Speech service is still starting."
+msgstr "Служба мовлення ще запускається."
+msgid "Speech model is still being prepared."
+msgstr "Модель мовлення ще готується."
+msgid "Dictation {session} is still processing; it will be inserted here when ready."
+msgstr "Диктування {session} ще обробляється; його буде вставлено сюди після завершення."
+msgid "Inserted {delivery} through the target adapter in {milliseconds} ms"
+msgstr "Вставлено {delivery} через адаптер цільового вікна за {milliseconds} мс"
+msgid "Inserted {delivery} after the target read the private transaction in {milliseconds} ms"
+msgstr "Вставлено {delivery} після читання приватної транзакції цільовим вікном за {milliseconds} мс"
+msgid "Verified insertion {delivery} in {milliseconds} ms"
+msgstr "Перевірено вставлення {delivery} за {milliseconds} мс"
+msgid "Paste dispatched {delivery} without target verification in {milliseconds} ms"
+msgstr "Вставлення {delivery} надіслано без перевірки цільового вікна за {milliseconds} мс"
+msgid "Input worker protocol mismatch. Reinstall the complete application."
+msgstr "Протокол процесу введення не збігається. Повністю перевстановіть застосунок."
+msgid "Speech worker protocol mismatch. Reinstall the complete application."
+msgstr "Протокол процесу мовлення не збігається. Повністю перевстановіть застосунок."
+msgid "Cloud speech is ready. The local speech engine is disabled."
+msgstr "Хмарне розпізнавання готове. Локальний рушій мовлення вимкнено."
+msgid "The speech backend was inconsistent; checking {backend} instead."
+msgstr "Рушій мовлення працював нестабільно; натомість перевіряється {backend}."
+msgid "Speech backend verification failed: {error}"
+msgstr "Перевірка рушія мовлення не вдалася: {error}"
+msgid "No compatible speech backend is available: {error}"
+msgstr "Немає сумісного рушія мовлення: {error}"
+msgid "Cloud translation is starting. The local model is disabled."
+msgstr "Запускається хмарний переклад. Локальну модель вимкнено."
+msgid "Cloud translation ready. The local model is disabled."
+msgstr "Хмарний переклад готовий. Локальну модель вимкнено."
+msgid "Translation model ready in {milliseconds} ms."
+msgstr "Модель перекладу готова за {milliseconds} мс."
+msgid "Ready · language direction is detected locally."
+msgstr "Готово · напрямок мови визначається локально."
+msgid "Translating locally… {chunk}/{total}"
+msgstr "Локальний переклад… {chunk}/{total}"
+msgid "Translating locally…"
+msgstr "Локальний переклад…"
+msgid "Translation ready; waiting for the shortcut to be released."
+msgstr "Переклад готовий; очікується відпускання сполучення клавіш."
+msgid "Could not switch the interface language: {error}"
+msgstr "Не вдалося перемкнути мову інтерфейсу: {error}"
+msgid "Speech backend initialization failed: {error}"
+msgstr "Не вдалося запустити рушій мовлення: {error}"
+msgid "Checking {backend} with the selected Whisper model…"
+msgstr "Перевірка {backend} з вибраною моделлю Whisper…"
+msgid "Speech backend could not be changed: {error}"
+msgstr "Не вдалося змінити рушій мовлення: {error}"
+msgid "This model was not trained to translate. Use the selection translator instead."
+msgstr "Цю модель не навчено перекладу. Скористайтеся перекладачем виділеного тексту."
+msgid "A key is needed. To remove the one already stored, use Remove key."
+msgstr "Потрібен ключ. Щоб видалити вже збережений, натисніть «Видалити ключ»."
+msgid "The key was not stored: {error}"
+msgstr "Ключ не збережено: {error}"
+msgid "The transcription order could not be applied: {error}"
+msgstr "Не вдалося застосувати порядок розпізнавання: {error}"
+
+msgid "Account"
+msgstr "Обліковий запис"
+
+msgid "Region"
+msgstr "Регіон"
+
+msgid "Endpoint"
+msgstr "Адреса"
+
+msgid "No translation provider is ready. Choose a local model or configure a service in Settings."
+msgstr "Жоден постачальник перекладу не готовий. Виберіть локальну модель або налаштуйте сервіс у параметрах."
+
+msgid "Input service is not ready yet."
+msgstr "Служба введення ще не готова."
+
+msgid "Wait for the current shortcut change to finish."
+msgstr "Дочекайтеся завершення поточної зміни сполучень клавіш."
+
+msgid "Could not apply shortcuts: {error}"
+msgstr "Не вдалося застосувати сполучення клавіш: {error}"
+
+msgid "A model is downloading. It resumes if it is interrupted."
+msgstr "Модель завантажується. Після переривання завантаження продовжиться."
+
+msgid "Translation is on, but no text route is ready yet."
+msgstr "Переклад увімкнено, але жоден маршрут обробки тексту ще не готовий."
+
+msgid "No RU/EN layout conversion is available."
+msgstr "Перетворення розкладки RU/EN недоступне."
+
+msgid "That interface language is not available."
+msgstr "Ця мова інтерфейсу недоступна."
+
+msgid "Checking backend"
+msgstr "Перевірка рушія"
+
+msgid "That spoken language is not supported."
+msgstr "Ця мова мовлення не підтримується."
+
+msgid "Enter text to translate."
+msgstr "Введіть текст для перекладу."
+
+msgid "The local translation model is still loading."
+msgstr "Локальна модель перекладу ще завантажується."
+
+msgid "Translating…"
+msgstr "Переклад…"
+
+msgid "Could not translate: {error}"
+msgstr "Не вдалося перекласти: {error}"
+
+msgid "Copied to clipboard."
+msgstr "Скопійовано до буфера обміну."
+
+msgid "Direction will be detected again when you translate."
+msgstr "Напрямок буде визначено знову під час наступного перекладу."
+
+msgid "Worker error"
+msgstr "Помилка робочого процесу"
+
+msgid "Recovering worker"
+msgstr "Відновлення робочого процесу"
+
+msgid "Worker unavailable"
+msgstr "Робочий процес недоступний"
+
+msgid "Worker mismatch"
+msgstr "Версії процесів не збігаються"
+
+msgid "Input ready"
+msgstr "Введення готове"
+
+msgid "Shortcuts updated."
+msgstr "Сполучення клавіш оновлено."
+
+msgid "Input worker is not ready."
+msgstr "Процес введення не готовий."
+
+msgid "Finishing the previous dictation…"
+msgstr "Завершення попереднього диктування…"
+
+msgid "Could not start recording: {error}"
+msgstr "Не вдалося почати запис: {error}"
+
+msgid "Listening…"
+msgstr "Слухаю…"
+
+msgid "Could not finish recording: {error}"
+msgstr "Не вдалося завершити запис: {error}"
+
+msgid "Processing locally…"
+msgstr "Локальна обробка…"
+
+msgid "Loading the latest transcript…"
+msgstr "Завантаження останньої розшифровки…"
+
+msgid "Reading selected text…"
+msgstr "Читання виділеного тексту…"
+
+msgid "Translation ready, but {message}"
+msgstr "Переклад готовий, але {message}"
+
+msgid "Selection: {message}"
+msgstr "Виділення: {message}"
+
+msgid "Replacement was sent to the target."
+msgstr "Заміну надіслано до цільового вікна."
+
+msgid "Translation copied to the clipboard."
+msgstr "Переклад скопійовано до буфера обміну."
+
+msgid "Keyboard-layout correction is disabled."
+msgstr "Виправлення розкладки клавіатури вимкнено."
+
+msgid "All selected-text actions are disabled."
+msgstr "Усі дії з виділеним текстом вимкнено."
+
+msgid "Translation is disabled in Actions."
+msgstr "Переклад вимкнено в розділі дій."
+
+msgid "Could not start translation: {error}"
+msgstr "Не вдалося почати переклад: {error}"
+
+msgid "Preparing model"
+msgstr "Підготовка моделі"
+
+msgid "Cloud speech ready"
+msgstr "Хмарне розпізнавання готове"
+
+msgid "Loading and warming the local speech engine…"
+msgstr "Завантаження та прогрів локального рушія мовлення…"
+
+msgid "Installing {model}…"
+msgstr "Встановлення {model}…"
+
+msgid "Checking fallback"
+msgstr "Перевірка резервного варіанта"
+
+msgid "Ready · hold Ctrl + Alt + Space to speak."
+msgstr "Готово · утримуйте Ctrl + Alt + Пробіл, щоб говорити."
+
+msgid "Speech model selected."
+msgstr "Модель мовлення вибрано."
+
+msgid "Transcript saved to history; target was lost."
+msgstr "Розшифровку збережено в історії; цільове вікно втрачено."
+
+msgid "Transcribed by {provider}."
+msgstr "Розпізнано через {provider}."
+
+msgid "There is no transcript to insert yet."
+msgstr "Ще немає розшифровки для вставлення."
+
+msgid "Downloading model… {percent}%"
+msgstr "Завантаження моделі… {percent}%"
+
+msgid "Downloading {model}: {percent}%"
+msgstr "Завантаження {model}: {percent}%"
+
+msgid "Translation cancelled."
+msgstr "Переклад скасовано."
+
+msgid "{code}: {message}"
+msgstr "{code}: {message}"
+msgid " anywhere in Windows to start one."
+msgstr "в будь-якому місці Windows, щоб запустити його."
+
+msgid "{count} installed"
+msgstr "{count} встановлено"
+
+msgid "{count} kept · {remote} went to a service"
+msgstr "{count} збережено · {count} передано до служби"
+
+msgid "{count} kept · all on this device"
+msgstr "{count} збережено · усе на цьому пристрої"
+
+msgid "{count} kept on this device"
+msgstr "{count} збережено на цьому пристрої"
+
+msgid "{count} of 5 shortcuts active"
+msgstr "{count} із 5 ярликів активний"
+
+msgid "{language} · {seconds}s audio · {milliseconds}ms processing{source}"
+msgstr "{language} · аудіо {language} · обробка {language} мс{language}"
+
+msgid "{language} · {seconds}s audio · {milliseconds}ms release{prepared}{source}"
+msgstr "{language} · {language} с аудіо · {language} мс відпускання{language}{language}"
+
+msgid "{name} · shown while recording"
+msgstr "{name} · відображається під час запису"
+
+msgid "1 installed"
+msgstr "1 встановлено"
+
+msgid "Add a key before making this the only provider"
+msgstr "Додайте ключ, перш ніж зробити цей провайдер єдиним"
+
+msgid "Add key"
+msgstr "Додати ключ"
+
+msgid "Already using the default"
+msgstr "Вже використовується за замовчуванням"
+
+msgid "Always ask"
+msgstr "Завжди запитувати"
+
+msgid "Always available"
+msgstr "Завжди доступно"
+
+msgid "Any modern GPU"
+msgstr "Будь-який сучасний графічний процесор"
+
+msgid "Any OpenAI-compatible address · HTTPS only"
+msgstr "Будь-яка адреса, сумісна з OpenAI · Тільки HTTPS"
+
+msgid "API KEY"
+msgstr "Ключ API"
+
+msgid "Applying"
+msgstr "Застосовується"
+
+msgid "Arabic"
+msgstr "Арабська"
+
+msgid "Arctic"
+msgstr "Арктика"
+
+msgid "AUDIO AND TEXT LEAVE"
+msgstr "АУДІО ТА ТЕКСТ ВИХОДЯТЬ"
+
+msgid "Audio and text leave this device for {service}"
+msgstr "Аудіо та текст залишають цей пристрій для {service}"
+
+msgid "Audio and text stay on this device"
+msgstr "Аудіо та текст залишаються на цьому пристрої"
+
+msgid "AUDIO LEAVES DEVICE"
+msgstr "АУДІО ВИХОДИТЬ З ПРИСТРОЮ"
+
+msgid "Audio leaves for {audio}, text for {text}"
+msgstr "Аудіо виходить на {audio}, текст — на {audio}"
+
+msgid "Audio leaves this device for {audio}"
+msgstr "Аудіо виходить з цього пристрою на {audio}"
+
+msgid "Auto"
+msgstr "Авто"
+
+msgid "AUTO"
+msgstr "АВТО"
+
+msgid "Auto-detect"
+msgstr "Автоматичне виявлення"
+
+msgid "Best when you switch languages often"
+msgstr "Найкраще підходить, якщо ви часто перемикаєте мови"
+
+msgid "Black and yellow"
+msgstr "Чорно-жовтий"
+
+msgid "Blue"
+msgstr "Синій"
+
+msgid "Blue glass"
+msgstr "Синє скло"
+
+msgid "Broadcast mic"
+msgstr "Мікрофон для трансляції"
+
+msgid "Cancel"
+msgstr "Скасувати"
+
+msgid "CANCEL"
+msgstr "СКАСУВАТИ"
+
+msgid "Change"
+msgstr "Змінити"
+
+msgid "Change a shortcut, then press its new key combination. Changes apply only after Windows accepts them."
+msgstr "Змініть комбінацію клавіш, а потім натисніть нову комбінацію. Зміни набудуть чинності лише після того, як Windows їх прийме."
+
+msgid "checking…"
+msgstr "перевірка…"
+
+msgid "Chinese (Simplified)"
+msgstr "Китайська (спрощена)"
+
+msgid "Chinese (Traditional)"
+msgstr "Китайська (традиційна)"
+
+msgid "Choose a translation model in Settings."
+msgstr "Оберіть модель перекладу в налаштуваннях."
+
+msgid "Chosen on the Models page"
+msgstr "Обрано на сторінці «Моделі»"
+
+msgid "Circular"
+msgstr "Циклічний"
+
+msgid "Clear history"
+msgstr "Очистити історію"
+
+msgid "Cloud speech · availability follows your Azure account"
+msgstr "Хмарне розпізнавання мови · доступність залежить від вашого облікового запису Azure"
+
+msgid "Cloud speech · availability follows your Cloudflare account"
+msgstr "Хмарне розпізнавання мови · доступність залежить від вашого облікового запису Cloudflare"
+
+msgid "Cloud speech · availability follows your Deepgram account"
+msgstr "Хмарний розпізнавач мови · доступність залежить від вашого облікового запису Deepgram"
+
+msgid "Cloud speech · availability follows your Groq account"
+msgstr "Хмарний розпізнавач мови · доступність залежить від вашого облікового запису Groq"
+
+msgid "Cloud translation · availability follows your DeepL account"
+msgstr "Хмарний переклад · доступність залежить від вашого облікового запису DeepL"
+
+msgid "Cloud translation · region is optional for global resources"
+msgstr "Хмарний переклад · регіон є необов’язковим для глобальних ресурсів"
+
+msgid "cold"
+msgstr "холодно"
+
+msgid "COLOUR"
+msgstr "КОЛІР"
+
+msgid "Companion orb"
+msgstr "Супутній шар"
+
+msgid "Cooling down"
+msgstr "Охолодження"
+
+msgid "Copy"
+msgstr "Копіювати"
+
+msgid "Copy it"
+msgstr "Скопіювати"
+
+msgid "Copy latest transcript"
+msgstr "Скопіювати останній транскрипт"
+
+msgid "COPY RESULT"
+msgstr "РЕЗУЛЬТАТ КОПІЮВАННЯ"
+
+msgid "Correct keyboard layout"
+msgstr "Виправити розкладку клавіатури"
+
+msgid "CORRECT LAYOUT"
+msgstr "ВИПРАВИТИ РОЗКЛАДКУ"
+
+msgid "CPU"
+msgstr "Процесор"
+
+msgid "CTRL + ALT + F"
+msgstr "CTRL + ALT + F"
+
+msgid "CUDA"
+msgstr "CUDA"
+
+msgid "Cyrillic keys → Latin layout"
+msgstr "Клавіші кирилиці → латинська розкладка"
+
+msgid "Dark panel"
+msgstr "Темна панель"
+
+msgid "Decide from the text"
+msgstr "Визначити на основі тексту"
+
+msgid "Delete every entry from disk?"
+msgstr "Видалити всі записи з диска?"
+
+msgid "Detects the selected text, then follows the Text provider order. Network providers send that text to their service; the local model keeps it here."
+msgstr "Виявляє виділений текст, а потім дотримується порядку постачальників тексту. Мережеві постачальники надсилають цей текст до своїх сервісів; локальна модель зберігає його тут."
+
+msgid "Deutsch"
+msgstr "Німецька"
+
+msgid "Dictation"
+msgstr "Диктування"
+
+msgid "Direction is detected automatically"
+msgstr "Напрямок визначається автоматично"
+
+msgid "Disabled"
+msgstr "Вимкнено"
+
+msgid "DOES"
+msgstr "DOES"
+
+msgid "Downloaded once, verified by SHA-256, then used from disk. An interrupted download resumes where it stopped."
+msgstr "Завантажено один раз, перевірено за допомогою SHA-256, потім використовується з диска. Перерване завантаження поновлюється з того місця, де воно зупинилося."
+
+msgid "DUAL"
+msgstr "DUAL"
+
+msgid "Efficient"
+msgstr "Ефективний"
+
+msgid "Enabled"
+msgstr "Увімкнено"
+
+msgid "Engine"
+msgstr "Двигун"
+
+msgid "ENGINE"
+msgstr "ДВИГУН"
+
+msgid "English"
+msgstr "Англійська"
+
+msgid "English ↔ Russian"
+msgstr "Англійська ↔ Російська"
+
+msgid "English keys → Cyrillic layout"
+msgstr "Англійські клавіші → Кирилична розкладка"
+
+msgid "ENTER"
+msgstr "ENTER"
+
+msgid "Español"
+msgstr "Іспанська"
+
+msgid "Every dictation you finish is written here — the words, how long the audio ran, how long it took, and whether it was transcribed on this machine or by a service. It stays on this device and nowhere else."
+msgstr "Кожне завершене диктування записується тут — слова, тривалість аудіозапису, час, який знадобився для транскрипції, а також інформація про те, чи було це зроблено на цьому пристрої чи за допомогою сервісу. Ці дані зберігаються лише на цьому пристрої і ніде більше."
+
+msgid "EVERYTHING STAYS HERE"
+msgstr "ВСЕ ЗБЕРІГАЄТЬСЯ ТУТ"
+
+msgid "Faster to answer, and holds memory to be"
+msgstr "Швидше реагує та має пам’ять, щоб бути"
+
+msgid "Fastest"
+msgstr "Найшвидшим"
+
+msgid "Fastest that works"
+msgstr "Найшвидшим, що працює"
+
+msgid "Flex"
+msgstr "Flex"
+
+msgid "Flow sphere"
+msgstr "Сфера потоку"
+
+msgid "Fluid ribbon"
+msgstr "Плавна стрічка"
+
+msgid "Follow Windows"
+msgstr "Слідує за Windows"
+
+msgid "Foreign text is translated into this language"
+msgstr "Текст іноземною мовою перекладається на цю мову"
+
+msgid "Français"
+msgstr "Французька"
+
+msgid "French"
+msgstr "Французька"
+
+msgid "German"
+msgstr "Німецька"
+
+msgid "Google Cloud Translation (unsupported)"
+msgstr "Переклад Google Cloud (не підтримується)"
+
+msgid "Hindi"
+msgstr "Хінді"
+
+msgid "History"
+msgstr "Історія"
+
+msgid "HISTORY"
+msgstr "ІСТОРІЯ"
+
+msgid "History is switched off"
+msgstr "Історія вимкнена"
+
+msgid "Hold "
+msgstr "Утримувати"
+
+msgid "Hotkeys"
+msgstr "Гарячі клавіші"
+
+msgid "Idle"
+msgstr "У режимі очікування"
+
+msgid "In use"
+msgstr "У використанні"
+
+msgid "Install"
+msgstr "Встановити"
+
+msgid "Installed"
+msgstr "Встановлено"
+
+msgid "Italian"
+msgstr "Італійська"
+
+msgid "Italiano"
+msgstr "Італійська"
+
+msgid "Japanese"
+msgstr "Японська"
+
+msgid "Kept from older settings · not supported by this version"
+msgstr "Збережено зі старих налаштувань · не підтримується цією версією"
+
+msgid "Kept on this device"
+msgstr "Збережено на цьому пристрої"
+
+msgid "Kept on this device only. Insert-last works from the newest entry."
+msgstr "Збережено лише на цьому пристрої. Функція «Вставити останнє» працює, починаючи з найновішого запису."
+
+msgid "Kept warm"
+msgstr "Збережено в пам’яті"
+
+msgid "Key {hint}{extra} · {about}"
+msgstr "Ключ {hint}{hint} · {hint}"
+
+msgid "Key refused"
+msgstr "Ключ відхилено"
+
+msgid "Korean"
+msgstr "Корейська"
+
+msgid "Less GPU and battery, slightly slower"
+msgstr "Менше навантаження на графічний процесор та акумулятор, трохи повільніше"
+
+msgid "local"
+msgstr "локально"
+
+msgid "LOCAL · PRIVATE"
+msgstr "ЛОКАЛЬНО · ПРИВАТНО"
+
+msgid "Local speech"
+msgstr "Локальне розпізнавання мови"
+
+msgid "Local speech · ready"
+msgstr "Локальне розпізнавання мови · готово"
+
+msgid "Local speech · starting"
+msgstr "Локальне розпізнавання мови · починаємо"
+
+msgid "Local translator"
+msgstr "Локальний перекладач"
+
+msgid "LOCAL TRANSLATOR"
+msgstr "МІСЦЕВИЙ ПЕРЕКЛАДАЧ"
+
+msgid "Matte glass"
+msgstr "Матове скло"
+
+msgid "Model"
+msgstr "Модель"
+
+msgid "Models"
+msgstr "Моделі"
+
+msgid "Monochrome"
+msgstr "Монохромний"
+
+msgid "More reliable for short Russian phrases"
+msgstr "Більш надійний для коротких російських фраз"
+
+msgid "Never reached"
+msgstr "Ніколи не досягався"
+
+msgid "No"
+msgstr "Ні"
+
+msgid "No compatible speech backend is active"
+msgstr "Не активовано жодного сумісного мовного модуля"
+
+msgid "No key stored"
+msgstr "Ключ не збережено"
+
+msgid "no overlay"
+msgstr "немає накладення"
+
+msgid "No speech model is installed, so nothing can be dictated yet."
+msgstr "Не встановлено жодної моделі розпізнавання мови, тому поки що нічого не можна диктувати."
+
+msgid "none"
+msgstr "немає"
+
+msgid "None installed"
+msgstr "Не встановлено"
+
+msgid "None installed yet"
+msgstr "Ще не встановлено"
+
+msgid "none selected"
+msgstr "Не вибрано"
+
+msgid "Not installed"
+msgstr "Не встановлено"
+
+msgid "not kept"
+msgstr "не зберігається"
+
+msgid "Not kept"
+msgstr "Не зберігається"
+
+msgid "Not kept. Insert-last still works for the newest one, which is held in memory until the application closes."
+msgstr "Не зберігається. Функція «Insert-last» все ще працює для найновішого елемента, який зберігається в пам’яті до закриття програми."
+
+msgid "Not ready"
+msgstr "Не готово"
+
+msgid "Nothing can transcribe · text leaves this device for {text}"
+msgstr "Нічого не можна транскрибувати · текст надсилається з цього пристрою до {text}"
+
+msgid "Nothing can transcribe right now"
+msgstr "Наразі нічого не можна транскрибувати"
+
+msgid "Nothing is being written to disk. Insert-last still works for the newest dictation, which is held in memory until SayFlex closes."
+msgstr "На диск нічого не записується. Функція «Вставити останнє» все ще працює для найновішого диктування, яке зберігається в пам’яті до закриття SayFlex."
+
+msgid "Nothing is replaced until you say so"
+msgstr "Нічого не замінюється, доки ви цього не скажете"
+
+msgid "Nothing kept yet"
+msgstr "Поки що нічого не збережено"
+
+msgid "NVIDIA"
+msgstr "NVIDIA"
+
+msgid "off"
+msgstr "вимкнено"
+
+msgid "Off"
+msgstr "Вимкнено"
+
+msgid "On"
+msgstr "Увімкнено"
+
+msgid "On selected text"
+msgstr "На вибраному тексті"
+
+msgid "On this device"
+msgstr "На цьому пристрої"
+
+msgid "Only"
+msgstr "Тільки"
+
+msgid "Only for models trained for it"
+msgstr "Тільки для моделей, навчених для цього"
+
+msgid "Open settings"
+msgstr "Відкрити налаштування"
+
+msgid "Open the translator"
+msgstr "Відкрити перекладач"
+
+msgid "Open translator"
+msgstr "Відкрити перекладач"
+
+msgid "ORIG"
+msgstr "ORIG"
+
+msgid "Original language"
+msgstr "Мова оригіналу"
+
+msgid "Original selection remains active"
+msgstr "Виділення оригіналу залишається активним"
+
+msgid "OUTPUT"
+msgstr "OUTPUT"
+
+msgid "Overview"
+msgstr "Огляд"
+
+msgid "PALETTE"
+msgstr "ПАЛІТРА"
+
+msgid "Paste the key"
+msgstr "Вставити ключ"
+
+msgid "Paused · {count} shortcuts configured"
+msgstr "Призупинено · {count} налаштовані комбінації клавіш"
+
+msgid "PIN"
+msgstr "PIN-код"
+
+msgid "Português (Brasil)"
+msgstr "Португальська (Бразилія)"
+
+msgid "Portuguese (Brazil)"
+msgstr "Португальська (Бразилія)"
+
+msgid "preference: {value}"
+msgstr "налаштування: {value}"
+
+msgid "prepared"
+msgstr "підготовлено"
+
+msgid "Prepares results during natural pauses"
+msgstr "Готує результати під час природних пауз"
+
+msgid "PRESS SHORTCUT  ·  "
+msgstr "НАТИСНИТИ КОМБІНАЦІЮ КЛАВІШ  ·"
+
+msgid "Preview blur"
+msgstr "Попередній перегляд розмиття"
+
+msgid "Primary language"
+msgstr "Основна мова"
+
+msgid "Primary-language text is translated into this one"
+msgstr "Текст основної мови перекладається на цю мову"
+
+msgid "Provider order"
+msgstr "Порядок постачальників"
+
+msgid "Providers"
+msgstr "Постачальники"
+
+msgid "Quit"
+msgstr "Вийти"
+
+msgid "Quit SayFlex"
+msgstr "Вийти з SayFlex"
+
+msgid "ready"
+msgstr "готово"
+
+msgid "Ready"
+msgstr "Готово"
+
+msgid "recommended"
+msgstr "Рекомендовано"
+
+msgid "recommended for your system language"
+msgstr "Рекомендовано для мови вашої системи"
+
+msgid "Red"
+msgstr "Червоний"
+
+msgid "Reference"
+msgstr "Довідка"
+
+msgid "Refresh"
+msgstr "Оновити"
+
+msgid "RELEASE"
+msgstr "ВИВІЛЬНИТИ"
+
+msgid "Remove key"
+msgstr "Видалити ключ"
+
+msgid "Remove the stored key?"
+msgstr "Видалити збережений ключ?"
+
+msgid "Replace key"
+msgstr "Замінити ключ"
+
+msgid "REPLACE THE KEY"
+msgstr "ЗАМІНИТИ КЛЮЧ"
+
+msgid "Replace the selection"
+msgstr "Замінити вибране"
+
+msgid "Reset"
+msgstr "Скинути"
+
+msgid "Result"
+msgstr "Результат"
+
+msgid "Runs on this computer · nothing leaves it"
+msgstr "Працює на цьому комп'ютері · нічого з нього не виходить"
+
+msgid "Russian"
+msgstr "Російська"
+
+msgid "Save"
+msgstr "Зберегти"
+
+msgid "Say"
+msgstr "Промовити"
+
+msgid "SayFlex"
+msgstr "SayFlex"
+
+msgid "SayFlex "
+msgstr "SayFlex"
+
+msgid "SayFlex Recording Indicator"
+msgstr "Індикатор запису SayFlex"
+
+msgid "Secondary language"
+msgstr "Додаткова мова"
+
+msgid "SELECT A RESULT"
+msgstr "ВИБРАТИ РЕЗУЛЬТАТ"
+
+msgid "Sent to a service"
+msgstr "Надіслано до служби"
+
+msgid "Show a preview"
+msgstr "Показати попередній перегляд"
+
+msgid "Showing {count} · {remote} of them went to a service"
+msgstr "Показано {count} · {count} з них було надіслано до служби"
+
+msgid "Showing {count} · all on this device"
+msgstr "Показано {count} · усі на цьому пристрої"
+
+msgid "Shows the palette every time"
+msgstr "Показує палітру щоразу"
+
+msgid "Shows the palette every time, whatever the text looks like"
+msgstr "Показує палітру щоразу, незалежно від того, як виглядає текст"
+
+msgid "Spanish"
+msgstr "Іспанська"
+
+msgid "Spectrum"
+msgstr "Спектр"
+
+msgid "Speech"
+msgstr "Мова"
+
+msgid "SPEECH — WHAT TRANSCRIBES A RECORDING"
+msgstr "МОВА — ЩО ТРАНСКРИБУЄ ЗАПИС"
+
+msgid "SPEECH ENGINE"
+msgstr "МОВНИЙ ДВИГУН"
+
+msgid "SPEECH MODEL"
+msgstr "МОВНА МОДЕЛЬ"
+
+msgid "Speech service · unavailable"
+msgstr "Служба розпізнавання мови · недоступна"
+
+msgid "SPOKEN LANGUAGE"
+msgstr "МОВА"
+
+msgid "Standing by"
+msgstr "У режимі очікування"
+
+msgid "Started on demand"
+msgstr "Запущено за запитом"
+
+msgid "Starting up"
+msgstr "Запуск"
+
+msgid "Starting workers…"
+msgstr "Запуск робочих процесів…"
+
+msgid "Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters."
+msgstr "Зберігається у зашифрованому вигляді за допомогою Windows DPAPI у власному файлі, а не у файлі settings.json. Після збереження більше не відображається — показуються лише останні чотири символи."
+
+msgid "STYLE"
+msgstr "СТИЛЬ"
+
+msgid "Sunset"
+msgstr "Захід сонця"
+
+msgid "SURFACE"
+msgstr "ПОВЕРХНЯ"
+
+msgid "SWAP TEXT"
+msgstr "ЗАМІНИТИ ТЕКСТ"
+
+msgid "Switch it on above and dictations from then on are kept."
+msgstr "Увімкніть цю опцію вище, і відтепер диктовки зберігатимуться."
+
+msgid "Switched off"
+msgstr "Вимкнено"
+
+msgid "System language"
+msgstr "Мова системи"
+
+msgid "TEXT — WHAT TRANSLATES A SELECTION"
+msgstr "ТЕКСТ — ЩО ПЕРЕКЛАДАЄ ВИДІЛЕНЕ"
+
+msgid "Text actions"
+msgstr "Дії з текстом"
+
+msgid "TEXT LEAVES DEVICE"
+msgstr "ТЕКСТ ВИХОДИТЬ З ПРИСТРОЮ"
+
+msgid "Text leaves this device for {text}"
+msgstr "Текст виходить з цього пристрою для {text}"
+
+msgid "The backdrop behind the preview"
+msgstr "Фон за попереднім переглядом"
+
+msgid "The original goes to the clipboard first"
+msgstr "Оригінал спочатку копіюється в буфер обміну"
+
+msgid "The selection is left exactly as it was"
+msgstr "Виділення залишається без змін"
+
+msgid "This build does not know this service"
+msgstr "Ця збірка не знає цю службу"
+
+msgid "This computer"
+msgstr "Цей комп’ютер"
+
+msgid "This model was not trained for it"
+msgstr "Ця модель не була навчена для цього"
+
+msgid "Tools"
+msgstr "Інструменти"
+
+msgid "TRANSLATE"
+msgstr "ПЕРЕКЛАСТИ"
+
+msgid "Translate to English"
+msgstr "Перекласти на англійську"
+
+msgid "Translated by {provider}."
+msgstr "Перекладено {provider}."
+
+msgid "Translates foreign text, offers layout candidates for the rest"
+msgstr "Перекладає іноземний текст, пропонує варіанти оформлення для решти"
+
+msgid "Translating locally…"
+msgstr "Переклад виконується локально…"
+
+msgid "Translation"
+msgstr "Переклад"
+
+msgid "TRANSLATION"
+msgstr "ПЕРЕКЛАД"
+
+msgid "Translation completed locally."
+msgstr "Переклад на локальному комп’ютері завершено."
+
+msgid "Translation preview"
+msgstr "Попередній перегляд перекладу"
+
+msgid "Two separate lists. The first enabled row is used; failures move down. Choose Only for cloud-only use, or move a cloud service above This computer to keep local fallback."
+msgstr "Два окремі списки. Використовується перший увімкнений рядок; помилки переміщуються вниз. Оберіть «Тільки» для використання виключно в хмарі або перемістіть хмарну службу вище пункту «Цей комп’ютер», щоб зберегти локальний резерв."
+
+msgid "Ukrainian"
+msgstr "Українська"
+
+msgid "Unavailable"
+msgstr "Недоступно"
+
+msgid "Use"
+msgstr "Використовувати"
+
+msgid "via {provider}"
+msgstr "через {provider}"
+
+msgid "Visuals"
+msgstr "Візуальні ефекти"
+
+msgid "Voice orb"
+msgstr "Голосова куля"
+
+msgid "Vulkan"
+msgstr "Vulkan"
+
+msgid "Waiting for Windows"
+msgstr "Очікування Windows"
+
+msgid "Waiting for Windows to accept the new shortcuts"
+msgstr "Очікування, поки Windows прийме нові комбінації клавіш"
+
+msgid "What Ctrl + Alt + F does with what it finds"
+msgstr "Що робить комбінація Ctrl + Alt + F із тим, що знаходить"
+
+msgid "What happens to it once it exists"
+msgstr "Що з цим відбувається, коли воно вже існує"
+
+msgid "Whatever you spoke, written as spoken"
+msgstr "Що б ви не сказали, записується так, як ви це сказали"
+
+msgid "Whether the selection shortcut may translate"
+msgstr "Чи можна перекласти комбінацію клавіш для виділення"
+
+msgid "White"
+msgstr "Білий"
+
+msgid "Writing slate"
+msgstr "Дошка для записів"
+
+msgid "Yes"
+msgstr "Так"
+
+msgid "About"
+msgstr "Про програму"
+
+msgid "SayFlex uses Slint for its interface. Dependency and model notices are included with the installed application."
+msgstr "Інтерфейс SayFlex створено на Slint. Відомості про залежності та моделі входять до встановленої програми."
+
+msgid "Windows tools for dictation and translation."
+msgstr "Інструменти Windows для диктування та перекладу."
+
+msgid "Open-source notices are installed as THIRD_PARTY_NOTICES.md."
+msgstr "Відомості про відкрите ПЗ встановлено у файлі THIRD_PARTY_NOTICES.md."
+msgid "Move item up or down"
+msgstr "Перемістити елемент угору або вниз"
+
+msgid "Swap source and target languages"
+msgstr "Поміняти місцями вихідну та цільову мови"
+
+msgid "Retry translation"
+msgstr "Повторити переклад"
+
+msgid "Value"
+msgstr "Значення"
+
+msgid "Hold {shortcut} to dictate."
+msgstr "Утримуйте {shortcut}, щоб диктувати."
+
+msgid "Companion Orb protocol mismatch. Reinstall the complete application."
+msgstr "Протокол сфери-компаньйона не збігається. Повністю перевстановіть програму."
+
+msgid "Translation worker protocol mismatch. Reinstall the complete application."
+msgstr "Протокол процесу перекладу не збігається. Повністю перевстановіть програму."
+
+msgid "{code} on the selected backend; checking {backend} automatically."
+msgstr "Помилка {code} у вибраному рушії; автоматично перевіряється {backend}."
+
+msgid "No model installed. Choose Fast or Quality in Settings."
+msgstr "Модель не встановлена. Виберіть «Швидко» або «Якісно» в налаштуваннях."
+
+msgid "Speech translation was turned off because no enabled provider supports it."
+msgstr "Переклад мовлення вимкнено, оскільки жоден увімкнений провайдер його не підтримує."
+
+msgid "{backend} verified by warm-up. The preference above is where the search starts."
+msgstr "{backend} перевірено розминкою. З наведених вище параметрів починається пошук."
+
+msgid "{field} is needed as well as the key."
+msgstr "Потрібен {field}, а також ключ."
+
+msgid "{visual} · shown while recording"
+msgstr "{visual} · відображається під час запису"
+
+msgid "A point cloud that accelerates on voice onset"
+msgstr "Хмара точок, яка прискорюється при появі голосу"
+
+msgid "Act on selection"
+msgstr "Акт про відбір"
+
+msgid "Add and save this provider's key before making it the only route."
+msgstr "Додайте та збережіть ключ цього провайдера, перш ніж зробити його єдиним маршрутом."
+
+msgid "Broadcast microphone colour updated for the next dictation."
+msgstr "Колір трансляційного мікрофона оновлено для наступного диктування."
+
+msgid "Choose a local translation model or configure a text service in Settings first."
+msgstr "Спершу виберіть локальну модель перекладу або налаштуйте текстову службу в налаштуваннях."
+
+msgid "Circular spectrum palette updated for the next dictation."
+msgstr "Палітру кругового спектру оновлено для наступного диктанту."
+
+msgid "Companion Orb is active on the desktop."
+msgstr "Companion Orb активний на робочому столі."
+
+msgid "Companion Orb is unavailable: {error}"
+msgstr "Companion Orb недоступний: {error}"
+
+msgid "Companion Orb restarted. Dictation continued normally."
+msgstr "Companion Orb перезапущено. Диктування тривало нормально."
+
+msgid "Companion Orb: {message}"
+msgstr "Куля-супутник: {message}"
+
+msgid "Could not cancel the install: {error}"
+msgstr "Не вдалося скасувати встановлення: {error}"
+
+msgid "Could not configure translation model: {error}"
+msgstr "Не вдалося налаштувати модель перекладу: {error}"
+
+msgid "Could not start Companion Orb: {error}"
+msgstr "Не вдалося запустити Companion Orb: {error}"
+
+msgid "Dictate"
+msgstr "Диктуйте"
+
+msgid "Downloading and verifying the translation model…"
+msgstr "Завантаження та перевірка моделі перекладу…"
+
+msgid "Drawn by the application itself, over whatever you are typing into."
+msgstr "Намальоване самою програмою поверх того, що ви вводите."
+
+msgid "Drawn on its own native surface, so it can be transparent per pixel."
+msgstr "Намальовано на власній рідній поверхні, тому воно може бути прозорим на піксель."
+
+msgid "Flow Sphere palette updated for the next dictation."
+msgstr "Палітру Flow Sphere оновлено для наступного диктування."
+
+msgid "Follows the level of your voice"
+msgstr "Стежить за рівнем вашого голосу"
+
+msgid "Insert last"
+msgstr "Вставити останнім"
+
+msgid "Install cancelled. The partial file is kept."
+msgstr "Встановлення скасовано. Частковий файл зберігається."
+
+msgid "Latest transcript {session} copied. Shift+Insert is ready."
+msgstr "Останню розшифровку {session} скопійовано. Shift+Insert готовий."
+
+msgid "Level bars beside a studio microphone"
+msgstr "Смуги рівнів біля студійного мікрофона"
+
+msgid "Listening; Companion Orb unavailable: {error}"
+msgstr "аудіювання; Супутня сфера недоступна: {error}"
+
+msgid "Loading the selected translation model…"
+msgstr "Завантаження вибраної моделі перекладу…"
+
+msgid "Local voice and translation history cleared."
+msgstr "Локальний голос і історію перекладів очищено."
+
+msgid "No overlay is drawn while recording"
+msgstr "Під час запису накладання не малюється"
+
+msgid "No transcription provider is ready. Enable a local model or configure a speech service in Settings."
+msgstr "Жоден постачальник транскрипції не готовий. Увімкніть локальну модель або налаштуйте службу мовлення в налаштуваннях."
+
+msgid "Not available on the CPU engine: one pass at a time, and a preview is time the transcript waits."
+msgstr "Недоступно на механізмі CPU: один проход за раз, а попередній перегляд – це час очікування стенограми."
+
+msgid "One line that thickens with the voice"
+msgstr "Одна лінія, яка згущується разом із голосом"
+
+msgid "Pause / resume"
+msgstr "Пауза / відновлення"
+
+msgid "Removing the key for {provider}…"
+msgstr "Видалення ключа для {provider}…"
+
+msgid "Stays where you put it, between dictations"
+msgstr "Залишається там, де ви його поставили, між диктовками"
+
+msgid "Storing the key for {provider}…"
+msgstr "Зберігання ключа для {provider}…"
+
+msgid "That key cannot be used as a global shortcut."
+msgstr "Цей ключ не можна використовувати як глобальний ярлик."
+
+msgid "The endpoint must be HTTPS: the key and the audio both travel in this request."
+msgstr "Кінцева точка має бути HTTPS: і ключ, і аудіо передаються в цьому запиті."
+
+msgid "The key could not be removed: {error}"
+msgstr "Не вдалося видалити ключ: {error}"
+
+msgid "The key could not be sent to the worker: {error}"
+msgstr "Не вдалося надіслати ключ робочому: {error}"
+
+msgid "The key for {provider} has been removed."
+msgstr "Ключ для {provider} видалено."
+
+msgid "The key for {provider} is stored."
+msgstr "Ключ для {provider} збережено."
+
+msgid "The latest dictation was cancelled and cannot be inserted."
+msgstr "Останній диктант скасовано, і його неможливо вставити."
+
+msgid "The microphone and transcription keep working; only the overlay is disabled."
+msgstr "Мікрофон і транскрипція продовжують працювати; вимкнено лише накладання."
+
+msgid "The pause/resume recovery shortcut must stay enabled."
+msgstr "Комбінація швидкого доступу для призупинення/відновлення відновлення має залишатися ввімкненою."
+
+msgid "The spectrum wrapped into a ring"
+msgstr "Спектр, загорнутий у кільце"
+
+msgid "The translation order could not be applied: {error}"
+msgstr "Не вдалося застосувати порядок перекладу: {error}"
+
+msgid "The words as they are recognised"
+msgstr "Слова, як вони розпізнаються"
+
+msgid "Thirty-two bands, thirty-one times a second"
+msgstr "Тридцять дві смуги, тридцять один раз на секунду"
+
+msgid "Use a letter, number, function key, Space, Tab, Enter, or arrow key."
+msgstr "Використовуйте літеру, цифру, функціональну клавішу, пробіл, Tab, Enter або клавішу зі стрілкою."
+
+msgid "Visualizer updated. The next dictation uses the selected style."
+msgstr "Візуалізатор оновлений. У наступному диктанті використовується обраний стиль."
+
+msgid "Warming up on {backend}. If it fails, the search moves to the next one down."
+msgstr "Розминка на {backend}. Якщо це не вдається, пошук переходить до наступного."
+
+msgid "Writing Slate surface updated for the next dictation."
+msgstr "Поверхню Slate для письма оновлено для наступного диктування."
+
+msgid "Worker restarted automatically."
+msgstr "Робочий процес автоматично перезапущено."
+
+msgid "Worker restart failed. See the diagnostic log for details."
+msgstr "Не вдалося перезапустити робочий процес. Докладніше дивіться в журналі діагностики."
+
+msgid "The latest dictation could not be inserted."
+msgstr "Не вдалося вставити останнє диктування."
+
+msgid "No answer arrived from the worker, so whether the key was stored is not known yet. The row will show the stored state when the worker answers; sending again is safe."
+msgstr "Робочий процес не відповів, тому поки невідомо, чи збережено ключ. Після відповіді рядок покаже фактичний стан; повторне надсилання безпечне."
+
+msgid "{provider} did not confirm the key."
+msgstr "{provider} не підтвердив збереження ключа."
+
+msgid "The worker stopped before confirming the key. The row will show the stored state after recovery."
+msgstr "Робочий процес зупинився до підтвердження ключа. Після відновлення рядок покаже фактичний стан."
+
+msgid "{provider} did not accept the key."
+msgstr "{provider} не прийняв ключ."
+msgid "Scroll position"
+msgstr "Положення прокручування"
+
+msgid "Show original text"
+msgstr "Показати вихідний текст"
+
+msgid "Show interleaved original and translation"
+msgstr "Показати оригінал і переклад почергово"
+
+msgid "Pin translation"
+msgstr "Закріпити переклад"
+
+msgid "Unpin translation"
+msgstr "Відкріпити переклад"

@@ -1,15 +1,12 @@
 //! Why a provider could not translate, and what that means for the next one.
 //!
 //! The transcription crate answers the same question, and this is deliberately
-//! not the same code. These three services disagree with the speech services
+//! not the same code. These services disagree with the speech services
 //! about which status code means what, and the differences are exactly the ones
 //! that matter:
 //!
 //! * DeepL signals a spent allowance with **456**, a status no speech service
 //!   uses, and signals a bad key with **403** where the others use 401.
-//! * Google returns **403** for a key that is wrong, a key that is restricted
-//!   to other APIs, and an allowance that is spent — the body is the only thing
-//!   that tells them apart.
 //! * Azure Translator returns **401** for a missing key and **403** for a key
 //!   whose region is wrong, which is a fixable mistake rather than a dead key.
 //!
@@ -22,7 +19,7 @@ use std::time::Duration;
 /// does not say for how long.
 ///
 /// An hour, and no attempt to work out when the allowance actually resets.
-/// None of the three publishes that in a reply, and a guess would be a
+/// Neither provider publishes that in a reply, and a guess would be a
 /// deliberate silence of unknown length. An hour is long enough not to hammer a
 /// spent daily allowance and short enough that a service which has recovered is
 /// tried again the same afternoon.
@@ -43,8 +40,8 @@ pub enum ProviderFailure {
     /// The key is missing, wrong, or revoked. Trying again changes nothing, so
     /// the row is switched off and the user is told which one it was.
     Credential(String),
-    /// The key is real but the request was addressed wrongly — an Azure key
-    /// used with the wrong region, a Google key restricted to another API.
+    /// The key is real but the request was addressed wrongly — for example an
+    /// Azure key used with the wrong region.
     /// Fixable in settings, and not a reason to throw the key away.
     Misconfigured(String),
     /// The free allowance is used up. Nothing will work until the service
@@ -60,8 +57,8 @@ pub enum ProviderFailure {
     /// The service answered and handed back nothing for a text that had
     /// something in it.
     ///
-    /// That is this provider failing, not a fact about the text: DeepL and
-    /// Google do not have the same languages, and a model that returns nothing
+    /// That is this provider failing, not a fact about the text: providers and
+    /// the local model do not have identical language support, and one returning nothing
     /// for a sentence is a model having a bad day. So the walk carries on. An
     /// empty *source* never gets this far — it is refused before anything is
     /// routed, because there is nothing to translate.
@@ -71,8 +68,8 @@ pub enum ProviderFailure {
 impl ProviderFailure {
     /// Whether the next provider in the list should be tried.
     ///
-    /// Always. These three do not cover the same language pairs — DeepL has
-    /// around thirty languages where Google has hundreds — and the local
+    /// Always. The providers and local models do not cover identical language
+    /// pairs, and the local
     /// engine usually sits at the end of the list, so stopping strands a
     /// translation somebody else could have done.
     ///
@@ -301,39 +298,12 @@ mod tests {
     }
 
     #[test]
-    fn google_403_tells_a_spent_quota_from_a_wrong_key_by_the_body() {
-        let spent = classify_response(
-            ProviderId::GOOGLE,
-            403,
-            None,
-            "Quota exceeded for quota metric 'v2 and v3 general model characters'",
-        );
-        assert!(matches!(spent, ProviderFailure::QuotaExhausted { .. }));
-
-        let restricted = classify_response(
-            ProviderId::GOOGLE,
-            403,
-            None,
-            "Cloud Translation API has not been used in project 12345 before or it is disabled",
-        );
-        assert!(matches!(restricted, ProviderFailure::Misconfigured(_)));
-
-        let dead = classify_response(
-            ProviderId::GOOGLE,
-            403,
-            None,
-            "The caller does not have permission",
-        );
-        assert!(matches!(dead, ProviderFailure::Credential(_)));
-    }
-
-    #[test]
     fn a_rate_limit_is_told_from_a_spent_allowance_by_the_body() {
         let slow_down = classify_response(ProviderId::DEEPL, 429, None, "Too many requests");
         assert!(matches!(slow_down, ProviderFailure::RateLimited { .. }));
 
         let spent = classify_response(
-            ProviderId::GOOGLE,
+            ProviderId::DEEPL,
             429,
             None,
             "Daily limit exceeded for this project",

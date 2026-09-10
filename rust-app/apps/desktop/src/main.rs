@@ -23,6 +23,7 @@ use providers_view::sync_providers;
 use rust_app_core::{
     BeginDisposition, EndDisposition, LayoutCandidate, SessionPhase, SessionRegistry,
     dictation::{CompletionDelivery, HistoryUpdate, plan_completion},
+    provider_drafts::ProviderDraftStore,
 };
 use rust_protocol::{
     BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, DictationLanguage,
@@ -50,12 +51,12 @@ use slint::{
     ComponentHandle, Image, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
 };
 use translation_view::{
-    TranslationPreviewRegistry, TranslationPreviewSlot, adaptive_text_panel_height,
-    apply_translation_preview_layout, apply_translation_preview_pin_state,
-    configure_slint_translation_resize, create_translation_preview_slot,
-    precreate_translation_preview, refresh_cloaked_translation_backdrop,
-    retire_translation_preview, set_translation_status, update_translation_preview_content,
-    wire_translation_preview,
+    TranslationPreviewRegistry, TranslationPreviewSlot, TranslationRetry,
+    adaptive_text_panel_height, apply_translation_preview_layout,
+    apply_translation_preview_pin_state, configure_slint_translation_resize,
+    create_translation_preview_slot, precreate_translation_preview,
+    refresh_cloaked_translation_backdrop, retire_translation_preview, set_translation_status,
+    update_translation_preview_content, wire_translation_preview,
 };
 use visualizer::{
     BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, IndicatorAnimation,
@@ -68,6 +69,7 @@ use worker_supervisor::{
 };
 
 mod flow_sphere;
+mod localization;
 mod overlay_presenter;
 mod preview_modes;
 mod providers_view;
@@ -80,10 +82,23 @@ mod translation_view;
 mod visualizer;
 mod worker_supervisor;
 
+use localization::{UiLocale, UiText, active_locale, render, text};
 use overlay_presenter::{OverlayContract, OverlayPresenter};
 use speech_backend::{SpeechBackend, SpeechBackendPreference};
 
 slint::include_modules!();
+
+fn state_text(state: &Rc<RefCell<AppState>>, message: UiText) -> &'static str {
+    text(active_locale(state.borrow().ui_locale), message)
+}
+
+fn state_message(
+    state: &Rc<RefCell<AppState>>,
+    message: UiText,
+    values: &[(&str, &str)],
+) -> String {
+    render(active_locale(state.borrow().ui_locale), message, values)
+}
 
 const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 const DEFAULT_TRANSLATION_BLUR_RADIUS: u32 = 3;
@@ -150,6 +165,10 @@ enum RuntimeEvent {
     ScrollTranslationPreview {
         window_handle: u64,
         delta: i32,
+    },
+    RetryTranslation {
+        window_handle: u64,
+        swap: bool,
     },
     SessionEnd(rust_platform_windows::SessionEndEvent),
     WorkerError {
@@ -335,6 +354,8 @@ struct SelectionTranslationRequest {
     text: String,
     delivery: TranslationDelivery,
     request_started_unix_ms: u64,
+    source_language: Option<TranslationLanguage>,
+    target_language: Option<TranslationLanguage>,
 }
 
 struct PendingInsertLast {
@@ -399,6 +420,7 @@ struct AppState {
     text_action_mode: TextActionMode,
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
+    ui_locale: UiLocale,
     pending_text_action: Option<PendingTextAction>,
     pending_selection_captures: HashMap<RequestId, u64>,
     selection_release_gates: HashMap<RequestId, SelectionReleaseGate>,
@@ -429,11 +451,16 @@ struct AppState {
     /// form, threw away what the user had typed, and wrote the second field to
     /// disk on the strength of the pipe having accepted the message.
     pending_credentials: HashMap<RequestId, PendingCredential>,
+    /// Unsaved provider text belongs to Rust, not to a repeated Slint row.
+    /// Reordering or refreshing provider status may rebuild that row.
+    provider_drafts: ProviderDraftStore,
 }
 
 /// One key save the window is waiting to hear about.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingCredential {
+    /// Correlation id retained after the map entry is removed by a timeout.
+    pub(crate) operation_id: RequestId,
     /// The row it belongs to, prefixed with its list.
     pub(crate) row_id: String,
     /// The second field, held here until the key is known to be stored. It is
@@ -512,7 +539,9 @@ impl AppState {
             translation_providers: Vec::new(),
             translation_chain: saved_settings.translation_providers.clone(),
             pending_credentials: HashMap::new(),
+            provider_drafts: ProviderDraftStore::default(),
             history_enabled: saved_settings.history_enabled,
+            ui_locale: saved_settings.ui_locale,
         }
     }
 
@@ -731,8 +760,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
-    settings.set_today(rust_platform_windows::local_date_line().into());
     let saved_settings = load_settings();
+    let system_locale = rust_platform_windows::user_locale_name();
+    slint::select_bundled_translation(saved_settings.ui_locale.resolved_code(&system_locale))?;
+    settings.set_today(
+        rust_platform_windows::local_date_line_for_locale(
+            active_locale(saved_settings.ui_locale).code(),
+        )
+        .into(),
+    );
     let (panel_indicator, transparent_indicator, indicator_animation) = new_recording_indicators()?;
     let settings_preview_animation = new_settings_preview(&settings);
     let panel_indicator_presenter = OverlayPresenter::install_always_renderable(
@@ -800,6 +836,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         preview: Rc::clone(&translation_preview),
         presenter: translation_preview_presenter.clone(),
         attached: Rc::new(Cell::new(false)),
+        retry: Rc::new(RefCell::new(None)),
     };
     let translation_previews = Rc::new(RefCell::new(TranslationPreviewRegistry {
         current: translation_preview_slot.clone(),
@@ -1188,7 +1225,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 } else {
                     set_indicator_status(
                         &runtime.settings,
-                        "Companion Orb protocol mismatch. Reinstall the complete application.",
+                        state_text(&runtime.state, UiText::CompanionProtocolMismatch),
                     );
                 }
             }
@@ -1212,7 +1249,14 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 rust_app_core::diagnostics::log_line(&format!(
                     "companion_renderer result=failed session={session_id:?} code={code} message={message}"
                 ));
-                set_indicator_status(&runtime.settings, &format!("Companion Orb: {message}"));
+                set_indicator_status(
+                    &runtime.settings,
+                    &state_message(
+                        &runtime.state,
+                        UiText::CompanionOrbStatus,
+                        &[("message", &message)],
+                    ),
+                );
             }
         },
         RuntimeEvent::DismissTranslationPreview(window_handle) => {
@@ -1316,6 +1360,34 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 slot.preview.invoke_scroll_by(delta as f32);
             }
         }
+        RuntimeEvent::RetryTranslation {
+            window_handle,
+            swap,
+        } => {
+            let retry = runtime
+                .translation_previews
+                .borrow()
+                .slot_by_handle(window_handle)
+                .and_then(|slot| slot.retry.borrow().clone());
+            if let Some(retry) = retry {
+                let (text, source_language, target_language) = retry.request(swap);
+                begin_selection_translation(
+                    SelectionTranslationRequest {
+                        request_id: RequestId::new(),
+                        target: retry.target,
+                        text,
+                        delivery: TranslationDelivery::Preview,
+                        request_started_unix_ms: unix_ms(),
+                        source_language: Some(source_language),
+                        target_language: Some(target_language),
+                    },
+                    &runtime.settings,
+                    &runtime.translation_previews,
+                    &runtime.state,
+                    &runtime.workers,
+                );
+            }
+        }
         RuntimeEvent::SessionEnd(event) => {
             handle_session_end(event, runtime);
         }
@@ -1373,7 +1445,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             runtime.indicator_animation.borrow_mut().stop();
             runtime.recording_overlays.retire_all("worker_error");
             if let Some(settings) = runtime.settings.upgrade() {
-                settings.set_runtime_status("Worker error".into());
+                settings.set_runtime_status(state_text(&runtime.state, UiText::WorkerError).into());
             }
             set_status_problem(&runtime.settings, &message);
         }
@@ -1428,10 +1500,6 @@ fn handle_worker_exit(
     let exit_code = exit
         .exit_code
         .map_or_else(|| "unknown".to_owned(), |code| format!("0x{code:08X}"));
-    let message = format!(
-        "{kind:?} worker exited with {exit_code} after {} ms",
-        exit.uptime.as_millis()
-    );
     rust_app_core::diagnostics::log_line(&format!(
         "worker kind={kind:?} instance={instance_id} exit_code={exit_code} uptime_ms={}",
         exit.uptime.as_millis()
@@ -1473,13 +1541,17 @@ fn handle_worker_exit(
                 }
                 set_indicator_status(
                     &runtime.settings,
-                    "Companion Orb restarted. Dictation continued normally.",
+                    state_text(&runtime.state, UiText::CompanionOrbRestarted),
                 );
             }
             Ok(WorkerRecovery::Deferred | WorkerRecovery::Stopping | WorkerRecovery::Stale) => {}
             Err(error) => set_status_problem(
                 &runtime.settings,
-                &format!("Companion Orb is unavailable: {error}"),
+                &state_message(
+                    &runtime.state,
+                    UiText::CompanionOrbUnavailable,
+                    &[("error", &error.to_string())],
+                ),
             ),
         }
         return;
@@ -1567,7 +1639,9 @@ fn handle_worker_exit(
                 WorkerKind::Companion => Ok(()),
             };
             if let Some(settings) = runtime.settings.upgrade() {
-                settings.set_runtime_status("Recovering worker".into());
+                settings.set_runtime_status(
+                    state_text(&runtime.state, UiText::RecoveringWorker).into(),
+                );
             }
             // A restart that worked is progress; one that did not is trouble.
             // Reading that out of the sentence is what the old classifier got
@@ -1575,12 +1649,17 @@ fn handle_worker_exit(
             match initialization {
                 Ok(()) => set_indicator_status(
                     &runtime.settings,
-                    &format!("{message}; worker restarted automatically"),
+                    state_text(&runtime.state, UiText::WorkerRestarted),
                 ),
-                Err(error) => set_status_problem(
-                    &runtime.settings,
-                    &format!("{message}; restart initialization failed: {error}"),
-                ),
+                Err(error) => {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "worker kind={kind:?} recovery=initialization_failed error={error}"
+                    ));
+                    set_status_problem(
+                        &runtime.settings,
+                        state_text(&runtime.state, UiText::WorkerRestartFailed),
+                    );
+                }
             }
         }
         Ok(WorkerRecovery::Deferred) => {
@@ -1595,14 +1674,22 @@ fn handle_worker_exit(
         }
         Ok(WorkerRecovery::Stale) => {}
         Err(error) => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "worker kind={kind:?} recovery=failed error={error}"
+            ));
             if kind == WorkerKind::Speech {
                 runtime.state.borrow_mut().speech_backend_active = None;
                 sync_action_settings(&runtime.settings, &runtime.state);
             }
             if let Some(settings) = runtime.settings.upgrade() {
-                settings.set_runtime_status("Worker unavailable".into());
+                settings.set_runtime_status(
+                    state_text(&runtime.state, UiText::WorkerUnavailable).into(),
+                );
             }
-            set_status_problem(&runtime.settings, &format!("{message}; {error}"));
+            set_status_problem(
+                &runtime.settings,
+                state_text(&runtime.state, UiText::WorkerUnavailable),
+            );
         }
     }
 }
@@ -1631,17 +1718,18 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     configuration: HotkeyConfiguration { bindings },
                 }) {
                     state.borrow_mut().pending_hotkeys = None;
-                    set_status_problem(settings, &format!("Could not apply shortcuts: {error}"));
+                    let error = error.to_string();
+                    set_status_problem(
+                        settings,
+                        &state_message(state, UiText::CouldNotApplyShortcuts, &[("error", &error)]),
+                    );
                     return;
                 }
-                set_runtime_status(settings, "Input ready");
+                set_runtime_status(settings, state_text(state, UiText::InputReady));
             } else {
                 state.borrow_mut().input_ready = false;
-                set_runtime_status(settings, "Worker mismatch");
-                set_indicator_status(
-                    settings,
-                    "Input worker protocol mismatch. Reinstall the complete application.",
-                );
+                set_runtime_status(settings, state_text(state, UiText::WorkerMismatch));
+                set_indicator_status(settings, state_text(state, UiText::InputProtocolMismatch));
             }
         }
         InputHostEvent::HotkeysApplied {
@@ -1659,7 +1747,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             };
             if applied {
                 sync_action_settings(settings, state);
-                set_indicator_status(settings, "Shortcuts updated.");
+                set_indicator_status(settings, state_text(state, UiText::ShortcutsUpdated));
             }
         }
         InputHostEvent::HotkeysRejected {
@@ -1682,9 +1770,9 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             set_indicator_status(
                 settings,
                 if paused {
-                    "Input features paused. Use the pause shortcut again to resume."
+                    state_text(state, UiText::InputPaused)
                 } else {
-                    "Input features resumed."
+                    state_text(state, UiText::InputResumed)
                 },
             );
         }
@@ -1694,7 +1782,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             target,
         } => {
             if !state.borrow().input_ready {
-                set_status_problem(settings, "Input worker is not ready.");
+                set_status_problem(settings, state_text(state, UiText::InputWorkerNotReady));
                 return;
             }
             let (path_ready, worker_ready, waits_for_local) = {
@@ -1707,17 +1795,20 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             };
             if !path_ready {
                 let message = if !worker_ready {
-                    "Speech service is still starting."
+                    UiText::SpeechServiceStarting
                 } else if waits_for_local {
-                    "Speech model is still being prepared."
+                    UiText::SpeechModelPreparing
                 } else {
-                    "No transcription provider is ready. Enable a local model or configure a speech service in Settings."
+                    UiText::NoTranscriptionProviderReady
                 };
-                set_indicator_status(settings, message);
+                set_indicator_status(settings, state_text(state, message));
                 return;
             }
             if state.borrow().indicator_session.is_some() {
-                set_indicator_status(settings, "Finishing the previous dictation…");
+                set_indicator_status(
+                    settings,
+                    state_text(state, UiText::FinishingPreviousDictation),
+                );
                 return;
             }
             let begin = state
@@ -1745,11 +1836,16 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 started_unix_ms,
             }) {
                 let mut state = state.borrow_mut();
+                let message = render(
+                    active_locale(state.ui_locale),
+                    UiText::CouldNotStartRecording,
+                    &[("error", &error.to_string())],
+                );
                 let _ = state.registry.fail(session_id);
                 state.targets.remove(&session_id);
                 state.indicator_session = None;
                 state.active_visualizer_style = None;
-                set_status_problem(settings, &format!("Could not start recording: {error}"));
+                set_status_problem(settings, &message);
                 return;
             }
             let active_style = state.borrow().active_visualizer_style.unwrap_or_default();
@@ -1770,7 +1866,11 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     ));
                     set_indicator_status(
                         settings,
-                        &format!("Listening; Companion Orb unavailable: {error}"),
+                        &state_message(
+                            state,
+                            UiText::ListeningCompanionUnavailable,
+                            &[("error", &error.to_string())],
+                        ),
                     );
                 }
             } else {
@@ -1787,7 +1887,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     );
                 }
             }
-            set_indicator_status(settings, "Listening…");
+            set_indicator_status(settings, state_text(state, UiText::Listening));
         }
         InputHostEvent::DictationEnd {
             session_id,
@@ -1806,6 +1906,11 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     .send(&SpeechWorkerCommand::End { session_id })
                 {
                     let mut state = state.borrow_mut();
+                    let message = render(
+                        active_locale(state.ui_locale),
+                        UiText::CouldNotFinishRecording,
+                        &[("error", &error.to_string())],
+                    );
                     let companion_active = state
                         .active_visualizer_style
                         .is_some_and(VisualizerStyle::uses_external_renderer);
@@ -1820,7 +1925,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     }
                     indicator_animation.borrow_mut().stop();
                     recording_overlays.retire_all("speech_end_send_failed");
-                    set_status_problem(settings, &format!("Could not finish recording: {error}"));
+                    set_status_problem(settings, &message);
                     return;
                 }
                 if state.borrow().active_visualizer_style != Some(VisualizerStyle::Off) {
@@ -1843,7 +1948,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     indicator.set_signal_opacity(0.72);
                     indicator.set_disc_opacity(0.82);
                 }
-                set_indicator_status(settings, "Processing locally…");
+                set_indicator_status(settings, state_text(state, UiText::ProcessingLocally));
             }
         }
         InputHostEvent::InsertLastRequested { target } => {
@@ -1867,9 +1972,10 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     ));
                     set_indicator_status(
                         settings,
-                        &format!(
-                            "Dictation {} is still processing; it will be inserted here when ready.",
-                            short_id(session_id)
+                        &state_message(
+                            state,
+                            UiText::DictationStillProcessing,
+                            &[("session", &short_id(session_id))],
                         ),
                     );
                 }
@@ -1881,14 +1987,17 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     let _ = workers.speech.send(&SpeechWorkerCommand::GetHistory {
                         limit: HISTORY_LIMIT,
                     });
-                    set_indicator_status(settings, "Loading the latest transcript…");
+                    set_indicator_status(
+                        settings,
+                        state_text(state, UiText::LoadingLatestTranscript),
+                    );
                 }
-                InsertLastResolution::Unavailable(message) => {
+                InsertLastResolution::Unavailable(_message) => {
                     rust_app_core::diagnostics::log_line(&format!(
                         "insert_last decision=unavailable target_pid={}",
                         target.process_id
                     ));
-                    set_indicator_status(settings, message);
+                    set_indicator_status(settings, state_text(state, UiText::NoTranscriptToInsert));
                 }
             }
         }
@@ -1911,7 +2020,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     translation_previews.borrow_mut().current_request = None;
                 }
             }
-            set_indicator_status(settings, "Reading selected text…");
+            set_indicator_status(settings, state_text(state, UiText::ReadingSelectedText));
         }
         InputHostEvent::SelectionCaptured {
             request_id,
@@ -2001,7 +2110,10 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 request_id,
             ));
             if had_deferred_replacement {
-                set_indicator_status(settings, &format!("Translation ready, but {message}"));
+                set_indicator_status(
+                    settings,
+                    &state_message(state, UiText::TranslationReadyBut, &[("message", &message)]),
+                );
             }
         }
         InputHostEvent::SelectionCaptureFailed {
@@ -2012,7 +2124,10 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             app.pending_selection_captures.remove(&request_id);
             app.selection_release_gates.remove(&request_id);
             drop(app);
-            set_indicator_status(settings, &format!("Selection: {message}"));
+            set_indicator_status(
+                settings,
+                &state_message(state, UiText::SelectionIssue, &[("message", &message)]),
+            );
         }
         InputHostEvent::InsertionCompleted {
             session_id,
@@ -2081,53 +2196,48 @@ speculative_reuse={} method={} delivery={}",
                 ));
             }
             let elapsed = total_after_release_ms.unwrap_or(dispatch_duration_ms);
+            let session = short_id(session_id);
+            let elapsed = elapsed.to_string();
             let status = match delivery {
-                rust_protocol::InsertionDelivery::Committed => {
-                    format!(
-                        "Inserted {} through the target adapter in {} ms",
-                        short_id(session_id),
-                        elapsed
-                    )
-                }
-                rust_protocol::InsertionDelivery::PayloadRead => {
-                    format!(
-                        "Inserted {} after the target read the private transaction in {} ms",
-                        short_id(session_id),
-                        elapsed
-                    )
-                }
-                rust_protocol::InsertionDelivery::Verified => {
-                    format!(
-                        "Verified insertion {} in {} ms",
-                        short_id(session_id),
-                        elapsed
-                    )
-                }
-                rust_protocol::InsertionDelivery::Dispatched => {
-                    format!(
-                        "Paste dispatched {} without target verification in {} ms",
-                        short_id(session_id),
-                        elapsed
-                    )
-                }
+                rust_protocol::InsertionDelivery::Committed => state_message(
+                    state,
+                    UiText::InsertedTargetAdapter,
+                    &[("delivery", &session), ("milliseconds", &elapsed)],
+                ),
+                rust_protocol::InsertionDelivery::PayloadRead => state_message(
+                    state,
+                    UiText::InsertedPrivateTransaction,
+                    &[("delivery", &session), ("milliseconds", &elapsed)],
+                ),
+                rust_protocol::InsertionDelivery::Verified => state_message(
+                    state,
+                    UiText::VerifiedInsertion,
+                    &[("delivery", &session), ("milliseconds", &elapsed)],
+                ),
+                rust_protocol::InsertionDelivery::Dispatched => state_message(
+                    state,
+                    UiText::PasteDispatched,
+                    &[("delivery", &session), ("milliseconds", &elapsed)],
+                ),
             };
             set_indicator_status(settings, &status);
         }
         InputHostEvent::Recovered { session_id } => {
             set_indicator_status(
                 settings,
-                &format!(
-                    "Latest transcript {} copied. Shift+Insert is ready.",
-                    short_id(session_id)
+                &state_message(
+                    state,
+                    UiText::LatestTranscriptCopied,
+                    &[("session", &short_id(session_id))],
                 ),
             );
         }
         InputHostEvent::SelectionReplaced { request_id } => {
             let _ = request_id;
-            set_indicator_status(settings, "Replacement was sent to the target.");
+            set_indicator_status(settings, state_text(state, UiText::ReplacementSent));
         }
         InputHostEvent::TextCopied { .. } => {
-            set_indicator_status(settings, "Translation copied to the clipboard.");
+            set_indicator_status(settings, state_text(state, UiText::TranslationCopied));
         }
         InputHostEvent::Failed {
             session_id,
@@ -2158,7 +2268,14 @@ speculative_reuse={} method={} delivery={}",
                 indicator_animation.borrow_mut().stop();
                 recording_overlays.retire_all("insertion_failed");
             }
-            set_indicator_status(settings, &format!("{code}: {message}"));
+            set_indicator_status(
+                settings,
+                &state_message(
+                    state,
+                    UiText::TechnicalFailure,
+                    &[("code", &code), ("message", &message)],
+                ),
+            );
         }
     }
 }
@@ -2226,7 +2343,10 @@ fn handle_text_action(
                     .borrow_mut()
                     .selection_release_gates
                     .remove(&request_id);
-                set_indicator_status(settings, "Keyboard-layout correction is disabled.");
+                set_indicator_status(
+                    settings,
+                    state_text(state, UiText::LayoutCorrectionDisabled),
+                );
             }
         }
         TextActionIntent::Translate => {
@@ -2237,6 +2357,8 @@ fn handle_text_action(
                     text,
                     delivery: TranslationDelivery::Preview,
                     request_started_unix_ms,
+                    source_language: None,
+                    target_language: None,
                 },
                 settings,
                 translation_previews,
@@ -2260,7 +2382,7 @@ fn handle_text_action(
                     .borrow_mut()
                     .selection_release_gates
                     .remove(&request_id);
-                set_indicator_status(settings, "All selected-text actions are disabled.");
+                set_indicator_status(settings, state_text(state, UiText::AllTextActionsDisabled));
                 return;
             }
             if enabled_count == 1 && mode == TextActionMode::Adaptive {
@@ -2272,6 +2394,8 @@ fn handle_text_action(
                             text,
                             delivery,
                             request_started_unix_ms,
+                            source_language: None,
+                            target_language: None,
                         },
                         settings,
                         translation_previews,
@@ -2361,6 +2485,8 @@ fn begin_selection_translation(
         text,
         delivery,
         request_started_unix_ms,
+        source_language,
+        target_language,
     } = request;
     let (enabled, selected_tier, path_ready, waits_for_local) = {
         let state = state.borrow();
@@ -2376,7 +2502,7 @@ fn begin_selection_translation(
             .borrow_mut()
             .selection_release_gates
             .remove(&request_id);
-        set_indicator_status(settings, "Translation is disabled in Actions.");
+        set_indicator_status(settings, state_text(state, UiText::TranslationDisabled));
         rust_app_core::diagnostics::log_line(&format!(
             "translation_pipeline request={request_id} stage=rejected \
 reason=translation_disabled"
@@ -2388,10 +2514,7 @@ reason=translation_disabled"
             .borrow_mut()
             .selection_release_gates
             .remove(&request_id);
-        set_indicator_status(
-            settings,
-            "Choose a local translation model or configure a text service in Settings first.",
-        );
+        set_indicator_status(settings, state_text(state, UiText::ChooseTranslationRoute));
         rust_app_core::diagnostics::log_line(&format!(
             "translation_pipeline request={request_id} stage=rejected reason=no_selected_model"
         ));
@@ -2404,8 +2527,10 @@ reason=translation_disabled"
             text,
             delivery,
             request_started_unix_ms,
+            source_language,
+            target_language,
         });
-        set_indicator_status(settings, "The local translation model is still loading.");
+        set_indicator_status(settings, state_text(state, UiText::LocalTranslationLoading));
         rust_app_core::diagnostics::log_line(&format!(
             "translation_pipeline request={request_id} stage=queued reason=model_loading"
         ));
@@ -2433,8 +2558,8 @@ reason=translation_disabled"
         .send(&TranslationWorkerCommand::Translate {
             request_id,
             text,
-            source_language: None,
-            target_language: None,
+            source_language,
+            target_language,
             language_policy: TranslationLanguagePolicy {
                 primary: state.borrow().translation_primary_language,
                 secondary: state.borrow().translation_secondary_language,
@@ -2447,13 +2572,26 @@ reason=translation_disabled"
         translation_previews
             .borrow_mut()
             .clear_current_request(request_id);
-        set_status_problem(settings, &format!("Could not start translation: {error}"));
+        set_status_problem(
+            settings,
+            &state_message(
+                state,
+                UiText::CouldNotStartTranslation,
+                &[("error", &error.to_string())],
+            ),
+        );
     } else {
-        set_indicator_status(settings, "Translating…");
+        set_indicator_status(settings, state_text(state, UiText::TranslatingNow));
         rust_app_core::diagnostics::log_line(&format!(
             "translation_pipeline request={request_id} stage=dispatched"
         ));
     }
+}
+
+#[derive(Clone, Copy)]
+struct TranslationPreviewLanguages {
+    resolved: Option<(TranslationLanguage, TranslationLanguage)>,
+    locale: UiLocale,
 }
 
 fn show_selection_translation_preview(
@@ -2463,6 +2601,7 @@ fn show_selection_translation_preview(
     translated_text: &str,
     translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     final_update: bool,
+    languages: TranslationPreviewLanguages,
 ) {
     let Some(slot) = translation_previews.borrow().slot_for_request(request_id) else {
         rust_app_core::diagnostics::log_line(&format!(
@@ -2491,9 +2630,22 @@ fn show_selection_translation_preview(
             ));
         }
         preview.set_live_glass(false);
+        preview.set_source_language_label(text(languages.locale, UiText::AutoUpper).into());
+        preview.set_target_language_label("".into());
         if let Some(handle) = slint_window_handle(preview.window()) {
             let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
         }
+    }
+    if let Some((source_language, target_language)) = languages.resolved {
+        preview.set_source_language_label(source_language.code().to_uppercase().into());
+        preview.set_target_language_label(target_language.code().to_uppercase().into());
+        *slot.retry.borrow_mut() = Some(TranslationRetry {
+            target,
+            source_text: source_text.to_owned(),
+            translated_text: translated_text.to_owned(),
+            source_language,
+            target_language,
+        });
     }
     update_translation_preview_content(
         preview,
@@ -2664,14 +2816,12 @@ fn handle_speech_event(
         } => {
             if protocol_version != PROTOCOL_VERSION {
                 let mut state = state.borrow_mut();
+                let locale = active_locale(state.ui_locale);
                 state.speech_worker_ready = false;
                 state.speech_ready = false;
                 drop(state);
-                set_runtime_status(settings, "Worker mismatch");
-                set_indicator_status(
-                    settings,
-                    "Speech worker protocol mismatch. Reinstall the complete application.",
-                );
+                set_runtime_status(settings, text(locale, UiText::WorkerMismatch));
+                set_indicator_status(settings, text(locale, UiText::SpeechProtocolMismatch));
                 return;
             }
             {
@@ -2682,13 +2832,13 @@ fn handle_speech_event(
             }
             sync_models(settings, state);
             if state.borrow().local_speech_enabled() {
-                set_runtime_status(settings, "Preparing model");
-                set_indicator_status(settings, "Loading and warming the local speech engine…");
+                set_runtime_status(settings, state_text(state, UiText::PreparingModel));
+                set_indicator_status(settings, state_text(state, UiText::LoadingSpeechEngine));
             } else {
-                set_runtime_status(settings, "Cloud speech ready");
+                set_runtime_status(settings, state_text(state, UiText::CloudSpeechReady));
                 set_indicator_status(
                     settings,
-                    "Cloud speech is ready. The local speech engine is disabled.",
+                    state_text(state, UiText::CloudSpeechLocalDisabled),
                 );
             }
             sync_action_settings(settings, state);
@@ -2713,7 +2863,10 @@ fn handle_speech_event(
                 },
             );
             sync_models(settings, state);
-            set_indicator_status(settings, &format!("Installing {catalog_id}…"));
+            set_indicator_status(
+                settings,
+                &state_message(state, UiText::InstallingModel, &[("model", &catalog_id)]),
+            );
         }
         SpeechWorkerEvent::ModelInstalled { catalog_id, .. } => {
             finish_download(state, &catalog_id);
@@ -2751,10 +2904,10 @@ fn handle_speech_event(
                 }
                 sync_models(settings, state);
                 sync_action_settings(settings, state);
-                set_runtime_status(settings, "Cloud speech ready");
+                set_runtime_status(settings, state_text(state, UiText::CloudSpeechReady));
                 set_indicator_status(
                     settings,
-                    "Cloud speech is ready. The local speech engine is disabled.",
+                    state_text(state, UiText::CloudSpeechLocalDisabled),
                 );
                 rust_app_core::diagnostics::log_line(&format!(
                     "speech_model state=stale_ready_ignored model={catalog_id}"
@@ -2774,21 +2927,27 @@ fn handle_speech_event(
                         "reported_backend_mismatch",
                     ) {
                         Ok(fallback) => {
-                            set_runtime_status(settings, "Checking fallback");
+                            set_runtime_status(
+                                settings,
+                                state_text(state, UiText::CheckingFallback),
+                            );
                             set_indicator_status(
                                 settings,
-                                &format!(
-                                    "The speech backend was inconsistent; checking {} instead.",
-                                    fallback.display_name()
+                                &state_message(
+                                    state,
+                                    UiText::BackendFallback,
+                                    &[("backend", fallback.display_name())],
                                 ),
                             );
                         }
                         Err(fallback_error) => {
-                            set_runtime_status(settings, "Worker error");
+                            set_runtime_status(settings, state_text(state, UiText::WorkerError));
                             set_indicator_status(
                                 settings,
-                                &format!(
-                                    "Speech backend verification failed: {error}; {fallback_error}"
+                                &state_message(
+                                    state,
+                                    UiText::BackendVerificationFailed,
+                                    &[("error", &format!("{error}; {fallback_error}"))],
                                 ),
                             );
                         }
@@ -2812,8 +2971,8 @@ fn handle_speech_event(
             }
             sync_models(settings, state);
             sync_action_settings(settings, state);
-            set_runtime_status(settings, "Ready");
-            set_indicator_status(settings, "Ready · hold Ctrl + Alt + Space to speak.");
+            set_runtime_status(settings, state_text(state, UiText::ReadyTitle));
+            set_indicator_status(settings, state_text(state, UiText::ReadyHoldToSpeak));
             rust_app_core::diagnostics::log_line(&format!(
                 "speech_backend preference={} selected={} verification=passed model={} load_ms={} warmup_ms={}",
                 workers.speech_backend_preference().label(),
@@ -2836,7 +2995,7 @@ fn handle_speech_event(
             let _ = save_settings(&state.borrow());
             sync_models(settings, state);
             if state.borrow().local_speech_enabled() {
-                set_indicator_status(settings, "Speech model selected.");
+                set_indicator_status(settings, state_text(state, UiText::SpeechModelSelected));
             }
         }
         SpeechWorkerEvent::Listening { session_id: _ } => {}
@@ -2960,14 +3119,22 @@ delivery={} target_pid={}",
                 state.borrow_mut().active_visualizer_style = None;
                 indicator_animation.borrow_mut().stop();
                 recording_overlays.retire_all("target_lost");
-                set_indicator_status(settings, "Transcript saved to history; target was lost.");
+                set_indicator_status(
+                    settings,
+                    state_text(state, UiText::TranscriptSavedTargetLost),
+                );
             }
             match plan.history {
                 HistoryUpdate::Rebuild => sync_history(settings, state),
                 HistoryUpdate::PrependLatest => {
                     let state = state.borrow();
                     if let Some(entry) = state.history.first() {
-                        prepend_history_row(settings, entry, HISTORY_RETAINED_ROWS);
+                        prepend_history_row(
+                            settings,
+                            entry,
+                            HISTORY_RETAINED_ROWS,
+                            state.ui_locale,
+                        );
                     }
                 }
                 HistoryUpdate::Unchanged => {}
@@ -3023,7 +3190,10 @@ delivery={} target_pid={}",
             rust_app_core::diagnostics::log_line(&format!(
                 "transcription session={session_id} provider={provider_id}"
             ));
-            set_indicator_status(settings, &format!("Transcribed by {provider_id}."));
+            set_indicator_status(
+                settings,
+                &state_message(state, UiText::TranscribedBy, &[("provider", &provider_id)]),
+            );
         }
         SpeechWorkerEvent::Cancelled { session_id } => {
             rust_app_core::diagnostics::log_line(&format!(
@@ -3060,7 +3230,7 @@ delivery={} target_pid={}",
             if insert_was_waiting {
                 set_indicator_status(
                     settings,
-                    "The latest dictation was cancelled and cannot be inserted.",
+                    state_text(state, UiText::LatestDictationCancelled),
                 );
             }
         }
@@ -3102,7 +3272,7 @@ delivery={} target_pid={}",
                 }
                 Some((None, _)) => {
                     rust_app_core::diagnostics::log_line("insert_last decision=history_empty");
-                    set_indicator_status(settings, "There is no transcript to insert yet.");
+                    set_indicator_status(settings, state_text(state, UiText::NoTranscriptToInsert));
                 }
                 None => {}
             }
@@ -3125,22 +3295,27 @@ delivery={} target_pid={}",
                     "model_prepare_failed",
                 ) {
                     Ok(fallback) => {
-                        set_runtime_status(settings, "Checking fallback");
+                        set_runtime_status(settings, state_text(state, UiText::CheckingFallback));
                         set_indicator_status(
                             settings,
-                            &format!(
-                                "{code} on the selected backend; checking {} automatically.",
-                                fallback.display_name()
+                            &state_message(
+                                state,
+                                UiText::BackendFailureFallback,
+                                &[("code", &code), ("backend", fallback.display_name())],
                             ),
                         );
                     }
                     Err(error) => {
                         state.borrow_mut().speech_backend_active = None;
                         sync_action_settings(settings, state);
-                        set_runtime_status(settings, "Worker error");
+                        set_runtime_status(settings, state_text(state, UiText::WorkerError));
                         set_indicator_status(
                             settings,
-                            &format!("No compatible speech backend is available: {error}"),
+                            &state_message(
+                                state,
+                                UiText::NoCompatibleBackend,
+                                &[("error", &error.to_string())],
+                            ),
                         );
                     }
                 }
@@ -3187,10 +3362,17 @@ retryable={retryable} message={message}"
             if insert_was_waiting {
                 set_indicator_status(
                     settings,
-                    &format!("{code}: the latest dictation could not be inserted: {message}"),
+                    state_text(state, UiText::DictationInsertionFailed),
                 );
             } else {
-                set_indicator_status(settings, &format!("{code}: {message}"));
+                set_indicator_status(
+                    settings,
+                    &state_message(
+                        state,
+                        UiText::TechnicalFailure,
+                        &[("code", &code), ("message", &message)],
+                    ),
+                );
             }
         }
     }
@@ -3214,7 +3396,7 @@ fn handle_translation_event(
                 state.borrow_mut().translation_worker_ready = false;
                 set_indicator_status(
                     settings,
-                    "Translation worker protocol mismatch. Reinstall the complete application.",
+                    state_text(state, UiText::TranslationProtocolMismatch),
                 );
                 return;
             }
@@ -3243,12 +3425,12 @@ fn handle_translation_event(
                 if state.borrow().local_translation_enabled() {
                     set_translation_status(
                         translator,
-                        "No model installed. Choose Fast or Quality in Settings.",
+                        state_text(state, UiText::NoTranslationModelInstalled),
                     );
                 } else {
                     set_translation_status(
                         translator,
-                        "Cloud translation is starting. The local model is disabled.",
+                        state_text(state, UiText::CloudTranslationStarting),
                     );
                 }
             }
@@ -3273,8 +3455,23 @@ fn handle_translation_event(
                 },
             );
             sync_translation_models(settings, state);
-            set_indicator_status(settings, &format!("Downloading {catalog_id}: {percent}%"));
-            set_translation_status(translator, &format!("Downloading model… {percent}%"));
+            let percent_text = percent.to_string();
+            set_indicator_status(
+                settings,
+                &state_message(
+                    state,
+                    UiText::DownloadingNamedModel,
+                    &[("model", &catalog_id), ("percent", &percent_text)],
+                ),
+            );
+            set_translation_status(
+                translator,
+                &state_message(
+                    state,
+                    UiText::DownloadingModel,
+                    &[("percent", &percent_text)],
+                ),
+            );
         }
         TranslationWorkerEvent::ModelInstalled {
             catalog_id, tier, ..
@@ -3319,7 +3516,7 @@ fn handle_translation_event(
                 sync_action_settings(settings, state);
                 set_translation_status(
                     translator,
-                    "Cloud translation ready. The local model is disabled.",
+                    state_text(state, UiText::CloudTranslationReady),
                 );
                 rust_app_core::diagnostics::log_line(&format!(
                     "translation_model state=stale_ready_ignored catalog_id={catalog_id}"
@@ -3346,11 +3543,15 @@ fn handle_translation_event(
             sync_action_settings(settings, state);
             set_indicator_status(
                 settings,
-                &format!("Translation model ready in {load_duration_ms} ms."),
+                &state_message(
+                    state,
+                    UiText::TranslationModelReady,
+                    &[("milliseconds", &load_duration_ms.to_string())],
+                ),
             );
             set_translation_status(
                 translator,
-                "Ready · language direction is detected locally.",
+                state_text(state, UiText::ReadyDirectionDetected),
             );
             if let Some(request) = queued_selection_translation {
                 begin_selection_translation(
@@ -3415,9 +3616,16 @@ fn handle_translation_event(
                     if let Some(translator) = translator.upgrade() {
                         translator.set_result_text(translated_text.into());
                         let status = if chunk_count > 1 {
-                            format!("Translating locally… {chunk_index}/{chunk_count}")
+                            state_message(
+                                state,
+                                UiText::TranslatingLocallyProgress,
+                                &[
+                                    ("chunk", &chunk_index.to_string()),
+                                    ("total", &chunk_count.to_string()),
+                                ],
+                            )
                         } else {
-                            "Translating locally…".to_owned()
+                            state_text(state, UiText::TranslatingLocally).to_owned()
                         };
                         translator.set_status_text(status.into());
                         translator.set_processing(true);
@@ -3434,6 +3642,10 @@ fn handle_translation_event(
                         &translated_text,
                         translation_previews,
                         false,
+                        TranslationPreviewLanguages {
+                            resolved: None,
+                            locale: active_locale(state.borrow().ui_locale),
+                        },
                     );
                 }
                 TranslationOrigin::Selection { .. } => {}
@@ -3530,7 +3742,7 @@ fn handle_translation_event(
             ) && let Some(translator) = translator.upgrade()
             {
                 translator.set_processing(false);
-                translator.set_status_text("Translation cancelled.".into());
+                translator.set_status_text(state_text(state, UiText::TranslationCancelled).into());
             }
             let request_slot = { translation_previews.borrow().slot_for_request(request_id) };
             if let Some(slot) = request_slot
@@ -3598,9 +3810,23 @@ fn handle_translation_event(
                 pending.as_ref().map(|pending| pending.origin),
                 Some(TranslationOrigin::Translator)
             ) {
-                set_translation_status(translator, &format!("{code}: {message}"));
+                set_translation_status(
+                    translator,
+                    &state_message(
+                        state,
+                        UiText::TechnicalFailure,
+                        &[("code", &code), ("message", &message)],
+                    ),
+                );
             }
-            set_indicator_status(settings, &format!("{code}: {message}"));
+            set_indicator_status(
+                settings,
+                &state_message(
+                    state,
+                    UiText::TechnicalFailure,
+                    &[("code", &code), ("message", &message)],
+                ),
+            );
         }
     }
 }
@@ -3634,8 +3860,13 @@ fn route_translation_result(
     // Where the words came from, from the result itself. It used to be
     // announced in its own event just before this one, and then overwritten
     // here by a sentence that said "locally" whatever had happened.
-    let origin = settings_projection::translation_origin(result.provider.as_deref());
-    let completed = settings_projection::translation_completed_sentence(result.provider.as_deref());
+    let locale = active_locale(state.borrow().ui_locale);
+    let origin =
+        settings_projection::translation_origin_localized(result.provider.as_deref(), locale);
+    let completed = settings_projection::translation_completed_sentence_localized(
+        result.provider.as_deref(),
+        locale,
+    );
     let completion_status = match pending.origin {
         TranslationOrigin::Translator => {
             if let Some(translator) = translator.upgrade() {
@@ -3666,6 +3897,10 @@ fn route_translation_result(
                     &result.translated_text,
                     translation_previews,
                     true,
+                    TranslationPreviewLanguages {
+                        resolved: Some((result.source_language, result.target_language)),
+                        locale,
+                    },
                 );
                 completed
             }
@@ -3679,10 +3914,10 @@ fn route_translation_result(
                 ) {
                     ReplacementDispatch::Dispatched => completed,
                     ReplacementDispatch::Deferred => {
-                        "Translation ready; waiting for the shortcut to be released.".to_owned()
+                        state_text(state, UiText::TranslationWaitingRelease).to_owned()
                     }
                     ReplacementDispatch::Blocked(message) => {
-                        format!("Translation ready, but {message}")
+                        state_message(state, UiText::TranslationReadyBut, &[("message", &message)])
                     }
                 }
             }

@@ -34,10 +34,10 @@ pub(crate) fn requested_page() -> i32 {
                 .and_then(|value| value.parse::<i32>().ok())
         })
         .unwrap_or(0)
-        // 8 is History again, with nothing in it — the state most people see
+        // 9 is History again, with nothing in it — the state most people see
         // first, and the one easiest to leave undrawn.
-        .clamp(0, 8);
-    if asked == 8 { HISTORY_PAGE } else { asked }
+        .clamp(0, 9);
+    if asked == 9 { HISTORY_PAGE } else { asked }
 }
 
 /// Where History sits in the navigation.
@@ -512,9 +512,8 @@ fn fill_providers(settings: &SettingsWindow) {
             section: "SPEECH".into(),
             id: "speech:groq".into(),
             title: "Groq".into(),
-            detail:
-                "Key \u{2022}\u{2022}\u{2022}\u{2022}9c07 \u{b7} Free tier: 2 000 requests a day"
-                    .into(),
+            detail: "Key \u{2022}\u{2022}\u{2022}\u{2022}9c07 \u{b7} Cloud speech \u{b7} availability follows your Groq account"
+                .into(),
             enabled: true,
             available: true,
             needs_key: true,
@@ -590,7 +589,7 @@ fn fill_providers(settings: &SettingsWindow) {
             section: "TEXT".into(),
             id: "text:deepl".into(),
             title: "DeepL".into(),
-            detail: "Free tier: 500 000 characters a month".into(),
+            detail: "Cloud translation \u{b7} availability follows your DeepL account".into(),
             enabled: false,
             available: false,
             needs_key: true,
@@ -605,7 +604,7 @@ fn fill_providers(settings: &SettingsWindow) {
             section: "TEXT".into(),
             id: "text:azure".into(),
             title: "Microsoft Azure Translator".into(),
-            detail: "Free tier F0: 2 million characters a month \u{b7} needs a region".into(),
+            detail: "Cloud translation \u{b7} region is optional for global resources".into(),
             enabled: false,
             available: false,
             needs_key: true,
@@ -619,8 +618,8 @@ fn fill_providers(settings: &SettingsWindow) {
         ProviderRow {
             section: "TEXT".into(),
             id: "text:google".into(),
-            title: "Google Cloud Translation".into(),
-            detail: "Free tier: 500 000 characters a month".into(),
+            title: "Google Cloud Translation (unsupported)".into(),
+            detail: "Kept from older settings \u{b7} not supported by this version".into(),
             enabled: false,
             available: false,
             needs_key: true,
@@ -640,9 +639,9 @@ fn fill_visuals(settings: &SettingsWindow) {
 }
 
 fn fill_history(settings: &SettingsWindow) {
-    // `--settings-preview=8` shows the page with nothing on it: the state most
+    // `--settings-preview=9` shows the page with nothing on it: the state most
     // people see first, and the one easiest to leave undrawn.
-    if std::env::args().any(|argument| argument == "--settings-preview=8") {
+    if std::env::args().any(|argument| argument == "--settings-preview=9") {
         settings.set_history_scope("Nothing kept yet".into());
         settings.set_history_rows(ModelRc::new(VecModel::from(Vec::new())));
         return;

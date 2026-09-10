@@ -37,17 +37,20 @@ use crate::{
     RecordingOverlays, SelectionChooser, SelectionTranslationRequest, SettingsWindow,
     TextActionMode, TranslationDelivery, TranslationOrigin, TranslatorWindow,
     begin_selection_translation, configure_standard_app_window,
-    dispatch_or_defer_selection_replacement, flow_sphere, native_window_handle,
+    dispatch_or_defer_selection_replacement, flow_sphere,
+    localization::{UiLocale, UiText, active_locale, render, text},
+    native_window_handle,
     overlay_presenter::OverlayPresenter,
     providers_view::{
         Kind, SaveRefused, apply_provider_chain, apply_translation_chain,
-        check_provider_configuration, check_translation_provider_configuration, locate,
-        row_display_name, split_row_id, sync_providers,
+        begin_provider_draft_save, cancel_provider_draft_save, check_provider_configuration,
+        check_translation_provider_configuration, discard_provider_draft, edit_provider_draft,
+        locate, row_display_name_localized, split_row_id, sync_providers, update_provider_draft,
     },
     settings_document::save_settings,
     settings_projection::{
-        departure_badge, departures, history_row, privacy_claim, speech_model_row, tone,
-        translation_model_row,
+        departure_badge_localized, departures, history_row_localized, privacy_claim_localized,
+        speech_model_row_localized, tone, translation_model_row_localized,
     },
     slint_window_handle,
     speech_backend::SpeechBackendPreference,
@@ -60,6 +63,45 @@ use crate::{
     worker_supervisor::Workers,
 };
 
+const fn translation_language_text(language: TranslationLanguage) -> UiText {
+    match language {
+        TranslationLanguage::English => UiText::EnglishLanguage,
+        TranslationLanguage::Russian => UiText::RussianLanguage,
+        TranslationLanguage::Ukrainian => UiText::UkrainianLanguage,
+        TranslationLanguage::Spanish => UiText::SpanishLanguage,
+        TranslationLanguage::PortugueseBrazil => UiText::PortugueseBrazilLanguage,
+        TranslationLanguage::German => UiText::GermanLanguage,
+        TranslationLanguage::French => UiText::FrenchLanguage,
+        TranslationLanguage::Italian => UiText::ItalianLanguage,
+        TranslationLanguage::ChineseSimplified => UiText::ChineseSimplifiedLanguage,
+        TranslationLanguage::ChineseTraditional => UiText::ChineseTraditionalLanguage,
+        TranslationLanguage::Japanese => UiText::JapaneseLanguage,
+        TranslationLanguage::Korean => UiText::KoreanLanguage,
+        TranslationLanguage::Hindi => UiText::HindiLanguage,
+        TranslationLanguage::Arabic => UiText::ArabicLanguage,
+    }
+}
+
+const fn dictation_language_text(language: DictationLanguage) -> UiText {
+    match language {
+        DictationLanguage::Auto => UiText::AutoDetect,
+        DictationLanguage::English => UiText::EnglishLanguage,
+        DictationLanguage::Russian => UiText::RussianLanguage,
+        DictationLanguage::Ukrainian => UiText::UkrainianLanguage,
+        DictationLanguage::Spanish => UiText::SpanishLanguage,
+        DictationLanguage::PortugueseBrazil => UiText::PortugueseBrazilLanguage,
+        DictationLanguage::German => UiText::GermanLanguage,
+        DictationLanguage::French => UiText::FrenchLanguage,
+        DictationLanguage::Italian => UiText::ItalianLanguage,
+        DictationLanguage::ChineseSimplified => UiText::ChineseSimplifiedLanguage,
+        DictationLanguage::ChineseTraditional => UiText::ChineseTraditionalLanguage,
+        DictationLanguage::Japanese => UiText::JapaneseLanguage,
+        DictationLanguage::Korean => UiText::KoreanLanguage,
+        DictationLanguage::Hindi => UiText::HindiLanguage,
+        DictationLanguage::Arabic => UiText::ArabicLanguage,
+    }
+}
+
 /// Both lists, in the order the page shows them: speech models, then the
 /// translator. One list because the page is about models, and because a
 /// `ListView` takes a single `for`.
@@ -68,16 +110,24 @@ pub(crate) fn sync_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<Ref
         return;
     };
     let state = state.borrow();
+    let locale = active_locale(state.ui_locale);
     let mut rows: Vec<ModelRow> = state
         .models
         .iter()
-        .map(|model| speech_model_row(model, state.downloads.get(&model.catalog_id).copied()))
+        .map(|model| {
+            speech_model_row_localized(
+                model,
+                state.downloads.get(&model.catalog_id).copied(),
+                locale,
+            )
+        })
         .collect();
     rows.extend(state.translation_models.iter().map(|model| {
-        translation_model_row(
+        translation_model_row_localized(
             model,
             state.selected_translation_tier == Some(model.tier),
             state.downloads.get(&model.catalog_id).copied(),
+            locale,
         )
     }));
     settings.set_model_rows(ModelRc::new(VecModel::from(rows)));
@@ -110,6 +160,7 @@ pub(crate) fn sync_translation_models(
 /// caption, not a figure worth the large-number treatment: it does not change
 /// while you are looking at it.
 fn set_models_summary(settings: &SettingsWindow, state: &AppState) {
+    let locale = active_locale(state.ui_locale);
     let installed = state.models.iter().filter(|model| model.installed).count()
         + state
             .translation_models
@@ -118,9 +169,13 @@ fn set_models_summary(settings: &SettingsWindow, state: &AppState) {
             .count();
     settings.set_models_summary(
         match installed {
-            0 => "None installed yet".to_owned(),
-            1 => "1 installed".to_owned(),
-            many => format!("{many} installed"),
+            0 => text(locale, UiText::NoneInstalledYet).to_owned(),
+            1 => text(locale, UiText::OneInstalled).to_owned(),
+            many => render(
+                locale,
+                UiText::ManyInstalled,
+                &[("count", &many.to_string())],
+            ),
         }
         .into(),
     );
@@ -134,6 +189,7 @@ pub(crate) fn sync_action_settings(
         return;
     };
     let state = state.borrow();
+    let locale = active_locale(state.ui_locale);
 
     // ── Dictation ──
     settings.set_speech_backend_index(state.speech_backend_preference.index());
@@ -142,19 +198,21 @@ pub(crate) fn sync_action_settings(
         state
             .speech_backend_active
             .map_or_else(
-                || "No compatible speech backend is active".to_owned(),
+                || text(locale, UiText::NoCompatibleSpeechBackend).to_owned(),
                 |active| {
                     if state.speech_ready {
-                        format!(
-                            "{} verified by warm-up. The preference above is where the search starts.",
-                            active.display_name()
+                        render(
+                            locale,
+                            UiText::BackendVerified,
+                            &[("backend", active.display_name())],
                         )
                     } else {
                         // Chosen is not the same as proved. The warm-up is what
                         // proves it, and until it finishes the line says so.
-                        format!(
-                            "Warming up on {}. If it fails, the search moves to the next one down.",
-                            active.display_name()
+                        render(
+                            locale,
+                            UiText::WarmingBackend,
+                            &[("backend", active.display_name())],
                         )
                     }
                 },
@@ -170,13 +228,23 @@ pub(crate) fn sync_action_settings(
         state.speech_backend_active != Some(crate::speech_backend::SpeechBackend::Cpu);
     let previews_on = state.fast_release_previews && previews_possible;
     settings.set_release_mode(if previews_on { "fastest" } else { "efficient" }.into());
-    settings.set_release_mode_label(if previews_on { "Fastest" } else { "Efficient" }.into());
+    settings.set_release_mode_label(
+        text(
+            locale,
+            if previews_on {
+                UiText::Fastest
+            } else {
+                UiText::Efficient
+            },
+        )
+        .into(),
+    );
     settings.set_release_mode_locked(!previews_possible);
     settings.set_release_mode_note(
         if previews_possible {
             ""
         } else {
-            "Not available on the CPU engine: one pass at a time, and a preview is time the transcript waits."
+            text(locale, UiText::CpuPreviewUnavailable)
         }
         .into(),
     );
@@ -190,41 +258,50 @@ pub(crate) fn sync_action_settings(
     );
     settings.set_output_mode_label(
         match state.output_mode {
-            SpeechOutputMode::OriginalLanguage => "Original language",
-            SpeechOutputMode::TranslateToEnglish => "Translate to English",
+            SpeechOutputMode::OriginalLanguage => text(locale, UiText::OriginalLanguage),
+            SpeechOutputMode::TranslateToEnglish => text(locale, UiText::TranslateToEnglish),
         }
         .into(),
     );
     settings.set_dictation_language(state.dictation_language.code().unwrap_or("auto").into());
-    settings.set_dictation_language_label(state.dictation_language.display_name().into());
+    settings.set_dictation_language_label(
+        text(locale, dictation_language_text(state.dictation_language)).into(),
+    );
     settings.set_dictate_hotkey(format_hotkey(state.hotkeys.dictate.spec).into());
     settings.set_output_mode_locked(!state.speech_translation_supported());
     settings.set_dictation_subtitle(
         if state.speech_path_ready() {
             match state.first_transcription_provider() {
                 Some(provider) if provider.id != "local" => {
-                    format!("{} · ready", row_display_name(Kind::Speech, &provider.id))
+                    format!(
+                        "{} · {}",
+                        row_display_name_localized(Kind::Speech, &provider.id, locale),
+                        text(locale, UiText::Ready)
+                    )
                 }
-                _ => "Local speech · ready".to_owned(),
+                _ => text(locale, UiText::LocalSpeechReady).to_owned(),
             }
         } else if state.speech_waits_for_local() {
-            "Local speech · starting".to_owned()
+            text(locale, UiText::LocalSpeechStarting).to_owned()
         } else {
-            "Speech service · unavailable".to_owned()
+            text(locale, UiText::SpeechServiceUnavailable).to_owned()
         }
         .into(),
     );
     settings.set_dictation_readout(
         if state.speech_path_ready() {
-            "Ready"
+            text(locale, UiText::ReadyTitle)
         } else if state.speech_waits_for_local() {
-            "Warming up"
+            text(locale, UiText::StartingUp)
         } else {
-            "Not ready"
+            text(locale, UiText::NotReady)
         }
         .into(),
     );
-    settings.set_dictation_caption("hold Ctrl + Alt + Space".into());
+    let shortcut = format_hotkey(state.hotkeys.dictate.spec);
+    settings.set_dictation_caption(
+        render(locale, UiText::HoldShortcut, &[("shortcut", &shortcut)]).into(),
+    );
 
     // ── Translation ──
     settings.set_translation_enabled(state.translation_enabled);
@@ -239,9 +316,9 @@ pub(crate) fn sync_action_settings(
     );
     settings.set_translation_delivery_label(
         match state.translation_delivery {
-            TranslationDelivery::Preview => "Show a preview",
-            TranslationDelivery::Replace => "Replace the selection",
-            TranslationDelivery::Copy => "Copy it",
+            TranslationDelivery::Preview => text(locale, UiText::ShowPreview),
+            TranslationDelivery::Replace => text(locale, UiText::ReplaceSelection),
+            TranslationDelivery::Copy => text(locale, UiText::CopyIt),
         }
         .into(),
     );
@@ -254,19 +331,28 @@ pub(crate) fn sync_action_settings(
     );
     settings.set_text_action_mode_label(
         match state.text_action_mode {
-            TextActionMode::Adaptive => "Decide from the text",
-            TextActionMode::AlwaysPalette => "Always ask",
+            TextActionMode::Adaptive => text(locale, UiText::DecideFromText),
+            TextActionMode::AlwaysPalette => text(locale, UiText::AlwaysAsk),
         }
         .into(),
     );
     settings.set_translation_blur_radius(state.translation_blur_radius as i32);
     settings.set_translation_ready(state.translation_path_ready());
-    settings
-        .set_translation_primary_language(state.translation_primary_language.display_name().into());
+    settings.set_translation_primary_language(
+        text(
+            locale,
+            translation_language_text(state.translation_primary_language),
+        )
+        .into(),
+    );
     settings
         .set_translation_primary_language_value(state.translation_primary_language.code().into());
     settings.set_translation_secondary_language(
-        state.translation_secondary_language.display_name().into(),
+        text(
+            locale,
+            translation_language_text(state.translation_secondary_language),
+        )
+        .into(),
     );
     settings.set_translation_secondary_language_value(
         state.translation_secondary_language.code().into(),
@@ -283,6 +369,16 @@ pub(crate) fn sync_action_settings(
     // ── Hotkeys ──
     settings.set_hotkey_rows(ModelRc::new(VecModel::from(hotkey_rows(&state))));
     settings.set_hotkeys_summary(hotkeys_summary(&state).into());
+    settings.set_ui_locale(state.ui_locale.code().into());
+    settings.set_ui_locale_label(
+        if state.ui_locale == UiLocale::System {
+            text(locale, UiText::SystemLanguage)
+        } else {
+            state.ui_locale.display_name()
+        }
+        .into(),
+    );
+    settings.set_today(rust_platform_windows::local_date_line_for_locale(locale.code()).into());
 
     sync_overview(&settings, &state);
 }
@@ -292,49 +388,79 @@ pub(crate) fn sync_action_settings(
 /// Transparent visualizers are drawn on a native surface of their own. That is
 /// not decoration, it is why they behave differently, so the page says it.
 pub(crate) fn sync_visualizer_copy(settings: &SettingsWindow, style: VisualizerStyle) {
+    let locale = UiLocale::from_code(settings.get_ui_locale().as_str())
+        .map(active_locale)
+        .unwrap_or(UiLocale::English);
     let (name, caption) = match style {
-        VisualizerStyle::VoiceOrb => ("Voice orb", "Follows the level of your voice"),
-        VisualizerStyle::SymmetricSpectrum => {
-            ("Spectrum", "Thirty-two bands, thirty-one times a second")
-        }
-        VisualizerStyle::FluidRibbon => ("Fluid ribbon", "One line that thickens with the voice"),
-        VisualizerStyle::BroadcastMic => ("Broadcast mic", "Level bars beside a studio microphone"),
-        VisualizerStyle::CircularSpectrum => ("Circular", "The spectrum wrapped into a ring"),
+        VisualizerStyle::VoiceOrb => (
+            text(locale, UiText::VoiceOrb),
+            text(locale, UiText::VisualLevelDetail),
+        ),
+        VisualizerStyle::SymmetricSpectrum => (
+            text(locale, UiText::Spectrum),
+            text(locale, UiText::VisualBandsDetail),
+        ),
+        VisualizerStyle::FluidRibbon => (
+            text(locale, UiText::FluidRibbon),
+            text(locale, UiText::VisualLineDetail),
+        ),
+        VisualizerStyle::BroadcastMic => (
+            text(locale, UiText::BroadcastMic),
+            text(locale, UiText::VisualMicrophoneDetail),
+        ),
+        VisualizerStyle::CircularSpectrum => (
+            text(locale, UiText::Circular),
+            text(locale, UiText::VisualRingDetail),
+        ),
         VisualizerStyle::FlowSphere => (
-            "Flow sphere",
-            "A point cloud that accelerates on voice onset",
+            text(locale, UiText::FlowSphere),
+            text(locale, UiText::VisualFlowDetail),
         ),
-        VisualizerStyle::WritingSlate => ("Writing slate", "The words as they are recognised"),
+        VisualizerStyle::WritingSlate => (
+            text(locale, UiText::WritingSlate),
+            text(locale, UiText::VisualWordsDetail),
+        ),
         VisualizerStyle::CompanionOrb => (
-            "Companion orb",
-            "Stays where you put it, between dictations",
+            text(locale, UiText::CompanionOrb),
+            text(locale, UiText::VisualCompanionDetail),
         ),
-        VisualizerStyle::Off => ("Off", "No overlay is drawn while recording"),
+        VisualizerStyle::Off => (
+            text(locale, UiText::Off),
+            text(locale, UiText::VisualNoneDetail),
+        ),
     };
     let native =
         style.recording_surface() == Some(crate::visualizer::RecordingSurface::Transparent);
-    settings.set_visuals_subtitle(format!("{name} · shown while recording").into());
+    settings.set_visuals_subtitle(
+        render(
+            locale,
+            UiText::VisualShownWhileRecording,
+            &[("visual", name)],
+        )
+        .into(),
+    );
     settings.set_visuals_caption(caption.into());
     settings.set_visuals_note(
         if style == VisualizerStyle::Off {
-            "The microphone and transcription keep working; only the overlay is disabled."
+            text(locale, UiText::VisualDisabledDetail)
         } else if native {
-            "Drawn on its own native surface, so it can be transparent per pixel."
+            text(locale, UiText::VisualExternalDetail)
         } else {
-            "Drawn by the application itself, over whatever you are typing into."
+            text(locale, UiText::VisualInternalDetail)
         }
         .into(),
     );
 }
 
 fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
+    let locale = active_locale(state.ui_locale);
     let pending = state.pending_hotkeys.is_some();
     let defaults = HotkeyBindings::default();
     let held = |on: bool| {
         if on {
-            (tone::RESTING, "Held")
+            (tone::RESTING, text(locale, UiText::Enabled))
         } else {
-            (tone::OFF, "Off")
+            (tone::OFF, text(locale, UiText::Off))
         }
     };
 
@@ -344,41 +470,41 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
             let binding = *state.hotkeys.binding(action);
             let (row_tone, row_state) = if action == HotkeyAction::PauseResume {
                 if state.input_paused {
-                    (tone::ACTIVE, "Paused")
+                    (tone::ACTIVE, text(locale, UiText::Disabled))
                 } else {
-                    (tone::RESTING, "Ready")
+                    (tone::RESTING, text(locale, UiText::ReadyTitle))
                 }
             } else {
                 held(binding.enabled)
             };
             let (name, detail) = match action {
                 HotkeyAction::Dictate => (
-                    "Dictate",
-                    "Records while held · transcribes and inserts on release",
+                    text(locale, UiText::Dictation),
+                    text(locale, UiText::WhateverYouSpoke),
                 ),
                 HotkeyAction::InsertLast => (
-                    "Insert last",
-                    "Places the newest transcript where the caret is now",
+                    text(locale, UiText::CopyLatestTranscript),
+                    text(locale, UiText::OnThisDevice),
                 ),
                 HotkeyAction::CorrectLayout => (
-                    "Correct layout",
+                    text(locale, UiText::CorrectLayout),
                     if binding.enabled {
-                        "Offers RU/EN candidates for the selection · never automatic"
+                        text(locale, UiText::OriginalSelectionActive)
                     } else {
-                        "Switched off · the shortcut is released back to Windows"
+                        text(locale, UiText::SwitchOff)
                     },
                 ),
                 HotkeyAction::Translate => (
-                    "Act on selection",
+                    text(locale, UiText::TextActions),
                     if binding.enabled {
-                        "Captures the selection once and acts on it"
+                        text(locale, UiText::OnSelectedText)
                     } else {
-                        "Switched off · the shortcut is released back to Windows"
+                        text(locale, UiText::SwitchOff)
                     },
                 ),
                 HotkeyAction::PauseResume => (
-                    "Pause input features",
-                    "Always available as the recovery shortcut; press again to resume",
+                    text(locale, UiText::AlwaysAvailable),
+                    text(locale, UiText::AlwaysAvailable),
                 ),
             };
             HotkeyRow {
@@ -387,7 +513,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                 name: name.into(),
                 detail: detail.into(),
                 state: if pending {
-                    "Applying".into()
+                    text(locale, UiText::Applying).into()
                 } else {
                     row_state.into()
                 },
@@ -400,7 +526,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                 toggle_enabled: !pending && action != HotkeyAction::PauseResume,
                 is_default: binding == *defaults.binding(action),
                 locked_reason: if pending {
-                    "Waiting for Windows".into()
+                    text(locale, UiText::WaitingForWindows).into()
                 } else {
                     "".into()
                 },
@@ -411,8 +537,8 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                 },
                 mode_value: if action == HotkeyAction::Translate {
                     match state.text_action_mode {
-                        TextActionMode::Adaptive => "Decide from the text".into(),
-                        TextActionMode::AlwaysPalette => "Always ask".into(),
+                        TextActionMode::Adaptive => text(locale, UiText::DecideFromText).into(),
+                        TextActionMode::AlwaysPalette => text(locale, UiText::AlwaysAsk).into(),
                     }
                 } else {
                     "".into()
@@ -431,16 +557,25 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
 }
 
 fn hotkeys_summary(state: &AppState) -> String {
+    let locale = active_locale(state.ui_locale);
     let enabled = HotkeyAction::ALL
         .into_iter()
         .filter(|action| state.hotkeys.binding(*action).enabled)
         .count();
     if state.input_paused {
-        format!("Paused · {enabled} shortcuts configured")
+        render(
+            locale,
+            UiText::PausedShortcuts,
+            &[("count", &enabled.to_string())],
+        )
     } else if state.pending_hotkeys.is_some() {
-        "Waiting for Windows to accept the new shortcuts".to_owned()
+        text(locale, UiText::ApplyingShortcuts).to_owned()
     } else {
-        format!("{enabled} of 5 shortcuts active")
+        render(
+            locale,
+            UiText::ActiveShortcuts,
+            &[("count", &enabled.to_string())],
+        )
     }
 }
 
@@ -471,6 +606,7 @@ fn submit_hotkey_bindings(
     workers: &Rc<Workers>,
     bindings: HotkeyBindings,
 ) -> bool {
+    let locale = active_locale(state.borrow().ui_locale);
     if let Err(error) = validate_hotkeys(&bindings) {
         set_status_problem(settings, &error.message);
         return false;
@@ -478,11 +614,11 @@ fn submit_hotkey_bindings(
     {
         let state = state.borrow();
         if !state.input_ready {
-            set_status_problem(settings, "Input service is not ready yet.");
+            set_status_problem(settings, text(locale, UiText::InputServiceNotReady));
             return false;
         }
         if state.pending_hotkeys.is_some() {
-            set_status_problem(settings, "Wait for the current shortcut change to finish.");
+            set_status_problem(settings, text(locale, UiText::ShortcutChangeBusy));
             return false;
         }
     }
@@ -494,7 +630,14 @@ fn submit_hotkey_bindings(
             bindings: bindings.clone(),
         },
     }) {
-        set_status_problem(settings, &format!("Could not apply shortcuts: {error}"));
+        set_status_problem(
+            settings,
+            &render(
+                locale,
+                UiText::CouldNotApplyShortcuts,
+                &[("error", &error.to_string())],
+            ),
+        );
         return false;
     }
     state.borrow_mut().pending_hotkeys = Some((operation_id, bindings));
@@ -613,6 +756,7 @@ fn downloading_now(state: &AppState) -> bool {
 
 /// The claim, the statement and the facts on Overview.
 fn sync_overview(settings: &SettingsWindow, state: &AppState) {
+    let locale = active_locale(state.ui_locale);
     let keyed = |id: &str| {
         state
             .transcription_providers
@@ -633,28 +777,31 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
     );
     settings.set_audio_leaves_device(leaving.audio_leaves());
     settings.set_text_leaves_device(leaving.text_leaves());
-    settings.set_departure_badge(departure_badge(&leaving).into());
-    settings.set_provider_claim(privacy_claim(&leaving).into());
+    settings.set_departure_badge(departure_badge_localized(&leaving, locale).into());
+    settings.set_provider_claim(privacy_claim_localized(&leaving, locale).into());
 
     let installed_speech = state.models.iter().any(|model| model.installed);
     let speech_path_ready = state.speech_path_ready();
     let speech_waits_for_local = state.speech_waits_for_local();
     let (statement, sub) = if speech_path_ready {
         (
-            "Ready to dictate",
-            "Hold Ctrl + Alt + Space anywhere in Windows.",
+            text(locale, UiText::ReadyTitle),
+            text(locale, UiText::LocalSpeechReady),
         )
     } else if speech_waits_for_local && !installed_speech {
         (
-            "No speech model yet",
-            "Install one on the Models page and dictation starts working.",
+            text(locale, UiText::NoSpeechModel),
+            text(locale, UiText::NoneInstalledYet),
         )
     } else if speech_waits_for_local {
-        ("Warming up", "The engine is loading the model you chose.")
+        (
+            text(locale, UiText::StartingUp),
+            text(locale, UiText::LocalSpeechStarting),
+        )
     } else {
         (
-            "No speech route",
-            "Enable a ready provider on the Providers page.",
+            text(locale, UiText::NotReady),
+            text(locale, UiText::SpeechServiceUnavailable),
         )
     };
     settings.set_overview_statement(statement.into());
@@ -663,19 +810,16 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
     // The note carries the one thing that wants attention, and its button goes
     // where the thing can be dealt with.
     if speech_waits_for_local && !installed_speech {
-        settings.set_overview_note(
-            "No speech model is installed, so nothing can be dictated yet.".into(),
-        );
-        settings.set_overview_note_action("Install one".into());
+        settings.set_overview_note(text(locale, UiText::NoSpeechModel).into());
+        settings.set_overview_note_action(text(locale, UiText::Install).into());
         settings.set_overview_note_signal(true);
     } else if downloading_now(state) {
-        settings
-            .set_overview_note("A model is downloading. It resumes if it is interrupted.".into());
-        settings.set_overview_note_action("Details".into());
+        settings.set_overview_note(text(locale, UiText::ModelDownloadResume).into());
+        settings.set_overview_note_action(text(locale, UiText::Refresh).into());
         settings.set_overview_note_signal(true);
     } else if state.translation_enabled && !state.translation_path_ready() {
-        settings.set_overview_note("Translation is on, but no text route is ready yet.".into());
-        settings.set_overview_note_action("Details".into());
+        settings.set_overview_note(text(locale, UiText::TranslationRouteNotReady).into());
+        settings.set_overview_note_action(text(locale, UiText::Refresh).into());
         settings.set_overview_note_signal(false);
     } else {
         settings.set_overview_note("".into());
@@ -685,47 +829,57 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
 
     let facts = vec![
         Fact {
-            label: "SPEECH ENGINE".into(),
+            label: text(locale, UiText::SpeechEngine).into(),
             value: state
                 .speech_backend_active
                 .map_or_else(
-                    || "none".to_owned(),
+                    || text(locale, UiText::None).to_owned(),
                     |active| active.display_name().to_owned(),
                 )
                 .into(),
-            detail: format!("preference: {}", state.speech_backend_preference.label()).into(),
+            detail: render(
+                locale,
+                UiText::Preference,
+                &[("value", state.speech_backend_preference.label())],
+            )
+            .into(),
             signal: state.speech_backend_active.is_none(),
         },
         Fact {
-            label: "SPEECH MODEL".into(),
+            label: text(locale, UiText::SpeechModel).into(),
             value: state
                 .models
                 .iter()
                 .find(|model| model.catalog_id == state.selected_model_id)
                 .map(|model| model.display_name.clone())
-                .unwrap_or_else(|| "none selected".to_owned())
+                .unwrap_or_else(|| text(locale, UiText::NoneSelected).to_owned())
                 .into(),
             detail: "".into(),
             signal: false,
         },
         Fact {
-            label: "TRANSLATION".into(),
+            label: text(locale, UiText::Translation).into(),
             value: if !state.translation_enabled {
-                "off".into()
+                text(locale, UiText::Off).into()
             } else if state.translation_path_ready() {
-                "ready".into()
+                text(locale, UiText::Ready).into()
             } else {
-                "cold".into()
+                text(locale, UiText::Cold).into()
             },
             detail: "".into(),
             signal: false,
         },
         Fact {
-            label: "HISTORY".into(),
+            label: text(locale, UiText::History).into(),
             value: if state.history_enabled {
-                format!("{} kept on this device", state.history.len()).into()
+                render(
+                    locale,
+                    UiText::KeptOnDevice,
+                    &[("count", &state.history.len().to_string())],
+                )
+                .into()
             } else {
-                "not kept".into()
+                text(locale, UiText::NotKept).into()
             },
             detail: "".into(),
             signal: false,
@@ -761,12 +915,13 @@ pub(crate) fn prepend_history_row(
     settings: &slint::Weak<SettingsWindow>,
     entry: &HistoryEntry,
     retained: usize,
+    locale: crate::localization::UiLocale,
 ) {
     let Some(settings) = settings.upgrade() else {
         return;
     };
     let rows = history_rows_model(&settings);
-    rows.insert(0, history_row(entry));
+    rows.insert(0, history_row_localized(entry, active_locale(locale)));
     while rows.row_count() > retained {
         rows.remove(rows.row_count() - 1);
     }
@@ -777,7 +932,12 @@ pub(crate) fn sync_history(settings: &slint::Weak<SettingsWindow>, state: &Rc<Re
         return;
     };
     let state = state.borrow();
-    let rows = state.history.iter().map(history_row).collect::<Vec<_>>();
+    let locale = active_locale(state.ui_locale);
+    let rows = state
+        .history
+        .iter()
+        .map(|entry| history_row_localized(entry, locale))
+        .collect::<Vec<_>>();
     // How many entries there are is a caption under a heading, not a figure
     // worth the large-number treatment: it does not change while you look at
     // it. How many of them left the machine, on the other hand, is worth
@@ -799,17 +959,33 @@ pub(crate) fn sync_history(settings: &slint::Weak<SettingsWindow>, state: &Rc<Re
     let shown = rows.len();
     settings.set_history_scope(
         match (shown, remote) {
-            (0, _) => "Nothing kept yet".to_owned(),
-            (total, 0) if total < HISTORY_LIMIT => {
-                format!("{total} kept · all on this device")
-            }
-            (total, 0) => format!("Showing {total} · all on this device"),
-            (total, remote) if total < HISTORY_LIMIT => {
-                format!("{total} kept · {remote} went to a service")
-            }
-            (total, remote) => {
-                format!("Showing {total} · {remote} of them went to a service")
-            }
+            (0, _) => text(locale, UiText::NothingKeptYet).to_owned(),
+            (total, 0) if total < HISTORY_LIMIT => render(
+                locale,
+                UiText::AllKeptOnDevice,
+                &[("count", &total.to_string())],
+            ),
+            (total, 0) => render(
+                locale,
+                UiText::ShowingAllOnDevice,
+                &[("count", &total.to_string())],
+            ),
+            (total, remote) if total < HISTORY_LIMIT => render(
+                locale,
+                UiText::SomeSentToService,
+                &[
+                    ("count", &total.to_string()),
+                    ("remote", &remote.to_string()),
+                ],
+            ),
+            (total, remote) => render(
+                locale,
+                UiText::ShowingSomeSent,
+                &[
+                    ("count", &total.to_string()),
+                    ("remote", &remote.to_string()),
+                ],
+            ),
         }
         .into(),
     );
@@ -822,6 +998,7 @@ pub(crate) fn sync_output_mode(
 ) {
     if let Some(settings) = settings.upgrade() {
         let state = state.borrow();
+        let locale = active_locale(state.ui_locale);
         settings.set_output_mode(
             match state.output_mode {
                 SpeechOutputMode::OriginalLanguage => "original",
@@ -831,8 +1008,8 @@ pub(crate) fn sync_output_mode(
         );
         settings.set_output_mode_label(
             match state.output_mode {
-                SpeechOutputMode::OriginalLanguage => "Original language",
-                SpeechOutputMode::TranslateToEnglish => "Translate to English",
+                SpeechOutputMode::OriginalLanguage => text(locale, UiText::OriginalLanguage),
+                SpeechOutputMode::TranslateToEnglish => text(locale, UiText::TranslateToEnglish),
             }
             .into(),
         );
@@ -892,19 +1069,20 @@ pub(crate) fn set_status_problem(settings: &slint::Weak<SettingsWindow>, message
 pub(crate) fn show_layout_chooser(
     request_id: RequestId,
     target: TargetSnapshot,
-    text: String,
+    source_text: String,
     settings: &slint::Weak<SettingsWindow>,
     chooser: &slint::Weak<SelectionChooser>,
     chooser_presenter: &OverlayPresenter,
     state: &Rc<RefCell<AppState>>,
 ) {
-    let candidates = build_layout_candidates(&text);
+    let candidates = build_layout_candidates(&source_text);
+    let locale = active_locale(state.borrow().ui_locale);
     if candidates.is_empty() {
         state
             .borrow_mut()
             .selection_release_gates
             .remove(&request_id);
-        set_indicator_status(settings, "No RU/EN layout conversion is available.");
+        set_indicator_status(settings, text(locale, UiText::LayoutConversionUnavailable));
         return;
     }
     if let Some(chooser) = chooser.upgrade() {
@@ -918,16 +1096,25 @@ pub(crate) fn show_layout_chooser(
                 return;
             }
         };
-        chooser.set_source_panel_height(adaptive_text_panel_height(&text, 82, 2, 5, 15.0, 16.0));
-        chooser.set_source_text(text.into());
+        chooser.set_source_panel_height(adaptive_text_panel_height(
+            &source_text,
+            82,
+            2,
+            5,
+            15.0,
+            16.0,
+        ));
+        chooser.set_source_text(source_text.into());
         chooser.set_candidate_labels(ModelRc::new(VecModel::from(
             candidates
                 .iter()
                 .map(|candidate| match candidate.direction {
                     LayoutDirection::ToCyrillic => {
-                        SharedString::from("English keys → Cyrillic layout")
+                        SharedString::from(text(locale, UiText::EnglishToCyrillic))
                     }
-                    LayoutDirection::ToLatin => SharedString::from("Cyrillic keys → Latin layout"),
+                    LayoutDirection::ToLatin => {
+                        SharedString::from(text(locale, UiText::CyrillicToLatin))
+                    }
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -1037,15 +1224,25 @@ fn choose_translation_model(
     if let Err(error) = workers.translation.send(&command) {
         set_indicator_status(
             settings_weak,
-            &format!("Could not configure translation model: {error}"),
+            &render(
+                active_locale(state.borrow().ui_locale),
+                UiText::CouldNotConfigureTranslationModel,
+                &[("error", &error.to_string())],
+            ),
         );
     } else {
         set_indicator_status(
             settings_weak,
             if model.installed {
-                "Loading the selected translation model…"
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::LoadingSelectedTranslationModel,
+                )
             } else {
-                "Downloading and verifying the translation model…"
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::DownloadingTranslationModel,
+                )
             },
         );
     }
@@ -1070,6 +1267,40 @@ pub(crate) fn wire_settings(
                 configure_standard_app_window(&translator, "Translator");
                 translator.window().request_redraw();
             }
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        settings.on_set_ui_locale(move |value| {
+            let Some(locale) = crate::localization::UiLocale::from_code(&value) else {
+                let current = active_locale(state.borrow().ui_locale);
+                set_status_problem(
+                    &settings_weak,
+                    text(current, UiText::InterfaceLanguageUnavailable),
+                );
+                return;
+            };
+            let system_locale = rust_platform_windows::user_locale_name();
+            if let Err(error) =
+                slint::select_bundled_translation(locale.resolved_code(&system_locale))
+            {
+                set_status_problem(
+                    &settings_weak,
+                    &render(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::CouldNotSwitchInterface,
+                        &[("error", &error.to_string())],
+                    ),
+                );
+                return;
+            }
+            state.borrow_mut().ui_locale = locale;
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+            sync_history(&settings_weak, &state);
+            sync_models(&settings_weak, &state);
+            sync_providers(&settings_weak, &state);
         });
     }
     {
@@ -1106,22 +1337,32 @@ pub(crate) fn wire_settings(
                     if let Err(error) = initialization {
                         set_indicator_status(
                             &settings_weak,
-                            &format!("Speech backend initialization failed: {error}"),
+                            &render(
+                                active_locale(state.borrow().ui_locale),
+                                UiText::BackendInitializationFailed,
+                                &[("error", &error.to_string())],
+                            ),
                         );
                     } else {
-                        set_runtime_status(&settings_weak, "Checking backend");
+                        let locale = active_locale(state.borrow().ui_locale);
+                        set_runtime_status(&settings_weak, text(locale, UiText::CheckingBackend));
                         set_indicator_status(
                             &settings_weak,
-                            &format!(
-                                "Checking {} with the selected Whisper model…",
-                                active.display_name()
+                            &render(
+                                locale,
+                                UiText::CheckingNamedBackend,
+                                &[("backend", active.display_name())],
                             ),
                         );
                     }
                 }
                 Err(error) => set_status_problem(
                     &settings_weak,
-                    &format!("Speech backend could not be changed: {error}"),
+                    &render(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::BackendChangeFailed,
+                        &[("error", &error.to_string())],
+                    ),
                 ),
             }
         });
@@ -1190,7 +1431,11 @@ pub(crate) fn wire_settings(
                 }) {
                     set_indicator_status(
                         &settings_weak,
-                        &format!("Could not start Companion Orb: {error}"),
+                        &render(
+                            active_locale(state.borrow().ui_locale),
+                            UiText::CouldNotStartCompanion,
+                            &[("error", &error.to_string())],
+                        ),
                     );
                     return;
                 }
@@ -1210,9 +1455,15 @@ pub(crate) fn wire_settings(
             set_indicator_status(
                 &settings_weak,
                 if style.uses_external_renderer() {
-                    "Companion Orb is active on the desktop."
+                    text(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::CompanionActive,
+                    )
                 } else {
-                    "Visualizer updated. The next dictation uses the selected style."
+                    text(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::VisualizerUpdated,
+                    )
                 },
             );
         });
@@ -1231,7 +1482,10 @@ pub(crate) fn wire_settings(
             sync_action_settings(&settings_weak, &state);
             set_indicator_status(
                 &settings_weak,
-                "Broadcast microphone colour updated for the next dictation.",
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::BroadcastColourUpdated,
+                ),
             );
         });
     }
@@ -1249,7 +1503,10 @@ pub(crate) fn wire_settings(
             sync_action_settings(&settings_weak, &state);
             set_indicator_status(
                 &settings_weak,
-                "Circular spectrum palette updated for the next dictation.",
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::CircularPaletteUpdated,
+                ),
             );
         });
     }
@@ -1269,7 +1526,10 @@ pub(crate) fn wire_settings(
             sync_action_settings(&settings_weak, &state);
             set_indicator_status(
                 &settings_weak,
-                "Flow Sphere palette updated for the next dictation.",
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::FlowPaletteUpdated,
+                ),
             );
         });
     }
@@ -1287,7 +1547,10 @@ pub(crate) fn wire_settings(
             sync_action_settings(&settings_weak, &state);
             set_indicator_status(
                 &settings_weak,
-                "Writing Slate surface updated for the next dictation.",
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::SlateSurfaceUpdated,
+                ),
             );
         });
     }
@@ -1311,7 +1574,10 @@ pub(crate) fn wire_settings(
             sync_history(&settings_weak, &state);
             set_indicator_status(
                 &settings_weak,
-                "Local voice and translation history cleared.",
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::HistoryCleared,
+                ),
             );
         });
     }
@@ -1440,7 +1706,10 @@ pub(crate) fn wire_settings(
             let Some(selected) = selected else {
                 set_status_problem(
                     &settings_weak,
-                    "Add and save this provider's key before making it the only route.",
+                    text(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::ProviderKeyNeededForOnly,
+                    ),
                 );
                 return;
             };
@@ -1481,10 +1750,38 @@ pub(crate) fn wire_settings(
             set_indicator_status(
                 &settings_weak,
                 &match sent {
-                    Ok(()) => "Install cancelled. The partial file is kept.".to_owned(),
-                    Err(error) => format!("Could not cancel the install: {error}"),
+                    Ok(()) => text(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::InstallCancelled,
+                    )
+                    .to_owned(),
+                    Err(error) => render(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::CouldNotCancelInstall,
+                        &[("error", &error.to_string())],
+                    ),
                 },
             );
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        settings.on_edit_provider(move |row_id| {
+            edit_provider_draft(&settings_weak, &state, &row_id);
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        settings.on_update_provider_draft(move |row_id, secret, extra| {
+            update_provider_draft(&state, &row_id, &secret, &extra);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        settings.on_discard_provider_draft(move |row_id| {
+            discard_provider_draft(&settings_weak, &state, &row_id);
         });
     }
     {
@@ -1498,6 +1795,7 @@ pub(crate) fn wire_settings(
         // it had worked.
         settings.on_save_provider(move |row_id, secret, extra| {
             let row_id = row_id.to_string();
+            update_provider_draft(&state, &row_id, &secret, &extra);
             // Which list this row is in, and which service inside it. The two
             // lists both have an `azure` and a `local`, so a bare id would let
             // a translation key be stored against the speech service.
@@ -1513,9 +1811,27 @@ pub(crate) fn wire_settings(
             };
             let (secret, extra) = match checked {
                 Ok(values) => values,
-                Err(SaveRefused(reason)) => {
+                Err(reason) => {
                     if let Some(settings) = settings_weak.upgrade() {
-                        settings.set_provider_problem(reason.into());
+                        let locale = active_locale(state.borrow().ui_locale);
+                        let message = match reason {
+                            SaveRefused::KeyRequired => {
+                                text(locale, UiText::ProviderKeyRequired).to_owned()
+                            }
+                            SaveRefused::FieldRequired(field) => {
+                                let field = match field.as_str() {
+                                    "Account" => text(locale, UiText::Account),
+                                    "Region" => text(locale, UiText::Region),
+                                    "Endpoint" => text(locale, UiText::Endpoint),
+                                    _ => &field,
+                                };
+                                render(locale, UiText::ProviderFieldRequired, &[("field", field)])
+                            }
+                            SaveRefused::InsecureEndpoint => {
+                                text(locale, UiText::ProviderEndpointHttps).to_owned()
+                            }
+                        };
+                        settings.set_provider_problem(message.into());
                         settings.set_provider_problem_for(row_id.clone().into());
                     }
                     return;
@@ -1531,12 +1847,18 @@ pub(crate) fn wire_settings(
             // typed, and if the write then failed the row was left configured
             // for a service it had no key for.
             let operation_id = RequestId::new();
+            begin_provider_draft_save(&state, &row_id, operation_id);
             state.borrow_mut().pending_credentials.insert(
                 operation_id,
                 PendingCredential {
+                    operation_id,
                     row_id: row_id.clone(),
                     extra: extra.clone(),
-                    display_name: row_display_name(kind, &provider_id),
+                    display_name: row_display_name_localized(
+                        kind,
+                        &provider_id,
+                        active_locale(state.borrow().ui_locale),
+                    ),
                     forget: false,
                     sent: Instant::now(),
                 },
@@ -1560,9 +1882,15 @@ pub(crate) fn wire_settings(
             };
             if let Err(error) = sent {
                 state.borrow_mut().pending_credentials.remove(&operation_id);
+                cancel_provider_draft_save(&state, &row_id, operation_id);
                 if let Some(settings) = settings_weak.upgrade() {
                     settings.set_provider_problem(
-                        format!("The key could not be sent to the worker: {error}").into(),
+                        render(
+                            active_locale(state.borrow().ui_locale),
+                            UiText::ProviderKeySendFailed,
+                            &[("error", &error.to_string())],
+                        )
+                        .into(),
                     );
                     settings.set_provider_problem_for(row_id.clone().into());
                 }
@@ -1573,9 +1901,17 @@ pub(crate) fn wire_settings(
             // says what happened when the worker answers.
             set_indicator_status(
                 &settings_weak,
-                &format!(
-                    "Storing the key for {}…",
-                    row_display_name(kind, &provider_id)
+                &render(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::StoringProviderKey,
+                    &[(
+                        "provider",
+                        &row_display_name_localized(
+                            kind,
+                            &provider_id,
+                            active_locale(state.borrow().ui_locale),
+                        ),
+                    )],
                 ),
             );
         });
@@ -1599,9 +1935,14 @@ pub(crate) fn wire_settings(
             state.borrow_mut().pending_credentials.insert(
                 operation_id,
                 PendingCredential {
+                    operation_id,
                     row_id: row_id.clone(),
                     extra: None,
-                    display_name: row_display_name(kind, &provider_id),
+                    display_name: row_display_name_localized(
+                        kind,
+                        &provider_id,
+                        active_locale(state.borrow().ui_locale),
+                    ),
                     forget: true,
                     sent: Instant::now(),
                 },
@@ -1628,14 +1969,26 @@ pub(crate) fn wire_settings(
             match sent {
                 Ok(()) => set_indicator_status(
                     &settings_weak,
-                    &format!(
-                        "Removing the key for {}…",
-                        row_display_name(kind, &provider_id)
+                    &render(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::RemovingProviderKey,
+                        &[(
+                            "provider",
+                            &row_display_name_localized(
+                                kind,
+                                &provider_id,
+                                active_locale(state.borrow().ui_locale),
+                            ),
+                        )],
                     ),
                 ),
                 Err(error) => set_status_problem(
                     &settings_weak,
-                    &format!("The key could not be removed: {error}"),
+                    &render(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::ProviderKeyRemoveFailed,
+                        &[("error", &error.to_string())],
+                    ),
                 ),
             }
             sync_providers(&settings_weak, &state);
@@ -1663,7 +2016,11 @@ pub(crate) fn wire_settings(
         let workers = Rc::clone(workers);
         settings.on_set_dictation_language(move |value| {
             let Some(language) = DictationLanguage::from_code(&value) else {
-                set_status_problem(&settings_weak, "That spoken language is not supported.");
+                let locale = active_locale(state.borrow().ui_locale);
+                set_status_problem(
+                    &settings_weak,
+                    text(locale, UiText::SpokenLanguageUnsupported),
+                );
                 return;
             };
             state.borrow_mut().dictation_language = language;
@@ -1687,7 +2044,10 @@ pub(crate) fn wire_settings(
             if wants_english && !supports_translation {
                 set_status_problem(
                     &settings_weak,
-                    "This model was not trained to translate. Use the selection translator instead.",
+                    text(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::ModelCannotTranslate,
+                    ),
                 );
                 return;
             }
@@ -1742,7 +2102,10 @@ pub(crate) fn wire_settings(
             if action == HotkeyAction::PauseResume {
                 set_status_problem(
                     &settings_weak,
-                    "The pause/resume recovery shortcut must stay enabled.",
+                    text(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::PauseShortcutRequired,
+                    ),
                 );
                 return;
             }
@@ -1753,19 +2116,21 @@ pub(crate) fn wire_settings(
     }
     {
         let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
         settings.on_change_hotkey(move |index| {
             let Some(action) = hotkey_action_at(index) else {
                 return;
             };
             if let Some(settings) = settings_weak.upgrade() {
                 settings.set_hotkey_capture_index(index);
+                let locale = active_locale(state.borrow().ui_locale);
                 settings.set_hotkey_capture_label(
                     match action {
-                        HotkeyAction::Dictate => "Dictate",
-                        HotkeyAction::InsertLast => "Insert last",
-                        HotkeyAction::CorrectLayout => "Correct layout",
-                        HotkeyAction::Translate => "Act on selection",
-                        HotkeyAction::PauseResume => "Pause / resume",
+                        HotkeyAction::Dictate => text(locale, UiText::DictateAction),
+                        HotkeyAction::InsertLast => text(locale, UiText::InsertLastAction),
+                        HotkeyAction::CorrectLayout => text(locale, UiText::CorrectLayout),
+                        HotkeyAction::Translate => text(locale, UiText::ActOnSelectionAction),
+                        HotkeyAction::PauseResume => text(locale, UiText::PauseResumeAction),
                     }
                     .into(),
                 );
@@ -1820,7 +2185,10 @@ pub(crate) fn wire_settings(
             let PhysicalKey::Code(code) = event.physical_key else {
                 set_status_problem(
                     &settings_weak,
-                    "That key cannot be used as a global shortcut.",
+                    text(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::InvalidGlobalShortcut,
+                    ),
                 );
                 return EventResult::PreventDefault;
             };
@@ -1849,7 +2217,10 @@ pub(crate) fn wire_settings(
             let Some(virtual_key) = virtual_key_for_code(code) else {
                 set_status_problem(
                     &settings_weak,
-                    "Use a letter, number, function key, Space, Tab, Enter, or arrow key.",
+                    text(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::AllowedGlobalShortcutKeys,
+                    ),
                 );
                 return EventResult::PreventDefault;
             };
@@ -2124,6 +2495,8 @@ pub(crate) fn wire_action_palette(
                     text: pending.text,
                     delivery,
                     request_started_unix_ms: pending.request_started_unix_ms,
+                    source_language: None,
+                    target_language: None,
                 },
                 &settings,
                 &translation_previews,
@@ -2196,9 +2569,10 @@ pub(crate) fn wire_translator(
             let Some(translator) = translator_weak.upgrade() else {
                 return;
             };
-            let text = translator.get_source_text().trim().to_owned();
-            if text.is_empty() {
-                translator.set_status_text("Enter text to translate.".into());
+            let source_text = translator.get_source_text().trim().to_owned();
+            let locale = active_locale(state.borrow().ui_locale);
+            if source_text.is_empty() {
+                translator.set_status_text(text(locale, UiText::EnterTextToTranslate).into());
                 return;
             }
             let (selected_tier, path_ready, waits_for_local) = {
@@ -2210,13 +2584,11 @@ pub(crate) fn wire_translator(
                 )
             };
             if !(path_ready || selected_tier.is_some() && waits_for_local) {
-                translator.set_status_text(
-                    "No translation provider is ready. Choose a local model or configure a service in Settings.".into(),
-                );
+                translator.set_status_text(text(locale, UiText::NoTranslationProviderReady).into());
                 return;
             }
             if !path_ready {
-                translator.set_status_text("The local translation model is still loading.".into());
+                translator.set_status_text(text(locale, UiText::LocalTranslationLoading).into());
                 return;
             }
             let request_id = RequestId::new();
@@ -2224,7 +2596,7 @@ pub(crate) fn wire_translator(
                 request_id,
                 PendingTranslation {
                     origin: TranslationOrigin::Translator,
-                    source_text: text.clone(),
+                    source_text: source_text.clone(),
                     started: Instant::now(),
                     request_started_unix_ms: unix_ms(),
                     first_partial_shown: false,
@@ -2232,12 +2604,12 @@ pub(crate) fn wire_translator(
             );
             translator.set_processing(true);
             translator.set_result_text("".into());
-            translator.set_status_text("Translating…".into());
+            translator.set_status_text(text(locale, UiText::TranslatingNow).into());
             if let Err(error) = workers
                 .translation
                 .send(&TranslationWorkerCommand::Translate {
                     request_id,
-                    text,
+                    text: source_text,
                     source_language: None,
                     target_language: None,
                     language_policy: TranslationLanguagePolicy {
@@ -2248,37 +2620,47 @@ pub(crate) fn wire_translator(
             {
                 state.borrow_mut().pending_translations.remove(&request_id);
                 translator.set_processing(false);
-                translator.set_status_text(format!("Could not translate: {error}").into());
+                translator.set_status_text(
+                    render(
+                        locale,
+                        UiText::CouldNotTranslate,
+                        &[("error", &error.to_string())],
+                    )
+                    .into(),
+                );
             }
         });
     }
     {
         let translator_weak = translator.as_weak();
+        let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         translator.on_copy_result(move || {
             let Some(translator) = translator_weak.upgrade() else {
                 return;
             };
-            let text = translator.get_result_text().to_string();
-            if !text.trim().is_empty() {
+            let result_text = translator.get_result_text().to_string();
+            if !result_text.trim().is_empty() {
                 let _ = workers.input.send(&InputHostCommand::CopyText {
                     request_id: RequestId::new(),
-                    text,
+                    text: result_text,
                 });
-                translator.set_status_text("Copied to clipboard.".into());
+                let locale = active_locale(state.borrow().ui_locale);
+                translator.set_status_text(text(locale, UiText::CopiedToClipboard).into());
             }
         });
     }
     {
         let translator_weak = translator.as_weak();
+        let state = Rc::clone(state);
         translator.on_swap_text(move || {
             if let Some(translator) = translator_weak.upgrade() {
                 let source = translator.get_source_text();
                 let result = translator.get_result_text();
                 translator.set_source_text(result);
                 translator.set_result_text(source);
-                translator
-                    .set_status_text("Direction will be detected again when you translate.".into());
+                let locale = active_locale(state.borrow().ui_locale);
+                translator.set_status_text(text(locale, UiText::DirectionDetectAgain).into());
             }
         });
     }

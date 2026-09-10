@@ -25,12 +25,15 @@ impl ProviderId {
     pub const LOCAL: &'static str = "local";
     pub const DEEPL: &'static str = "deepl";
     pub const AZURE: &'static str = "azure";
+    /// Kept only so an older stored row can round-trip and be described as
+    /// unsupported. It is deliberately absent from `KNOWN` and can never be a
+    /// routing candidate.
     pub const GOOGLE: &'static str = "google";
 
     /// Every provider this build understands, in the order the settings list
     /// offers them before the user rearranges anything. The local engine comes
     /// first because nothing leaves the machine while it does.
-    pub const KNOWN: [&'static str; 4] = [Self::LOCAL, Self::DEEPL, Self::AZURE, Self::GOOGLE];
+    pub const KNOWN: [&'static str; 3] = [Self::LOCAL, Self::DEEPL, Self::AZURE];
 
     #[must_use]
     pub fn new(value: &str) -> Self {
@@ -67,31 +70,23 @@ impl ProviderId {
 
     /// The second thing a provider needs beyond its key, if it needs one.
     ///
-    /// Azure will not answer without knowing which region issued the key.
-    /// DeepL and Google carry everything they need in the key itself.
+    /// Azure accepts an optional region for regional and multi-service
+    /// resources. Global Translator resources have no region, so no provider
+    /// in this build requires a second field.
     #[must_use]
     pub fn required_setting(&self) -> Option<&'static str> {
-        match self.0.as_str() {
-            Self::AZURE => Some("region"),
-            _ => None,
-        }
+        None
     }
 
-    /// What the free allowance is, for the row that offers it.
-    ///
-    /// Stated once here rather than in the interface, so the page and the code
-    /// that meets the limit cannot describe it differently.
+    /// Stable capability copy for settings. It intentionally does not promise
+    /// a numeric commercial allowance that may differ by account or change
+    /// independently of this release.
     #[must_use]
-    pub fn free_allowance(&self) -> &'static str {
+    pub fn capability_note(&self) -> &'static str {
         match self.0.as_str() {
             Self::LOCAL => "Runs on this computer · nothing leaves it",
-            // Free keys end in `:fx`. New DeepL customers are directed to a
-            // one-off million characters rather than a monthly allowance, but
-            // keys issued before that keep working, which is why this row still
-            // exists.
-            Self::DEEPL => "Free tier: 500 000 characters a month · key ends in :fx",
-            Self::AZURE => "Free tier F0: 2 million characters a month · needs a region",
-            Self::GOOGLE => "Free tier: 500 000 characters a month",
+            Self::DEEPL => "Cloud translation · availability follows your DeepL account",
+            Self::AZURE => "Cloud translation · region is optional for global resources",
             _ => "",
         }
     }
@@ -156,12 +151,15 @@ mod tests {
     }
 
     #[test]
-    fn only_azure_asks_for_a_second_setting() {
-        assert_eq!(
-            ProviderId::new(ProviderId::AZURE).required_setting(),
-            Some("region")
-        );
+    fn azure_region_is_optional_and_google_is_legacy_unknown() {
+        assert_eq!(ProviderId::new(ProviderId::AZURE).required_setting(), None);
         assert_eq!(ProviderId::new(ProviderId::DEEPL).required_setting(), None);
         assert_eq!(ProviderId::new(ProviderId::GOOGLE).required_setting(), None);
+        assert!(!ProviderId::new(ProviderId::GOOGLE).is_known());
+        assert!(
+            !ProviderEntry::default_chain()
+                .iter()
+                .any(|entry| entry.id.as_str() == ProviderId::GOOGLE)
+        );
     }
 }

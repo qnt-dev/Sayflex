@@ -7,7 +7,31 @@ new entries belong here.
 Format: newest first, grouped by product. Dates are the day the work landed,
 not the day it shipped.
 
-## Unreleased
+## 0.7.0 - 2026-09-11
+
+### Release hardening
+
+- Settings pages use Slint's native wheel/touchpad physics with one vertical
+  scroll owner; the graphite rail remains a draggable projection.
+- All five global shortcuts are typed, editable, atomically registered by the
+  input host, conflict-checked, resettable, and persisted only after Windows
+  accepts the complete set. Pause/resume now suppresses every other action.
+- The interface and installer ship System, English, Russian, Ukrainian,
+  Spanish, Brazilian Portuguese, German, French, Italian, and Korean locales.
+- Provider drafts survive refresh and reorder. Speech and translation request
+  queues are bounded; control commands remain responsive while network work is
+  in flight, and superseded results cannot publish.
+- Settings use flushed same-directory temporary files and Windows atomic
+  replacement with recovery from primary, previous, or temporary candidates.
+  Credential read failures are no longer mistaken for an empty key store.
+- Translation shows its resolved direction, supports exact swap/retry, and
+  anchors to selection, caret, pointer, then the monitor work area.
+- Every selectable visual has a live transparent preview; custom controls have
+  keyboard and accessibility contracts; About and generated dependency notices
+  are included.
+- Release tooling validates exact artifacts, supports Authenticode without
+  accepting certificate passwords, records incomplete smoke checks explicitly,
+  and requires signatures for public tag builds.
 
 ### SayFlex (rust-app)
 

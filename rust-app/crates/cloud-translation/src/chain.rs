@@ -20,7 +20,7 @@ pub enum Unavailable {
     MissingCredential,
     /// The key was refused, and will be until it is replaced.
     CredentialRefused(String),
-    /// A setting is wrong — Azure's region, a restricted Google key. The row
+    /// A setting is wrong — for example Azure's region. The row
     /// stays on, because the fix is in settings rather than in a new key.
     Misconfigured(String),
     /// The service asked to be left alone, and there is time left to wait.
@@ -30,7 +30,7 @@ pub enum Unavailable {
 }
 
 /// What the last few answers from each provider mean for the next request.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Ledger {
     cooldowns: HashMap<ProviderId, (Instant, String)>,
     refusals: HashMap<ProviderId, String>,
@@ -375,11 +375,11 @@ mod tests {
 
     #[test]
     fn a_spent_allowance_comes_back_when_the_cooldown_is_over() {
-        let chain = enabled(&[ProviderId::GOOGLE, ProviderId::LOCAL]);
+        let chain = enabled(&[ProviderId::AZURE, ProviderId::LOCAL]);
         let mut ledger = Ledger::default();
         let now = Instant::now();
         ledger.record_failure(
-            &ProviderId::new(ProviderId::GOOGLE),
+            &ProviderId::new(ProviderId::AZURE),
             &ProviderFailure::QuotaExhausted {
                 retry_after: Some(Duration::from_secs(600)),
             },

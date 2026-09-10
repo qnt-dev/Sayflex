@@ -1,6 +1,6 @@
 //! Turning one translation into the request a particular service takes.
 //!
-//! Three services, three shapes. Nothing here talks to the network: a plan is
+//! Two services, two shapes. Nothing here talks to the network: a plan is
 //! data, so what would be sent can be examined in a test without a key and
 //! without a connection.
 
@@ -11,19 +11,17 @@ use crate::{ProviderEntry, ProviderId};
 /// A request built for one provider, and how to read its answer back.
 ///
 /// `Debug` is written by hand and redacts. The derived one printed the
-/// Authorization header, the key Google carries in its query string, and the
-/// user's own text; nothing logged it, but a struct that spills all three the
+/// Authorization header and the user's own text; nothing logged it, but a
+/// struct that spills both the
 /// first time somebody adds a `{plan:?}` is a struct waiting to.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RequestPlan {
     /// Who this is for. The transport does not care, but the reader of the
-    /// answer does: the three services disagree about what a 403 means, and
+    /// answer does: the services disagree about what a 403 means, and
     /// telling them apart needs to know which one replied.
     pub provider: ProviderId,
     pub url: String,
-    /// Header name and value. The key travels here for two of the three; for
-    /// Google it is in the query string, because that is the only form the v2
-    /// endpoint takes.
+    /// Header name and value. Both supported services carry their key here.
     pub headers: Vec<(String, String)>,
     pub body: String,
     pub shape: ResponseShape,
@@ -42,7 +40,8 @@ impl std::fmt::Debug for RequestPlan {
     }
 }
 
-/// Drops a URL's query string, which is where Google's key travels.
+/// Drops a URL's query string so future query parameters cannot leak through
+/// diagnostics by accident.
 fn redact_query(url: &str) -> String {
     url.split_once('?')
         .map_or_else(|| url.to_owned(), |(head, _)| format!("{head}?…"))
@@ -55,12 +54,10 @@ pub enum ResponseShape {
     DeepL,
     /// `[{"translations":[{"text":"…"}]}]`
     Azure,
-    /// `{"data":{"translations":[{"translatedText":"…"}]}}`
-    Google,
 }
 
-/// Why a plan could not be built. All three are the user's to fix, and all
-/// three are worth saying plainly rather than sending a request that will fail.
+/// Why a plan could not be built. These are worth saying plainly rather than
+/// sending a request that will fail.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
     #[error("{0} is needed as well as the key")]
@@ -95,12 +92,6 @@ pub fn plan_request(
             source.map(azure_language),
             azure_language(target),
         ),
-        ProviderId::GOOGLE => Ok(plan_google(
-            secret,
-            text,
-            source.map(google_language),
-            google_language(target),
-        )),
         other => Err(PlanError::Unsupported(other.to_owned())),
     }
 }
@@ -169,18 +160,9 @@ fn azure_language(code: &str) -> &str {
     code
 }
 
-fn google_language(code: &str) -> &str {
-    match code {
-        "pt-BR" => "pt",
-        "zh-Hans" => "zh-CN",
-        "zh-Hant" => "zh-TW",
-        other => other,
-    }
-}
-
 /// Azure carries the key and the region in headers, and the languages in the
-/// query string. Without the region header the service answers 403, which is
-/// why the region is required before a request is built at all.
+/// query string. A global resource has no region; regional and multi-service
+/// resources carry their region in a header.
 fn plan_azure(
     entry: &ProviderEntry,
     secret: &str,
@@ -220,48 +202,6 @@ fn plan_azure(
     })
 }
 
-/// Google's v2 endpoint takes the key in the query string. That is the only
-/// form it accepts — v3 wants a service account, which is a different and much
-/// heavier thing to ask a user for.
-fn plan_google(secret: &str, text: &str, source: Option<&str>, target: &str) -> RequestPlan {
-    let mut body = json!({
-        "q": text,
-        "target": target,
-        // Without this the service treats the text as HTML and escapes
-        // punctuation on the way back.
-        "format": "text",
-    });
-    if let Some(source) = source {
-        body["source"] = Value::String(source.to_owned());
-    }
-    RequestPlan {
-        provider: ProviderId::new(ProviderId::GOOGLE),
-        url: format!(
-            "https://translation.googleapis.com/language/translate/v2?key={}",
-            urlencode(secret)
-        ),
-        headers: vec![("Content-Type".to_owned(), "application/json".to_owned())],
-        body: body.to_string(),
-        shape: ResponseShape::Google,
-    }
-}
-
-/// Enough escaping for an API key in a query string. Keys are alphanumeric with
-/// dashes and underscores, but a key pasted with a stray character should be
-/// rejected by the service rather than change the URL's meaning.
-fn urlencode(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '~') {
-                character.to_string()
-            } else {
-                format!("%{:02X}", character as u32)
-            }
-        })
-        .collect()
-}
-
 /// Reads the translated text out of a successful answer.
 ///
 /// An answer that parses but carries nothing is not an error to pass down the
@@ -271,8 +211,8 @@ fn urlencode(value: &str) -> String {
 /// Three outcomes, not two. An answer that could not be parsed at all — a proxy
 /// login page, a WAF block, a schema the service changed — is not the same as a
 /// service saying it has no translation for this text, and treating them alike
-/// meant one broken reply from DeepL stopped the walk before Azure, Google or
-/// the local engine were asked.
+/// meant one broken reply from DeepL stopped the walk before Azure or the local
+/// engine were asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadAnswer {
     Translated(String),
@@ -297,11 +237,6 @@ pub fn read_answer(shape: ResponseShape, body: &str) -> ReadAnswer {
             .and_then(|value| value.get("translations"))
             .and_then(|value| value.get(0))
             .and_then(|value| value.get("text")),
-        ResponseShape::Google => value
-            .get("data")
-            .and_then(|value| value.get("translations"))
-            .and_then(|value| value.get(0))
-            .and_then(|value| value.get("translatedText")),
     };
     match found.and_then(Value::as_str) {
         None => ReadAnswer::Malformed(
@@ -326,13 +261,6 @@ pub fn read_translation(shape: ResponseShape, body: &str) -> Option<String> {
             .get("translations")?
             .get(0)?
             .get("text")?
-            .as_str()?
-            .to_owned(),
-        ResponseShape::Google => value
-            .get("data")?
-            .get("translations")?
-            .get(0)?
-            .get("translatedText")?
             .as_str()?
             .to_owned(),
     };
@@ -406,23 +334,6 @@ mod tests {
 
         assert!(!printed.contains("super-secret-key"), "{printed}");
         assert!(!printed.contains("confidential sentence"), "{printed}");
-
-        let google = format!(
-            "{:?}",
-            plan_request(
-                &entry(ProviderId::GOOGLE),
-                "another-key",
-                "hello",
-                None,
-                "ru"
-            )
-            .unwrap()
-        );
-
-        assert!(
-            !google.contains("another-key"),
-            "Google's key rides in the query string: {google}"
-        );
     }
 
     #[test]
@@ -506,15 +417,17 @@ mod tests {
     }
 
     #[test]
-    fn a_google_key_is_escaped_into_the_query_string() {
-        let plan =
-            plan_request(&entry(ProviderId::GOOGLE), "abc 123&x", "hello", None, "ru").unwrap();
+    fn the_removed_google_adapter_is_not_a_routing_backdoor() {
+        let error = plan_request(
+            &entry(ProviderId::GOOGLE),
+            "legacy-key",
+            "hello",
+            None,
+            "ru",
+        )
+        .expect_err("a retained settings row must not keep an undeclared transport alive");
 
-        assert!(plan.url.contains("key=abc%20123%26x"));
-        assert!(
-            plan.body.contains("\"format\":\"text\""),
-            "without this the answer comes back HTML-escaped"
-        );
+        assert_eq!(error, PlanError::Unsupported("google".to_owned()));
     }
 
     #[test]
@@ -530,13 +443,6 @@ mod tests {
             read_translation(
                 ResponseShape::Azure,
                 r#"[{"translations":[{"text":"привет"}]}]"#
-            ),
-            Some("привет".to_owned())
-        );
-        assert_eq!(
-            read_translation(
-                ResponseShape::Google,
-                r#"{"data":{"translations":[{"translatedText":"привет"}]}}"#
             ),
             Some("привет".to_owned())
         );
@@ -574,17 +480,6 @@ mod tests {
         .unwrap();
         assert!(plan.body.contains("\"source_lang\":\"ZH\""));
         assert!(plan.body.contains("\"target_lang\":\"PT-BR\""));
-
-        let plan = plan_request(
-            &entry(ProviderId::GOOGLE),
-            "key",
-            "text",
-            Some("zh-Hant"),
-            "zh-Hans",
-        )
-        .unwrap();
-        assert!(plan.body.contains("\"source\":\"zh-TW\""));
-        assert!(plan.body.contains("\"target\":\"zh-CN\""));
     }
 
     #[test]
@@ -593,5 +488,61 @@ mod tests {
             plan_request(&entry(ProviderId::DEEPL), "key", "परीक्षण", Some("hi"), "en").unwrap();
         assert!(plan.body.contains("\"source_lang\":\"HI\""));
         assert!(plan.body.contains("\"target_lang\":\"EN-GB\""));
+    }
+
+    #[test]
+    fn every_product_language_has_explicit_deepl_and_azure_wire_names() {
+        use rust_protocol::TranslationLanguage;
+
+        let deepl_names = [
+            ("en", "EN", "EN-GB"),
+            ("ru", "RU", "RU"),
+            ("uk", "UK", "UK"),
+            ("es", "ES", "ES"),
+            ("pt-BR", "PT", "PT-BR"),
+            ("de", "DE", "DE"),
+            ("fr", "FR", "FR"),
+            ("it", "IT", "IT"),
+            ("zh-Hans", "ZH", "ZH-HANS"),
+            ("zh-Hant", "ZH", "ZH-HANT"),
+            ("ja", "JA", "JA"),
+            ("ko", "KO", "KO"),
+            ("hi", "HI", "HI"),
+            ("ar", "AR", "AR"),
+        ];
+        assert_eq!(TranslationLanguage::ALL.len(), deepl_names.len());
+
+        for (language, (code, source_name, target_name)) in
+            TranslationLanguage::ALL.into_iter().zip(deepl_names)
+        {
+            assert_eq!(language.code(), code);
+
+            let source_plan =
+                plan_request(&entry(ProviderId::DEEPL), "key", "text", Some(code), "en").unwrap();
+            let source_body: serde_json::Value = serde_json::from_str(&source_plan.body).unwrap();
+            assert_eq!(
+                source_body["source_lang"], source_name,
+                "DeepL source {code}"
+            );
+
+            let target_plan =
+                plan_request(&entry(ProviderId::DEEPL), "key", "text", None, code).unwrap();
+            let target_body: serde_json::Value = serde_json::from_str(&target_plan.body).unwrap();
+            assert_eq!(
+                target_body["target_lang"], target_name,
+                "DeepL target {code}"
+            );
+
+            let azure_plan =
+                plan_request(&entry(ProviderId::AZURE), "key", "text", Some(code), code).unwrap();
+            assert!(
+                azure_plan.url.contains(&format!("to={code}")),
+                "Azure target {code}"
+            );
+            assert!(
+                azure_plan.url.contains(&format!("from={code}")),
+                "Azure source {code}"
+            );
+        }
     }
 }

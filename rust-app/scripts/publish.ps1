@@ -2,10 +2,16 @@
 param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Release',
-    [switch]$KeepBuildArtifacts
+    [switch]$KeepBuildArtifacts,
+    [string]$SigningThumbprint,
+    [switch]$RequireSignature,
+    [string]$VulkanTarget
 )
 
 $ErrorActionPreference = 'Stop'
+if ($RequireSignature -and [string]::IsNullOrWhiteSpace($SigningThumbprint)) {
+    throw 'A public artifact requires -SigningThumbprint.'
+}
 $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $gitCommit = (& git -C $rustRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-f]{40}$') {
@@ -36,7 +42,9 @@ $cpuTarget = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'target\publish-
 $cudaTarget = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'target\publish-cuda'))
 # whisper.cpp builds its Vulkan shader generator as a deeply nested CMake project.
 # Keep this target deliberately short so MSBuild stays below MAX_PATH on Windows.
-$vulkanTarget = [System.IO.Path]::GetFullPath('C:\sf-build\v')
+$vulkanTarget = [System.IO.Path]::GetFullPath(
+    $(if ([string]::IsNullOrWhiteSpace($VulkanTarget)) { 'C:\sf-build\v' } else { $VulkanTarget })
+)
 $temporaryTargets = @($cpuTarget, $cudaTarget, $vulkanTarget)
 $cudaArchitectures = '75-virtual;80-virtual;86-real;89-real;120a-real;121a-real'
 
@@ -166,7 +174,7 @@ try {
 
     Push-Location $rustRoot
     try {
-        & $cargoPath build --target-dir $cpuTarget --profile $profile --workspace
+        & $cargoPath build --locked --target-dir $cpuTarget --profile $profile --workspace
         if ($LASTEXITCODE -ne 0) { throw 'The Rust workspace build failed.' }
 
         $binaryMap = [ordered]@{
@@ -190,7 +198,7 @@ try {
 
         $env:CUDA_PATH = $cudaRoot
         $env:CMAKE_CUDA_ARCHITECTURES = $cudaArchitectures
-        & $cargoPath build --target-dir $cudaTarget --profile $profile `
+        & $cargoPath build --locked --target-dir $cudaTarget --profile $profile `
             -p sayflex-speech-worker --features cuda
         if ($LASTEXITCODE -ne 0) { throw 'The CUDA speech worker build failed.' }
         Copy-Item -LiteralPath (Join-Path $cudaTarget "$profile\sayflex-speech-worker.exe") `
@@ -206,7 +214,7 @@ try {
             'set "CMAKE_GENERATOR=Ninja"'
             "set `"CMAKE_MAKE_PROGRAM=$ninja`""
             'set "CMAKE_GENERATOR_INSTANCE="'
-            "`"$cargoPath`" build --target-dir `"$vulkanTarget`" --profile $profile -p sayflex-speech-worker --features vulkan"
+            "`"$cargoPath`" build --locked --target-dir `"$vulkanTarget`" --profile $profile -p sayflex-speech-worker --features vulkan"
         ) -join ' && '
         & $env:ComSpec /d /s /c $vulkanBuildCommand
         if ($LASTEXITCODE -ne 0) { throw 'The Vulkan speech worker build failed.' }
@@ -221,6 +229,15 @@ try {
                 throw "The CUDA runtime is incomplete: $source is missing."
             }
             Copy-Item -LiteralPath $source -Destination (Join-Path $cudaRuntimeOutput $dll)
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($SigningThumbprint)) {
+            $executables = Get-ChildItem -LiteralPath $output -Filter '*.exe' -File |
+                Select-Object -ExpandProperty FullName
+            & (Join-Path $PSScriptRoot 'sign-artifacts.ps1') `
+                -Path $executables `
+                -CertificateThumbprint $SigningThumbprint
+            if ($LASTEXITCODE -ne 0) { throw 'Executable signing failed.' }
         }
 
         $manifest = [ordered]@{
@@ -296,7 +313,9 @@ try {
         } | ConvertTo-Json -Depth 6 |
             Set-Content -LiteralPath (Join-Path $output 'build-manifest.json') -Encoding utf8
 
-        & (Join-Path $PSScriptRoot 'validate-release.ps1') -AppDirectory $output
+        & (Join-Path $PSScriptRoot 'validate-release.ps1') `
+            -AppDirectory $output `
+            -RequireSignature:$RequireSignature
         if ($LASTEXITCODE -ne 0) { throw 'Release validation failed.' }
         $publishSucceeded = $true
     }

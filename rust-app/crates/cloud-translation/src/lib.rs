@@ -2,12 +2,8 @@
 //!
 //! The product translates on the machine by default and always has. This crate
 //! is the other option: an ordered list the user arranges themselves, in which
-//! the local engine is one entry among DeepL, Azure Translator and Google
-//! Cloud Translation, and can be put first, put last, or switched off.
-//!
-//! Three services and no more. Each has a free allowance a person can sign up
-//! for without a contract — DeepL 500,000 characters a month, Azure two
-//! million, Google 500,000 — which is the line drawn for what belongs here.
+//! the local engine is one entry alongside DeepL and Azure Translator, and can
+//! be put first, put last, or switched off.
 //!
 //! Nothing in this crate sends anything by itself. [`request::plan_request`]
 //! turns a translation into the shape one service takes, and the worker hands
