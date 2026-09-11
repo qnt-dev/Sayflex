@@ -7,6 +7,27 @@ new entries belong here.
 Format: newest first, grouped by product. Dates are the day the work landed,
 not the day it shipped.
 
+## 0.7.1 - 2026-09-11
+
+### Localization and translated layout
+
+- Reworked the eight bundled non-English catalogs around UI meaning instead of
+  literal word substitution. Brand and technical labels remain stable, action
+  names now describe the operation they perform, and the History page no
+  longer exposes the internal name `Insert-last`.
+- Moved the interface-language selector from the global header to the About
+  page, corrected every page index to the real nine-page total, and refreshes
+  the idle status and configured dictation shortcut immediately after a locale
+  change.
+- Made translated backend cards and provider rows size from their actual text
+  while keeping every action inside the page. List delegates and row identity
+  columns are now explicitly bounded by the visible viewport.
+- Catalog generation now rejects duplicate message identifiers and any change
+  to the exact set of named placeholders instead of silently rewriting the
+  translation. Regression tests construct every locale and verify semantic
+  copy, page numbering, interactive bounds, engine-card separation, and
+  provider-action geometry.
+
 ## 0.7.0 - 2026-09-11
 
 ### Release hardening

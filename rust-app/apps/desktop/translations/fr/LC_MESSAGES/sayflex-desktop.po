@@ -212,9 +212,6 @@ msgstr "Installation de {model}…"
 msgid "Checking fallback"
 msgstr "Vérification de la solution de secours"
 
-msgid "Ready · hold Ctrl + Alt + Space to speak."
-msgstr "Prêt · maintenez Ctrl + Alt + Espace pour parler."
-
 msgid "Speech model selected."
 msgstr "Modèle vocal sélectionné."
 
@@ -245,7 +242,7 @@ msgid "{count} installed"
 msgstr "{count} installé"
 
 msgid "{count} kept · {remote} went to a service"
-msgstr "{count} conservé · {count} transféré vers un service"
+msgstr "{count} conservés · {remote} envoyés à un service"
 
 msgid "{count} kept · all on this device"
 msgstr "{count} conservé · tout sur cet appareil"
@@ -257,10 +254,10 @@ msgid "{count} of 5 shortcuts active"
 msgstr "{count} sur 5 raccourcis actifs"
 
 msgid "{language} · {seconds}s audio · {milliseconds}ms processing{source}"
-msgstr "{language} · {language} audio · {language}ms de traitement{language}"
+msgstr "{language} · {seconds} s d’audio · {milliseconds} ms de traitement{source}"
 
 msgid "{language} · {seconds}s audio · {milliseconds}ms release{prepared}{source}"
-msgstr "{language} · {language} s d'audio · {language} ms de relâchement{language}{language}"
+msgstr "{language} · {seconds} s d’audio · {milliseconds} ms après relâchement{prepared}{source}"
 
 msgid "{name} · shown while recording"
 msgstr "{name} · affiché pendant l'enregistrement"
@@ -314,13 +311,13 @@ msgid "AUDIO LEAVES DEVICE"
 msgstr "LE SON QUITTE L'APPAREIL"
 
 msgid "Audio leaves for {audio}, text for {text}"
-msgstr "Le son est transmis vers {audio}, le texte vers {audio}"
+msgstr "L’audio est envoyé à {audio}, le texte à {text}"
 
 msgid "Audio leaves this device for {audio}"
 msgstr "Le son quitte cet appareil pour {audio}"
 
 msgid "Auto"
-msgstr "Auto"
+msgstr "Automatique"
 
 msgid "AUTO"
 msgstr "AUTO"
@@ -341,7 +338,7 @@ msgid "Blue glass"
 msgstr "Verre bleu"
 
 msgid "Broadcast mic"
-msgstr "Micro de diffusion"
+msgstr "Micro avec ondes"
 
 msgid "Cancel"
 msgstr "Annuler"
@@ -371,7 +368,7 @@ msgid "Chosen on the Models page"
 msgstr "Sélectionné sur la page Modèles"
 
 msgid "Circular"
-msgstr "Circulaire"
+msgstr "Spectre circulaire"
 
 msgid "Clear history"
 msgstr "Effacer l’historique"
@@ -395,13 +392,13 @@ msgid "Cloud translation · region is optional for global resources"
 msgstr "Traduction dans le cloud · la région est facultative pour les ressources mondiales"
 
 msgid "cold"
-msgstr "froid"
+msgstr "non chargé"
 
 msgid "COLOUR"
 msgstr "COULEUR"
 
 msgid "Companion orb"
-msgstr "Orbe compagnon"
+msgstr "Sphère assistante"
 
 msgid "Cooling down"
 msgstr "Temps de refroidissement"
@@ -416,7 +413,7 @@ msgid "Copy latest transcript"
 msgstr "Copier la dernière transcription"
 
 msgid "COPY RESULT"
-msgstr "RÉSULTAT DE LA COPIE"
+msgstr "COPIER LE RÉSULTAT"
 
 msgid "Correct keyboard layout"
 msgstr "Corriger la disposition du clavier"
@@ -515,7 +512,7 @@ msgid "Flex"
 msgstr "Flex"
 
 msgid "Flow sphere"
-msgstr "Sphère fluide"
+msgstr "Sphère de particules"
 
 msgid "Fluid ribbon"
 msgstr "Ruban fluide"
@@ -590,7 +587,7 @@ msgid "Kept warm"
 msgstr "Conservé en mémoire"
 
 msgid "Key {hint}{extra} · {about}"
-msgstr "Clé {hint}{hint} · {hint}"
+msgstr "Clé {hint}{extra} · {about}"
 
 msgid "Key refused"
 msgstr "Clé refusée"
@@ -638,19 +635,19 @@ msgid "More reliable for short Russian phrases"
 msgstr "Plus fiable pour les phrases courtes en russe"
 
 msgid "Never reached"
-msgstr "Jamais atteint"
+msgstr "Ignoré"
 
 msgid "No"
 msgstr "Non"
 
 msgid "No compatible speech backend is active"
-msgstr "Aucun moteur de synthèse vocale compatible n'est actif"
+msgstr "Aucun moteur de reconnaissance vocale compatible n’est actif"
 
 msgid "No key stored"
 msgstr "Aucune clé enregistrée"
 
 msgid "no overlay"
-msgstr "Pas de superposition"
+msgstr "sans visualisation"
 
 msgid "No speech model is installed, so nothing can be dictated yet."
 msgstr "Aucun modèle de synthèse vocale n'est installé, il n'est donc pas encore possible de dicter quoi que ce soit."
@@ -755,7 +752,7 @@ msgid "Paused · {count} shortcuts configured"
 msgstr "En pause · {count} raccourcis configurés"
 
 msgid "PIN"
-msgstr "Code PIN"
+msgstr "PIN"
 
 msgid "Português (Brasil)"
 msgstr "Portugais (Brésil)"
@@ -851,7 +848,7 @@ msgid "Save"
 msgstr "Enregistrer"
 
 msgid "Say"
-msgstr "Dire"
+msgstr "Say"
 
 msgid "SayFlex"
 msgstr "SayFlex"
@@ -875,7 +872,7 @@ msgid "Show a preview"
 msgstr "Afficher un aperçu"
 
 msgid "Showing {count} · {remote} of them went to a service"
-msgstr "Affichage de {count} · {count} d'entre eux ont été envoyés à un service"
+msgstr "{count} affichés · {remote} envoyés à un service"
 
 msgid "Showing {count} · all on this device"
 msgstr "Affichage de {count} · tous sur cet appareil"
@@ -935,7 +932,7 @@ msgid "SURFACE"
 msgstr "SURFACE"
 
 msgid "SWAP TEXT"
-msgstr "CHANGER LE TEXTE"
+msgstr "INVERSER LES TEXTES"
 
 msgid "Switch it on above and dictations from then on are kept."
 msgstr "Activez cette option ci-dessus et les dictées seront conservées à partir de ce moment-là."
@@ -990,9 +987,6 @@ msgstr "Traduit par {provider}."
 
 msgid "Translates foreign text, offers layout candidates for the rest"
 msgstr "Traduit le texte en langue étrangère, propose des suggestions de mise en page pour le reste"
-
-msgid "Translating locally…"
-msgstr "Traduction en cours…"
 
 msgid "Translation"
 msgstr "Traduction"
@@ -1294,3 +1288,102 @@ msgstr "Épingler la traduction"
 
 msgid "Unpin translation"
 msgstr "Détacher la traduction"
+
+msgid "Only this"
+msgstr "Celui-ci uniquement"
+
+msgid "Fastest available"
+msgstr "Option la plus rapide"
+
+msgid "Modern GPU"
+msgstr "GPU récente"
+
+msgid "DICTATION LANGUAGE"
+msgstr "LANGUE DE DICTÉE"
+
+msgid "TRANSCRIPT LANGUAGE"
+msgstr "LANGUE DU RÉSULTAT"
+
+msgid "PROCESSING MODE"
+msgstr "MODE DE TRAITEMENT"
+
+msgid "Fast response"
+msgstr "Réponse rapide"
+
+msgid "Lower resource use"
+msgstr "Économie de ressources"
+
+msgid "Hold {} anywhere in Windows."
+msgstr "Maintenez {} dans n’importe quelle fenêtre Windows."
+
+msgid "Interface language"
+msgstr "Langue de l’interface"
+
+msgid "Changes the language of SayFlex menus and settings"
+msgstr "Modifie la langue des menus et des paramètres de SayFlex"
+
+msgid "Follow Windows settings"
+msgstr "Comme dans Windows"
+
+msgid "Speech and text use separate provider lists. The first enabled provider is tried first; failed services move down. Make one provider exclusive, or place a cloud service above This computer to keep a local fallback."
+msgstr "La voix et le texte utilisent deux listes de fournisseurs distinctes. Le premier fournisseur activé est essayé en premier ; les services en échec descendent dans la liste. Vous pouvez utiliser un seul fournisseur ou placer un service cloud au-dessus de Cet ordinateur pour conserver un secours local."
+
+msgid "Hold {} anywhere in Windows to start a dictation."
+msgstr "Maintenez {} dans n’importe quelle fenêtre Windows pour commencer une dictée."
+
+msgid "Selection translation"
+msgstr "Traduction de la sélection"
+
+msgid "Allow the selection shortcut to translate text"
+msgstr "Autorise le raccourci de sélection à traduire le texte"
+
+msgid "Local model"
+msgstr "Modèle local"
+
+msgid "Keep the model loaded for faster translations"
+msgstr "Maintient le modèle chargé pour accélérer les traductions"
+
+msgid "Keep ready"
+msgstr "Garder prêt"
+
+msgid "Load when needed"
+msgstr "Charger au besoin"
+
+msgid "Translation result"
+msgstr "Résultat de la traduction"
+
+msgid "How completed translations are delivered"
+msgstr "Définit où sont envoyées les traductions terminées"
+
+msgid "Selection action"
+msgstr "Action sur la sélection"
+
+msgid "What the selection shortcut does"
+msgstr "Définit l’action du raccourci de sélection"
+
+msgid "PRESS SHORTCUT · {} · ESC CANCELS"
+msgstr "APPUYEZ SUR LE RACCOURCI · {} · ÉCHAP POUR ANNULER"
+
+msgid "ACTION"
+msgstr "ACTION"
+
+msgid "SayFlex {} · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it."
+msgstr "SayFlex {} · des outils locaux pour la langue et la pensée. Aucun compte cloud n’est requis ; un modèle n’est téléchargé que lorsque vous le choisissez."
+
+msgid "SayFlex {}"
+msgstr "SayFlex {}"
+
+msgid "Ready · hold {shortcut} to speak."
+msgstr "Prêt · maintenez {shortcut} pour parler."
+
+msgid "Insert latest dictation"
+msgstr "Insérer la dernière dictée"
+
+msgid "Kept on this device only. The insert-latest shortcut uses the newest entry."
+msgstr "Conservé uniquement sur cet appareil. Le raccourci d’insertion utilise l’entrée la plus récente."
+
+msgid "History is off. The newest dictation stays in memory until SayFlex closes, so its shortcut can still insert it."
+msgstr "L’historique est désactivé. La dernière dictée reste en mémoire jusqu’à la fermeture de SayFlex et peut encore être insérée avec son raccourci."
+
+msgid "Nothing has been saved yet. The newest dictation can still be inserted with its shortcut until SayFlex closes."
+msgstr "Rien n’a encore été enregistré. La dernière dictée peut toujours être insérée avec son raccourci jusqu’à la fermeture de SayFlex."

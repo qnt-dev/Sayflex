@@ -83,8 +83,8 @@ AudioDuration|{language} · {seconds}s audio · {milliseconds}ms release{prepare
 ProcessingDuration|{language} · {seconds}s audio · {milliseconds}ms processing{source}
 SentToService|Sent to a service
 OnThisDevice|On this device
-Fastest|Fastest
-Efficient|Efficient
+FastResponse|Fast response
+LowerResourceUse|Lower resource use
 OriginalLanguage|Original language
 TranslateToEnglish|Translate to English
 ReadyTitle|Ready
@@ -102,7 +102,7 @@ FlowSphere|Flow sphere
 WritingSlate|Writing slate
 CompanionOrb|Companion orb
 Dictation|Dictation
-CopyLatestTranscript|Copy latest transcript
+InsertLatestDictation|Insert latest dictation
 CorrectLayout|Correct keyboard layout
 TextActions|Text actions
 AlwaysAvailable|Always available
@@ -165,7 +165,7 @@ CloudSpeechReady|Cloud speech ready
 LoadingSpeechEngine|Loading and warming the local speech engine…
 InstallingModel|Installing {model}…
 CheckingFallback|Checking fallback
-ReadyHoldToSpeak|Ready · hold Ctrl + Alt + Space to speak.
+ReadyHoldShortcut|Ready · hold {shortcut} to speak.
 SpeechModelSelected|Speech model selected.
 TranscriptSavedTargetLost|Transcript saved to history; target was lost.
 TranscribedBy|Transcribed by {provider}.
@@ -265,7 +265,6 @@ CpuPreviewUnavailable|Not available on the CPU engine: one pass at a time, and a
 VisualFlowDetail|A point cloud that accelerates on voice onset
 VisualShownWhileRecording|{visual} · shown while recording
 DictateAction|Dictate
-InsertLastAction|Insert last
 ActOnSelectionAction|Act on selection
 PauseResumeAction|Pause / resume
 WorkerRestarted|Worker restarted automatically.

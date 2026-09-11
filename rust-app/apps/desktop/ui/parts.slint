@@ -209,6 +209,8 @@ export component ListRow inherits Rectangle {
     }
 
     HorizontalLayout {
+        width: parent.width;
+        height: parent.height;
         padding-top: 11px;
         padding-bottom: 11px;
         spacing: 14px;
@@ -230,15 +232,23 @@ export component ListRow inherits Rectangle {
             vertical-alignment: center;
         }
 
-        VerticalLayout {
+        identity := VerticalLayout {
+            width: max(0px, root.width
+                - actions.preferred-width
+                - (root.orderable ? 36px : 0px)
+                - (root.lead != "" ? 146px : 0px)
+                - 14px);
             horizontal-stretch: 1;
             alignment: center;
             spacing: 4px;
 
             HorizontalLayout {
+                min-width: 0px;
                 spacing: 9px;
                 alignment: start;
                 Text {
+                    min-width: 0px;
+                    horizontal-stretch: 1;
                     text: root.title;
                     color: root.tone == "off" ? Sheet.muted : Sheet.ink;
                     font-size: Sheet.body-size;
@@ -246,15 +256,18 @@ export component ListRow inherits Rectangle {
                     overflow: elide;
                 }
                 if root.tag != "" : Text {
+                    max-width: 108px;
                     text: root.tag;
                     color: Sheet.muted;
                     font-size: Sheet.label-size;
                     font-weight: 650;
                     letter-spacing: 1.2px;
                     vertical-alignment: center;
+                    overflow: elide;
                 }
             }
             Text {
+                min-width: 0px;
                 text: root.detail;
                 color: Sheet.muted;
                 font-size: Sheet.detail-size;
@@ -262,7 +275,7 @@ export component ListRow inherits Rectangle {
             }
         }
 
-        HorizontalLayout {
+        actions := HorizontalLayout {
             alignment: end;
             spacing: 9px;
             Rectangle {
@@ -311,7 +324,10 @@ export component ListRow inherits Rectangle {
             // The verbs get a column too. Without one, a row with fewer of them
             // pulled its state word right and the column read as a ragged edge.
             HorizontalLayout {
-                width: root.controls-width;
+                // A translated verb may be wider than its English source.
+                // Reserve the measured preferred width instead of clipping
+                // several controls into an English-sized box.
+                min-width: root.controls-width;
                 alignment: end;
                 spacing: 9px;
                 @children

@@ -103,9 +103,8 @@ fn generate_typed_ui_catalog() {
             let translated = catalog
                 .get(english)
                 .unwrap_or_else(|| panic!("{code} is missing typed UI message {english:?}"));
-            let translated = canonicalize_placeholders(english, translated).unwrap_or_else(|| {
-                panic!("{code} changed the number of placeholders in {english:?}")
-            });
+            let translated = validate_placeholders(english, translated)
+                .unwrap_or_else(|| panic!("{code} changed the named placeholders in {english:?}"));
             generated.push_str(&format!("            UiText::{name} => {translated:?},\n"));
         }
         generated.push_str("        },\n");
@@ -138,7 +137,10 @@ fn parse_po(source: &str) -> BTreeMap<String, String> {
             && let Some(id) = id.take()
             && !value.is_empty()
         {
-            result.insert(id, value);
+            assert!(
+                result.insert(id.clone(), value).is_none(),
+                "duplicate PO message id {id:?}"
+            );
         }
     }
     result
@@ -184,18 +186,16 @@ fn placeholder_ranges(value: &str) -> Vec<(usize, usize)> {
     result
 }
 
-fn canonicalize_placeholders(english: &str, translated: &str) -> Option<String> {
-    let expected = placeholder_ranges(english)
+fn validate_placeholders<'a>(english: &str, translated: &'a str) -> Option<&'a str> {
+    let mut expected = placeholder_ranges(english)
         .into_iter()
         .map(|(start, end)| &english[start..end])
         .collect::<Vec<_>>();
-    let actual = placeholder_ranges(translated);
-    if expected.len() != actual.len() {
-        return None;
-    }
-    let mut result = translated.to_owned();
-    for ((start, end), replacement) in actual.into_iter().zip(expected).rev() {
-        result.replace_range(start..end, replacement);
-    }
-    Some(result)
+    let mut actual = placeholder_ranges(translated)
+        .into_iter()
+        .map(|(start, end)| &translated[start..end])
+        .collect::<Vec<_>>();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    (expected == actual).then_some(translated)
 }

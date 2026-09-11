@@ -135,6 +135,18 @@ mod tests {
         assert_eq!(UiLocale::French.resolved_code("de-DE"), "fr");
     }
 
+    #[test]
+    fn ready_status_uses_the_configured_shortcut_in_the_active_language() {
+        assert_eq!(
+            super::render(
+                UiLocale::Russian,
+                super::UiText::ReadyHoldShortcut,
+                &[("shortcut", "Alt + F9")],
+            ),
+            "Готово · удерживайте Alt + F9, чтобы говорить."
+        );
+    }
+
     fn slint_message_ids() -> BTreeSet<String> {
         [
             include_str!("../ui/app.slint"),
@@ -225,6 +237,694 @@ mod tests {
             assert!(missing.is_empty(), "{language} is missing {missing:?}");
             assert_ne!(entries.get("Tools").map(String::as_str), Some("Tools"));
         }
+    }
+
+    #[test]
+    fn settings_copy_is_semantic_in_every_supported_language() {
+        let catalogs = [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+                [
+                    ("Only this", "Только этот"),
+                    ("Fastest available", "Самый быстрый из доступных"),
+                    ("Modern GPU", "Современная видеокарта"),
+                    ("DICTATION LANGUAGE", "ЯЗЫК ДИКТОВКИ"),
+                    ("TRANSCRIPT LANGUAGE", "ЯЗЫК РЕЗУЛЬТАТА"),
+                    ("PROCESSING MODE", "РЕЖИМ ОБРАБОТКИ"),
+                    ("Fast response", "Быстрый ответ"),
+                    ("Lower resource use", "Экономия ресурсов"),
+                    ("Interface language", "Язык интерфейса"),
+                    ("Follow Windows settings", "Как в Windows"),
+                    ("ACTION", "ДЕЙСТВИЕ"),
+                    ("Insert latest dictation", "Вставить последнюю диктовку"),
+                    ("Act on selection", "Обработать выделение"),
+                    ("Correct keyboard layout", "Исправить раскладку клавиатуры"),
+                    ("Never reached", "Пропускается"),
+                    (
+                        "No compatible speech backend is active",
+                        "Нет совместимого движка распознавания речи",
+                    ),
+                ],
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+                [
+                    ("Only this", "Лише цей"),
+                    ("Fastest available", "Найшвидший із доступних"),
+                    ("Modern GPU", "Сучасна відеокарта"),
+                    ("DICTATION LANGUAGE", "МОВА ДИКТУВАННЯ"),
+                    ("TRANSCRIPT LANGUAGE", "МОВА РЕЗУЛЬТАТУ"),
+                    ("PROCESSING MODE", "РЕЖИМ ОБРОБКИ"),
+                    ("Fast response", "Швидка відповідь"),
+                    ("Lower resource use", "Економія ресурсів"),
+                    ("Interface language", "Мова інтерфейсу"),
+                    ("Follow Windows settings", "Як у Windows"),
+                    ("ACTION", "ДІЯ"),
+                    ("Insert latest dictation", "Вставити останнє диктування"),
+                    ("Act on selection", "Обробити виділення"),
+                    ("Correct keyboard layout", "Виправити розкладку клавіатури"),
+                    ("Never reached", "Пропускається"),
+                    (
+                        "No compatible speech backend is active",
+                        "Немає сумісного рушія розпізнавання мовлення",
+                    ),
+                ],
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+                [
+                    ("Only this", "Solo este"),
+                    ("Fastest available", "La opción más rápida"),
+                    ("Modern GPU", "GPU moderna"),
+                    ("DICTATION LANGUAGE", "IDIOMA DE DICTADO"),
+                    ("TRANSCRIPT LANGUAGE", "IDIOMA DEL RESULTADO"),
+                    ("PROCESSING MODE", "MODO DE PROCESAMIENTO"),
+                    ("Fast response", "Respuesta rápida"),
+                    ("Lower resource use", "Menor uso de recursos"),
+                    ("Interface language", "Idioma de la interfaz"),
+                    ("Follow Windows settings", "Como en Windows"),
+                    ("ACTION", "ACCIÓN"),
+                    ("Insert latest dictation", "Insertar el último dictado"),
+                    ("Act on selection", "Procesar la selección"),
+                    (
+                        "Correct keyboard layout",
+                        "Corregir la distribución del teclado",
+                    ),
+                    ("Never reached", "Omitido"),
+                    (
+                        "No compatible speech backend is active",
+                        "No hay ningún motor de reconocimiento de voz compatible activo",
+                    ),
+                ],
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+                [
+                    ("Only this", "Só este"),
+                    ("Fastest available", "A opção mais rápida"),
+                    ("Modern GPU", "GPU moderna"),
+                    ("DICTATION LANGUAGE", "IDIOMA DO DITADO"),
+                    ("TRANSCRIPT LANGUAGE", "IDIOMA DO RESULTADO"),
+                    ("PROCESSING MODE", "MODO DE PROCESSAMENTO"),
+                    ("Fast response", "Resposta rápida"),
+                    ("Lower resource use", "Menor uso de recursos"),
+                    ("Interface language", "Idioma da interface"),
+                    ("Follow Windows settings", "Como no Windows"),
+                    ("ACTION", "AÇÃO"),
+                    ("Insert latest dictation", "Inserir o último ditado"),
+                    ("Act on selection", "Processar a seleção"),
+                    ("Correct keyboard layout", "Corrigir o layout do teclado"),
+                    ("Never reached", "Ignorado"),
+                    (
+                        "No compatible speech backend is active",
+                        "Nenhum mecanismo de reconhecimento de fala compatível está ativo",
+                    ),
+                ],
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+                [
+                    ("Only this", "Nur dieser"),
+                    ("Fastest available", "Schnellste verfügbare Option"),
+                    ("Modern GPU", "Moderne GPU"),
+                    ("DICTATION LANGUAGE", "DIKTATSPRACHE"),
+                    ("TRANSCRIPT LANGUAGE", "SPRACHE DER AUSGABE"),
+                    ("PROCESSING MODE", "VERARBEITUNGSMODUS"),
+                    ("Fast response", "Schnelle Antwort"),
+                    ("Lower resource use", "Ressourcensparend"),
+                    ("Interface language", "Sprache der Benutzeroberfläche"),
+                    ("Follow Windows settings", "Wie in Windows"),
+                    ("ACTION", "AKTION"),
+                    ("Insert latest dictation", "Letztes Diktat einfügen"),
+                    ("Act on selection", "Auswahl verarbeiten"),
+                    ("Correct keyboard layout", "Tastaturlayout korrigieren"),
+                    ("Never reached", "Übersprungen"),
+                    (
+                        "No compatible speech backend is active",
+                        "Keine kompatible Spracherkennungs-Engine ist aktiv",
+                    ),
+                ],
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+                [
+                    ("Only this", "Celui-ci uniquement"),
+                    ("Fastest available", "Option la plus rapide"),
+                    ("Modern GPU", "GPU récente"),
+                    ("DICTATION LANGUAGE", "LANGUE DE DICTÉE"),
+                    ("TRANSCRIPT LANGUAGE", "LANGUE DU RÉSULTAT"),
+                    ("PROCESSING MODE", "MODE DE TRAITEMENT"),
+                    ("Fast response", "Réponse rapide"),
+                    ("Lower resource use", "Économie de ressources"),
+                    ("Interface language", "Langue de l’interface"),
+                    ("Follow Windows settings", "Comme dans Windows"),
+                    ("ACTION", "ACTION"),
+                    ("Insert latest dictation", "Insérer la dernière dictée"),
+                    ("Act on selection", "Agir sur la sélection"),
+                    (
+                        "Correct keyboard layout",
+                        "Corriger la disposition du clavier",
+                    ),
+                    ("Never reached", "Ignoré"),
+                    (
+                        "No compatible speech backend is active",
+                        "Aucun moteur de reconnaissance vocale compatible n’est actif",
+                    ),
+                ],
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+                [
+                    ("Only this", "Solo questo"),
+                    ("Fastest available", "Opzione più veloce"),
+                    ("Modern GPU", "GPU moderna"),
+                    ("DICTATION LANGUAGE", "LINGUA DI DETTATURA"),
+                    ("TRANSCRIPT LANGUAGE", "LINGUA DEL RISULTATO"),
+                    ("PROCESSING MODE", "MODALITÀ DI ELABORAZIONE"),
+                    ("Fast response", "Risposta rapida"),
+                    ("Lower resource use", "Risparmio di risorse"),
+                    ("Interface language", "Lingua dell’interfaccia"),
+                    ("Follow Windows settings", "Come in Windows"),
+                    ("ACTION", "AZIONE"),
+                    ("Insert latest dictation", "Inserisci l’ultima dettatura"),
+                    ("Act on selection", "Agisci sulla selezione"),
+                    (
+                        "Correct keyboard layout",
+                        "Correggi il layout della tastiera",
+                    ),
+                    ("Never reached", "Saltato"),
+                    (
+                        "No compatible speech backend is active",
+                        "Non è attivo alcun motore di riconoscimento vocale compatibile",
+                    ),
+                ],
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+                [
+                    ("Only this", "이것만"),
+                    ("Fastest available", "사용 가능한 최고 속도"),
+                    ("Modern GPU", "최신 GPU"),
+                    ("DICTATION LANGUAGE", "받아쓰기 언어"),
+                    ("TRANSCRIPT LANGUAGE", "결과 언어"),
+                    ("PROCESSING MODE", "처리 모드"),
+                    ("Fast response", "빠른 응답"),
+                    ("Lower resource use", "리소스 절약"),
+                    ("Interface language", "인터페이스 언어"),
+                    ("Follow Windows settings", "Windows 설정 따르기"),
+                    ("ACTION", "동작"),
+                    ("Insert latest dictation", "최근 받아쓰기 삽입"),
+                    ("Act on selection", "선택 영역 처리"),
+                    ("Correct keyboard layout", "키보드 레이아웃 수정"),
+                    ("Never reached", "건너뜀"),
+                    (
+                        "No compatible speech backend is active",
+                        "호환되는 음성 인식 엔진이 활성화되어 있지 않음",
+                    ),
+                ],
+            ),
+        ];
+
+        for (language, source, expected) in catalogs {
+            let entries = catalog(source);
+            for (message, translation) in expected {
+                assert_eq!(
+                    entries.get(message).map(String::as_str),
+                    Some(translation),
+                    "{language}: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn technical_labels_remain_stable_in_every_catalog() {
+        let catalogs = [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ];
+
+        for (language, source) in catalogs {
+            let entries = catalog(source);
+            for label in [
+                "CPU", "CUDA", "Vulkan", "PIN", "ORIG", "DUAL", "Say", "Flex", "SayFlex",
+            ] {
+                assert_eq!(
+                    entries.get(label).map(String::as_str),
+                    Some(label),
+                    "{language}: {label} is a product label, not prose"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn catalogs_do_not_define_the_same_message_twice() {
+        let catalogs = [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ];
+
+        for (language, source) in catalogs {
+            let mut seen = BTreeSet::new();
+            let duplicates = source
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("msgid \"")
+                        .and_then(|value| value.strip_suffix('"'))
+                })
+                .filter(|message| !message.is_empty())
+                .filter(|message| !seen.insert((*message).to_owned()))
+                .collect::<Vec<_>>();
+            assert!(
+                duplicates.is_empty(),
+                "{language}: duplicate message ids {duplicates:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_catalog_messages_preserve_named_placeholders() {
+        let placeholders = |value: &str| {
+            let mut names = Vec::new();
+            let mut rest = value;
+            while let Some(start) = rest.find('{') {
+                let tail = &rest[start + 1..];
+                let Some(end) = tail.find('}') else {
+                    break;
+                };
+                names.push(tail[..end].to_owned());
+                rest = &tail[end + 1..];
+            }
+            names.sort();
+            names
+        };
+        let typed_messages = include_str!("../ui_texts.txt")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| line.split_once('|').map(|(_, message)| message))
+            .collect::<Vec<_>>();
+
+        for (language, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            let entries = catalog(source);
+            for message in &typed_messages {
+                assert_eq!(
+                    placeholders(message),
+                    placeholders(&entries[*message]),
+                    "{language}: placeholders changed in {message:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interface_language_control_lives_on_the_about_page() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        slint::select_bundled_translation("en").expect("select English bundle");
+        let settings = crate::SettingsWindow::new().expect("settings surface");
+        settings.show().expect("show headless settings surface");
+
+        settings.set_active_page(0);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+        assert!(
+            ElementHandle::find_by_accessible_label(&settings, "System language")
+                .next()
+                .is_none(),
+            "the global header must not carry an application setting"
+        );
+
+        settings.set_active_page(8);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+        assert!(
+            ElementHandle::find_by_accessible_label(&settings, "System language")
+                .next()
+                .is_some(),
+            "the About page must expose the interface-language setting"
+        );
+        drop(seed);
+    }
+
+    #[test]
+    fn every_settings_page_reports_the_real_nine_page_count() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        slint::select_bundled_translation("en").expect("select English bundle");
+        let settings = crate::SettingsWindow::new().expect("settings surface");
+        settings.show().expect("show headless settings surface");
+
+        for page in 0..9 {
+            settings.set_active_page(page);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+            let expected = format!("{:02} / 09", page + 1);
+            assert!(
+                ElementHandle::find_by_accessible_label(&settings, &expected)
+                    .next()
+                    .is_some(),
+                "page {page} must expose {expected}"
+            );
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn translated_engine_tiles_do_not_overlap() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(1);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+            let entries = catalog(source);
+
+            let find = |label: &str| {
+                ElementHandle::find_by_accessible_label(&settings, label)
+                    .next()
+                    .unwrap_or_else(|| panic!("{locale}: missing engine tile {label}"))
+            };
+            let auto = find(&entries["Auto"]);
+            let cuda = find("CUDA");
+            let vulkan = find("Vulkan");
+            let cpu = find("CPU");
+
+            for tile in [&auto, &cuda, &vulkan, &cpu] {
+                assert!(
+                    tile.size().height >= 68.0,
+                    "{locale}: translated tile is too short"
+                );
+            }
+            let separated = |first: &ElementHandle, second: &ElementHandle| {
+                let a = first.absolute_position();
+                let b = second.absolute_position();
+                let a_size = first.size();
+                let b_size = second.size();
+                a.x + a_size.width <= b.x
+                    || b.x + b_size.width <= a.x
+                    || a.y + a_size.height <= b.y
+                    || b.y + b_size.height <= a.y
+            };
+            assert!(separated(&auto, &cuda), "{locale}: top row overlaps");
+            assert!(separated(&auto, &vulkan), "{locale}: left column overlaps");
+            assert!(separated(&cuda, &cpu), "{locale}: right column overlaps");
+            assert!(separated(&vulkan, &cpu), "{locale}: bottom row overlaps");
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn translated_provider_actions_fit_side_by_side() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::{ComponentHandle, ModelRc, VecModel};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.set_provider_rows(ModelRc::new(VecModel::from(vec![crate::ProviderRow {
+                id: "speech:groq".into(),
+                section: "SPEECH".into(),
+                title: "Groq".into(),
+                detail: "Key ••••9c07 · Cloud speech · availability follows the configured account and service region".into(),
+                enabled: true,
+                available: true,
+                needs_key: true,
+                key_hint: "".into(),
+                field_label: "".into(),
+                field_value: "".into(),
+                state: entries["Key refused"].clone().into(),
+                tone: "off".into(),
+                unreachable: false,
+            }])));
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(4);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            let only = ElementHandle::find_by_accessible_label(&settings, &entries["Only this"])
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: exclusive-provider action"));
+            let add = ElementHandle::find_by_accessible_label(&settings, &entries["Add key"])
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: credential action"));
+            let only_position = only.absolute_position();
+            let add_position = add.absolute_position();
+            let list = ElementHandle::find_by_element_id(&settings, "ProvidersPage::list")
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: provider list"));
+            let provider_row = ElementHandle::find_by_element_type_name(&settings, "ListRow")
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: provider row"));
+            assert!(
+                only_position.x + only.size().width <= add_position.x,
+                "{locale}: translated provider actions overlap: only_right={} add_left={}",
+                only_position.x + only.size().width,
+                add_position.x,
+            );
+            let list_position = list.absolute_position();
+            let row_position = provider_row.absolute_position();
+            assert!(
+                add_position.x + add.size().width <= list_position.x + list.size().width,
+                "{locale}: translated provider actions leave the page: action_right={} list_right={} row_left={} row_width={}",
+                add_position.x + add.size().width,
+                list_position.x + list.size().width,
+                row_position.x,
+                provider_row.size().width,
+            );
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn translated_interactive_controls_stay_inside_the_settings_window() {
+        use i_slint_backend_testing::{AccessibleRole, ElementQuery, ElementRoot};
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for locale in ["ru", "uk", "es", "pt-BR", "de", "fr", "it", "ko"] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.show().expect("show headless settings surface");
+            let surface = settings.root_element().size();
+
+            for page in 0..9 {
+                settings.set_active_page(page);
+                i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+                let controls = ElementQuery::from_root(&settings)
+                    .match_predicate(|element| {
+                        matches!(
+                            element.accessible_role(),
+                            Some(
+                                AccessibleRole::Button
+                                    | AccessibleRole::Checkbox
+                                    | AccessibleRole::Combobox
+                                    | AccessibleRole::RadioButton
+                                    | AccessibleRole::Slider
+                                    | AccessibleRole::Spinbox
+                                    | AccessibleRole::Switch
+                                    | AccessibleRole::TextInput
+                            )
+                        )
+                    })
+                    .find_all();
+
+                for control in controls {
+                    let position = control.absolute_position();
+                    let size = control.size();
+                    if size.width <= 0.0 || size.height <= 0.0 {
+                        continue;
+                    }
+                    assert!(
+                        position.x >= -0.5 && position.x + size.width <= surface.width + 0.5,
+                        "{locale} page {page}: control {:?} at x={} width={} leaves {}px surface",
+                        control.accessible_label(),
+                        position.x,
+                        size.width,
+                        surface.width,
+                    );
+                }
+            }
+        }
+        drop(seed);
     }
 
     #[test]
@@ -372,6 +1072,8 @@ mod tests {
         slint::select_bundled_translation("en").expect("select English bundle");
         let settings = crate::SettingsWindow::new().expect("settings surface");
         settings.show().expect("show headless settings surface");
+        settings.set_active_page(8);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
         let selected = Rc::new(RefCell::new(String::new()));
         let selected_from_callback = Rc::clone(&selected);

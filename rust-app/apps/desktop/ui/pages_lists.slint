@@ -32,7 +32,7 @@ export component ModelsPage inherits VerticalLayout {
     spacing: 0px;
 
     ListHead {
-        index: "04 / 08";
+        index: "04 / 09";
         title: @tr("Models");
         lede: @tr("Downloaded once, verified by SHA-256, then used from disk. An interrupted download resumes where it stopped.");
         claim: root.summary;
@@ -57,6 +57,11 @@ export component ModelsPage inherits VerticalLayout {
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
             for row[index] in root.rows : VerticalLayout {
+                // A ListView delegate otherwise keeps its preferred width and
+                // can make the viewport wider than the visible list. Bind the
+                // delegate to the viewport so translated actions are laid out
+                // inside the page instead of creating hidden horizontal overflow.
+                width: list.width;
                 spacing: 0px;
 
                 if index == 0 || root.rows[index - 1].section != row.section : GroupLabel {
@@ -136,9 +141,9 @@ export component ProvidersPage inherits VerticalLayout {
     spacing: 0px;
 
     ListHead {
-        index: "05 / 08";
+        index: "05 / 09";
         title: @tr("Provider order");
-        lede: @tr("Two separate lists. The first enabled row is used; failures move down. Choose Only for cloud-only use, or move a cloud service above This computer to keep local fallback.");
+        lede: @tr("Speech and text use separate provider lists. The first enabled provider is tried first; failed services move down. Make one provider exclusive, or place a cloud service above This computer to keep a local fallback.");
         claim: root.claim;
         claim-signal: root.audio-leaves-device;
     }
@@ -164,6 +169,7 @@ export component ProvidersPage inherits VerticalLayout {
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
             for row[index] in root.rows : VerticalLayout {
+                width: list.width;
                 spacing: 0px;
 
                 // Speech and text are two separate orders with separate keys and
@@ -182,7 +188,12 @@ export component ProvidersPage inherits VerticalLayout {
                 ListRow {
                     title: row.title;
                     detail: row.detail;
-                    state-text: row.state;
+                    // Provider rows already carry three controls. Keeping a
+                    // fixed 108px status column beside them made translated
+                    // key actions leave the list. The state belongs with the
+                    // provider identity and leaves the action edge stable.
+                    tag: row.state;
+                    state-text: "";
                     tone: row.tone;
                     controls-width: 208px;
                     orderable: true;
@@ -206,7 +217,7 @@ export component ProvidersPage inherits VerticalLayout {
                     }
 
                     RowAction {
-                        label: @tr("Only");
+                        label: @tr("Only this");
                         enabled: !row.needs-key || row.key-hint != "";
                         reason: @tr("Add a key before making this the only provider");
                         clicked => { root.use-provider-only(index); }
@@ -353,11 +364,11 @@ export component HistoryPage inherits VerticalLayout {
     spacing: 0px;
 
     ListHead {
-        index: "07 / 08";
+        index: "07 / 09";
         title: @tr("History");
         lede: root.keeping
-            ? @tr("Kept on this device only. Insert-last works from the newest entry.")
-            : @tr("Not kept. Insert-last still works for the newest one, which is held in memory until the application closes.");
+            ? @tr("Kept on this device only. The insert-latest shortcut uses the newest entry.")
+            : @tr("History is off. The newest dictation stays in memory until SayFlex closes, so its shortcut can still insert it.");
         claim: root.scope;
     }
 
@@ -427,7 +438,7 @@ export component HistoryPage inherits VerticalLayout {
                     Text {
                         text: root.keeping
                             ? @tr("Every dictation you finish is written here — the words, how long the audio ran, how long it took, and whether it was transcribed on this machine or by a service. It stays on this device and nowhere else.")
-                            : @tr("Nothing is being written to disk. Insert-last still works for the newest dictation, which is held in memory until SayFlex closes.");
+                            : @tr("Nothing has been saved yet. The newest dictation can still be inserted with its shortcut until SayFlex closes.");
                         color: Sheet.muted;
                         font-size: Sheet.detail-size;
                         wrap: word-wrap;
@@ -478,7 +489,7 @@ export component HistoryPage inherits VerticalLayout {
                         }
                         Text {
                             text: root.keeping
-                                ? @tr("Hold ") + root.hotkey + @tr(" anywhere in Windows to start one.")
+                                ? @tr("Hold {} anywhere in Windows to start a dictation.", root.hotkey)
                                 : @tr("Switch it on above and dictations from then on are kept.");
                             color: Sheet.ink;
                             font-size: Sheet.detail-size;

@@ -212,9 +212,6 @@ msgstr "{model} 설치 중…"
 msgid "Checking fallback"
 msgstr "대체 경로 확인 중"
 
-msgid "Ready · hold Ctrl + Alt + Space to speak."
-msgstr "준비됨 · 말하려면 Ctrl + Alt + Space를 누르고 계세요."
-
 msgid "Speech model selected."
 msgstr "음성 모델을 선택했습니다."
 
@@ -323,7 +320,7 @@ msgid "Auto"
 msgstr "자동"
 
 msgid "AUTO"
-msgstr "AUTO"
+msgstr "자동"
 
 msgid "Auto-detect"
 msgstr "자동 감지"
@@ -341,7 +338,7 @@ msgid "Blue glass"
 msgstr "파란색 유리"
 
 msgid "Broadcast mic"
-msgstr "방송용 마이크"
+msgstr "파형 마이크"
 
 msgid "Cancel"
 msgstr "취소"
@@ -371,7 +368,7 @@ msgid "Chosen on the Models page"
 msgstr "모델 페이지에서 선택됨"
 
 msgid "Circular"
-msgstr "순환"
+msgstr "원형 스펙트럼"
 
 msgid "Clear history"
 msgstr "기록 지우기"
@@ -395,13 +392,13 @@ msgid "Cloud translation · region is optional for global resources"
 msgstr "클라우드 번역 · 글로벌 리소스의 경우 지역 선택은 선택 사항입니다"
 
 msgid "cold"
-msgstr "cold"
+msgstr "로드 안 됨"
 
 msgid "COLOUR"
-msgstr "COLOUR"
+msgstr "색상"
 
 msgid "Companion orb"
-msgstr "컴패니언 오브"
+msgstr "도우미 구체"
 
 msgid "Cooling down"
 msgstr "쿨다운 중"
@@ -479,7 +476,7 @@ msgid "Engine"
 msgstr "엔진"
 
 msgid "ENGINE"
-msgstr "ENGINE"
+msgstr "엔진"
 
 msgid "English"
 msgstr "영어"
@@ -515,7 +512,7 @@ msgid "Flex"
 msgstr "Flex"
 
 msgid "Flow sphere"
-msgstr "흐르는 구체"
+msgstr "입자 구체"
 
 msgid "Fluid ribbon"
 msgstr "유동적인 리본"
@@ -638,19 +635,19 @@ msgid "More reliable for short Russian phrases"
 msgstr "짧은 러시아어 문구에 더 안정적"
 
 msgid "Never reached"
-msgstr "도달하지 못함"
+msgstr "건너뜀"
 
 msgid "No"
 msgstr "아니요"
 
 msgid "No compatible speech backend is active"
-msgstr "호환되는 음성 백엔드가 활성화되어 있지 않음"
+msgstr "호환되는 음성 인식 엔진이 활성화되어 있지 않음"
 
 msgid "No key stored"
 msgstr "키가 저장되어 있지 않음"
 
 msgid "no overlay"
-msgstr "오버레이 없음"
+msgstr "시각화 없음"
 
 msgid "No speech model is installed, so nothing can be dictated yet."
 msgstr "음성 모델이 설치되어 있지 않으므로 아직 음성 입력을 할 수 없습니다."
@@ -851,7 +848,7 @@ msgid "Save"
 msgstr "저장"
 
 msgid "Say"
-msgstr "말하기"
+msgstr "Say"
 
 msgid "SayFlex"
 msgstr "SayFlex"
@@ -926,7 +923,7 @@ msgid "Stored encrypted with Windows DPAPI, in its own file and never in setting
 msgstr "Windows DPAPI를 사용하여 암호화되어 별도의 파일에 저장되며, settings.json에는 절대 저장되지 않습니다. 한번 저장되면 다시는 표시되지 않으며, 마지막 네 글자만 표시됩니다."
 
 msgid "STYLE"
-msgstr "STYLE"
+msgstr "스타일"
 
 msgid "Sunset"
 msgstr "일몰"
@@ -941,7 +938,7 @@ msgid "Switch it on above and dictations from then on are kept."
 msgstr "위에서 이 기능을 켜면 그 이후의 받아쓰기 내용이 저장됩니다."
 
 msgid "Switched off"
-msgstr "끄기"
+msgstr "꺼짐"
 
 msgid "System language"
 msgstr "시스템 언어"
@@ -990,9 +987,6 @@ msgstr "{provider}에 의해 번역되었습니다."
 
 msgid "Translates foreign text, offers layout candidates for the rest"
 msgstr "외국어 텍스트를 번역하고, 나머지 부분에 대한 레이아웃 후보를 제안합니다"
-
-msgid "Translating locally…"
-msgstr "로컬에서 번역 중…"
 
 msgid "Translation"
 msgstr "번역"
@@ -1111,7 +1105,7 @@ msgid "A point cloud that accelerates on voice onset"
 msgstr "음성 시작 시 가속되는 포인트 클라우드"
 
 msgid "Act on selection"
-msgstr "선택에 따라 행동"
+msgstr "선택 영역 처리"
 
 msgid "Add and save this provider's key before making it the only route."
 msgstr "이 공급자의 키를 유일한 경로로 만들기 전에 추가하고 저장하세요."
@@ -1147,7 +1141,7 @@ msgid "Could not start Companion Orb: {error}"
 msgstr "컴패니언 오브를 시작할 수 없습니다: {error}"
 
 msgid "Dictate"
-msgstr "명령"
+msgstr "받아쓰기"
 
 msgid "Downloading and verifying the translation model…"
 msgstr "번역 모델 다운로드 및 검증 중…"
@@ -1294,3 +1288,102 @@ msgstr "번역 고정"
 
 msgid "Unpin translation"
 msgstr "번역 고정 해제"
+
+msgid "Only this"
+msgstr "이것만"
+
+msgid "Fastest available"
+msgstr "사용 가능한 최고 속도"
+
+msgid "Modern GPU"
+msgstr "최신 GPU"
+
+msgid "DICTATION LANGUAGE"
+msgstr "받아쓰기 언어"
+
+msgid "TRANSCRIPT LANGUAGE"
+msgstr "결과 언어"
+
+msgid "PROCESSING MODE"
+msgstr "처리 모드"
+
+msgid "Fast response"
+msgstr "빠른 응답"
+
+msgid "Lower resource use"
+msgstr "리소스 절약"
+
+msgid "Hold {} anywhere in Windows."
+msgstr "Windows 어디서나 {} 키를 길게 누르세요."
+
+msgid "Interface language"
+msgstr "인터페이스 언어"
+
+msgid "Changes the language of SayFlex menus and settings"
+msgstr "SayFlex 메뉴와 설정의 언어를 변경합니다"
+
+msgid "Follow Windows settings"
+msgstr "Windows 설정 따르기"
+
+msgid "Speech and text use separate provider lists. The first enabled provider is tried first; failed services move down. Make one provider exclusive, or place a cloud service above This computer to keep a local fallback."
+msgstr "음성과 텍스트는 별도의 공급자 목록을 사용합니다. 활성화된 첫 번째 공급자를 먼저 시도하고 실패한 서비스는 아래로 이동합니다. 한 공급자만 사용하거나 클라우드 서비스를 이 컴퓨터 위에 두어 로컬 처리를 예비 수단으로 유지할 수 있습니다."
+
+msgid "Hold {} anywhere in Windows to start a dictation."
+msgstr "Windows 어디서나 {} 키를 길게 눌러 받아쓰기를 시작하세요."
+
+msgid "Selection translation"
+msgstr "선택 영역 번역"
+
+msgid "Allow the selection shortcut to translate text"
+msgstr "선택 영역 단축키로 텍스트 번역을 허용합니다"
+
+msgid "Local model"
+msgstr "로컬 모델"
+
+msgid "Keep the model loaded for faster translations"
+msgstr "더 빠른 번역을 위해 모델을 메모리에 유지합니다"
+
+msgid "Keep ready"
+msgstr "준비 상태 유지"
+
+msgid "Load when needed"
+msgstr "필요할 때 로드"
+
+msgid "Translation result"
+msgstr "번역 결과"
+
+msgid "How completed translations are delivered"
+msgstr "완료된 번역을 전달할 위치를 정합니다"
+
+msgid "Selection action"
+msgstr "선택 영역 동작"
+
+msgid "What the selection shortcut does"
+msgstr "선택 영역 단축키가 수행할 동작을 정합니다"
+
+msgid "PRESS SHORTCUT · {} · ESC CANCELS"
+msgstr "단축키를 누르세요 · {} · ESC 취소"
+
+msgid "ACTION"
+msgstr "동작"
+
+msgid "SayFlex {} · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it."
+msgstr "SayFlex {} · 언어와 사고를 위한 로컬 도구입니다. 클라우드 계정은 필요하지 않으며 사용자가 선택할 때만 모델을 다운로드합니다."
+
+msgid "SayFlex {}"
+msgstr "SayFlex {}"
+
+msgid "Ready · hold {shortcut} to speak."
+msgstr "준비됨 · 말하려면 {shortcut} 키를 누르고 계세요."
+
+msgid "Insert latest dictation"
+msgstr "최근 받아쓰기 삽입"
+
+msgid "Kept on this device only. The insert-latest shortcut uses the newest entry."
+msgstr "이 장치에만 보관됩니다. 삽입 단축키는 가장 최근 항목을 사용합니다."
+
+msgid "History is off. The newest dictation stays in memory until SayFlex closes, so its shortcut can still insert it."
+msgstr "기록이 꺼져 있습니다. 최근 받아쓰기는 SayFlex를 닫을 때까지 메모리에 남아 있어 단축키로 계속 삽입할 수 있습니다."
+
+msgid "Nothing has been saved yet. The newest dictation can still be inserted with its shortcut until SayFlex closes."
+msgstr "아직 저장된 내용이 없습니다. SayFlex를 닫기 전까지 최근 받아쓰기를 단축키로 삽입할 수 있습니다."

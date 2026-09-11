@@ -23,6 +23,7 @@ use providers_view::sync_providers;
 use rust_app_core::{
     BeginDisposition, EndDisposition, LayoutCandidate, SessionPhase, SessionRegistry,
     dictation::{CompletionDelivery, HistoryUpdate, plan_completion},
+    hotkeys::format_hotkey,
     provider_drafts::ProviderDraftStore,
 };
 use rust_protocol::{
@@ -2989,7 +2990,11 @@ fn handle_speech_event(
             sync_models(settings, state);
             sync_action_settings(settings, state);
             set_runtime_status(settings, state_text(state, UiText::ReadyTitle));
-            set_indicator_status(settings, state_text(state, UiText::ReadyHoldToSpeak));
+            let shortcut = format_hotkey(state.borrow().hotkeys.dictate.spec);
+            set_indicator_status(
+                settings,
+                &state_message(state, UiText::ReadyHoldShortcut, &[("shortcut", &shortcut)]),
+            );
             rust_app_core::diagnostics::log_line(&format!(
                 "speech_backend preference={} selected={} verification=passed model={} load_ms={} warmup_ms={}",
                 workers.speech_backend_preference().label(),

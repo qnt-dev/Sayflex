@@ -8,7 +8,7 @@
 import { Sheet } from "sheet.slint";
 import { Fact } from "parts.slint";
 import { ModelRow, ProviderRow, HistoryRow, HotkeyRow } from "rows.slint";
-import { MenuButton, RowAction, ScrollRail } from "controls.slint";
+import { RowAction, ScrollRail } from "controls.slint";
 import { ModelsPage, ProvidersPage, HistoryPage } from "pages_lists.slint";
 import { TranslationPage, HotkeysPage } from "pages_forms.slint";
 import { OverviewPage, DictationPage, VisualsPage, AboutPage } from "pages_instruments.slint";
@@ -105,7 +105,7 @@ component SettingsNavigation inherits VerticalLayout {
 }
 
 export component SettingsWindow inherits Window {
-    title: @tr("SayFlex");
+    title: "SayFlex";
     icon: @image-url("../assets/tray-icon.svg");
     // Small enough to be worth dragging to. The pages are still drawn at the
     // size they were designed for; the workspace scrolls to whatever is left,
@@ -123,9 +123,9 @@ export component SettingsWindow inherits Window {
 
     // ── what page, and what the frame says ──
     in-out property <int> active-page: 0;
-    // The native wheel adapter needs the same geometry the outer Flickable
-    // uses. Keeping it on the window makes wheel mice and touchpads follow one
-    // deterministic path instead of Slint's gesture-start heuristic.
+    // The custom rail needs the same geometry as the native Flickable. Wheel
+    // and touchpad input remain owned by Slint; these properties only project
+    // its position and accept deliberate rail drags.
     in-out property <length> workspace-scroll-y: 0px;
     out property <length> workspace-scroll-content-height: work.viewport-height;
     out property <length> workspace-scroll-shown-height: work.height;
@@ -175,7 +175,7 @@ export component SettingsWindow inherits Window {
     in-out property <string> dictation-language: "auto";
     in-out property <string> dictation-language-label: @tr("Auto-detect");
     in-out property <string> release-mode: "fastest";
-    in-out property <string> release-mode-label: @tr("Fastest");
+    in-out property <string> release-mode-label: @tr("Fast response");
     in property <bool> release-mode-locked: false;
     in property <string> release-mode-note: "";
     in-out property <bool> history-enabled: true;
@@ -300,10 +300,8 @@ export component SettingsWindow inherits Window {
     in-out property <string> provider-draft-extra;
     callback quit-requested();
 
-    // The page's own number, written once from the order the navigation is
-    // built from rather than typed into eight places — and the same number the
-    // heading shows, because two numbering schemes for one page read as a bug
-    // whether or not both were deliberate.
+    // Navigation numbers come from one ordered list. Page headings repeat the
+    // same total and are guarded by the localization/layout test.
     property <[string]> page-numbers: ["01", "02", "03", "04", "05", "06", "07", "08", "09"];
 
     VerticalLayout {
@@ -332,35 +330,8 @@ export component SettingsWindow inherits Window {
             HorizontalLayout {
                 spacing: 16px;
                 alignment: end;
-                MenuButton {
-                    compact: true;
-                    text: root.ui-locale-label;
-                    value: root.ui-locale;
-                    current-index: root.ui-locale == "system" ? 0
-                        : root.ui-locale == "en" ? 1
-                        : root.ui-locale == "ru" ? 2
-                        : root.ui-locale == "uk" ? 3
-                        : root.ui-locale == "es" ? 4
-                        : root.ui-locale == "pt-BR" ? 5
-                        : root.ui-locale == "de" ? 6
-                        : root.ui-locale == "fr" ? 7
-                        : root.ui-locale == "it" ? 8 : 9;
-                    options: [
-                        { value: "system", label: @tr("System language"), note: @tr("Follow Windows"), reason: "", danger: false, separator: false },
-                        { value: "en", label: @tr("English"), note: "", reason: "", danger: false, separator: false },
-                        { value: "ru", label: "Русский", note: "", reason: "", danger: false, separator: false },
-                        { value: "uk", label: "Українська", note: "", reason: "", danger: false, separator: false },
-                        { value: "es", label: @tr("Español"), note: "", reason: "", danger: false, separator: false },
-                        { value: "pt-BR", label: @tr("Português (Brasil)"), note: "", reason: "", danger: false, separator: false },
-                        { value: "de", label: @tr("Deutsch"), note: "", reason: "", danger: false, separator: false },
-                        { value: "fr", label: @tr("Français"), note: "", reason: "", danger: false, separator: false },
-                        { value: "it", label: @tr("Italiano"), note: "", reason: "", danger: false, separator: false },
-                        { value: "ko", label: "한국어", note: "", reason: "", danger: false, separator: false },
-                    ];
-                    chosen(value) => { root.set-ui-locale(value); }
-                }
                 Text {
-                    text: @tr("SayFlex");
+                    text: "SayFlex";
                     color: Sheet.muted;
                     font-size: Sheet.label-size;
                     font-weight: 650;
@@ -620,6 +591,9 @@ export component SettingsWindow inherits Window {
 
                 if root.active-page == 8 : AboutPage {
                     version: root.app-version;
+                    ui-locale <=> root.ui-locale;
+                    ui-locale-label: root.ui-locale-label;
+                    set-ui-locale(value) => { root.set-ui-locale(value); }
                 }
             }
         }
@@ -823,13 +797,13 @@ export component SettingsWindow inherits Window {
                         alignment: end;
                         spacing: 0px;
                         Text {
-                            text: @tr("Say");
+                            text: "Say";
                             color: Sheet.ink;
                             font-size: 13px;
                             font-weight: 700;
                         }
                         Text {
-                            text: @tr("Flex");
+                            text: "Flex";
                             color: Sheet.ink;
                             font-size: 13px;
                             font-weight: 700;

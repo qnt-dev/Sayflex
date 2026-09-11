@@ -47,8 +47,31 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.SettingsPreview")?;
     let settings = SettingsWindow::new()?;
+    if let Some(code) = std::env::args()
+        .find_map(|argument| argument.strip_prefix("--ui-locale=").map(str::to_owned))
+        && let Some(locale) = crate::localization::UiLocale::from_code(&code)
+    {
+        let system_locale = rust_platform_windows::user_locale_name();
+        slint::select_bundled_translation(locale.resolved_code(&system_locale))?;
+        settings.set_ui_locale(locale.code().into());
+        settings.set_ui_locale_label(
+            if locale == crate::localization::UiLocale::System {
+                crate::localization::text(
+                    crate::localization::active_locale(locale),
+                    crate::localization::UiText::SystemLanguage,
+                )
+            } else {
+                locale.display_name()
+            }
+            .into(),
+        );
+    }
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
-    settings.set_today(rust_platform_windows::local_date_line().into());
+    let preview_locale = crate::localization::UiLocale::from_code(&settings.get_ui_locale())
+        .map(crate::localization::active_locale)
+        .unwrap_or(crate::localization::UiLocale::English);
+    settings
+        .set_today(rust_platform_windows::local_date_line_for_locale(preview_locale.code()).into());
     settings.set_runtime_status("SYSTEM READY".into());
     settings.set_active_page(requested_page());
 
@@ -705,7 +728,7 @@ fn fill_hotkeys(settings: &SettingsWindow) {
         HotkeyRow {
             action: "insert_last".into(),
             keys: "Ctrl + Alt + V".into(),
-            name: "Insert last".into(),
+            name: "Insert latest dictation".into(),
             detail: "Places the newest transcript where the caret is now".into(),
             state: "Held".into(),
             tone: "resting".into(),

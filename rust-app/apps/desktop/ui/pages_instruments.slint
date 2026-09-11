@@ -9,7 +9,7 @@
 // not; that is a caption under a heading.
 
 import { Sheet } from "sheet.slint";
-import { Fact, ListHead, StageHeading, FactList, Note, GroupLabel, SideNote, PageLede, ClaimLine } from "parts.slint";
+import { Fact, ListHead, StageHeading, FactList, Note, GroupLabel, SideNote, PageLede, ClaimLine, FormRow } from "parts.slint";
 import { RowAction, Toggle, ChoiceTile, MenuButton, MenuOption } from "controls.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
 import { AboutSlint } from "std-widgets.slint";
@@ -30,7 +30,7 @@ export component OverviewPage inherits VerticalLayout {
     spacing: 0px;
 
     ListHead {
-        index: "01 / 08";
+        index: "01 / 09";
         title: @tr("Overview");
         claim: root.claim;
         claim-signal: root.audio-leaves-device;
@@ -70,7 +70,7 @@ export component OverviewPage inherits VerticalLayout {
     Text {
         height: 64px;
         vertical-alignment: bottom;
-        text: @tr("SayFlex ") + root.version + " · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it.";
+        text: @tr("SayFlex {} · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it.", root.version);
         color: Sheet.muted;
         font-size: Sheet.detail-size;
         wrap: word-wrap;
@@ -118,7 +118,7 @@ export component DictationPage inherits HorizontalLayout {
         spacing: 0px;
 
         StageHeading {
-            index: "02 / 08";
+            index: "02 / 09";
             title: @tr("Dictation");
             subtitle: root.subtitle;
         }
@@ -177,7 +177,7 @@ export component DictationPage inherits HorizontalLayout {
     }
 
     VerticalLayout {
-        width: 262px;
+        width: 282px;
         spacing: 0px;
 
         GroupLabel { text: @tr("ENGINE"); height: 24px; }
@@ -186,12 +186,12 @@ export component DictationPage inherits HorizontalLayout {
         // them at once matters more here than saving the space, because the
         // one in force is the answer to "why is this slow".
         GridLayout {
-            height: 118px;
+            height: 148px;
             spacing: 7px;
             Row {
                 ChoiceTile {
                     label: @tr("Auto");
-                    detail: @tr("Fastest that works");
+                    detail: @tr("Fastest available");
                     selected: root.backend == 0;
                     busy: root.backend == 0 && !root.backend-verified;
                     clicked => { root.select-backend(0); }
@@ -207,7 +207,7 @@ export component DictationPage inherits HorizontalLayout {
             Row {
                 ChoiceTile {
                     label: @tr("Vulkan");
-                    detail: @tr("Any modern GPU");
+                    detail: @tr("Modern GPU");
                     selected: root.backend == 2;
                     busy: root.backend == 2 && !root.backend-verified;
                     clicked => { root.select-backend(2); }
@@ -227,7 +227,7 @@ export component DictationPage inherits HorizontalLayout {
             text: root.engine-note;
         }
 
-        GroupLabel { text: @tr("SPOKEN LANGUAGE"); height: 30px; }
+        GroupLabel { text: @tr("DICTATION LANGUAGE"); height: 30px; }
         MenuButton {
             text: root.dictation-language;
             value: root.dictation-language-value;
@@ -265,7 +265,7 @@ export component DictationPage inherits HorizontalLayout {
             chosen(value) => { root.set-dictation-language(value); }
         }
 
-        GroupLabel { text: @tr("OUTPUT"); height: 30px; }
+        GroupLabel { text: @tr("TRANSCRIPT LANGUAGE"); height: 30px; }
         MenuButton {
             text: root.output-mode;
             value: root.output-mode-value;
@@ -284,7 +284,7 @@ export component DictationPage inherits HorizontalLayout {
             chosen(value) => { root.set-output-mode(value); }
         }
 
-        GroupLabel { text: @tr("RELEASE"); height: 30px; }
+        GroupLabel { text: @tr("PROCESSING MODE"); height: 30px; }
         MenuButton {
             text: root.release-mode;
             value: root.release-mode-value;
@@ -292,11 +292,11 @@ export component DictationPage inherits HorizontalLayout {
             options: [
                 {
                     value: "fastest",
-                    label: @tr("Fastest"),
+                    label: @tr("Fast response"),
                     note: @tr("Prepares results during natural pauses"),
                     reason: root.release-mode-locked ? root.release-mode-note : "",
                 },
-                { value: "efficient", label: @tr("Efficient"), note: @tr("Less GPU and battery, slightly slower") },
+                { value: "efficient", label: @tr("Lower resource use"), note: @tr("Less GPU and battery, slightly slower") },
             ];
             chosen(value) => { root.set-release-mode(value); }
         }
@@ -316,7 +316,7 @@ export component DictationPage inherits HorizontalLayout {
 
         SideNote {
             height: 34px;
-            text: @tr("Hold ") + root.hotkey + " anywhere in Windows.";
+            text: @tr("Hold {} anywhere in Windows.", root.hotkey);
         }
     }
 }
@@ -364,7 +364,7 @@ export component VisualsPage inherits HorizontalLayout {
         spacing: 0px;
 
         StageHeading {
-            index: "06 / 08";
+            index: "06 / 09";
             title: @tr("Visuals");
             subtitle: root.subtitle;
         }
@@ -540,6 +540,9 @@ export component VisualsPage inherits HorizontalLayout {
 // are attributed independently.
 export component AboutPage inherits VerticalLayout {
     in property <string> version;
+    in-out property <string> ui-locale: "system";
+    in property <string> ui-locale-label: @tr("System language");
+    callback set-ui-locale(string);
 
     spacing: 0px;
 
@@ -567,7 +570,7 @@ export component AboutPage inherits VerticalLayout {
             alignment: start;
             spacing: 10px;
             Text {
-                text: @tr("SayFlex ") + root.version;
+                text: @tr("SayFlex {}", root.version);
                 color: Sheet.ink;
                 font-size: Sheet.title-size;
                 font-weight: 650;
@@ -583,6 +586,40 @@ export component AboutPage inherits VerticalLayout {
                 font-size: Sheet.detail-size;
                 wrap: word-wrap;
             }
+        }
+    }
+
+    Rectangle { height: 22px; }
+
+    FormRow {
+        label: @tr("Interface language");
+        hint: @tr("Changes the language of SayFlex menus and settings");
+        MenuButton {
+            compact: true;
+            text: root.ui-locale-label;
+            value: root.ui-locale;
+            current-index: root.ui-locale == "system" ? 0
+                : root.ui-locale == "en" ? 1
+                : root.ui-locale == "ru" ? 2
+                : root.ui-locale == "uk" ? 3
+                : root.ui-locale == "es" ? 4
+                : root.ui-locale == "pt-BR" ? 5
+                : root.ui-locale == "de" ? 6
+                : root.ui-locale == "fr" ? 7
+                : root.ui-locale == "it" ? 8 : 9;
+            options: [
+                { value: "system", label: @tr("System language"), note: @tr("Follow Windows settings"), reason: "", danger: false, separator: false },
+                { value: "en", label: @tr("English"), note: "", reason: "", danger: false, separator: false },
+                { value: "ru", label: "Русский", note: "", reason: "", danger: false, separator: false },
+                { value: "uk", label: "Українська", note: "", reason: "", danger: false, separator: false },
+                { value: "es", label: @tr("Español"), note: "", reason: "", danger: false, separator: false },
+                { value: "pt-BR", label: @tr("Português (Brasil)"), note: "", reason: "", danger: false, separator: false },
+                { value: "de", label: @tr("Deutsch"), note: "", reason: "", danger: false, separator: false },
+                { value: "fr", label: @tr("Français"), note: "", reason: "", danger: false, separator: false },
+                { value: "it", label: @tr("Italiano"), note: "", reason: "", danger: false, separator: false },
+                { value: "ko", label: "한국어", note: "", reason: "", danger: false, separator: false },
+            ];
+            chosen(value) => { root.set-ui-locale(value); }
         }
     }
 

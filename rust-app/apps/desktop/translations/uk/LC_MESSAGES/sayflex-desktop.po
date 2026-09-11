@@ -212,9 +212,6 @@ msgstr "Встановлення {model}…"
 msgid "Checking fallback"
 msgstr "Перевірка резервного варіанта"
 
-msgid "Ready · hold Ctrl + Alt + Space to speak."
-msgstr "Готово · утримуйте Ctrl + Alt + Пробіл, щоб говорити."
-
 msgid "Speech model selected."
 msgstr "Модель мовлення вибрано."
 
@@ -245,7 +242,7 @@ msgid "{count} installed"
 msgstr "{count} встановлено"
 
 msgid "{count} kept · {remote} went to a service"
-msgstr "{count} збережено · {count} передано до служби"
+msgstr "{count} збережено · {remote} передано до служби"
 
 msgid "{count} kept · all on this device"
 msgstr "{count} збережено · усе на цьому пристрої"
@@ -257,10 +254,10 @@ msgid "{count} of 5 shortcuts active"
 msgstr "{count} із 5 ярликів активний"
 
 msgid "{language} · {seconds}s audio · {milliseconds}ms processing{source}"
-msgstr "{language} · аудіо {language} · обробка {language} мс{language}"
+msgstr "{language} · аудіо {seconds} с · обробка {milliseconds} мс{source}"
 
 msgid "{language} · {seconds}s audio · {milliseconds}ms release{prepared}{source}"
-msgstr "{language} · {language} с аудіо · {language} мс відпускання{language}{language}"
+msgstr "{language} · аудіо {seconds} с · {milliseconds} мс після відпускання{prepared}{source}"
 
 msgid "{name} · shown while recording"
 msgstr "{name} · відображається під час запису"
@@ -314,7 +311,7 @@ msgid "AUDIO LEAVES DEVICE"
 msgstr "АУДІО ВИХОДИТЬ З ПРИСТРОЮ"
 
 msgid "Audio leaves for {audio}, text for {text}"
-msgstr "Аудіо виходить на {audio}, текст — на {audio}"
+msgstr "Аудіо надсилається до {audio}, текст — до {text}"
 
 msgid "Audio leaves this device for {audio}"
 msgstr "Аудіо виходить з цього пристрою на {audio}"
@@ -341,7 +338,7 @@ msgid "Blue glass"
 msgstr "Синє скло"
 
 msgid "Broadcast mic"
-msgstr "Мікрофон для трансляції"
+msgstr "Мікрофон із хвилями"
 
 msgid "Cancel"
 msgstr "Скасувати"
@@ -371,7 +368,7 @@ msgid "Chosen on the Models page"
 msgstr "Обрано на сторінці «Моделі»"
 
 msgid "Circular"
-msgstr "Циклічний"
+msgstr "Круговий спектр"
 
 msgid "Clear history"
 msgstr "Очистити історію"
@@ -395,13 +392,13 @@ msgid "Cloud translation · region is optional for global resources"
 msgstr "Хмарний переклад · регіон є необов’язковим для глобальних ресурсів"
 
 msgid "cold"
-msgstr "холодно"
+msgstr "не завантажено"
 
 msgid "COLOUR"
 msgstr "КОЛІР"
 
 msgid "Companion orb"
-msgstr "Супутній шар"
+msgstr "Сфера-помічник"
 
 msgid "Cooling down"
 msgstr "Охолодження"
@@ -416,7 +413,7 @@ msgid "Copy latest transcript"
 msgstr "Скопіювати останній транскрипт"
 
 msgid "COPY RESULT"
-msgstr "РЕЗУЛЬТАТ КОПІЮВАННЯ"
+msgstr "КОПІЮВАТИ РЕЗУЛЬТАТ"
 
 msgid "Correct keyboard layout"
 msgstr "Виправити розкладку клавіатури"
@@ -425,7 +422,7 @@ msgid "CORRECT LAYOUT"
 msgstr "ВИПРАВИТИ РОЗКЛАДКУ"
 
 msgid "CPU"
-msgstr "Процесор"
+msgstr "CPU"
 
 msgid "CTRL + ALT + F"
 msgstr "CTRL + ALT + F"
@@ -479,7 +476,7 @@ msgid "Engine"
 msgstr "Двигун"
 
 msgid "ENGINE"
-msgstr "ДВИГУН"
+msgstr "РУШІЙ"
 
 msgid "English"
 msgstr "Англійська"
@@ -506,7 +503,7 @@ msgid "Faster to answer, and holds memory to be"
 msgstr "Швидше реагує та має пам’ять, щоб бути"
 
 msgid "Fastest"
-msgstr "Найшвидшим"
+msgstr "Швидкий режим"
 
 msgid "Fastest that works"
 msgstr "Найшвидшим, що працює"
@@ -515,10 +512,10 @@ msgid "Flex"
 msgstr "Flex"
 
 msgid "Flow sphere"
-msgstr "Сфера потоку"
+msgstr "Сфера з частинками"
 
 msgid "Fluid ribbon"
-msgstr "Плавна стрічка"
+msgstr "Жива стрічка"
 
 msgid "Follow Windows"
 msgstr "Слідує за Windows"
@@ -590,7 +587,7 @@ msgid "Kept warm"
 msgstr "Збережено в пам’яті"
 
 msgid "Key {hint}{extra} · {about}"
-msgstr "Ключ {hint}{hint} · {hint}"
+msgstr "Ключ {hint}{extra} · {about}"
 
 msgid "Key refused"
 msgstr "Ключ відхилено"
@@ -638,19 +635,19 @@ msgid "More reliable for short Russian phrases"
 msgstr "Більш надійний для коротких російських фраз"
 
 msgid "Never reached"
-msgstr "Ніколи не досягався"
+msgstr "Пропускається"
 
 msgid "No"
 msgstr "Ні"
 
 msgid "No compatible speech backend is active"
-msgstr "Не активовано жодного сумісного мовного модуля"
+msgstr "Немає сумісного рушія розпізнавання мовлення"
 
 msgid "No key stored"
 msgstr "Ключ не збережено"
 
 msgid "no overlay"
-msgstr "немає накладення"
+msgstr "без візуалізації"
 
 msgid "No speech model is installed, so nothing can be dictated yet."
 msgstr "Не встановлено жодної моделі розпізнавання мови, тому поки що нічого не можна диктувати."
@@ -755,7 +752,7 @@ msgid "Paused · {count} shortcuts configured"
 msgstr "Призупинено · {count} налаштовані комбінації клавіш"
 
 msgid "PIN"
-msgstr "PIN-код"
+msgstr "PIN"
 
 msgid "Português (Brasil)"
 msgstr "Португальська (Бразилія)"
@@ -851,7 +848,7 @@ msgid "Save"
 msgstr "Зберегти"
 
 msgid "Say"
-msgstr "Промовити"
+msgstr "Say"
 
 msgid "SayFlex"
 msgstr "SayFlex"
@@ -875,7 +872,7 @@ msgid "Show a preview"
 msgstr "Показати попередній перегляд"
 
 msgid "Showing {count} · {remote} of them went to a service"
-msgstr "Показано {count} · {count} з них було надіслано до служби"
+msgstr "Показано {count} · до служби надіслано: {remote}"
 
 msgid "Showing {count} · all on this device"
 msgstr "Показано {count} · усі на цьому пристрої"
@@ -935,7 +932,7 @@ msgid "SURFACE"
 msgstr "ПОВЕРХНЯ"
 
 msgid "SWAP TEXT"
-msgstr "ЗАМІНИТИ ТЕКСТ"
+msgstr "ПОМІНЯТИ МІСЦЯМИ"
 
 msgid "Switch it on above and dictations from then on are kept."
 msgstr "Увімкніть цю опцію вище, і відтепер диктовки зберігатимуться."
@@ -991,9 +988,6 @@ msgstr "Перекладено {provider}."
 msgid "Translates foreign text, offers layout candidates for the rest"
 msgstr "Перекладає іноземний текст, пропонує варіанти оформлення для решти"
 
-msgid "Translating locally…"
-msgstr "Переклад виконується локально…"
-
 msgid "Translation"
 msgstr "Переклад"
 
@@ -1025,7 +1019,7 @@ msgid "Visuals"
 msgstr "Візуальні ефекти"
 
 msgid "Voice orb"
-msgstr "Голосова куля"
+msgstr "Голосова сфера"
 
 msgid "Vulkan"
 msgstr "Vulkan"
@@ -1052,7 +1046,7 @@ msgid "White"
 msgstr "Білий"
 
 msgid "Writing slate"
-msgstr "Дошка для записів"
+msgstr "Панель письма"
 
 msgid "Yes"
 msgstr "Так"
@@ -1111,7 +1105,7 @@ msgid "A point cloud that accelerates on voice onset"
 msgstr "Хмара точок, яка прискорюється при появі голосу"
 
 msgid "Act on selection"
-msgstr "Акт про відбір"
+msgstr "Обробити виділення"
 
 msgid "Add and save this provider's key before making it the only route."
 msgstr "Додайте та збережіть ключ цього провайдера, перш ніж зробити його єдиним маршрутом."
@@ -1294,3 +1288,102 @@ msgstr "Закріпити переклад"
 
 msgid "Unpin translation"
 msgstr "Відкріпити переклад"
+
+msgid "Only this"
+msgstr "Лише цей"
+
+msgid "Fastest available"
+msgstr "Найшвидший із доступних"
+
+msgid "Modern GPU"
+msgstr "Сучасна відеокарта"
+
+msgid "DICTATION LANGUAGE"
+msgstr "МОВА ДИКТУВАННЯ"
+
+msgid "TRANSCRIPT LANGUAGE"
+msgstr "МОВА РЕЗУЛЬТАТУ"
+
+msgid "PROCESSING MODE"
+msgstr "РЕЖИМ ОБРОБКИ"
+
+msgid "Fast response"
+msgstr "Швидка відповідь"
+
+msgid "Lower resource use"
+msgstr "Економія ресурсів"
+
+msgid "Hold {} anywhere in Windows."
+msgstr "Утримуйте {} у будь-якому вікні Windows."
+
+msgid "Interface language"
+msgstr "Мова інтерфейсу"
+
+msgid "Changes the language of SayFlex menus and settings"
+msgstr "Змінює мову меню та налаштувань SayFlex"
+
+msgid "Follow Windows settings"
+msgstr "Як у Windows"
+
+msgid "Speech and text use separate provider lists. The first enabled provider is tried first; failed services move down. Make one provider exclusive, or place a cloud service above This computer to keep a local fallback."
+msgstr "Для мовлення й тексту використовуються окремі списки. Першим викликається верхній увімкнений провайдер; після помилки сервіс переміщується нижче. Можна залишити лише один провайдер або поставити хмарний сервіс вище пункту «Цей комп’ютер», зберігши локальний резерв."
+
+msgid "Hold {} anywhere in Windows to start a dictation."
+msgstr "Утримуйте {} у будь-якому вікні Windows, щоб почати диктування."
+
+msgid "Selection translation"
+msgstr "Переклад виділеного тексту"
+
+msgid "Allow the selection shortcut to translate text"
+msgstr "Дозволяє сполученню для виділеного тексту запускати переклад"
+
+msgid "Local model"
+msgstr "Локальна модель"
+
+msgid "Keep the model loaded for faster translations"
+msgstr "Залишає модель завантаженою для швидшого перекладу"
+
+msgid "Keep ready"
+msgstr "Тримати готовою"
+
+msgid "Load when needed"
+msgstr "Завантажувати за потреби"
+
+msgid "Translation result"
+msgstr "Результат перекладу"
+
+msgid "How completed translations are delivered"
+msgstr "Визначає, куди надсилається готовий переклад"
+
+msgid "Selection action"
+msgstr "Дія з виділенням"
+
+msgid "What the selection shortcut does"
+msgstr "Що робить сполучення клавіш для виділеного тексту"
+
+msgid "PRESS SHORTCUT · {} · ESC CANCELS"
+msgstr "НАТИСНІТЬ СПОЛУЧЕННЯ · {} · ESC — СКАСУВАТИ"
+
+msgid "ACTION"
+msgstr "ДІЯ"
+
+msgid "SayFlex {} · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it."
+msgstr "SayFlex {} · локальні інструменти для диктування, перекладу та роботи з текстом. Хмарний обліковий запис не потрібен; моделі завантажуються лише за вашим вибором."
+
+msgid "SayFlex {}"
+msgstr "SayFlex {}"
+
+msgid "Ready · hold {shortcut} to speak."
+msgstr "Готово · утримуйте {shortcut}, щоб говорити."
+
+msgid "Insert latest dictation"
+msgstr "Вставити останнє диктування"
+
+msgid "Kept on this device only. The insert-latest shortcut uses the newest entry."
+msgstr "Зберігається лише на цьому пристрої. Сполучення для вставлення використовує найновіший запис."
+
+msgid "History is off. The newest dictation stays in memory until SayFlex closes, so its shortcut can still insert it."
+msgstr "Історію вимкнено. Останнє диктування зберігається в пам’яті до закриття SayFlex, тому його все ще можна вставити сполученням клавіш."
+
+msgid "Nothing has been saved yet. The newest dictation can still be inserted with its shortcut until SayFlex closes."
+msgstr "Поки нічого не збережено. Останнє диктування все ще можна вставити сполученням клавіш до закриття SayFlex."

@@ -232,9 +232,9 @@ pub(crate) fn sync_action_settings(
         text(
             locale,
             if previews_on {
-                UiText::Fastest
+                UiText::FastResponse
             } else {
-                UiText::Efficient
+                UiText::LowerResourceUse
             },
         )
         .into(),
@@ -490,7 +490,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                     text(locale, UiText::WhateverYouSpoke),
                 ),
                 HotkeyAction::InsertLast => (
-                    text(locale, UiText::CopyLatestTranscript),
+                    text(locale, UiText::InsertLatestDictation),
                     text(locale, UiText::OnThisDevice),
                 ),
                 HotkeyAction::CorrectLayout => (
@@ -1092,6 +1092,80 @@ pub(crate) fn set_status_problem(settings: &slint::Weak<SettingsWindow>, message
     set_status(settings, Severity::Trouble, message);
 }
 
+fn ready_to_speak_status(state: &AppState) -> String {
+    let shortcut = format_hotkey(state.hotkeys.dictate.spec);
+    render(
+        active_locale(state.ui_locale),
+        UiText::ReadyHoldShortcut,
+        &[("shortcut", &shortcut)],
+    )
+}
+
+fn can_refresh_idle_status(state: &AppState) -> bool {
+    state.registry.active_session().is_none()
+        && state.pending_hotkeys.is_none()
+        && state.pending_insert_last.is_none()
+        && state.pending_selection.is_none()
+        && state.pending_text_action.is_none()
+        && state.pending_selection_captures.is_empty()
+        && state.selection_release_gates.is_empty()
+        && state.pending_translations.is_empty()
+        && state.queued_selection_translation.is_none()
+        && state.downloads.is_empty()
+        && state.pending_credentials.is_empty()
+}
+
+/// Rebuild the idle footer after an interface-language change.
+///
+/// The footer used to retain whatever already-rendered English string happened
+/// to be stored in Slint. Active operations keep their precise status; an idle
+/// surface is safe to project from the typed Rust state again.
+fn sync_idle_status_after_locale_change(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+) {
+    let state = state.borrow();
+    if !can_refresh_idle_status(&state) {
+        return;
+    }
+
+    let locale = active_locale(state.ui_locale);
+    let (runtime, severity, indicator) = if state.input_paused {
+        (
+            text(locale, UiText::InputReady).to_owned(),
+            Severity::Progress,
+            text(locale, UiText::InputPaused).to_owned(),
+        )
+    } else if !state.input_ready {
+        (
+            text(locale, UiText::WorkerUnavailable).to_owned(),
+            Severity::Trouble,
+            text(locale, UiText::InputWorkerNotReady).to_owned(),
+        )
+    } else if state.speech_path_ready() {
+        (
+            text(locale, UiText::ReadyTitle).to_owned(),
+            Severity::Progress,
+            ready_to_speak_status(&state),
+        )
+    } else if state.speech_waits_for_local() {
+        (
+            text(locale, UiText::PreparingModel).to_owned(),
+            Severity::Progress,
+            text(locale, UiText::SpeechModelPreparing).to_owned(),
+        )
+    } else {
+        (
+            text(locale, UiText::WorkerUnavailable).to_owned(),
+            Severity::Trouble,
+            text(locale, UiText::NoTranscriptionProviderReady).to_owned(),
+        )
+    };
+    drop(state);
+    set_runtime_status(settings, &runtime);
+    set_status(settings, severity, &indicator);
+}
+
 pub(crate) fn show_layout_chooser(
     request_id: RequestId,
     target: TargetSnapshot,
@@ -1327,6 +1401,7 @@ pub(crate) fn wire_settings(
             sync_history(&settings_weak, &state);
             sync_models(&settings_weak, &state);
             sync_providers(&settings_weak, &state);
+            sync_idle_status_after_locale_change(&settings_weak, &state);
         });
     }
     {
@@ -2153,7 +2228,7 @@ pub(crate) fn wire_settings(
                 settings.set_hotkey_capture_label(
                     match action {
                         HotkeyAction::Dictate => text(locale, UiText::DictateAction),
-                        HotkeyAction::InsertLast => text(locale, UiText::InsertLastAction),
+                        HotkeyAction::InsertLast => text(locale, UiText::InsertLatestDictation),
                         HotkeyAction::CorrectLayout => text(locale, UiText::CorrectLayout),
                         HotkeyAction::Translate => text(locale, UiText::ActOnSelectionAction),
                         HotkeyAction::PauseResume => text(locale, UiText::PauseResumeAction),
@@ -2807,5 +2882,35 @@ mod hotkey_capture_tests {
         assert!(row.detail.contains("already using"));
         assert!(row.locked_reason.is_empty());
         assert_eq!(hotkeys_summary(&state), "3 of 5 shortcuts active");
+    }
+}
+
+#[cfg(test)]
+mod status_refresh_tests {
+    use rust_protocol::SpeechOutputMode;
+
+    use crate::{AppState, SavedSettings, SpeechBackend, settings_projection::Download};
+
+    use super::can_refresh_idle_status;
+
+    #[test]
+    fn a_language_change_does_not_replace_an_active_download_status() {
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        );
+        assert!(can_refresh_idle_status(&state));
+
+        state.downloads.insert(
+            "whisper-large-v3-turbo".to_owned(),
+            Download {
+                downloaded_bytes: 1,
+                total_bytes: 2,
+            },
+        );
+
+        assert!(!can_refresh_idle_status(&state));
     }
 }
