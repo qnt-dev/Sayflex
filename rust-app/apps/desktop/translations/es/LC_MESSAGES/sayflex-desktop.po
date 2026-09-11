@@ -925,8 +925,8 @@ msgstr "Eliminar clave"
 msgid "Remove the stored key?"
 msgstr "¿Desea eliminar la clave guardada?"
 
-msgid "Removed {size} of local model files."
-msgstr "Se eliminaron {size} de archivos del modelo local."
+msgid "Removed local model data from SayFlex (file size: {size})."
+msgstr "Los datos del modelo local se eliminaron de SayFlex (tamaño de archivos: {size})."
 
 msgid "Removing the key for {provider}…"
 msgstr "Quitando la clave para {provider}…"

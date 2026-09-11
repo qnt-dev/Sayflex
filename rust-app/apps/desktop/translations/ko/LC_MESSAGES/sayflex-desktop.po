@@ -925,8 +925,8 @@ msgstr "키 제거"
 msgid "Remove the stored key?"
 msgstr "저장된 키를 제거하시겠습니까?"
 
-msgid "Removed {size} of local model files."
-msgstr "로컬 모델 파일 {size}을 삭제했습니다."
+msgid "Removed local model data from SayFlex (file size: {size})."
+msgstr "SayFlex에서 로컬 모델 데이터를 삭제했습니다(파일 크기: {size})."
 
 msgid "Removing the key for {provider}…"
 msgstr "{provider}의 키를 삭제하는 중…"

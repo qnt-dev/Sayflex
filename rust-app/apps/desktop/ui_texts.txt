@@ -49,7 +49,7 @@ SelectedUnloaded|Selected · unloaded
 RemovingModel|Removing…
 RemoveModel|Remove
 RemoveModelQuestion|Remove {model} ({size}) from this device?
-ModelFilesRemoved|Removed {size} of local model files.
+ModelFilesRemoved|Removed local model data from SayFlex (file size: {size}).
 ModelRemoveFailed|Could not remove the local model: {error}
 Installed|Installed
 Use|Use

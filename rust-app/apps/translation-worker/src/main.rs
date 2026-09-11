@@ -10,6 +10,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, Sender},
     },
     thread::{self, JoinHandle},
@@ -76,6 +77,7 @@ enum InstallCommand {
         keep_warm: bool,
         history_enabled: bool,
         prepare_local_model: bool,
+        skip_local_prepare: bool,
     },
     EnsureModel {
         tier: TranslationTier,
@@ -93,9 +95,45 @@ enum InstallCommand {
     Shutdown,
 }
 
+struct QueuedInstallCommand {
+    command: InstallCommand,
+    cancels_at_send: u64,
+}
+
+/// Applies cancellations that happened while a command was waiting in the
+/// mailbox. Expensive work and a request to re-enable the local engine may be
+/// superseded. Initialization still has to announce Ready, but must no longer
+/// prepare a model after cloud-only mode was requested. Disabling and an
+/// explicitly confirmed removal are durable control decisions and must not be
+/// erased by a later cancellation.
+fn command_after_queued_cancellation(
+    mut command: InstallCommand,
+    cancels_at_send: u64,
+    current_cancels: u64,
+) -> Option<InstallCommand> {
+    if cancels_at_send == current_cancels {
+        return Some(command);
+    }
+    match &mut command {
+        InstallCommand::Initialize {
+            skip_local_prepare, ..
+        } => {
+            *skip_local_prepare = true;
+            Some(command)
+        }
+        InstallCommand::EnsureModel { .. }
+        | InstallCommand::SelectTier { .. }
+        | InstallCommand::SetLocalEnabled { enabled: true } => None,
+        InstallCommand::RemoveModel { .. }
+        | InstallCommand::SetLocalEnabled { enabled: false }
+        | InstallCommand::Shutdown => Some(command),
+    }
+}
+
 struct InstallActor {
-    commands: Sender<InstallCommand>,
+    commands: Sender<QueuedInstallCommand>,
     cancellation: CancelToken,
+    cancels: Arc<AtomicU64>,
 }
 
 impl InstallActor {
@@ -104,12 +142,21 @@ impl InstallActor {
         writer: EventWriter,
         cancellation: CancelToken,
     ) -> Result<(Self, JoinHandle<()>)> {
-        let (commands, requests) = mpsc::channel::<InstallCommand>();
+        let (commands, requests) = mpsc::channel::<QueuedInstallCommand>();
         let worker_cancellation = cancellation.clone();
+        let cancels = Arc::new(AtomicU64::new(0));
+        let worker_cancels = Arc::clone(&cancels);
         let thread = thread::Builder::new()
             .name("translation-model-installer".to_owned())
             .spawn(move || {
-                for command in requests {
+                for request in requests {
+                    let Some(command) = command_after_queued_cancellation(
+                        request.command,
+                        request.cancels_at_send,
+                        worker_cancels.load(Ordering::Acquire),
+                    ) else {
+                        continue;
+                    };
                     if matches!(command, InstallCommand::Shutdown) {
                         break;
                     }
@@ -151,16 +198,21 @@ impl InstallActor {
             Self {
                 commands,
                 cancellation,
+                cancels,
             },
             thread,
         ))
     }
 
     fn send(&self, command: InstallCommand) {
-        let _ = self.commands.send(command);
+        let _ = self.commands.send(QueuedInstallCommand {
+            command,
+            cancels_at_send: self.cancels.load(Ordering::Acquire),
+        });
     }
 
     fn cancel(&self) {
+        self.cancels.fetch_add(1, Ordering::AcqRel);
         self.cancellation.cancel();
     }
 }
@@ -393,6 +445,7 @@ fn handle_command(
                 keep_warm,
                 history_enabled,
                 prepare_local_model,
+                skip_local_prepare: false,
             });
         }
         TranslationWorkerCommand::EnsureModel { tier } => {
@@ -534,6 +587,7 @@ fn run_install(
             keep_warm,
             history_enabled,
             prepare_local_model,
+            skip_local_prepare,
         } => {
             let mut state = recover_lock(state);
             state.keep_warm = keep_warm;
@@ -546,6 +600,7 @@ fn run_install(
                 models: state.summaries(),
             })?;
             if state.local_model_enabled
+                && !skip_local_prepare
                 && let Some(tier) = state.selected_tier
             {
                 let catalog_id = state.pack(tier)?.id.clone();
@@ -1212,7 +1267,10 @@ mod direction_tests {
 mod local_model_policy_tests {
     use rust_protocol::{TranslationProviderEntry, TranslationTier};
 
-    use super::{InstallCommand, install_failure_code, local_translation_enabled};
+    use super::{
+        InstallCommand, command_after_queued_cancellation, install_failure_code,
+        local_translation_enabled,
+    };
 
     fn entry(id: &str, enabled: bool) -> TranslationProviderEntry {
         TranslationProviderEntry {
@@ -1252,5 +1310,73 @@ mod local_model_policy_tests {
             }),
             "translation_worker"
         );
+    }
+
+    #[test]
+    fn a_cancel_supersedes_expensive_work_that_was_still_queued() {
+        for command in [
+            InstallCommand::EnsureModel {
+                tier: TranslationTier::Tiny,
+            },
+            InstallCommand::SelectTier {
+                tier: TranslationTier::Teacher,
+                keep_warm: true,
+            },
+            InstallCommand::SetLocalEnabled { enabled: true },
+        ] {
+            assert!(
+                command_after_queued_cancellation(command, 4, 5).is_none(),
+                "stale work must not download or reload a model after cloud-only was requested"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancelled_initialization_still_becomes_ready_without_loading_local() {
+        let command = command_after_queued_cancellation(
+            InstallCommand::Initialize {
+                selected_tier: Some(TranslationTier::Teacher),
+                keep_warm: true,
+                history_enabled: true,
+                prepare_local_model: true,
+                skip_local_prepare: false,
+            },
+            9,
+            10,
+        )
+        .expect("initialization still owns the Ready handshake");
+
+        assert!(matches!(
+            command,
+            InstallCommand::Initialize {
+                prepare_local_model: true,
+                skip_local_prepare: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cancellation_never_erases_disable_or_confirmed_removal() {
+        assert!(matches!(
+            command_after_queued_cancellation(
+                InstallCommand::SetLocalEnabled { enabled: false },
+                1,
+                2,
+            ),
+            Some(InstallCommand::SetLocalEnabled { enabled: false })
+        ));
+        assert!(matches!(
+            command_after_queued_cancellation(
+                InstallCommand::RemoveModel {
+                    tier: TranslationTier::Teacher,
+                },
+                1,
+                2,
+            ),
+            Some(InstallCommand::RemoveModel {
+                tier: TranslationTier::Teacher,
+            })
+        ));
     }
 }
