@@ -393,6 +393,11 @@ export component ChoiceTile inherits Rectangle {
     in property <bool> busy: false;
     callback clicked();
 
+    // Three translated visualizer names share one row. Without a floor the
+    // grid squeezed its middle column to the shortest English label, leaving
+    // Cyrillic names split into a dangling final syllable.
+    min-width: 88px;
+
     forward-focus: focus;
     accessible-role: radio-button;
     accessible-label: root.label;

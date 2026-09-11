@@ -40,9 +40,9 @@ use serde::{Deserialize, Serialize};
 use settings_document::{SavedSettings, data_root, load_settings, save_settings};
 use settings_view::{
     precreate_action_windows, prepend_history_row, set_indicator_status, set_runtime_status,
-    set_status_problem, show_layout_chooser, sync_action_settings, sync_history, sync_models,
-    sync_output_mode, sync_translation_models, wire_action_palette, wire_chooser, wire_settings,
-    wire_translator, wire_tray,
+    set_status_problem, show_layout_chooser, sync_action_settings, sync_history,
+    sync_hotkey_capture_status, sync_models, sync_output_mode, sync_translation_models,
+    wire_action_palette, wire_chooser, wire_settings, wire_translator, wire_tray,
 };
 use slint::winit_030::{
     WinitWindowAccessor,
@@ -1749,6 +1749,12 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 }
             };
             if applied {
+                if let Some(settings) = settings.upgrade() {
+                    settings.set_hotkey_capture_index(-1);
+                    settings.set_hotkey_capture_label("".into());
+                    settings.set_hotkey_capture_value("".into());
+                    settings.set_hotkey_capture_valid(false);
+                }
                 sync_action_settings(settings, state);
                 set_indicator_status(settings, state_text(state, UiText::ShortcutsUpdated));
             }
@@ -1764,12 +1770,13 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 reject_hotkeys_if_pending(&mut state, operation_id, action, reason)
             };
             if rejected {
+                if let Some(settings) = settings.upgrade()
+                    && settings.get_hotkey_capture_index() >= 0
+                {
+                    settings.set_hotkey_capture_valid(false);
+                }
                 sync_action_settings(settings, state);
-                let locale = active_locale(state.borrow().ui_locale);
-                set_status_problem(
-                    settings,
-                    settings_view::hotkey_rejection_detail(locale, reason),
-                );
+                sync_hotkey_capture_status(settings, state, Some(reason));
                 rust_app_core::diagnostics::log_line(&format!(
                     "hotkeys action={action:?} result=rejected reason={reason:?} detail={message}"
                 ));
@@ -4743,5 +4750,18 @@ mod audio_level_coalescing_tests {
         // Once consumed, the next frame queues its own wake-up again.
         assert!(record_audio_level(frame(0.4)).is_some());
         assert!(take_audio_level().is_some_and(|frame| (frame.peak - 0.4).abs() < f32::EPSILON));
+    }
+}
+
+#[cfg(test)]
+mod product_icon_tests {
+    #[test]
+    fn tray_waveform_is_the_accent_without_a_graphite_stripe() {
+        let source = include_str!("../assets/tray-icon.svg");
+        assert_eq!(source.matches("fill=\"#ef5048\"").count(), 5);
+        assert!(
+            !source.contains("stroke=\"#111317\"") && !source.contains("fill=\"#111317\""),
+            "the tiny tray mark must not paint graphite over the red waveform",
+        );
     }
 }

@@ -21,6 +21,9 @@ use crate::{
     providers_view::provider_display_name,
 };
 
+const SPEECH_PROVIDER_SECTION: &str = "SPEECH";
+const TEXT_PROVIDER_SECTION: &str = "TEXT";
+
 /// How far along an install is, when one is running.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Download {
@@ -84,7 +87,7 @@ pub(crate) fn speech_model_row_localized(
         title: model.display_name.clone().into(),
         detail: format!(
             "{}{}",
-            model.description,
+            model_description_localized(&model.catalog_id, &model.description, locale),
             if model.recommended {
                 format!(" · {}", text(locale, UiText::Recommended))
             } else {
@@ -96,7 +99,7 @@ pub(crate) fn speech_model_row_localized(
         state: state.into(),
         tone: tone.into(),
         action: action.into(),
-        secondary: "".into(),
+        action_key: model_action_key(model.installed, model.selected, download).into(),
         selected: model.selected,
         installed: model.installed,
         progress,
@@ -118,7 +121,7 @@ pub(crate) fn translation_model_row_localized(
         title: model.display_name.clone().into(),
         detail: format!(
             "{} · {}{}",
-            model.description,
+            model_description_localized(&model.catalog_id, &model.description, locale),
             model.license,
             if model.recommended {
                 format!(" · {}", text(locale, UiText::RecommendedForSystemLanguage))
@@ -131,10 +134,39 @@ pub(crate) fn translation_model_row_localized(
         state: state.into(),
         tone: tone.into(),
         action: action.into(),
-        secondary: "".into(),
+        action_key: model_action_key(model.installed, selected, download).into(),
         selected,
         installed: model.installed,
         progress,
+    }
+}
+
+fn model_description_localized<'a>(
+    catalog_id: &str,
+    fallback: &'a str,
+    locale: UiLocale,
+) -> std::borrow::Cow<'a, str> {
+    let message = match catalog_id {
+        "whisper-small" => UiText::WhisperSmallDescription,
+        "whisper-medium" => UiText::WhisperMediumDescription,
+        "whisper-large-v3-turbo" => UiText::WhisperTurboDescription,
+        "whisper-large-v3" => UiText::WhisperLargeDescription,
+        "qwen35-4b-q4" => UiText::QwenFastDescription,
+        "qwen35-9b-q4" => UiText::QwenQualityDescription,
+        _ => return std::borrow::Cow::Borrowed(fallback),
+    };
+    std::borrow::Cow::Borrowed(text(locale, message))
+}
+
+fn model_action_key(installed: bool, selected: bool, download: Option<Download>) -> &'static str {
+    if download.is_some() && !installed {
+        "cancel"
+    } else if selected {
+        ""
+    } else if installed {
+        "use"
+    } else {
+        "install"
     }
 }
 
@@ -246,7 +278,7 @@ pub(crate) fn provider_row_localized(
 
     ProviderRow {
         id: qualified_row_id("speech", &entry.id).into(),
-        section: text(locale, UiText::SpeechSection).into(),
+        section: SPEECH_PROVIDER_SECTION.into(),
         title: provider_display_name_localized(&entry.id, locale).into(),
         // Stable localized capability text belongs here. The state column
         // carries the localized failure class; arbitrary worker diagnostics
@@ -322,10 +354,10 @@ pub(crate) fn qualified_row_id(kind: &str, id: &str) -> String {
 }
 
 pub(crate) fn provider_display_name_localized(id: &str, locale: UiLocale) -> String {
-    if id == "local" {
-        text(locale, UiText::ThisComputer).to_owned()
-    } else {
-        provider_display_name(id)
+    match id {
+        "local" => text(locale, UiText::ThisComputer).to_owned(),
+        "custom" => text(locale, UiText::CustomProvider).to_owned(),
+        _ => provider_display_name(id),
     }
 }
 
@@ -355,7 +387,7 @@ pub(crate) fn translation_provider_row_localized(
 
     ProviderRow {
         id: qualified_row_id("text", &entry.id).into(),
-        section: text(locale, UiText::TranslationSection).into(),
+        section: TEXT_PROVIDER_SECTION.into(),
         title: translation_provider_display_name_localized(&entry.id, locale).into(),
         detail: translation_provider_detail(entry, status, locale).into(),
         enabled: entry.enabled,
@@ -700,13 +732,97 @@ pub(crate) fn history_row_localized(entry: &HistoryEntry, locale: UiLocale) -> H
 #[cfg(test)]
 mod tests {
     use rust_protocol::{
-        TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationProviderEntry,
+        ModelSummary, TranscriptionProviderEntry, TranscriptionProviderStatus,
+        TranslationModelSummary, TranslationProviderEntry, TranslationTier,
     };
 
     use super::{
         Download, chain_positions, departure_badge, departures, model_progress, privacy_claim,
-        provider_row, tone,
+        provider_display_name_localized, provider_row, provider_row_localized,
+        speech_model_row_localized, tone, translation_model_row_localized,
+        translation_provider_row_localized,
     };
+
+    #[test]
+    fn a_generic_provider_name_is_localized_but_service_brands_are_not() {
+        assert_eq!(
+            provider_display_name_localized("custom", crate::localization::UiLocale::Russian),
+            "Свой сервер"
+        );
+        assert_eq!(
+            provider_display_name_localized("groq", crate::localization::UiLocale::Russian),
+            "Groq"
+        );
+    }
+
+    #[test]
+    fn provider_section_identity_does_not_change_with_the_interface_language() {
+        let speech = provider_row_localized(
+            &entry("local", true),
+            None,
+            0,
+            Some(0),
+            Some(0),
+            crate::localization::UiLocale::Russian,
+        );
+        assert_eq!(speech.section.as_str(), "SPEECH");
+
+        let text = translation_provider_row_localized(
+            &text_entry("local", true),
+            None,
+            0,
+            Some(0),
+            Some(0),
+            crate::localization::UiLocale::Russian,
+        );
+        assert_eq!(text.section.as_str(), "TEXT");
+    }
+
+    #[test]
+    fn catalog_model_descriptions_follow_the_interface_language() {
+        let speech = ModelSummary {
+            catalog_id: "whisper-small".to_owned(),
+            display_name: "Whisper Small".to_owned(),
+            description: "Lower download size and resource use for less powerful computers."
+                .to_owned(),
+            size_bytes: 1,
+            installed: false,
+            selected: false,
+            recommended: false,
+            supports_speech_translation: true,
+        };
+        let translation = TranslationModelSummary {
+            catalog_id: "qwen35-4b-q4".to_owned(),
+            display_name: "Qwen3.5 4B · Fast".to_owned(),
+            description: "Modern multilingual 4B model accelerated locally through Vulkan."
+                .to_owned(),
+            tier: TranslationTier::Tiny,
+            languages: Vec::new(),
+            size_bytes: 1,
+            installed: false,
+            selected: false,
+            recommended: false,
+            license: "Apache-2.0".to_owned(),
+        };
+
+        let speech_row =
+            speech_model_row_localized(&speech, None, crate::localization::UiLocale::Russian);
+        let translation_row = translation_model_row_localized(
+            &translation,
+            false,
+            None,
+            crate::localization::UiLocale::Russian,
+        );
+
+        assert_eq!(
+            speech_row.detail,
+            "Компактная модель с меньшей нагрузкой для слабых компьютеров."
+        );
+        assert_eq!(
+            translation_row.detail,
+            "Современная многоязычная модель 4B с локальным ускорением Vulkan. · Apache-2.0"
+        );
+    }
 
     fn entry(id: &str, enabled: bool) -> TranscriptionProviderEntry {
         TranscriptionProviderEntry {

@@ -136,6 +136,18 @@ mod tests {
     }
 
     #[test]
+    fn about_page_keeps_framework_credit_small_and_out_of_the_product_identity() {
+        let source = include_str!("../ui/pages_instruments.slint");
+        assert!(source.contains("about-identity := Rectangle"));
+        assert!(source.contains("technical-details := Rectangle"));
+        assert!(source.contains("THIRD_PARTY_NOTICES.md"));
+        assert!(!source.contains("AboutSlint"));
+        assert!(source.contains("text: \"Made with Slint\""));
+        assert!(source.contains("font-size: 9px"));
+        assert!(!source.contains("licenses-panel"));
+    }
+
+    #[test]
     fn ready_status_uses_the_configured_shortcut_in_the_active_language() {
         assert_eq!(
             super::render(
@@ -246,9 +258,34 @@ mod tests {
                 "ru",
                 include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
                 [
-                    ("Only this", "Только этот"),
+                    ("Locally", "Локально"),
                     ("Fastest available", "Самый быстрый из доступных"),
                     ("Modern GPU", "Современная видеокарта"),
+                    ("Custom endpoint", "Свой сервер"),
+                    ("Providers", "Провайдеры"),
+                    ("OUTPUT", "РЕЗУЛЬТАТ"),
+                    (
+                        "Runs on this computer · nothing leaves it",
+                        "Работает локально · данные никуда не отправляются",
+                    ),
+                    ("TEXT LEAVES DEVICE", "ТЕКСТ ОТПРАВЛЯЕТСЯ В ОБЛАКО"),
+                    ("EVERYTHING STAYS HERE", "ВСЁ ОБРАБАТЫВАЕТСЯ ЛОКАЛЬНО"),
+                    (
+                        "Nothing can transcribe right now",
+                        "Диктовка сейчас недоступна",
+                    ),
+                    (
+                        "Nothing can transcribe · text leaves this device for {text}",
+                        "Диктовка недоступна · текст отправляется в {text}",
+                    ),
+                    (
+                        "SPEECH — WHAT TRANSCRIBES A RECORDING",
+                        "ДИКТОВКА — СЕРВИСЫ РАСПОЗНАВАНИЯ РЕЧИ",
+                    ),
+                    (
+                        "TEXT — WHAT TRANSLATES A SELECTION",
+                        "ПЕРЕВОД — СЕРВИСЫ ПЕРЕВОДА ТЕКСТА",
+                    ),
                     ("DICTATION LANGUAGE", "ЯЗЫК ДИКТОВКИ"),
                     ("TRANSCRIPT LANGUAGE", "ЯЗЫК РЕЗУЛЬТАТА"),
                     ("PROCESSING MODE", "РЕЖИМ ОБРАБОТКИ"),
@@ -271,9 +308,34 @@ mod tests {
                 "uk",
                 include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
                 [
-                    ("Only this", "Лише цей"),
+                    ("Locally", "Локально"),
                     ("Fastest available", "Найшвидший із доступних"),
                     ("Modern GPU", "Сучасна відеокарта"),
+                    ("Custom endpoint", "Власний сервер"),
+                    ("Providers", "Провайдери"),
+                    ("OUTPUT", "РЕЗУЛЬТАТ"),
+                    (
+                        "Runs on this computer · nothing leaves it",
+                        "Працює локально · дані нікуди не надсилаються",
+                    ),
+                    ("TEXT LEAVES DEVICE", "ТЕКСТ НАДСИЛАЄТЬСЯ В ХМАРУ"),
+                    ("EVERYTHING STAYS HERE", "УСЕ ОБРОБЛЯЄТЬСЯ ЛОКАЛЬНО"),
+                    (
+                        "Nothing can transcribe right now",
+                        "Диктування зараз недоступне",
+                    ),
+                    (
+                        "Nothing can transcribe · text leaves this device for {text}",
+                        "Диктування недоступне · текст надсилається до {text}",
+                    ),
+                    (
+                        "SPEECH — WHAT TRANSCRIBES A RECORDING",
+                        "ДИКТУВАННЯ — СЕРВІСИ РОЗПІЗНАВАННЯ МОВЛЕННЯ",
+                    ),
+                    (
+                        "TEXT — WHAT TRANSLATES A SELECTION",
+                        "ПЕРЕКЛАД — СЕРВІСИ ПЕРЕКЛАДУ ТЕКСТУ",
+                    ),
                     ("DICTATION LANGUAGE", "МОВА ДИКТУВАННЯ"),
                     ("TRANSCRIPT LANGUAGE", "МОВА РЕЗУЛЬТАТУ"),
                     ("PROCESSING MODE", "РЕЖИМ ОБРОБКИ"),
@@ -296,9 +358,34 @@ mod tests {
                 "es",
                 include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
                 [
-                    ("Only this", "Solo este"),
+                    ("Locally", "En local"),
                     ("Fastest available", "La opción más rápida"),
                     ("Modern GPU", "GPU moderna"),
+                    ("Custom endpoint", "Servidor propio"),
+                    ("Providers", "Proveedores"),
+                    ("OUTPUT", "RESULTADO"),
+                    (
+                        "Runs on this computer · nothing leaves it",
+                        "Funciona de forma local · no se envían datos",
+                    ),
+                    ("TEXT LEAVES DEVICE", "EL TEXTO SE ENVÍA A LA NUBE"),
+                    ("EVERYTHING STAYS HERE", "TODO SE PROCESA DE FORMA LOCAL"),
+                    (
+                        "Nothing can transcribe right now",
+                        "El dictado no está disponible ahora",
+                    ),
+                    (
+                        "Nothing can transcribe · text leaves this device for {text}",
+                        "Dictado no disponible · el texto se envía a {text}",
+                    ),
+                    (
+                        "SPEECH — WHAT TRANSCRIBES A RECORDING",
+                        "DICTADO — SERVICIOS DE RECONOCIMIENTO DE VOZ",
+                    ),
+                    (
+                        "TEXT — WHAT TRANSLATES A SELECTION",
+                        "TRADUCCIÓN — SERVICIOS DE TRADUCCIÓN DE TEXTO",
+                    ),
                     ("DICTATION LANGUAGE", "IDIOMA DE DICTADO"),
                     ("TRANSCRIPT LANGUAGE", "IDIOMA DEL RESULTADO"),
                     ("PROCESSING MODE", "MODO DE PROCESAMIENTO"),
@@ -324,9 +411,34 @@ mod tests {
                 "pt-BR",
                 include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
                 [
-                    ("Only this", "Só este"),
+                    ("Locally", "Localmente"),
                     ("Fastest available", "A opção mais rápida"),
                     ("Modern GPU", "GPU moderna"),
+                    ("Custom endpoint", "Servidor personalizado"),
+                    ("Providers", "Provedores"),
+                    ("OUTPUT", "RESULTADO"),
+                    (
+                        "Runs on this computer · nothing leaves it",
+                        "Funciona localmente · nenhum dado é enviado",
+                    ),
+                    ("TEXT LEAVES DEVICE", "O TEXTO É ENVIADO À NUVEM"),
+                    ("EVERYTHING STAYS HERE", "TUDO É PROCESSADO LOCALMENTE"),
+                    (
+                        "Nothing can transcribe right now",
+                        "O ditado não está disponível agora",
+                    ),
+                    (
+                        "Nothing can transcribe · text leaves this device for {text}",
+                        "Ditado indisponível · o texto é enviado para {text}",
+                    ),
+                    (
+                        "SPEECH — WHAT TRANSCRIBES A RECORDING",
+                        "DITADO — SERVIÇOS DE RECONHECIMENTO DE VOZ",
+                    ),
+                    (
+                        "TEXT — WHAT TRANSLATES A SELECTION",
+                        "TRADUÇÃO — SERVIÇOS DE TRADUÇÃO DE TEXTO",
+                    ),
                     ("DICTATION LANGUAGE", "IDIOMA DO DITADO"),
                     ("TRANSCRIPT LANGUAGE", "IDIOMA DO RESULTADO"),
                     ("PROCESSING MODE", "MODO DE PROCESSAMENTO"),
@@ -349,9 +461,34 @@ mod tests {
                 "de",
                 include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
                 [
-                    ("Only this", "Nur dieser"),
+                    ("Locally", "Lokal"),
                     ("Fastest available", "Schnellste verfügbare Option"),
                     ("Modern GPU", "Moderne GPU"),
+                    ("Custom endpoint", "Eigener Server"),
+                    ("Providers", "Anbieter"),
+                    ("OUTPUT", "AUSGABE"),
+                    (
+                        "Runs on this computer · nothing leaves it",
+                        "Läuft lokal · es werden keine Daten gesendet",
+                    ),
+                    ("TEXT LEAVES DEVICE", "TEXT WIRD AN DIE CLOUD GESENDET"),
+                    ("EVERYTHING STAYS HERE", "ALLES WIRD LOKAL VERARBEITET"),
+                    (
+                        "Nothing can transcribe right now",
+                        "Diktat ist derzeit nicht verfügbar",
+                    ),
+                    (
+                        "Nothing can transcribe · text leaves this device for {text}",
+                        "Diktat nicht verfügbar · Text wird an {text} gesendet",
+                    ),
+                    (
+                        "SPEECH — WHAT TRANSCRIBES A RECORDING",
+                        "DIKTAT — DIENSTE ZUR SPRACHERKENNUNG",
+                    ),
+                    (
+                        "TEXT — WHAT TRANSLATES A SELECTION",
+                        "ÜBERSETZUNG — DIENSTE FÜR TEXTÜBERSETZUNG",
+                    ),
                     ("DICTATION LANGUAGE", "DIKTATSPRACHE"),
                     ("TRANSCRIPT LANGUAGE", "SPRACHE DER AUSGABE"),
                     ("PROCESSING MODE", "VERARBEITUNGSMODUS"),
@@ -374,9 +511,34 @@ mod tests {
                 "fr",
                 include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
                 [
-                    ("Only this", "Celui-ci uniquement"),
+                    ("Locally", "En local"),
                     ("Fastest available", "Option la plus rapide"),
                     ("Modern GPU", "GPU récente"),
+                    ("Custom endpoint", "Serveur personnalisé"),
+                    ("Providers", "Services"),
+                    ("OUTPUT", "RÉSULTAT"),
+                    (
+                        "Runs on this computer · nothing leaves it",
+                        "Fonctionne en local · aucune donnée n’est envoyée",
+                    ),
+                    ("TEXT LEAVES DEVICE", "LE TEXTE EST ENVOYÉ DANS LE CLOUD"),
+                    ("EVERYTHING STAYS HERE", "TOUT EST TRAITÉ LOCALEMENT"),
+                    (
+                        "Nothing can transcribe right now",
+                        "La dictée est indisponible pour le moment",
+                    ),
+                    (
+                        "Nothing can transcribe · text leaves this device for {text}",
+                        "Dictée indisponible · le texte est envoyé à {text}",
+                    ),
+                    (
+                        "SPEECH — WHAT TRANSCRIBES A RECORDING",
+                        "DICTÉE — SERVICES DE RECONNAISSANCE VOCALE",
+                    ),
+                    (
+                        "TEXT — WHAT TRANSLATES A SELECTION",
+                        "TRADUCTION — SERVICES DE TRADUCTION DE TEXTE",
+                    ),
                     ("DICTATION LANGUAGE", "LANGUE DE DICTÉE"),
                     ("TRANSCRIPT LANGUAGE", "LANGUE DU RÉSULTAT"),
                     ("PROCESSING MODE", "MODE DE TRAITEMENT"),
@@ -402,9 +564,34 @@ mod tests {
                 "it",
                 include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
                 [
-                    ("Only this", "Solo questo"),
+                    ("Locally", "In locale"),
                     ("Fastest available", "Opzione più veloce"),
                     ("Modern GPU", "GPU moderna"),
+                    ("Custom endpoint", "Server personalizzato"),
+                    ("Providers", "Provider"),
+                    ("OUTPUT", "RISULTATO"),
+                    (
+                        "Runs on this computer · nothing leaves it",
+                        "Funziona in locale · nessun dato viene inviato",
+                    ),
+                    ("TEXT LEAVES DEVICE", "IL TESTO VIENE INVIATO AL CLOUD"),
+                    ("EVERYTHING STAYS HERE", "TUTTO VIENE ELABORATO IN LOCALE"),
+                    (
+                        "Nothing can transcribe right now",
+                        "La dettatura non è disponibile al momento",
+                    ),
+                    (
+                        "Nothing can transcribe · text leaves this device for {text}",
+                        "Dettatura non disponibile · il testo viene inviato a {text}",
+                    ),
+                    (
+                        "SPEECH — WHAT TRANSCRIBES A RECORDING",
+                        "DETTATURA — SERVIZI DI RICONOSCIMENTO VOCALE",
+                    ),
+                    (
+                        "TEXT — WHAT TRANSLATES A SELECTION",
+                        "TRADUZIONE — SERVIZI DI TRADUZIONE DEL TESTO",
+                    ),
                     ("DICTATION LANGUAGE", "LINGUA DI DETTATURA"),
                     ("TRANSCRIPT LANGUAGE", "LINGUA DEL RISULTATO"),
                     ("PROCESSING MODE", "MODALITÀ DI ELABORAZIONE"),
@@ -430,9 +617,34 @@ mod tests {
                 "ko",
                 include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
                 [
-                    ("Only this", "이것만"),
+                    ("Locally", "로컬"),
                     ("Fastest available", "사용 가능한 최고 속도"),
                     ("Modern GPU", "최신 GPU"),
+                    ("Custom endpoint", "사용자 지정 서버"),
+                    ("Providers", "서비스"),
+                    ("OUTPUT", "결과"),
+                    (
+                        "Runs on this computer · nothing leaves it",
+                        "로컬에서 실행 · 데이터를 전송하지 않음",
+                    ),
+                    ("TEXT LEAVES DEVICE", "텍스트를 클라우드로 전송"),
+                    ("EVERYTHING STAYS HERE", "모두 로컬에서 처리"),
+                    (
+                        "Nothing can transcribe right now",
+                        "현재 받아쓰기를 사용할 수 없음",
+                    ),
+                    (
+                        "Nothing can transcribe · text leaves this device for {text}",
+                        "받아쓰기 사용 불가 · 텍스트 전송 대상: {text}",
+                    ),
+                    (
+                        "SPEECH — WHAT TRANSCRIBES A RECORDING",
+                        "받아쓰기 — 음성 인식 서비스",
+                    ),
+                    (
+                        "TEXT — WHAT TRANSLATES A SELECTION",
+                        "번역 — 텍스트 번역 서비스",
+                    ),
                     ("DICTATION LANGUAGE", "받아쓰기 언어"),
                     ("TRANSCRIPT LANGUAGE", "결과 언어"),
                     ("PROCESSING MODE", "처리 모드"),
@@ -777,6 +989,67 @@ mod tests {
     }
 
     #[test]
+    fn translated_visualizer_tiles_keep_a_readable_width() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(5);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            let companion =
+                ElementHandle::find_by_accessible_label(&settings, &entries["Companion orb"])
+                    .next()
+                    .unwrap_or_else(|| panic!("{locale}: companion visualizer tile"));
+            assert!(
+                companion.size().width >= 88.0,
+                "{locale}: visualizer tile is only {}px wide",
+                companion.size().width,
+            );
+        }
+        drop(seed);
+    }
+
+    #[test]
     fn translated_provider_actions_fit_side_by_side() {
         use i_slint_backend_testing::ElementHandle;
         use slint::{ComponentHandle, ModelRc, VecModel};
@@ -839,9 +1112,10 @@ mod tests {
             settings.set_active_page(4);
             i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
-            let only = ElementHandle::find_by_accessible_label(&settings, &entries["Only this"])
-                .next()
-                .unwrap_or_else(|| panic!("{locale}: exclusive-provider action"));
+            let only =
+                ElementHandle::find_by_accessible_label(&settings, &entries["Only this service"])
+                    .next()
+                    .unwrap_or_else(|| panic!("{locale}: exclusive-provider action"));
             let add = ElementHandle::find_by_accessible_label(&settings, &entries["Add key"])
                 .next()
                 .unwrap_or_else(|| panic!("{locale}: credential action"));
@@ -871,6 +1145,592 @@ mod tests {
             );
         }
         drop(seed);
+    }
+
+    #[test]
+    fn every_provider_privacy_state_stays_inside_the_visible_header() {
+        use i_slint_backend_testing::{ElementHandle, ElementRoot};
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for locale in UiLocale::ALL
+            .into_iter()
+            .filter(|locale| *locale != UiLocale::System)
+        {
+            slint::select_bundled_translation(locale.code())
+                .unwrap_or_else(|error| panic!("{} bundle failed: {error}", locale.code()));
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            let claims = [
+                super::text(locale, super::UiText::EverythingStays).to_owned(),
+                super::render(
+                    locale,
+                    super::UiText::NothingCanTranscribeTextLeaves,
+                    &[("text", "DeepL")],
+                ),
+                super::render(
+                    locale,
+                    super::UiText::DifferentServices,
+                    &[("audio", "Microsoft Azure Speech"), ("text", "DeepL")],
+                ),
+            ];
+
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(4);
+            for claim in claims {
+                settings.set_provider_claim(claim.clone().into());
+                settings.set_audio_leaves_device(true);
+                i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+                let element = ElementHandle::find_by_accessible_label(&settings, &claim)
+                    .next()
+                    .unwrap_or_else(|| panic!("{}: missing provider claim {claim}", locale.code()));
+                let surface = settings.root_element().size();
+                let position = element.absolute_position();
+                let size = element.size();
+                assert!(
+                    position.x >= -0.5 && position.x + size.width <= surface.width + 0.5,
+                    "{}: claim leaves the window: x={} width={} surface={} text={claim}",
+                    locale.code(),
+                    position.x,
+                    size.width,
+                    surface.width,
+                );
+                assert!(
+                    position.y >= -0.5 && position.y + size.height <= surface.height + 0.5,
+                    "{}: claim leaves the window vertically: y={} height={} surface={} text={claim}",
+                    locale.code(),
+                    position.y,
+                    size.height,
+                    surface.height,
+                );
+            }
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn provider_page_state_matrix_keeps_controls_and_group_identity_intact() {
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery, ElementRoot};
+        use slint::{ComponentHandle, ModelRc, VecModel};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let row = |id: &str,
+                       section: &str,
+                       title: &str,
+                       enabled: bool,
+                       needs_key: bool,
+                       key_hint: &str,
+                       field_label: &str,
+                       state: &str,
+                       tone: &str| crate::ProviderRow {
+                id: id.into(),
+                section: section.into(),
+                title: title.into(),
+                detail: entries["Cloud speech · availability follows your Azure account"]
+                    .clone()
+                    .into(),
+                enabled,
+                available: enabled && (!needs_key || !key_hint.is_empty()),
+                needs_key,
+                key_hint: key_hint.into(),
+                field_label: field_label.into(),
+                field_value: "westeurope".into(),
+                state: state.into(),
+                tone: tone.into(),
+                unreachable: false,
+            };
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.set_provider_rows(ModelRc::new(VecModel::from(vec![
+                row(
+                    "speech:local",
+                    "SPEECH",
+                    &entries["This computer"],
+                    false,
+                    false,
+                    "",
+                    "",
+                    &entries["Switched off"],
+                    "off",
+                ),
+                row(
+                    "speech:groq",
+                    "SPEECH",
+                    "Groq",
+                    false,
+                    true,
+                    "••••9c07",
+                    "",
+                    &entries["Switched off"],
+                    "off",
+                ),
+                row(
+                    "speech:azure",
+                    "SPEECH",
+                    "Microsoft Azure Speech",
+                    true,
+                    true,
+                    "••••1f30",
+                    &entries["Region"],
+                    &entries["Cooling down"],
+                    "working",
+                ),
+                row(
+                    "speech:custom",
+                    "SPEECH",
+                    &entries["Custom endpoint"],
+                    true,
+                    true,
+                    "",
+                    &entries["Endpoint"],
+                    &entries["No key stored"],
+                    "off",
+                ),
+                row(
+                    "text:local",
+                    "TEXT",
+                    &entries["This computer"],
+                    false,
+                    false,
+                    "",
+                    "",
+                    &entries["Switched off"],
+                    "off",
+                ),
+                row(
+                    "text:deepl",
+                    "TEXT",
+                    "DeepL",
+                    true,
+                    true,
+                    "••••7b22",
+                    "",
+                    &entries["In use"],
+                    "active",
+                ),
+            ])));
+            let locale = UiLocale::from_code(locale).expect("known locale");
+            let claim = super::render(
+                locale,
+                super::UiText::NothingCanTranscribeTextLeaves,
+                &[("text", "DeepL")],
+            );
+            settings.set_provider_claim(claim.into());
+            settings.set_audio_leaves_device(true);
+            settings.set_provider_editing("speech:groq".into());
+            settings.set_provider_problem_for("speech:groq".into());
+            settings.set_provider_problem(
+                "The service did not answer. The existing key was kept unchanged.".into(),
+            );
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(4);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            assert!(
+                ElementHandle::find_by_accessible_label(
+                    &settings,
+                    &entries["SPEECH — WHAT TRANSCRIBES A RECORDING"],
+                )
+                .next()
+                .is_some(),
+                "{locale:?}: speech providers must keep the speech heading",
+            );
+            for label in ["Locally", "Only this service"] {
+                assert!(
+                    ElementHandle::find_by_accessible_label(&settings, &entries[label])
+                        .next()
+                        .is_some(),
+                    "{locale:?}: provider state is missing the semantic action {label}",
+                );
+            }
+            for label in ["Save", "Cancel", "Remove key"] {
+                assert!(
+                    ElementHandle::find_by_accessible_label(&settings, &entries[label])
+                        .next()
+                        .is_some(),
+                    "{locale:?}: open credential state is missing {label}",
+                );
+            }
+            let rail =
+                ElementHandle::find_by_accessible_label(&settings, &entries["Scroll position"])
+                    .next()
+                    .unwrap_or_else(|| panic!("{locale:?}: provider scroll rail is missing"));
+            assert_eq!(
+                rail.accessible_enabled(),
+                Some(true),
+                "{locale:?}: the expanded provider state must remain scrollable",
+            );
+
+            let surface = settings.root_element().size();
+            let controls = ElementQuery::from_root(&settings)
+                .match_predicate(|element| {
+                    matches!(
+                        element.accessible_role(),
+                        Some(
+                            AccessibleRole::Button
+                                | AccessibleRole::Checkbox
+                                | AccessibleRole::Combobox
+                                | AccessibleRole::RadioButton
+                                | AccessibleRole::Slider
+                                | AccessibleRole::Spinbox
+                                | AccessibleRole::Switch
+                                | AccessibleRole::TextInput
+                        )
+                    )
+                })
+                .find_all();
+            for control in controls {
+                let position = control.absolute_position();
+                let size = control.size();
+                if size.width <= 0.0 || size.height <= 0.0 {
+                    continue;
+                }
+                assert!(
+                    position.x >= -0.5 && position.x + size.width <= surface.width + 0.5,
+                    "{locale:?}: control {:?} at x={} width={} leaves {}px surface",
+                    control.accessible_label(),
+                    position.x,
+                    size.width,
+                    surface.width,
+                );
+            }
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn a_localized_model_cancel_still_invokes_the_cancel_action() {
+        use std::{cell::Cell, rc::Rc};
+
+        use i_slint_backend_testing::{ElementHandle, ElementRoot};
+        use slint::{ComponentHandle, ModelRc, VecModel};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.set_model_rows(ModelRc::new(VecModel::from(vec![crate::ModelRow {
+                catalog_id: "whisper-large-v3-turbo".into(),
+                section: entries["Speech"].clone().into(),
+                title: "Whisper Large v3 Turbo".into(),
+                detail: entries["Preparing model"].clone().into(),
+                size: "1.6 GB".into(),
+                state: "50 %".into(),
+                tone: "working".into(),
+                action: entries["Cancel"].clone().into(),
+                action_key: "cancel".into(),
+                selected: false,
+                installed: false,
+                progress: 0.5,
+            }])));
+            let chose = Rc::new(Cell::new(false));
+            let cancelled = Rc::new(Cell::new(false));
+            let chose_from_callback = Rc::clone(&chose);
+            settings.on_choose_model(move |_| chose_from_callback.set(true));
+            let cancelled_from_callback = Rc::clone(&cancelled);
+            settings.on_cancel_model_install(move |_| cancelled_from_callback.set(true));
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(3);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            let cancel = ElementHandle::find_by_accessible_label(&settings, &entries["Cancel"])
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: localized cancel action"));
+            let position = cancel.absolute_position();
+            let surface = settings.root_element().size();
+            assert!(
+                position.x + cancel.size().width <= surface.width + 0.5,
+                "{locale}: localized cancel action leaves the window",
+            );
+            cancel.invoke_accessible_default_action();
+            assert!(cancelled.get(), "{locale}: localized Cancel must cancel");
+            assert!(!chose.get(), "{locale}: localized Cancel must not choose");
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn a_localized_custom_endpoint_editor_keeps_its_endpoint_hint() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::{ComponentHandle, ModelRc, VecModel};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, field_label) in [
+            ("ru", "Адрес сервера"),
+            ("uk", "Адреса сервера"),
+            ("es", "Dirección del servidor"),
+            ("pt-BR", "Endereço do servidor"),
+            ("de", "Serveradresse"),
+            ("fr", "Adresse du serveur"),
+            ("it", "Indirizzo del server"),
+            ("ko", "서버 주소"),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.set_provider_rows(ModelRc::new(VecModel::from(vec![crate::ProviderRow {
+                id: "speech:custom".into(),
+                section: "SPEECH".into(),
+                title: "Custom endpoint".into(),
+                detail: "OpenAI-compatible endpoint".into(),
+                enabled: true,
+                available: false,
+                needs_key: true,
+                key_hint: "".into(),
+                field_label: field_label.into(),
+                field_value: "".into(),
+                state: "No key".into(),
+                tone: "off".into(),
+                unreachable: false,
+            }])));
+            settings.set_provider_editing("speech:custom".into());
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(4);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            assert!(
+                ElementHandle::find_by_accessible_label(
+                    &settings,
+                    "https://speech.example.com/v1",
+                )
+                .next()
+                .is_some(),
+                "{locale}: endpoint hint disappeared after translating its field label",
+            );
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn localized_hotkey_capture_state_keeps_its_prompt_and_actions_visible() {
+        use std::{cell::Cell, rc::Rc};
+
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery, ElementRoot};
+        use slint::{ComponentHandle, ModelRc, VecModel};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.set_hotkey_rows(ModelRc::new(VecModel::from(vec![crate::HotkeyRow {
+                action: "translate".into(),
+                keys: "Ctrl + Alt + F".into(),
+                name: entries["Act on selection"].clone().into(),
+                detail: entries["On selected text"].clone().into(),
+                state: entries["Ready"].clone().into(),
+                tone: "resting".into(),
+                enabled: true,
+                toggle_enabled: true,
+                is_default: false,
+                locked_reason: "".into(),
+                mode: "text-action".into(),
+                mode_value: entries["Decide from the text"].clone().into(),
+                mode_key: "adaptive".into(),
+            }])));
+            settings.set_hotkey_capture_index(0);
+            settings.set_hotkey_capture_label(entries["Act on selection"].clone().into());
+            settings.set_hotkey_capture_value("Ctrl + Alt + G".into());
+            settings.set_hotkey_capture_valid(true);
+            let saved = Rc::new(Cell::new(false));
+            let saved_from_callback = Rc::clone(&saved);
+            settings.on_save_hotkey_capture(move || saved_from_callback.set(true));
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(7);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            let cancel = ElementHandle::find_by_accessible_label(&settings, &entries["Cancel"])
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: capture cancel is missing"));
+            assert_eq!(cancel.accessible_role(), Some(AccessibleRole::Button));
+            let save = ElementHandle::find_by_accessible_label(&settings, &entries["Save"])
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: capture save is missing"));
+            assert_eq!(save.accessible_enabled(), Some(true));
+            save.invoke_accessible_default_action();
+            assert!(
+                saved.get(),
+                "{locale}: Save does not submit the captured chord"
+            );
+            assert!(
+                ElementHandle::find_by_accessible_label(&settings, "Ctrl + Alt + G")
+                    .next()
+                    .is_some(),
+                "{locale}: captured shortcut is not visible",
+            );
+            let surface = settings.root_element().size();
+            let controls = ElementQuery::from_root(&settings)
+                .match_predicate(|element| {
+                    matches!(
+                        element.accessible_role(),
+                        Some(
+                            AccessibleRole::Button
+                                | AccessibleRole::Combobox
+                                | AccessibleRole::Switch
+                        )
+                    )
+                })
+                .find_all();
+            for control in controls {
+                let position = control.absolute_position();
+                let size = control.size();
+                if size.width <= 0.0 || size.height <= 0.0 {
+                    continue;
+                }
+                assert!(
+                    position.x >= -0.5 && position.x + size.width <= surface.width + 0.5,
+                    "{locale}: capture control {:?} leaves the window",
+                    control.accessible_label(),
+                );
+            }
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn text_action_mode_value_uses_the_row_value_column() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::{ComponentHandle, ModelRc, VecModel};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let settings = crate::SettingsWindow::new().expect("settings surface");
+        settings.set_hotkey_rows(ModelRc::new(VecModel::from(vec![crate::HotkeyRow {
+            action: "translate".into(),
+            keys: "Ctrl + Alt + F".into(),
+            name: "Text actions".into(),
+            detail: "On selected text".into(),
+            state: "Ready".into(),
+            tone: "resting".into(),
+            enabled: true,
+            toggle_enabled: true,
+            is_default: true,
+            locked_reason: "".into(),
+            mode: "text-action".into(),
+            mode_value: "Decide from the text".into(),
+            mode_key: "adaptive".into(),
+        }])));
+        settings.show().expect("show headless settings surface");
+        settings.set_active_page(7);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+        let mode = ElementHandle::find_by_accessible_label(&settings, "Decide from the text")
+            .next()
+            .expect("text action value selector");
+        let row = ElementHandle::find_by_element_type_name(&settings, "ListRow")
+            .next()
+            .expect("text action row");
+        let mode_right = mode.absolute_position().x + mode.size().width;
+        let row_right = row.absolute_position().x + row.size().width;
+        assert!(
+            (row_right - mode_right).abs() <= 1.0,
+            "mode value belongs at the value edge: mode_right={mode_right}, row_right={row_right}",
+        );
     }
 
     #[test]
@@ -917,6 +1777,53 @@ mod tests {
                         position.x >= -0.5 && position.x + size.width <= surface.width + 0.5,
                         "{locale} page {page}: control {:?} at x={} width={} leaves {}px surface",
                         control.accessible_label(),
+                        position.x,
+                        size.width,
+                        surface.width,
+                    );
+                }
+            }
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn translated_visible_content_stays_inside_the_horizontal_viewport() {
+        use i_slint_backend_testing::{ElementQuery, ElementRoot};
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for locale in ["ru", "uk", "es", "pt-BR", "de", "fr", "it", "ko"] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.show().expect("show headless settings surface");
+            let surface = settings.root_element().size();
+
+            for page in 0..9 {
+                settings.set_active_page(page);
+                i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+                let labelled = ElementQuery::from_root(&settings)
+                    .match_predicate(|element| {
+                        element
+                            .accessible_label()
+                            .is_some_and(|label| !label.trim().is_empty())
+                    })
+                    .find_all();
+                for element in labelled {
+                    let position = element.absolute_position();
+                    let size = element.size();
+                    if size.width <= 0.0
+                        || size.height <= 0.0
+                        || position.y >= surface.height
+                        || position.y + size.height <= 0.0
+                    {
+                        continue;
+                    }
+                    assert!(
+                        position.x >= -0.5 && position.x + size.width <= surface.width + 0.5,
+                        "{locale} page {page}: visible {:?} at x={} width={} leaves {}px surface",
+                        element.accessible_label(),
                         position.x,
                         size.width,
                         surface.width,

@@ -69,34 +69,15 @@ function New-IconFrame {
             [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
 
         $scale = [float]($Size / 256.0)
-        # No tile behind the mark. Every capsule is the SayFlex red requested
-        # for the waveform; the graphite halo keeps the transparent icon
-        # legible on both light and dark Windows surfaces.
-        $outlineBrush = [Drawing.SolidBrush]::new(
-            [Drawing.ColorTranslator]::FromHtml('#111317'))
+        # No tile and no dark halo behind the mark. At 16 px the old halo
+        # consumed most of the red interior and Windows rendered the centre as
+        # a black stripe. A solid accent waveform survives every icon size.
         $accentBrush = [Drawing.SolidBrush]::new(
             [Drawing.ColorTranslator]::FromHtml('#EF5048'))
         $centres = @(40, 84, 128, 172, 216)
         $heights = @(62, 112, 158, 112, 62)
         try {
             for ($index = 0; $index -lt $centres.Count; $index++) {
-                $outlineWidth = [float](32 * $scale)
-                $outlineHeight = [float](($heights[$index] + 18) * $scale)
-                $outlineX = [float](($centres[$index] * $scale) - ($outlineWidth / 2))
-                $outlineY = [float](($Size - $outlineHeight) / 2)
-                $outline = New-RoundedRectanglePath `
-                    -X $outlineX `
-                    -Y $outlineY `
-                    -Width $outlineWidth `
-                    -Height $outlineHeight `
-                    -Radius ($outlineWidth / 2)
-                try {
-                    $graphics.FillPath($outlineBrush, $outline)
-                }
-                finally {
-                    $outline.Dispose()
-                }
-
                 $width = [float](22 * $scale)
                 $height = [float]($heights[$index] * $scale)
                 $x = [float](($centres[$index] * $scale) - ($width / 2))
@@ -116,7 +97,6 @@ function New-IconFrame {
             }
         }
         finally {
-            $outlineBrush.Dispose()
             $accentBrush.Dispose()
         }
 

@@ -62,10 +62,12 @@ export component ClaimLine inherits Rectangle {
     in property <string> text;
     in property <bool> signal: false;
 
-    height: 18px;
-    width: layout.preferred-width;
+    min-width: 0px;
+    horizontal-stretch: 1;
+    height: max(18px, layout.preferred-height);
 
     layout := HorizontalLayout {
+        width: root.width;
         spacing: 8px;
         Rectangle {
             width: 8px;
@@ -74,11 +76,15 @@ export component ClaimLine inherits Rectangle {
             background: root.signal ? Sheet.signal : Sheet.ink;
         }
         Text {
+            min-width: 0px;
+            horizontal-stretch: 1;
             text: root.text;
             color: root.signal ? Sheet.signal-text : Sheet.muted;
             font-size: Sheet.detail-size;
             font-weight: root.signal ? 650 : 400;
+            horizontal-alignment: right;
             vertical-alignment: center;
+            wrap: word-wrap;
         }
     }
 }
@@ -94,12 +100,12 @@ export component ListHead inherits VerticalLayout {
     spacing: 0px;
 
     HorizontalLayout {
+        spacing: 24px;
         VerticalLayout {
             spacing: 7px;
             PageIndex { text: root.index; }
             PageTitle { text: root.title; }
         }
-        Rectangle { horizontal-stretch: 1; }
         if root.claim != "" : ClaimLine {
             text: root.claim;
             signal: root.claim-signal;

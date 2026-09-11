@@ -25,7 +25,7 @@ use slint::{
     winit_030::{
         EventResult, WinitWindowAccessor,
         winit::{
-            event::{ElementState, WindowEvent},
+            event::{ElementState, MouseScrollDelta, WindowEvent},
             keyboard::{KeyCode, ModifiersState, PhysicalKey},
         },
     },
@@ -62,6 +62,85 @@ use crate::{
     },
     worker_supervisor::Workers,
 };
+
+#[derive(Clone, Copy)]
+struct SettingsScrollMetrics {
+    current: f32,
+    minimum: f32,
+    maximum: f32,
+    set: fn(&SettingsWindow, f32),
+}
+
+fn settings_scroll_metrics(settings: &SettingsWindow) -> SettingsScrollMetrics {
+    let page = settings.get_active_page();
+    let (current, content, shown, set): (f32, f32, f32, fn(&SettingsWindow, f32)) = match page {
+        3 => (
+            settings.get_models_scroll_y(),
+            settings.get_models_scroll_content_height(),
+            settings.get_models_scroll_shown_height(),
+            SettingsWindow::set_models_scroll_y,
+        ),
+        4 => (
+            settings.get_providers_scroll_y(),
+            settings.get_providers_scroll_content_height(),
+            settings.get_providers_scroll_shown_height(),
+            SettingsWindow::set_providers_scroll_y,
+        ),
+        6 => (
+            settings.get_history_scroll_y(),
+            settings.get_history_scroll_content_height(),
+            settings.get_history_scroll_shown_height(),
+            SettingsWindow::set_history_scroll_y,
+        ),
+        7 => (
+            settings.get_hotkeys_scroll_y(),
+            settings.get_hotkeys_scroll_content_height(),
+            settings.get_hotkeys_scroll_shown_height(),
+            SettingsWindow::set_hotkeys_scroll_y,
+        ),
+        _ => (
+            settings.get_workspace_scroll_y(),
+            settings.get_workspace_scroll_content_height(),
+            settings.get_workspace_scroll_shown_height(),
+            SettingsWindow::set_workspace_scroll_y,
+        ),
+    };
+    SettingsScrollMetrics {
+        current,
+        minimum: (shown - content).min(0.0),
+        maximum: 0.0,
+        set,
+    }
+}
+
+fn handle_mouse_wheel(settings: &SettingsWindow, delta: &MouseScrollDelta) -> bool {
+    let Some(delta) = mouse_wheel_delta(delta) else {
+        return false;
+    };
+    if delta == 0.0 {
+        return false;
+    }
+    let metrics = settings_scroll_metrics(settings);
+    if metrics.minimum >= metrics.maximum {
+        return false;
+    }
+    let next = immediate_wheel_position(metrics.current, metrics.minimum, metrics.maximum, delta);
+    (metrics.set)(settings, next);
+    true
+}
+
+fn immediate_wheel_position(current: f32, minimum: f32, maximum: f32, delta: f32) -> f32 {
+    (current + delta).clamp(minimum, maximum)
+}
+
+fn mouse_wheel_delta(delta: &MouseScrollDelta) -> Option<f32> {
+    match delta {
+        MouseScrollDelta::LineDelta(_, vertical) => Some(*vertical * 60.0),
+        // Pixel deltas carry touchpad gesture information. Slint's native
+        // Flickable owns those phases and inertia.
+        MouseScrollDelta::PixelDelta(_) => None,
+    }
+}
 
 const fn translation_language_text(language: TranslationLanguage) -> UiText {
     match language {
@@ -510,7 +589,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                     },
                 ),
                 HotkeyAction::PauseResume => (
-                    text(locale, UiText::AlwaysAvailable),
+                    text(locale, UiText::PauseResumeAction),
                     text(locale, UiText::AlwaysAvailable),
                 ),
             };
@@ -576,6 +655,20 @@ pub(crate) fn hotkey_rejection_detail(locale: UiLocale, reason: HotkeyRejection)
     }
 }
 
+/// A startup registration conflict is durable row state, not a global
+/// operation that should occupy the footer forever. While the capture editor
+/// is open the same message is useful next to the user's current action.
+pub(crate) fn hotkey_rejection_global_message(
+    locale: UiLocale,
+    capture_index: i32,
+    reason: Option<HotkeyRejection>,
+) -> Option<&'static str> {
+    (capture_index >= 0)
+        .then_some(reason)
+        .flatten()
+        .map(|reason| hotkey_rejection_detail(locale, reason))
+}
+
 fn hotkeys_summary(state: &AppState) -> String {
     let locale = active_locale(state.ui_locale);
     let enabled = HotkeyAction::ALL
@@ -633,7 +726,7 @@ fn submit_hotkey_bindings(
 ) -> bool {
     let locale = active_locale(state.borrow().ui_locale);
     if let Err(error) = validate_hotkeys(&bindings) {
-        set_status_problem(settings, &error.message);
+        set_status_problem(settings, hotkey_rejection_detail(locale, error.reason));
         return false;
     }
     {
@@ -1120,7 +1213,7 @@ fn can_refresh_idle_status(state: &AppState) -> bool {
 /// The footer used to retain whatever already-rendered English string happened
 /// to be stored in Slint. Active operations keep their precise status; an idle
 /// surface is safe to project from the typed Rust state again.
-fn sync_idle_status_after_locale_change(
+pub(crate) fn sync_idle_status(
     settings: &slint::Weak<SettingsWindow>,
     state: &Rc<RefCell<AppState>>,
 ) {
@@ -1164,6 +1257,22 @@ fn sync_idle_status_after_locale_change(
     drop(state);
     set_runtime_status(settings, &runtime);
     set_status(settings, severity, &indicator);
+}
+
+pub(crate) fn sync_hotkey_capture_status(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    reason: Option<HotkeyRejection>,
+) {
+    let capture_index = settings
+        .upgrade()
+        .map_or(-1, |settings| settings.get_hotkey_capture_index());
+    let locale = active_locale(state.borrow().ui_locale);
+    if let Some(message) = hotkey_rejection_global_message(locale, capture_index, reason) {
+        set_status_problem(settings, message);
+    } else {
+        sync_idle_status(settings, state);
+    }
 }
 
 pub(crate) fn show_layout_chooser(
@@ -1359,6 +1468,11 @@ pub(crate) fn wire_settings(
     recording_overlays: &RecordingOverlays,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
 ) {
+    // Capturing a chord and applying it are separate user decisions. The old
+    // path submitted the first non-modifier key immediately, leaving no field
+    // to confirm what was captured and no Save action to make the boundary
+    // clear.
+    let hotkey_draft = Rc::new(Cell::new(None::<(i32, HotkeySpec)>));
     {
         let translator = translator.as_weak();
         settings.on_open_translator(move || {
@@ -1401,7 +1515,7 @@ pub(crate) fn wire_settings(
             sync_history(&settings_weak, &state);
             sync_models(&settings_weak, &state);
             sync_providers(&settings_weak, &state);
-            sync_idle_status_after_locale_change(&settings_weak, &state);
+            sync_idle_status(&settings_weak, &state);
         });
     }
     {
@@ -2218,12 +2332,16 @@ pub(crate) fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
+        let hotkey_draft = Rc::clone(&hotkey_draft);
         settings.on_change_hotkey(move |index| {
             let Some(action) = hotkey_action_at(index) else {
                 return;
             };
             if let Some(settings) = settings_weak.upgrade() {
+                hotkey_draft.set(None);
                 settings.set_hotkey_capture_index(index);
+                settings.set_hotkey_capture_value("".into());
+                settings.set_hotkey_capture_valid(false);
                 let locale = active_locale(state.borrow().ui_locale);
                 settings.set_hotkey_capture_label(
                     match action {
@@ -2235,15 +2353,50 @@ pub(crate) fn wire_settings(
                     }
                     .into(),
                 );
+                sync_hotkey_capture_status(&settings_weak, &state, None);
             }
         });
     }
     {
         let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let hotkey_draft = Rc::clone(&hotkey_draft);
         settings.on_cancel_hotkey_capture(move || {
             if let Some(settings) = settings_weak.upgrade() {
+                hotkey_draft.set(None);
                 settings.set_hotkey_capture_index(-1);
                 settings.set_hotkey_capture_label("".into());
+                settings.set_hotkey_capture_value("".into());
+                settings.set_hotkey_capture_valid(false);
+            }
+            sync_hotkey_capture_status(&settings_weak, &state, None);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        let hotkey_draft = Rc::clone(&hotkey_draft);
+        settings.on_save_hotkey_capture(move || {
+            let Some((index, spec)) = hotkey_draft.get() else {
+                return;
+            };
+            let Some(settings) = settings_weak.upgrade() else {
+                return;
+            };
+            if settings.get_hotkey_capture_index() != index {
+                return;
+            }
+            let Some(action) = hotkey_action_at(index) else {
+                return;
+            };
+            let mut bindings = state.borrow().hotkeys.clone();
+            bindings.binding_mut(action).spec = spec;
+            if submit_hotkey_bindings(&settings_weak, &state, &workers, bindings) {
+                // The editor remains visible while Windows owns the decision.
+                // Acceptance closes it; rejection leaves it open with the
+                // rejected chord and its reason.
+                settings.set_hotkey_capture_valid(false);
             }
         });
     }
@@ -2263,7 +2416,7 @@ pub(crate) fn wire_settings(
     {
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
-        let workers = Rc::clone(workers);
+        let hotkey_draft = Rc::clone(&hotkey_draft);
         let modifiers = Rc::new(Cell::new(ModifiersState::default()));
         settings.window().on_winit_window_event(move |_, event| {
             if let WindowEvent::ModifiersChanged(next) = event {
@@ -2273,6 +2426,11 @@ pub(crate) fn wire_settings(
             let Some(settings) = settings_weak.upgrade() else {
                 return EventResult::Propagate;
             };
+            if let WindowEvent::MouseWheel { delta, .. } = event
+                && handle_mouse_wheel(&settings, delta)
+            {
+                return EventResult::PreventDefault;
+            }
             let index = settings.get_hotkey_capture_index();
             if index < 0 {
                 return EventResult::Propagate;
@@ -2294,8 +2452,12 @@ pub(crate) fn wire_settings(
                 return EventResult::PreventDefault;
             };
             if code == KeyCode::Escape {
+                hotkey_draft.set(None);
                 settings.set_hotkey_capture_index(-1);
                 settings.set_hotkey_capture_label("".into());
+                settings.set_hotkey_capture_value("".into());
+                settings.set_hotkey_capture_valid(false);
+                sync_hotkey_capture_status(&settings_weak, &state, None);
                 return EventResult::PreventDefault;
             }
             if matches!(
@@ -2312,7 +2474,11 @@ pub(crate) fn wire_settings(
                 return EventResult::PreventDefault;
             }
             let Some(action) = hotkey_action_at(index) else {
+                hotkey_draft.set(None);
                 settings.set_hotkey_capture_index(-1);
+                settings.set_hotkey_capture_value("".into());
+                settings.set_hotkey_capture_valid(false);
+                sync_hotkey_capture_status(&settings_weak, &state, None);
                 return EventResult::PreventDefault;
             };
             let Some(virtual_key) = virtual_key_for_code(code) else {
@@ -2325,14 +2491,24 @@ pub(crate) fn wire_settings(
                 );
                 return EventResult::PreventDefault;
             };
-            let mut bindings = state.borrow().hotkeys.clone();
-            bindings.binding_mut(action).spec = HotkeySpec {
+            let spec = HotkeySpec {
                 modifiers: captured_modifiers(modifiers.get()),
                 virtual_key,
             };
-            if submit_hotkey_bindings(&settings_weak, &state, &workers, bindings) {
-                settings.set_hotkey_capture_index(-1);
-                settings.set_hotkey_capture_label("".into());
+            hotkey_draft.set(Some((index, spec)));
+            settings.set_hotkey_capture_value(format_hotkey(spec).into());
+
+            let mut bindings = state.borrow().hotkeys.clone();
+            bindings.binding_mut(action).spec = spec;
+            match validate_hotkeys(&bindings) {
+                Ok(()) => {
+                    settings.set_hotkey_capture_valid(true);
+                    sync_hotkey_capture_status(&settings_weak, &state, None);
+                }
+                Err(error) => {
+                    settings.set_hotkey_capture_valid(false);
+                    sync_hotkey_capture_status(&settings_weak, &state, Some(error.reason));
+                }
             }
             EventResult::PreventDefault
         });
@@ -2839,7 +3015,9 @@ mod hotkey_capture_tests {
     use rust_protocol::{HotkeyAction, HotkeyRejection, SpeechOutputMode};
     use slint::winit_030::winit::keyboard::KeyCode;
 
-    use crate::{AppState, SavedSettings, SpeechBackend, settings_projection::tone};
+    use crate::{
+        AppState, SavedSettings, SpeechBackend, localization::UiLocale, settings_projection::tone,
+    };
 
     use super::{hotkey_action_at, hotkey_rows, hotkeys_summary, virtual_key_for_code};
 
@@ -2870,6 +3048,7 @@ mod hotkey_capture_tests {
             SpeechBackend::Cpu,
             &SavedSettings::default(),
         );
+        state.ui_locale = UiLocale::English;
         state.hotkey_error = Some((
             HotkeyAction::PauseResume,
             HotkeyRejection::RegistrationFailed,
@@ -2879,19 +3058,61 @@ mod hotkey_capture_tests {
         let row = &rows[4];
         assert_eq!(row.tone, tone::REFUSED);
         assert_eq!(row.state, "Unavailable");
-        assert!(row.detail.contains("already using"));
+        assert_eq!(row.detail, "Shortcut already in use. Choose another.");
         assert!(row.locked_reason.is_empty());
         assert_eq!(hotkeys_summary(&state), "3 of 5 shortcuts active");
+    }
+
+    #[test]
+    fn pause_resume_keeps_its_action_name_in_a_localized_row() {
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        );
+        state.ui_locale = UiLocale::Russian;
+
+        let row = &hotkey_rows(&state)[4];
+        assert_eq!(row.name, "Пауза/возобновление");
+        assert_eq!(row.detail, "Всегда доступно");
     }
 }
 
 #[cfg(test)]
 mod status_refresh_tests {
-    use rust_protocol::SpeechOutputMode;
+    use rust_protocol::{HotkeyRejection, SpeechOutputMode};
 
-    use crate::{AppState, SavedSettings, SpeechBackend, settings_projection::Download};
+    use crate::{
+        AppState, SavedSettings, SpeechBackend, localization::UiLocale,
+        settings_projection::Download,
+    };
 
-    use super::can_refresh_idle_status;
+    use super::{can_refresh_idle_status, hotkey_rejection_global_message};
+
+    #[test]
+    fn startup_hotkey_conflicts_stay_on_their_row_instead_of_occupying_the_footer() {
+        assert_eq!(
+            hotkey_rejection_global_message(
+                UiLocale::Russian,
+                -1,
+                Some(HotkeyRejection::RegistrationFailed),
+            ),
+            None,
+        );
+        assert_eq!(
+            hotkey_rejection_global_message(
+                UiLocale::Russian,
+                0,
+                Some(HotkeyRejection::RegistrationFailed),
+            ),
+            Some("Сочетание уже занято. Выберите другое."),
+        );
+        assert_eq!(
+            hotkey_rejection_global_message(UiLocale::Russian, 0, None),
+            None
+        );
+    }
 
     #[test]
     fn a_language_change_does_not_replace_an_active_download_status() {
@@ -2912,5 +3133,50 @@ mod status_refresh_tests {
         );
 
         assert!(!can_refresh_idle_status(&state));
+    }
+}
+
+#[cfg(test)]
+mod wheel_motion_tests {
+    use slint::winit_030::winit::{dpi::PhysicalPosition, event::MouseScrollDelta};
+
+    use super::{immediate_wheel_position, mouse_wheel_delta};
+
+    #[test]
+    fn detented_wheels_use_the_fast_path_but_touchpads_stay_native() {
+        assert_eq!(
+            mouse_wheel_delta(&MouseScrollDelta::LineDelta(0.0, -1.0)),
+            Some(-60.0)
+        );
+        assert_eq!(
+            mouse_wheel_delta(&MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                0.0, -24.0
+            ))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_fast_wheel_burst_applies_every_step_immediately() {
+        let mut position = 0.0;
+
+        // A detented wheel is discrete input. Ten detents therefore mean
+        // exactly 600 logical pixels with no timer-driven tail afterwards.
+        for _ in 0..10 {
+            position = immediate_wheel_position(position, -13_600.0, 0.0, -60.0);
+        }
+
+        assert_eq!(position, -600.0);
+    }
+
+    #[test]
+    fn the_first_detent_reaches_its_destination_without_a_follow_up_tick() {
+        assert_eq!(immediate_wheel_position(0.0, -13_600.0, 0.0, -60.0), -60.0);
+    }
+
+    #[test]
+    fn wheel_destinations_are_clamped_to_both_ends_of_the_page() {
+        assert_eq!(immediate_wheel_position(-490.0, -500.0, 0.0, -60.0), -500.0);
+        assert_eq!(immediate_wheel_position(-10.0, -500.0, 0.0, 60.0), 0.0);
     }
 }

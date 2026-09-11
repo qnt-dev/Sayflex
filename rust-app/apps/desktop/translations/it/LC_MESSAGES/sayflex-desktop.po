@@ -86,8 +86,8 @@ msgstr "Attendi il completamento della modifica corrente delle scorciatoie."
 msgid "Could not apply shortcuts: {error}"
 msgstr "Impossibile applicare le scorciatoie: {error}"
 
-msgid "Windows or another application is already using this shortcut. Choose another."
-msgstr "Windows o un'altra applicazione usa già questa scorciatoia. Scegline un'altra."
+msgid "Shortcut already in use. Choose another."
+msgstr "Scorciatoia già in uso. Scegline un'altra."
 
 msgid "Finish the active dictation before changing shortcuts."
 msgstr "Termina la dettatura attiva prima di modificare le scorciatoie."
@@ -299,22 +299,22 @@ msgid "Arctic"
 msgstr "Artico"
 
 msgid "AUDIO AND TEXT LEAVE"
-msgstr "AUDIO E TESTO IN USCITA"
+msgstr "AUDIO E TESTO VENGONO INVIATI AL CLOUD"
 
 msgid "Audio and text leave this device for {service}"
-msgstr "L'audio e il testo escono da questo dispositivo per {service}"
+msgstr "L’audio e il testo vengono inviati a {service}"
 
 msgid "Audio and text stay on this device"
-msgstr "L'audio e il testo rimangono su questo dispositivo"
+msgstr "L’audio e il testo vengono elaborati su questo computer"
 
 msgid "AUDIO LEAVES DEVICE"
-msgstr "L'AUDIO ESCE DAL DISPOSITIVO"
+msgstr "L’AUDIO VIENE INVIATO AL CLOUD"
 
 msgid "Audio leaves for {audio}, text for {text}"
 msgstr "L'audio esce verso {audio}, il testo verso {text}"
 
 msgid "Audio leaves this device for {audio}"
-msgstr "L'audio esce da questo dispositivo verso {audio}"
+msgstr "L’audio viene inviato a {audio}"
 
 msgid "Auto"
 msgstr "Automatico"
@@ -349,8 +349,8 @@ msgstr "ANNULLA"
 msgid "Change"
 msgstr "Modifica"
 
-msgid "Change a shortcut, then press its new key combination. Changes apply only after Windows accepts them."
-msgstr "Modifica una scorciatoia, quindi premi la nuova combinazione di tasti. Le modifiche vengono applicate solo dopo che Windows le ha accettate."
+msgid "Choose Change, press a new key combination, then Save. It takes effect only after Windows accepts it."
+msgstr "Scegli Modifica, premi la nuova combinazione e salva. Diventa attiva solo dopo l’accettazione di Windows."
 
 msgid "checking…"
 msgstr "Verifica in corso…"
@@ -398,7 +398,7 @@ msgid "COLOUR"
 msgstr "COLORE"
 
 msgid "Companion orb"
-msgstr "Sfera assistente"
+msgstr "Assistente"
 
 msgid "Cooling down"
 msgstr "In fase di raffreddamento"
@@ -497,7 +497,7 @@ msgid "Every dictation you finish is written here — the words, how long the au
 msgstr "Ogni dettatura che completi viene registrata qui: le parole, la durata dell'audio, il tempo impiegato e se la trascrizione è stata effettuata su questo dispositivo o tramite un servizio. I dati rimangono su questo dispositivo e in nessun altro posto."
 
 msgid "EVERYTHING STAYS HERE"
-msgstr "TUTTO RIMANE QUI"
+msgstr "TUTTO VIENE ELABORATO IN LOCALE"
 
 msgid "Faster to answer, and holds memory to be"
 msgstr "Risposte più veloci e memoria per essere"
@@ -680,10 +680,10 @@ msgid "Not ready"
 msgstr "Non pronto"
 
 msgid "Nothing can transcribe · text leaves this device for {text}"
-msgstr "Impossibile trascrivere nulla · il testo viene trasferito da questo dispositivo a {text}"
+msgstr "Dettatura non disponibile · il testo viene inviato a {text}"
 
 msgid "Nothing can transcribe right now"
-msgstr "Al momento non è possibile trascrivere nulla"
+msgstr "La dettatura non è disponibile al momento"
 
 msgid "Nothing is being written to disk. Insert-last still works for the newest dictation, which is held in memory until SayFlex closes."
 msgstr "Non viene scritto nulla su disco. La funzione \"Inserisci l'ultimo\" funziona ancora per la dettatura più recente, che viene conservata in memoria fino alla chiusura di SayFlex."
@@ -737,7 +737,7 @@ msgid "Original selection remains active"
 msgstr "La selezione originale rimane attiva"
 
 msgid "OUTPUT"
-msgstr "OUTPUT"
+msgstr "RISULTATO"
 
 msgid "Overview"
 msgstr "Panoramica"
@@ -785,7 +785,7 @@ msgid "Provider order"
 msgstr "Ordine dei provider"
 
 msgid "Providers"
-msgstr "Fornitori"
+msgstr "Provider"
 
 msgid "Quit"
 msgstr "Esci"
@@ -839,7 +839,7 @@ msgid "Result"
 msgstr "Risultato"
 
 msgid "Runs on this computer · nothing leaves it"
-msgstr "Funziona su questo computer · nulla esce da esso"
+msgstr "Funziona in locale · nessun dato viene inviato"
 
 msgid "Russian"
 msgstr "Russo"
@@ -893,7 +893,7 @@ msgid "Speech"
 msgstr "Voce"
 
 msgid "SPEECH — WHAT TRANSCRIBES A RECORDING"
-msgstr "VOCE — COSA TRASCRIVE UNA REGISTRAZIONE"
+msgstr "DETTATURA — SERVIZI DI RICONOSCIMENTO VOCALE"
 
 msgid "SPEECH ENGINE"
 msgstr "MOTORE DI RICONOSCIMENTO VOCALE"
@@ -944,16 +944,16 @@ msgid "System language"
 msgstr "Lingua di sistema"
 
 msgid "TEXT — WHAT TRANSLATES A SELECTION"
-msgstr "TESTO — COSA TRADUCE UNA SELEZIONE"
+msgstr "TRADUZIONE — SERVIZI DI TRADUZIONE DEL TESTO"
 
 msgid "Text actions"
 msgstr "Azioni sul testo"
 
 msgid "TEXT LEAVES DEVICE"
-msgstr "IL TESTO LASCIA IL DISPOSITIVO"
+msgstr "IL TESTO VIENE INVIATO AL CLOUD"
 
 msgid "Text leaves this device for {text}"
-msgstr "Il testo lascia questo dispositivo per {text}"
+msgstr "Il testo viene inviato a {text}"
 
 msgid "The backdrop behind the preview"
 msgstr "Lo sfondo dietro l'anteprima"
@@ -1289,8 +1289,11 @@ msgstr "Fissa la traduzione"
 msgid "Unpin translation"
 msgstr "Rimuovi la traduzione fissata"
 
-msgid "Only this"
-msgstr "Solo questo"
+msgid "Locally"
+msgstr "In locale"
+
+msgid "Only this service"
+msgstr "Solo questo servizio"
 
 msgid "Fastest available"
 msgstr "Opzione più veloce"
@@ -1387,3 +1390,43 @@ msgstr "La cronologia è disattivata. L’ultima dettatura resta in memoria fino
 
 msgid "Nothing has been saved yet. The newest dictation can still be inserted with its shortcut until SayFlex closes."
 msgstr "Non è stato ancora salvato nulla. L’ultima dettatura può ancora essere inserita con la scorciatoia fino alla chiusura di SayFlex."
+
+msgid "Custom endpoint"
+msgstr "Server personalizzato"
+msgid "Lower download size and resource use for less powerful computers."
+msgstr "Modello compatto, più leggero e meno esigente per i computer meno potenti."
+
+msgid "Balanced local model for systems below the recommended profile."
+msgstr "Modello locale bilanciato per sistemi sotto il profilo consigliato."
+
+msgid "Recommended default and the model used by the current Windows application."
+msgstr "Modello predefinito consigliato per l’applicazione Windows corrente."
+
+msgid "Maximum-quality profile for users who accept a larger download and slower inference."
+msgstr "Massima qualità con un download maggiore e un’elaborazione più lenta."
+
+msgid "Modern multilingual 4B model accelerated locally through Vulkan."
+msgstr "Modello multilingue moderno 4B accelerato localmente con Vulkan."
+
+msgid "Higher-quality multilingual 9B model for modern discrete GPUs."
+msgstr "Modello multilingue 9B di qualità superiore per GPU dedicate moderne."
+msgid "Version, interface language, and software notices."
+msgstr "Versione, lingua dell’interfaccia e note sul software."
+
+msgid "VERSION"
+msgstr "VERSIONE"
+
+msgid "INTERFACE"
+msgstr "INTERFACCIA"
+
+msgid "PLATFORM"
+msgstr "PIATTAFORMA"
+
+msgid "OPEN-SOURCE NOTICES"
+msgstr "LICENZE OPEN SOURCE"
+
+msgid "Press a new key combination"
+msgstr "Premi una nuova combinazione di tasti"
+
+msgid "Press a valid shortcut first"
+msgstr "Prima premi una scorciatoia valida"

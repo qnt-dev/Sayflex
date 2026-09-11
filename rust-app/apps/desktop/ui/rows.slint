@@ -23,7 +23,9 @@ export struct ModelRow {
     // The one verb the row offers at rest, and the second that appears only
     // while something is running.
     action: string,
-    secondary: string,
+    // Stable command identity. The label is translated; dispatch must never
+    // branch on translated prose.
+    action-key: string,
     selected: bool,
     installed: bool,
     progress: float,
@@ -35,8 +37,9 @@ export struct ProviderRow {
     // both lists have an `azure` and a `local`, and they are different services
     // with different keys.
     id: string,
-    // The heading this row sits under. Rows arrive in one list and are grouped
-    // by this, the same way the model list groups speech and translation.
+    // Stable group identity ("SPEECH" or "TEXT"). The UI translates the
+    // heading separately; translating this discriminator made every
+    // non-English speech row fall through to the Text heading.
     section: string,
     title: string,
     detail: string,

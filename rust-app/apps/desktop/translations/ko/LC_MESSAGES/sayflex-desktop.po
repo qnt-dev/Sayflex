@@ -86,8 +86,8 @@ msgstr "현재 단축키 변경이 끝날 때까지 기다리세요."
 msgid "Could not apply shortcuts: {error}"
 msgstr "단축키를 적용할 수 없습니다: {error}"
 
-msgid "Windows or another application is already using this shortcut. Choose another."
-msgstr "Windows 또는 다른 앱에서 이미 이 바로 가기를 사용 중입니다. 다른 조합을 선택하세요."
+msgid "Shortcut already in use. Choose another."
+msgstr "이미 사용 중인 단축키입니다. 다른 키를 선택하세요."
 
 msgid "Finish the active dictation before changing shortcuts."
 msgstr "활성 받아쓰기를 끝낸 후 바로 가기를 변경하세요."
@@ -299,22 +299,22 @@ msgid "Arctic"
 msgstr "북극"
 
 msgid "AUDIO AND TEXT LEAVE"
-msgstr "오디오 및 텍스트 전송"
+msgstr "오디오와 텍스트를 클라우드로 전송"
 
 msgid "Audio and text leave this device for {service}"
-msgstr "오디오 및 텍스트는 {service}로 전송됩니다."
+msgstr "오디오와 텍스트 전송 대상: {service}"
 
 msgid "Audio and text stay on this device"
-msgstr "오디오 및 텍스트는 이 기기에 남아 있습니다."
+msgstr "오디오와 텍스트를 이 컴퓨터에서 처리"
 
 msgid "AUDIO LEAVES DEVICE"
-msgstr "오디오가 기기를 나갑니다"
+msgstr "오디오를 클라우드로 전송"
 
 msgid "Audio leaves for {audio}, text for {text}"
 msgstr "오디오는 {audio}로, 텍스트는 {text}로 나갑니다"
 
 msgid "Audio leaves this device for {audio}"
-msgstr "오디오는 {audio}로 전송됩니다"
+msgstr "오디오 전송 대상: {audio}"
 
 msgid "Auto"
 msgstr "자동"
@@ -349,8 +349,8 @@ msgstr "취소"
 msgid "Change"
 msgstr "변경"
 
-msgid "Change a shortcut, then press its new key combination. Changes apply only after Windows accepts them."
-msgstr "바로 가기를 변경한 후, 새로운 키 조합을 누르십시오. 변경 사항은 Windows에서 적용된 후에만 적용됩니다."
+msgid "Choose Change, press a new key combination, then Save. It takes effect only after Windows accepts it."
+msgstr "변경을 선택하고 새 키 조합을 누른 뒤 저장하세요. Windows가 승인한 후에만 적용됩니다."
 
 msgid "checking…"
 msgstr "확인 중…"
@@ -398,7 +398,7 @@ msgid "COLOUR"
 msgstr "색상"
 
 msgid "Companion orb"
-msgstr "도우미 구체"
+msgstr "도우미"
 
 msgid "Cooling down"
 msgstr "쿨다운 중"
@@ -497,7 +497,7 @@ msgid "Every dictation you finish is written here — the words, how long the au
 msgstr "완료한 모든 받아쓰기 기록이 여기에 저장됩니다 — 단어, 오디오 재생 시간, 소요 시간, 그리고 이 기기에서 직접 전사되었는지 아니면 서비스를 통해 전사되었는지에 대한 정보까지. 이 정보는 이 기기에만 저장되며 다른 곳에는 저장되지 않습니다."
 
 msgid "EVERYTHING STAYS HERE"
-msgstr "모든 정보는 여기에만 저장됩니다"
+msgstr "모두 로컬에서 처리"
 
 msgid "Faster to answer, and holds memory to be"
 msgstr "응답 속도가 더 빠르며,"
@@ -680,10 +680,10 @@ msgid "Not ready"
 msgstr "준비되지 않음"
 
 msgid "Nothing can transcribe · text leaves this device for {text}"
-msgstr "전사할 내용이 없음 · 텍스트가 {text}로 이 기기를 떠납니다"
+msgstr "받아쓰기 사용 불가 · 텍스트 전송 대상: {text}"
 
 msgid "Nothing can transcribe right now"
-msgstr "현재 변환할 내용이 없습니다"
+msgstr "현재 받아쓰기를 사용할 수 없음"
 
 msgid "Nothing is being written to disk. Insert-last still works for the newest dictation, which is held in memory until SayFlex closes."
 msgstr "디스크에 기록되는 내용이 없습니다. '마지막 삽입' 기능은 가장 최근의 받아쓰기 내용에 대해 여전히 작동하며, 이 내용은 SayFlex가 종료될 때까지 메모리에 유지됩니다."
@@ -737,7 +737,7 @@ msgid "Original selection remains active"
 msgstr "원본 선택 영역은 활성화된 상태로 유지됩니다"
 
 msgid "OUTPUT"
-msgstr "OUTPUT"
+msgstr "결과"
 
 msgid "Overview"
 msgstr "개요"
@@ -785,7 +785,7 @@ msgid "Provider order"
 msgstr "제공자 순서"
 
 msgid "Providers"
-msgstr "제공업체"
+msgstr "서비스"
 
 msgid "Quit"
 msgstr "종료"
@@ -839,7 +839,7 @@ msgid "Result"
 msgstr "결과"
 
 msgid "Runs on this computer · nothing leaves it"
-msgstr "이 컴퓨터에서만 실행되며, 외부로 데이터가 유출되지 않습니다."
+msgstr "로컬에서 실행 · 데이터를 전송하지 않음"
 
 msgid "Russian"
 msgstr "러시아어"
@@ -893,7 +893,7 @@ msgid "Speech"
 msgstr "음성"
 
 msgid "SPEECH — WHAT TRANSCRIBES A RECORDING"
-msgstr "음성 — 녹음 내용을 텍스트로 변환하는 것"
+msgstr "받아쓰기 — 음성 인식 서비스"
 
 msgid "SPEECH ENGINE"
 msgstr "음성 엔진"
@@ -944,16 +944,16 @@ msgid "System language"
 msgstr "시스템 언어"
 
 msgid "TEXT — WHAT TRANSLATES A SELECTION"
-msgstr "텍스트 — 선택 영역을 번역하는 항목"
+msgstr "번역 — 텍스트 번역 서비스"
 
 msgid "Text actions"
 msgstr "텍스트 작업"
 
 msgid "TEXT LEAVES DEVICE"
-msgstr "텍스트가 기기를 떠남"
+msgstr "텍스트를 클라우드로 전송"
 
 msgid "Text leaves this device for {text}"
-msgstr "텍스트가 {text}로 전송됩니다."
+msgstr "텍스트 전송 대상: {text}"
 
 msgid "The backdrop behind the preview"
 msgstr "미리보기의 배경"
@@ -1289,8 +1289,11 @@ msgstr "번역 고정"
 msgid "Unpin translation"
 msgstr "번역 고정 해제"
 
-msgid "Only this"
-msgstr "이것만"
+msgid "Locally"
+msgstr "로컬"
+
+msgid "Only this service"
+msgstr "이 서비스만"
 
 msgid "Fastest available"
 msgstr "사용 가능한 최고 속도"
@@ -1387,3 +1390,43 @@ msgstr "기록이 꺼져 있습니다. 최근 받아쓰기는 SayFlex를 닫을 
 
 msgid "Nothing has been saved yet. The newest dictation can still be inserted with its shortcut until SayFlex closes."
 msgstr "아직 저장된 내용이 없습니다. SayFlex를 닫기 전까지 최근 받아쓰기를 단축키로 삽입할 수 있습니다."
+
+msgid "Custom endpoint"
+msgstr "사용자 지정 서버"
+msgid "Lower download size and resource use for less powerful computers."
+msgstr "사양이 낮은 컴퓨터를 위한 다운로드 용량과 자원 사용량이 적은 모델"
+
+msgid "Balanced local model for systems below the recommended profile."
+msgstr "권장 사양보다 낮은 시스템을 위한 균형 잡힌 로컬 모델"
+
+msgid "Recommended default and the model used by the current Windows application."
+msgstr "현재 Windows 앱의 권장 기본 모델"
+
+msgid "Maximum-quality profile for users who accept a larger download and slower inference."
+msgstr "더 큰 다운로드와 느린 처리 속도를 감수하는 최고 품질 모델"
+
+msgid "Modern multilingual 4B model accelerated locally through Vulkan."
+msgstr "Vulkan으로 로컬 가속되는 최신 다국어 4B 모델"
+
+msgid "Higher-quality multilingual 9B model for modern discrete GPUs."
+msgstr "최신 외장 GPU를 위한 고품질 다국어 9B 모델"
+msgid "Version, interface language, and software notices."
+msgstr "버전, 인터페이스 언어 및 소프트웨어 고지"
+
+msgid "VERSION"
+msgstr "버전"
+
+msgid "INTERFACE"
+msgstr "인터페이스"
+
+msgid "PLATFORM"
+msgstr "플랫폼"
+
+msgid "OPEN-SOURCE NOTICES"
+msgstr "오픈 소스 라이선스"
+
+msgid "Press a new key combination"
+msgstr "새 키 조합을 누르세요"
+
+msgid "Press a valid shortcut first"
+msgstr "먼저 올바른 단축키를 누르세요"

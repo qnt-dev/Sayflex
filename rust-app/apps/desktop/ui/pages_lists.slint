@@ -82,7 +82,7 @@ export component ModelsPage inherits VerticalLayout {
                     if row.action != "" : RowAction {
                         label: row.action;
                         clicked => {
-                            if (row.action == "Cancel") {
+                            if (row.action-key == "cancel") {
                                 root.cancel-install(row.catalog-id);
                             } else {
                                 root.choose(row.catalog-id);
@@ -217,7 +217,9 @@ export component ProvidersPage inherits VerticalLayout {
                     }
 
                     RowAction {
-                        label: @tr("Only this");
+                        label: row.id == "speech:local" || row.id == "text:local"
+                            ? @tr("Locally")
+                            : @tr("Only this service");
                         enabled: !row.needs-key || row.key-hint != "";
                         reason: @tr("Add a key before making this the only provider");
                         clicked => { root.use-provider-only(index); }
@@ -267,7 +269,9 @@ export component ProvidersPage inherits VerticalLayout {
                             // and dropped the region on the floor.
                             visible: row.field-label != "";
                             height: row.field-label == "" ? 0px : 30px;
-                            placeholder: row.field-label == "Endpoint"
+                            // The label is localized; the qualified row id is
+                            // the stable identity used for behavior.
+                            placeholder: row.id == "speech:custom"
                                 ? "https://speech.example.com/v1"
                                 : "";
                             value <=> root.draft-extra;

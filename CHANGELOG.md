@@ -7,6 +7,33 @@ new entries belong here.
 Format: newest first, grouped by product. Dates are the day the work landed,
 not the day it shipped.
 
+## 0.7.2 - 2026-09-11
+
+### Localized state correctness
+
+- Made page claims wrap inside the settings viewport and verified the longest
+  privacy combinations in every bundled locale, including the state where no
+  speech provider can run while selected text is still sent to DeepL.
+- Separated stable row and action identities from translated display text.
+  Non-English speech providers now keep the speech heading, a translated
+  model-cancel button cancels rather than selecting the model, and the custom
+  endpoint hint no longer depends on the translated field label.
+- Reworded provider headings, local/cloud privacy notices, provider names and
+  output labels as product copy rather than literal translations.
+- Added rendered state-matrix checks for provider configuration, model
+  downloads, hotkey capture, visible text bounds and expanded key forms across
+  all eight bundled non-English locales.
+- Made detented mouse wheels move settings lists immediately, without Slint's
+  180 ms animation tail; high-resolution touchpad gestures keep their native
+  physics.
+- Reworked shortcut replacement into an explicit capture field with Save and
+  Cancel, and kept rejected chords visible until the user changes or cancels
+  them. Durable Windows conflicts stay on their affected row instead of
+  occupying the global footer after the editor closes.
+- Finished the product-first About page with only a quiet framework credit,
+  and regenerated the app, taskbar and tray marks from one red-waveform source
+  without the dark centre stripe.
+
 ## 0.7.1 - 2026-09-11
 
 ### Localization and translated layout

@@ -7,8 +7,8 @@ dependency inventory below is generated from the exact locked Cargo graph;
 ## Slint
 
 The user interface uses Slint 1.17 under the Slint Royalty-free Desktop,
-Mobile, and Web Applications License 2.0. The required `AboutSlint`
-attribution widget is reachable from the application About page.
+Mobile, and Web Applications License 2.0. Public distribution must also
+satisfy one of the attribution methods in section 2 of that license.
 
 Copyright © SixtyFPS GmbH <info@slint.dev>
 

@@ -16,6 +16,12 @@ ActiveShortcuts|{count} of 5 shortcuts active
 NoSpeechModel|No speech model is installed, so nothing can be dictated yet.
 SpeechEngine|SPEECH ENGINE
 SpeechModel|SPEECH MODEL
+WhisperSmallDescription|Lower download size and resource use for less powerful computers.
+WhisperMediumDescription|Balanced local model for systems below the recommended profile.
+WhisperTurboDescription|Recommended default and the model used by the current Windows application.
+WhisperLargeDescription|Maximum-quality profile for users who accept a larger download and slower inference.
+QwenFastDescription|Modern multilingual 4B model accelerated locally through Vulkan.
+QwenQualityDescription|Higher-quality multilingual 9B model for modern discrete GPUs.
 Translation|TRANSLATION
 History|HISTORY
 None|none
@@ -62,6 +68,7 @@ GroqAvailability|Cloud speech · availability follows your Groq account
 CloudflareAvailability|Cloud speech · availability follows your Cloudflare account
 AzureSpeechAvailability|Cloud speech · availability follows your Azure account
 DeepgramAvailability|Cloud speech · availability follows your Deepgram account
+CustomProvider|Custom endpoint
 CustomEndpoint|Any OpenAI-compatible address · HTTPS only
 NothingCanTranscribe|Nothing can transcribe right now
 NothingCanTranscribeTextLeaves|Nothing can transcribe · text leaves this device for {text}
@@ -122,7 +129,7 @@ SwitchOff|Switched off
 InputServiceNotReady|Input service is not ready yet.
 ShortcutChangeBusy|Wait for the current shortcut change to finish.
 CouldNotApplyShortcuts|Could not apply shortcuts: {error}
-ShortcutAlreadyInUse|Windows or another application is already using this shortcut. Choose another.
+ShortcutAlreadyInUse|Shortcut already in use. Choose another.
 FinishActiveDictation|Finish the active dictation before changing shortcuts.
 ShortcutRejected|This shortcut was not accepted. Choose another.
 ModelDownloadResume|A model is downloading. It resumes if it is interrupted.
