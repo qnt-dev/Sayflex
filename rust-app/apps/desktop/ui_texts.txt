@@ -122,6 +122,9 @@ SwitchOff|Switched off
 InputServiceNotReady|Input service is not ready yet.
 ShortcutChangeBusy|Wait for the current shortcut change to finish.
 CouldNotApplyShortcuts|Could not apply shortcuts: {error}
+ShortcutAlreadyInUse|Windows or another application is already using this shortcut. Choose another.
+FinishActiveDictation|Finish the active dictation before changing shortcuts.
+ShortcutRejected|This shortcut was not accepted. Choose another.
 ModelDownloadResume|A model is downloading. It resumes if it is interrupted.
 TranslationRouteNotReady|Translation is on, but no text route is ready yet.
 LayoutConversionUnavailable|No RU/EN layout conversion is available.

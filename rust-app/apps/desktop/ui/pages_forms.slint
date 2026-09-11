@@ -326,10 +326,8 @@ export component HotkeysPage inherits VerticalLayout {
                         toggled(next) => { root.toggle-row(index, next); }
                     }
 
-                    // The combination itself is fixed in this build. The button says
-                    // so rather than being absent, because a page that silently omits
-                    // the thing its design promised is a page that has been quietly
-                    // reduced.
+                    // Capture belongs to the row, so a registration failure can name
+                    // the exact shortcut and still leave Change available as recovery.
                     RowAction {
                         label: @tr("Change");
                         enabled: row.locked-reason == "";

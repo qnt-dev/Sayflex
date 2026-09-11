@@ -27,10 +27,10 @@ use rust_app_core::{
 };
 use rust_protocol::{
     BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, DictationLanguage,
-    HistoryEntry, HotkeyAction, HotkeyBindings, HotkeyConfiguration, InputHostCommand,
-    InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId, SpeechOutputMode,
-    SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript,
-    TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationHistoryEntry,
+    HistoryEntry, HotkeyAction, HotkeyBindings, HotkeyConfiguration, HotkeyRejection,
+    InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION, RequestId, SessionId,
+    SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot, TextActionIntent,
+    Transcript, TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationHistoryEntry,
     TranslationLanguage, TranslationLanguagePolicy, TranslationModelSummary,
     TranslationProviderEntry, TranslationProviderStatus, TranslationResult, TranslationTier,
     TranslationWorkerCommand, TranslationWorkerEvent,
@@ -393,6 +393,7 @@ struct AppState {
     input_ready: bool,
     hotkeys: HotkeyBindings,
     pending_hotkeys: Option<(RequestId, HotkeyBindings)>,
+    hotkey_error: Option<(HotkeyAction, HotkeyRejection)>,
     input_paused: bool,
     /// The speech process has completed its protocol handshake. This is
     /// deliberately separate from `speech_ready`: a cloud-first route can
@@ -507,6 +508,7 @@ impl AppState {
             input_ready: false,
             hotkeys: saved_settings.hotkeys.clone(),
             pending_hotkeys: None,
+            hotkey_error: None,
             input_paused: false,
             speech_worker_ready: false,
             speech_ready: false,
@@ -1752,16 +1754,24 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
         }
         InputHostEvent::HotkeysRejected {
             operation_id,
+            action,
+            reason,
             message,
-            ..
         } => {
             let rejected = {
                 let mut state = state.borrow_mut();
-                reject_hotkeys_if_pending(&mut state, operation_id)
+                reject_hotkeys_if_pending(&mut state, operation_id, action, reason)
             };
             if rejected {
                 sync_action_settings(settings, state);
-                set_status_problem(settings, &message);
+                let locale = active_locale(state.borrow().ui_locale);
+                set_status_problem(
+                    settings,
+                    settings_view::hotkey_rejection_detail(locale, reason),
+                );
+                rust_app_core::diagnostics::log_line(&format!(
+                    "hotkeys action={action:?} result=rejected reason={reason:?} detail={message}"
+                ));
             }
         }
         InputHostEvent::PauseChanged { paused } => {
@@ -2293,19 +2303,26 @@ fn commit_hotkeys_if_pending(
         return false;
     }
     state.pending_hotkeys = None;
+    state.hotkey_error = None;
     state.hotkeys = bindings;
     state.layout_enabled = state.hotkeys.binding(HotkeyAction::CorrectLayout).enabled;
     state.translation_enabled = state.hotkeys.binding(HotkeyAction::Translate).enabled;
     true
 }
 
-fn reject_hotkeys_if_pending(state: &mut AppState, operation_id: RequestId) -> bool {
+fn reject_hotkeys_if_pending(
+    state: &mut AppState,
+    operation_id: RequestId,
+    action: Option<HotkeyAction>,
+    reason: HotkeyRejection,
+) -> bool {
     let matches = state
         .pending_hotkeys
         .as_ref()
         .is_some_and(|(pending, _)| *pending == operation_id);
     if matches {
         state.pending_hotkeys = None;
+        state.hotkey_error = action.map(|action| (action, reason));
     }
     matches
 }
@@ -4486,7 +4503,7 @@ mod provider_path_readiness_tests {
 
 #[cfg(test)]
 mod hotkey_ack_tests {
-    use rust_protocol::{HotkeyAction, HotkeySpec, RequestId, SpeechOutputMode};
+    use rust_protocol::{HotkeyAction, HotkeyRejection, HotkeySpec, RequestId, SpeechOutputMode};
 
     use super::{
         AppState, SavedSettings, SpeechBackend, commit_hotkeys_if_pending,
@@ -4511,9 +4528,18 @@ mod hotkey_ack_tests {
         let operation_id = RequestId::new();
         state.pending_hotkeys = Some((operation_id, proposed));
 
-        assert!(reject_hotkeys_if_pending(&mut state, operation_id));
+        assert!(reject_hotkeys_if_pending(
+            &mut state,
+            operation_id,
+            Some(HotkeyAction::Translate),
+            HotkeyRejection::RegistrationFailed,
+        ));
         assert_eq!(state.hotkeys, committed);
         assert!(state.pending_hotkeys.is_none());
+        assert_eq!(
+            state.hotkey_error,
+            Some((HotkeyAction::Translate, HotkeyRejection::RegistrationFailed))
+        );
     }
 
     #[test]
@@ -4535,6 +4561,7 @@ mod hotkey_ack_tests {
             proposed.clone()
         ));
         assert_eq!(state.hotkeys, proposed);
+        assert!(state.hotkey_error.is_none());
     }
 }
 

@@ -84,7 +84,16 @@ msgid "Wait for the current shortcut change to finish."
 msgstr "Attendez la fin de la modification actuelle des raccourcis."
 
 msgid "Could not apply shortcuts: {error}"
-msgstr "Impossible d’appliquer les raccourcis : {error}"
+msgstr "Impossible d’appliquer les raccourcis : {error}"
+
+msgid "Windows or another application is already using this shortcut. Choose another."
+msgstr "Windows ou une autre application utilise déjà ce raccourci. Choisissez-en un autre."
+
+msgid "Finish the active dictation before changing shortcuts."
+msgstr "Terminez la dictée en cours avant de modifier les raccourcis."
+
+msgid "This shortcut was not accepted. Choose another."
+msgstr "Ce raccourci n’a pas été accepté. Choisissez-en un autre."
 
 msgid "A model is downloading. It resumes if it is interrupted."
 msgstr "Un modèle est en cours de téléchargement. Il reprendra après une interruption."

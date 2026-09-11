@@ -86,6 +86,15 @@ msgstr "Aguarde a conclusão da alteração atual dos atalhos."
 msgid "Could not apply shortcuts: {error}"
 msgstr "Não foi possível aplicar os atalhos: {error}"
 
+msgid "Windows or another application is already using this shortcut. Choose another."
+msgstr "O Windows ou outro aplicativo já usa este atalho. Escolha outro."
+
+msgid "Finish the active dictation before changing shortcuts."
+msgstr "Conclua o ditado ativo antes de alterar os atalhos."
+
+msgid "This shortcut was not accepted. Choose another."
+msgstr "Este atalho não foi aceito. Escolha outro."
+
 msgid "A model is downloading. It resumes if it is interrupted."
 msgstr "Um modelo está sendo baixado. O download será retomado se for interrompido."
 

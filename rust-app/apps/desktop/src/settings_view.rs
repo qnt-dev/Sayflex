@@ -16,7 +16,7 @@ use rust_app_core::{
 };
 use rust_protocol::{
     CompanionRendererCommand, DictationLanguage, HistoryEntry, HotkeyAction, HotkeyBindings,
-    HotkeyConfiguration, HotkeyModifiers, HotkeySpec, InputHostCommand, RequestId,
+    HotkeyConfiguration, HotkeyModifiers, HotkeyRejection, HotkeySpec, InputHostCommand, RequestId,
     SpeechOutputMode, SpeechWorkerCommand, TargetSnapshot, TranslationLanguage,
     TranslationLanguagePolicy, TranslationWorkerCommand,
 };
@@ -369,6 +369,7 @@ pub(crate) fn sync_action_settings(
     // ── Hotkeys ──
     settings.set_hotkey_rows(ModelRc::new(VecModel::from(hotkey_rows(&state))));
     settings.set_hotkeys_summary(hotkeys_summary(&state).into());
+    settings.set_hotkeys_summary_signal(state.hotkey_error.is_some());
     settings.set_ui_locale(state.ui_locale.code().into());
     settings.set_ui_locale_label(
         if state.ui_locale == UiLocale::System {
@@ -468,7 +469,13 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         .into_iter()
         .map(|action| {
             let binding = *state.hotkeys.binding(action);
-            let (row_tone, row_state) = if action == HotkeyAction::PauseResume {
+            let rejection = state
+                .hotkey_error
+                .filter(|(rejected_action, _)| *rejected_action == action)
+                .map(|(_, reason)| reason);
+            let (row_tone, row_state) = if rejection.is_some() {
+                (tone::REFUSED, text(locale, UiText::Unavailable))
+            } else if action == HotkeyAction::PauseResume {
                 if state.input_paused {
                     (tone::ACTIVE, text(locale, UiText::Disabled))
                 } else {
@@ -477,7 +484,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
             } else {
                 held(binding.enabled)
             };
-            let (name, detail) = match action {
+            let (name, normal_detail) = match action {
                 HotkeyAction::Dictate => (
                     text(locale, UiText::Dictation),
                     text(locale, UiText::WhateverYouSpoke),
@@ -507,6 +514,9 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                     text(locale, UiText::AlwaysAvailable),
                 ),
             };
+            let detail = rejection
+                .map(|reason| hotkey_rejection_detail(locale, reason))
+                .unwrap_or(normal_detail);
             HotkeyRow {
                 action: hotkey_action_key(action).into(),
                 keys: format_hotkey(binding.spec).into(),
@@ -556,11 +566,26 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         .collect()
 }
 
+pub(crate) fn hotkey_rejection_detail(locale: UiLocale, reason: HotkeyRejection) -> &'static str {
+    match reason {
+        HotkeyRejection::RegistrationFailed => text(locale, UiText::ShortcutAlreadyInUse),
+        HotkeyRejection::Busy => text(locale, UiText::FinishActiveDictation),
+        HotkeyRejection::Invalid | HotkeyRejection::Duplicate => {
+            text(locale, UiText::ShortcutRejected)
+        }
+    }
+}
+
 fn hotkeys_summary(state: &AppState) -> String {
     let locale = active_locale(state.ui_locale);
     let enabled = HotkeyAction::ALL
         .into_iter()
-        .filter(|action| state.hotkeys.binding(*action).enabled)
+        .filter(|action| {
+            state.hotkeys.binding(*action).enabled
+                && !state
+                    .hotkey_error
+                    .is_some_and(|(rejected_action, _)| rejected_action == *action)
+        })
         .count();
     if state.input_paused {
         render(
@@ -641,6 +666,7 @@ fn submit_hotkey_bindings(
         return false;
     }
     state.borrow_mut().pending_hotkeys = Some((operation_id, bindings));
+    state.borrow_mut().hotkey_error = None;
     sync_action_settings(settings, state);
     true
 }
@@ -2735,10 +2761,12 @@ pub(crate) fn precreate_action_windows(
 
 #[cfg(test)]
 mod hotkey_capture_tests {
-    use rust_protocol::HotkeyAction;
+    use rust_protocol::{HotkeyAction, HotkeyRejection, SpeechOutputMode};
     use slint::winit_030::winit::keyboard::KeyCode;
 
-    use super::{hotkey_action_at, virtual_key_for_code};
+    use crate::{AppState, SavedSettings, SpeechBackend, settings_projection::tone};
+
+    use super::{hotkey_action_at, hotkey_rows, hotkeys_summary, virtual_key_for_code};
 
     #[test]
     fn every_hotkey_row_has_a_stable_typed_action() {
@@ -2757,5 +2785,27 @@ mod hotkey_capture_tests {
         assert_eq!(virtual_key_for_code(KeyCode::Space), Some(0x20));
         assert_eq!(virtual_key_for_code(KeyCode::F12), Some(0x7B));
         assert_eq!(virtual_key_for_code(KeyCode::AudioVolumeUp), None);
+    }
+
+    #[test]
+    fn a_windows_registration_failure_is_visible_on_the_rejected_row() {
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        );
+        state.hotkey_error = Some((
+            HotkeyAction::PauseResume,
+            HotkeyRejection::RegistrationFailed,
+        ));
+
+        let rows = hotkey_rows(&state);
+        let row = &rows[4];
+        assert_eq!(row.tone, tone::REFUSED);
+        assert_eq!(row.state, "Unavailable");
+        assert!(row.detail.contains("already using"));
+        assert!(row.locked_reason.is_empty());
+        assert_eq!(hotkeys_summary(&state), "3 of 5 shortcuts active");
     }
 }

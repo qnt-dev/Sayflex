@@ -86,6 +86,15 @@ msgstr "Дочекайтеся завершення поточної зміни 
 msgid "Could not apply shortcuts: {error}"
 msgstr "Не вдалося застосувати сполучення клавіш: {error}"
 
+msgid "Windows or another application is already using this shortcut. Choose another."
+msgstr "Windows або інша програма вже використовує це сполучення. Виберіть інше."
+
+msgid "Finish the active dictation before changing shortcuts."
+msgstr "Завершіть поточне диктування перед зміною сполучень клавіш."
+
+msgid "This shortcut was not accepted. Choose another."
+msgstr "Це сполучення не прийнято. Виберіть інше."
+
 msgid "A model is downloading. It resumes if it is interrupted."
 msgstr "Модель завантажується. Після переривання завантаження продовжиться."
 

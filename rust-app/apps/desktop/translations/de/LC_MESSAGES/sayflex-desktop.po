@@ -86,6 +86,15 @@ msgstr "Warten Sie, bis die aktuelle Tastenkürzeländerung abgeschlossen ist."
 msgid "Could not apply shortcuts: {error}"
 msgstr "Tastenkürzel konnten nicht angewendet werden: {error}"
 
+msgid "Windows or another application is already using this shortcut. Choose another."
+msgstr "Windows oder eine andere Anwendung verwendet dieses Tastenkürzel bereits. Wählen Sie ein anderes."
+
+msgid "Finish the active dictation before changing shortcuts."
+msgstr "Beenden Sie das aktive Diktat, bevor Sie Tastenkürzel ändern."
+
+msgid "This shortcut was not accepted. Choose another."
+msgstr "Dieses Tastenkürzel wurde nicht akzeptiert. Wählen Sie ein anderes."
+
 msgid "A model is downloading. It resumes if it is interrupted."
 msgstr "Ein Modell wird heruntergeladen. Nach einer Unterbrechung wird der Download fortgesetzt."
 

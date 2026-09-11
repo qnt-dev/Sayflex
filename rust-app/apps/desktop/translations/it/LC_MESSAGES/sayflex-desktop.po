@@ -86,6 +86,15 @@ msgstr "Attendi il completamento della modifica corrente delle scorciatoie."
 msgid "Could not apply shortcuts: {error}"
 msgstr "Impossibile applicare le scorciatoie: {error}"
 
+msgid "Windows or another application is already using this shortcut. Choose another."
+msgstr "Windows o un'altra applicazione usa già questa scorciatoia. Scegline un'altra."
+
+msgid "Finish the active dictation before changing shortcuts."
+msgstr "Termina la dettatura attiva prima di modificare le scorciatoie."
+
+msgid "This shortcut was not accepted. Choose another."
+msgstr "Questa scorciatoia non è stata accettata. Scegline un'altra."
+
 msgid "A model is downloading. It resumes if it is interrupted."
 msgstr "È in corso il download di un modello. Riprenderà dopo un’interruzione."
 

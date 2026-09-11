@@ -86,6 +86,15 @@ msgstr "Espera a que termine el cambio actual de atajos."
 msgid "Could not apply shortcuts: {error}"
 msgstr "No se pudieron aplicar los atajos: {error}"
 
+msgid "Windows or another application is already using this shortcut. Choose another."
+msgstr "Windows u otra aplicación ya usa este atajo. Elige otro."
+
+msgid "Finish the active dictation before changing shortcuts."
+msgstr "Finaliza el dictado activo antes de cambiar los atajos."
+
+msgid "This shortcut was not accepted. Choose another."
+msgstr "Este atajo no ha sido aceptado. Elige otro."
+
 msgid "A model is downloading. It resumes if it is interrupted."
 msgstr "Se está descargando un modelo. La descarga se reanudará si se interrumpe."
 
