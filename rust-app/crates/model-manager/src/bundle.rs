@@ -9,7 +9,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{ArtifactFetcher, DownloadProgress, InstallPhase, ModelInstallError};
+use crate::{
+    ArtifactFetcher, DownloadProgress, InstallPhase, ModelInstallError, RemovalReceipt,
+    installer::{ensure_direct_child, remove_path_accounted, validate_direct_child_name},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleArtifact {
@@ -27,7 +30,7 @@ pub struct BundleDescriptor {
 
 impl BundleDescriptor {
     pub fn validate(&self) -> Result<(), ModelInstallError> {
-        if self.id.trim().is_empty() || self.artifacts.is_empty() {
+        if validate_direct_child_name(&self.id).is_err() || self.artifacts.is_empty() {
             return Err(ModelInstallError::InvalidBundle(self.id.clone()));
         }
         let mut paths = BTreeMap::new();
@@ -165,6 +168,27 @@ impl BundleInstaller {
     pub fn remove(&self, bundle: &BundleDescriptor) -> Result<(), ModelInstallError> {
         bundle.validate()?;
         remove_directory_if_present(&self.bundle_path(bundle))
+    }
+
+    /// Removes the installed bundle together with exact staging and backup
+    /// siblings left by an interrupted atomic install.
+    pub fn remove_complete(
+        &self,
+        bundle: &BundleDescriptor,
+    ) -> Result<RemovalReceipt, ModelInstallError> {
+        bundle.validate()?;
+        let targets = [
+            self.bundle_path(bundle),
+            self.root.join(format!(".{}.download", bundle.id)),
+            self.root.join(format!("{}.previous", bundle.id)),
+        ];
+        let mut removed = RemovalReceipt::default();
+        for target in targets {
+            ensure_direct_child(&self.root, &target)
+                .map_err(|()| ModelInstallError::InvalidBundle(bundle.id.clone()))?;
+            removed.add(remove_path_accounted(&target)?);
+        }
+        Ok(removed)
     }
 }
 
@@ -393,5 +417,41 @@ mod tests {
         let mut invalid = bundle();
         invalid.artifacts[0].relative_path = "../escape.bin".to_owned();
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_bundle_id_path_traversal() {
+        let mut invalid = bundle();
+        invalid.id = "../escape".to_owned();
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn complete_removal_deletes_final_partial_and_backup_but_not_a_sibling() {
+        let directory = tempdir().unwrap();
+        let installer = BundleInstaller::new(directory.path().to_owned());
+        let bundle = bundle();
+        let final_path = installer.bundle_path(&bundle);
+        let partial = directory.path().join(".pair-tiny.download");
+        let previous = directory.path().join("pair-tiny.previous");
+        let unrelated = directory.path().join("keep-me");
+
+        fs::create_dir_all(&final_path).unwrap();
+        fs::write(final_path.join("model.bin"), b"hello").unwrap();
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(partial.join("partial.bin"), b"abc").unwrap();
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("old.bin"), b"1234").unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(unrelated.join("sentinel"), b"untouched").unwrap();
+
+        let removed = installer.remove_complete(&bundle).unwrap();
+
+        assert_eq!(removed.removed_files, 3);
+        assert_eq!(removed.removed_bytes, 12);
+        assert!(!final_path.exists());
+        assert!(!partial.exists());
+        assert!(!previous.exists());
+        assert_eq!(fs::read(unrelated.join("sentinel")).unwrap(), b"untouched");
     }
 }

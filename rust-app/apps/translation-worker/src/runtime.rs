@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rust_model_manager::{ArtifactFetcher, DownloadProgress, InstallPhase};
+use rust_model_manager::{ArtifactFetcher, DownloadProgress, InstallPhase, RemovalReceipt};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
@@ -112,6 +112,40 @@ impl LlamaRuntimeManager {
         Ok(self.runtime_path())
     }
 
+    /// Removes the shared local-translation runtime and every exact temporary
+    /// sibling owned by its installer. Callers must drop `TranslationEngine`
+    /// first so `llama-server.exe` no longer has these files open.
+    pub fn remove(&self) -> Result<RemovalReceipt> {
+        let targets = [
+            self.runtime_path(),
+            self.root.join(format!("{RUNTIME_ID}.staging")),
+            self.root.join(format!("{RUNTIME_ID}.previous")),
+            self.root.join(RUNTIME_ARCHIVE),
+            append_suffix(&self.root.join(RUNTIME_ARCHIVE), ".download"),
+            append_suffix(&self.root.join(RUNTIME_ARCHIVE), ".previous"),
+        ];
+        let mut removed = RemovalReceipt::default();
+        for target in targets {
+            if target.parent() != Some(self.root.as_path()) {
+                bail!("runtime removal target escaped its configured root");
+            }
+            let metadata = match fs::symlink_metadata(&target) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let counted = measure_runtime_path(&target, &metadata)?;
+            if metadata.is_dir() {
+                fs::remove_dir_all(&target)?;
+            } else {
+                fs::remove_file(&target)?;
+            }
+            removed.removed_files = removed.removed_files.saturating_add(counted.removed_files);
+            removed.removed_bytes = removed.removed_bytes.saturating_add(counted.removed_bytes);
+        }
+        Ok(removed)
+    }
+
     fn extract_atomically(&self, archive_path: &Path) -> Result<()> {
         let final_path = self.runtime_path();
         let staging = self.root.join(format!("{RUNTIME_ID}.staging"));
@@ -169,6 +203,32 @@ impl LlamaRuntimeManager {
         remove_directory_if_present(&previous)?;
         Ok(())
     }
+}
+
+fn measure_runtime_path(path: &Path, metadata: &fs::Metadata) -> Result<RemovalReceipt> {
+    if metadata.file_type().is_symlink() {
+        return Ok(RemovalReceipt {
+            removed_files: 1,
+            removed_bytes: 0,
+        });
+    }
+    if metadata.is_file() {
+        return Ok(RemovalReceipt {
+            removed_files: 1,
+            removed_bytes: metadata.len(),
+        });
+    }
+    let mut result = RemovalReceipt::default();
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let child = fs::symlink_metadata(entry.path())?;
+            let measured = measure_runtime_path(&entry.path(), &child)?;
+            result.removed_files = result.removed_files.saturating_add(measured.removed_files);
+            result.removed_bytes = result.removed_bytes.saturating_add(measured.removed_bytes);
+        }
+    }
+    Ok(result)
 }
 
 fn marker_matches(path: &Path) -> bool {
@@ -267,5 +327,47 @@ mod tests {
         .unwrap();
 
         assert!(manager.is_installed());
+    }
+
+    #[test]
+    fn remove_cleans_runtime_archive_and_interrupted_install_only() {
+        let root = tempdir().unwrap();
+        let manager = LlamaRuntimeManager::new(root.path().to_owned());
+        let runtime = manager.runtime_path();
+        let staging = root.path().join("llama-b10164-vulkan.staging");
+        let previous = root.path().join("llama-b10164-vulkan.previous");
+        let archive = root.path().join("llama-b10164-vulkan.zip");
+        let partial = root.path().join("llama-b10164-vulkan.zip.download");
+        let archive_previous = root.path().join("llama-b10164-vulkan.zip.previous");
+        let unrelated = root.path().join("another-runtime");
+
+        for (directory, bytes) in [
+            (&runtime, b"runtime".as_slice()),
+            (&staging, b"stage".as_slice()),
+            (&previous, b"old".as_slice()),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::write(directory.join("file"), bytes).unwrap();
+        }
+        std::fs::write(&archive, b"archive").unwrap();
+        std::fs::write(&partial, b"partial").unwrap();
+        std::fs::write(&archive_previous, b"previous").unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(unrelated.join("sentinel"), b"untouched").unwrap();
+
+        let removed = manager.remove().unwrap();
+
+        assert_eq!(removed.removed_files, 6);
+        assert_eq!(removed.removed_bytes, 37);
+        assert!(!runtime.exists());
+        assert!(!staging.exists());
+        assert!(!previous.exists());
+        assert!(!archive.exists());
+        assert!(!partial.exists());
+        assert!(!archive_previous.exists());
+        assert_eq!(
+            std::fs::read(unrelated.join("sentinel")).unwrap(),
+            b"untouched"
+        );
     }
 }

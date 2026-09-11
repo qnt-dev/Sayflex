@@ -8,4 +8,5 @@ pub use catalog::{BuiltInCatalog, ModelArtifact, ModelCatalog, ModelDescriptor, 
 pub use http::{CancelToken, HttpFetcher};
 pub use installer::{
     ArtifactFetcher, DownloadProgress, InstallPhase, ModelInstallError, ModelInstaller,
+    RemovalReceipt,
 };

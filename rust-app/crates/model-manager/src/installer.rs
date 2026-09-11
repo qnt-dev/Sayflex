@@ -11,6 +11,25 @@ use thiserror::Error;
 
 use crate::ModelDescriptor;
 
+/// Files removed from one catalog-owned model installation.
+///
+/// `removed_bytes` is the sum of the logical lengths of regular files that no
+/// longer exist at their SayFlex-owned paths. It is intentionally not named
+/// `freed_bytes`: hard links, compression and filesystem allocation mean only
+/// the filesystem can know the physical space reclaimed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RemovalReceipt {
+    pub removed_files: u64,
+    pub removed_bytes: u64,
+}
+
+impl RemovalReceipt {
+    pub(crate) fn add(&mut self, other: Self) {
+        self.removed_files = self.removed_files.saturating_add(other.removed_files);
+        self.removed_bytes = self.removed_bytes.saturating_add(other.removed_bytes);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPhase {
     Downloading,
@@ -146,6 +165,91 @@ impl ModelInstaller {
         }
         result
     }
+
+    /// Removes every on-disk artifact owned by this model descriptor.
+    ///
+    /// Callers must unload the engine before invoking this method. Only names
+    /// derived from the validated catalog descriptor are accepted; no path is
+    /// received from IPC or followed outside `root`.
+    pub fn remove(&self, model: &ModelDescriptor) -> Result<RemovalReceipt, ModelInstallError> {
+        validate_direct_child_name(&model.artifact.file_name)
+            .map_err(|()| ModelInstallError::InvalidModel(model.id.clone()))?;
+        let final_path = self.model_path(model);
+        let receipt = verification_receipt_path(&final_path);
+        let targets = [
+            final_path.clone(),
+            receipt.clone(),
+            receipt.with_extension("tmp"),
+            final_path.with_extension("download"),
+            final_path.with_extension("previous"),
+        ];
+        let mut removed = RemovalReceipt::default();
+        for target in targets {
+            ensure_direct_child(&self.root, &target)
+                .map_err(|()| ModelInstallError::InvalidModel(model.id.clone()))?;
+            removed.add(remove_path_accounted(&target)?);
+        }
+        Ok(removed)
+    }
+}
+
+pub(crate) fn validate_direct_child_name(name: &str) -> Result<(), ()> {
+    let mut components = Path::new(name).components();
+    if matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+    {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+pub(crate) fn ensure_direct_child(root: &Path, target: &Path) -> Result<(), ()> {
+    (target.parent() == Some(root) && target.file_name().is_some())
+        .then_some(())
+        .ok_or(())
+}
+
+pub(crate) fn remove_path_accounted(path: &Path) -> Result<RemovalReceipt, ModelInstallError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(RemovalReceipt::default());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let removed = measure_path(path, &metadata)?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(removed)
+}
+
+fn measure_path(path: &Path, metadata: &fs::Metadata) -> Result<RemovalReceipt, ModelInstallError> {
+    if metadata.file_type().is_symlink() {
+        return Ok(RemovalReceipt {
+            removed_files: 1,
+            removed_bytes: 0,
+        });
+    }
+    if metadata.is_file() {
+        return Ok(RemovalReceipt {
+            removed_files: 1,
+            removed_bytes: metadata.len(),
+        });
+    }
+    if !metadata.is_dir() {
+        return Ok(RemovalReceipt::default());
+    }
+    let mut receipt = RemovalReceipt::default();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child_metadata = fs::symlink_metadata(entry.path())?;
+        receipt.add(measure_path(&entry.path(), &child_metadata)?);
+    }
+    Ok(receipt)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -284,6 +388,8 @@ pub enum ModelInstallError {
     VerificationReceipt(#[from] serde_json::Error),
     #[error("model bundle descriptor is invalid: {0}")]
     InvalidBundle(String),
+    #[error("model descriptor is invalid: {0}")]
+    InvalidModel(String),
 }
 
 #[cfg(test)]
@@ -423,5 +529,52 @@ mod tests {
             fs::read(installer.model_path(&model).with_extension("download")).unwrap(),
             b"hel"
         );
+    }
+
+    #[test]
+    fn remove_deletes_only_files_owned_by_the_model_descriptor() {
+        let directory = tempdir().unwrap();
+        let installer = ModelInstaller::new(directory.path().to_owned());
+        let model = model();
+        let final_path = installer.model_path(&model);
+        let receipt = super::verification_receipt_path(&final_path);
+        let receipt_temporary = receipt.with_extension("tmp");
+        let partial = final_path.with_extension("download");
+        let previous = final_path.with_extension("previous");
+        let unrelated = directory.path().join("keep-me.bin");
+
+        fs::write(&final_path, b"hello").unwrap();
+        fs::write(&receipt, b"four").unwrap();
+        fs::write(&receipt_temporary, b"tri").unwrap();
+        fs::write(&partial, b"tw").unwrap();
+        fs::write(&previous, b"1").unwrap();
+        fs::write(&unrelated, b"untouched").unwrap();
+
+        let removed = installer.remove(&model).unwrap();
+
+        assert_eq!(removed.removed_files, 5);
+        assert_eq!(removed.removed_bytes, 15);
+        assert!(!final_path.exists());
+        assert!(!receipt.exists());
+        assert!(!receipt_temporary.exists());
+        assert!(!partial.exists());
+        assert!(!previous.exists());
+        assert_eq!(fs::read(unrelated).unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn remove_rejects_a_model_file_name_that_escapes_the_root() {
+        let directory = tempdir().unwrap();
+        let installer = ModelInstaller::new(directory.path().join("models"));
+        let mut model = model();
+        model.artifact.file_name = "../keep-me.bin".to_owned();
+        let sentinel = directory.path().join("keep-me.bin");
+        fs::write(&sentinel, b"untouched").unwrap();
+
+        assert!(matches!(
+            installer.remove(&model),
+            Err(ModelInstallError::InvalidModel(_))
+        ));
+        assert_eq!(fs::read(sentinel).unwrap(), b"untouched");
     }
 }
