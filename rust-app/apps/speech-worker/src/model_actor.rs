@@ -19,9 +19,9 @@ use std::{
 use anyhow::{Context, Result};
 use rust_model_manager::{
     CancelToken, HttpFetcher, InstallPhase, ModelCatalog, ModelDescriptor, ModelInstallError,
-    ModelInstaller,
+    ModelInstaller, ModelTier,
 };
-use rust_protocol::SpeechWorkerEvent;
+use rust_protocol::{ModelSummary, SpeechWorkerEvent};
 
 use crate::inference::InferenceHandle;
 
@@ -35,6 +35,10 @@ pub enum ModelCommand {
     /// Cancels any install/load ahead of this command, then releases the
     /// currently prepared model from the inference actor.
     Deactivate,
+    Remove {
+        catalog_id: String,
+        selected_model_id: String,
+    },
     Shutdown,
 }
 
@@ -72,6 +76,14 @@ impl ModelActor {
     pub fn deactivate(&self) {
         self.cancel();
         self.send(ModelCommand::Deactivate);
+    }
+
+    pub fn remove(&self, catalog_id: String, selected_model_id: String) {
+        self.cancel();
+        self.send(ModelCommand::Remove {
+            catalog_id,
+            selected_model_id,
+        });
     }
 }
 
@@ -131,6 +143,53 @@ pub fn start(
                         }
                     }
                     ModelCommand::Deactivate => inference.unload_model(),
+                    ModelCommand::Remove {
+                        catalog_id,
+                        selected_model_id,
+                    } => {
+                        if inference.has_active_session() {
+                            let _ = events.send(SpeechWorkerEvent::Failed {
+                                session_id: None,
+                                code: "model_busy".to_owned(),
+                                message:
+                                    "Finish the active dictation before removing its local model."
+                                        .to_owned(),
+                                retryable: true,
+                            });
+                            continue;
+                        }
+                        let result = (|| -> Result<_> {
+                            let model = catalog
+                                .find(&catalog_id)
+                                .with_context(|| format!("unknown model: {catalog_id}"))?;
+                            inference
+                                .unload_model_if_and_wait(&catalog_id)
+                                .map_err(anyhow::Error::msg)?;
+                            let removed = installer.remove(model)?;
+                            Ok(removed)
+                        })();
+                        match result {
+                            Ok(removed) => {
+                                let _ = events.send(SpeechWorkerEvent::ModelRemoved {
+                                    catalog_id,
+                                    removed_bytes: removed.removed_bytes,
+                                    models: model_summaries(
+                                        &catalog,
+                                        &installer,
+                                        &selected_model_id,
+                                    ),
+                                });
+                            }
+                            Err(error) => {
+                                let _ = events.send(SpeechWorkerEvent::Failed {
+                                    session_id: None,
+                                    code: "model_remove".to_owned(),
+                                    message: format!("{error:#}"),
+                                    retryable: true,
+                                });
+                            }
+                        }
+                    }
                     ModelCommand::Shutdown => break,
                 }
             }
@@ -140,6 +199,27 @@ pub fn start(
         cancellation,
         cancels,
     })
+}
+
+pub fn model_summaries(
+    catalog: &ModelCatalog,
+    installer: &ModelInstaller,
+    selected: &str,
+) -> Vec<ModelSummary> {
+    catalog
+        .models
+        .iter()
+        .map(|model| ModelSummary {
+            catalog_id: model.id.clone(),
+            display_name: model.display_name.clone(),
+            description: model.description.clone(),
+            size_bytes: model.artifact.bytes,
+            installed: installer.is_installed(model).unwrap_or(false),
+            selected: model.id == selected,
+            recommended: model.tier == ModelTier::Recommended,
+            supports_speech_translation: model.supports_speech_translation,
+        })
+        .collect()
 }
 
 fn ensure_model(

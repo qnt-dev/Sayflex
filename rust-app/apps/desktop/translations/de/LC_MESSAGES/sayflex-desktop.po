@@ -4,239 +4,14 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-msgid "Input features paused. Use the pause shortcut again to resume."
-msgstr "Eingabefunktionen pausiert. Drücken Sie das Pausenkürzel erneut, um fortzufahren."
-msgid "Input features resumed."
-msgstr "Eingabefunktionen fortgesetzt."
-msgid "Speech service is still starting."
-msgstr "Der Sprachdienst startet noch."
-msgid "Speech model is still being prepared."
-msgstr "Das Sprachmodell wird noch vorbereitet."
-msgid "Dictation {session} is still processing; it will be inserted here when ready."
-msgstr "Diktat {session} wird noch verarbeitet und anschließend hier eingefügt."
-msgid "Inserted {delivery} through the target adapter in {milliseconds} ms"
-msgstr "{delivery} über den Zieladapter in {milliseconds} ms eingefügt"
-msgid "Inserted {delivery} after the target read the private transaction in {milliseconds} ms"
-msgstr "{delivery} eingefügt, nachdem das Ziel die private Transaktion in {milliseconds} ms gelesen hat"
-msgid "Verified insertion {delivery} in {milliseconds} ms"
-msgstr "Einfügen {delivery} in {milliseconds} ms bestätigt"
-msgid "Paste dispatched {delivery} without target verification in {milliseconds} ms"
-msgstr "Einfügen {delivery} ohne Zielbestätigung in {milliseconds} ms gesendet"
-msgid "Input worker protocol mismatch. Reinstall the complete application."
-msgstr "Das Protokoll des Eingabe-Workers stimmt nicht überein. Installieren Sie die Anwendung vollständig neu."
-msgid "Speech worker protocol mismatch. Reinstall the complete application."
-msgstr "Das Protokoll des Sprach-Workers stimmt nicht überein. Installieren Sie die Anwendung vollständig neu."
-msgid "Cloud speech is ready. The local speech engine is disabled."
-msgstr "Cloud-Spracherkennung ist bereit. Die lokale Sprach-Engine ist deaktiviert."
-msgid "The speech backend was inconsistent; checking {backend} instead."
-msgstr "Das Sprach-Backend war inkonsistent; stattdessen wird {backend} geprüft."
-msgid "Speech backend verification failed: {error}"
-msgstr "Prüfung des Sprach-Backends fehlgeschlagen: {error}"
-msgid "No compatible speech backend is available: {error}"
-msgstr "Kein kompatibles Sprach-Backend verfügbar: {error}"
-msgid "Cloud translation is starting. The local model is disabled."
-msgstr "Cloud-Übersetzung startet. Das lokale Modell ist deaktiviert."
-msgid "Cloud translation ready. The local model is disabled."
-msgstr "Cloud-Übersetzung bereit. Das lokale Modell ist deaktiviert."
-msgid "Translation model ready in {milliseconds} ms."
-msgstr "Übersetzungsmodell in {milliseconds} ms bereit."
-msgid "Ready · language direction is detected locally."
-msgstr "Bereit · Sprachrichtung wird lokal erkannt."
-msgid "Translating locally… {chunk}/{total}"
-msgstr "Lokale Übersetzung… {chunk}/{total}"
-msgid "Translating locally…"
-msgstr "Lokale Übersetzung…"
-msgid "Translation ready; waiting for the shortcut to be released."
-msgstr "Übersetzung bereit; das Loslassen des Kürzels wird abgewartet."
-msgid "Could not switch the interface language: {error}"
-msgstr "Oberflächensprache konnte nicht gewechselt werden: {error}"
-msgid "Speech backend initialization failed: {error}"
-msgstr "Start des Sprach-Backends fehlgeschlagen: {error}"
-msgid "Checking {backend} with the selected Whisper model…"
-msgstr "{backend} wird mit dem ausgewählten Whisper-Modell geprüft…"
-msgid "Speech backend could not be changed: {error}"
-msgstr "Sprach-Backend konnte nicht gewechselt werden: {error}"
-msgid "This model was not trained to translate. Use the selection translator instead."
-msgstr "Dieses Modell wurde nicht zum Übersetzen trainiert. Verwenden Sie den Auswahlübersetzer."
-msgid "A key is needed. To remove the one already stored, use Remove key."
-msgstr "Ein Schlüssel ist erforderlich. Den gespeicherten Schlüssel entfernen Sie mit „Schlüssel entfernen“."
-msgid "The key was not stored: {error}"
-msgstr "Der Schlüssel wurde nicht gespeichert: {error}"
-msgid "The transcription order could not be applied: {error}"
-msgstr "Die Transkriptionsreihenfolge konnte nicht angewendet werden: {error}"
+msgid "{backend} verified by warm-up. The preference above is where the search starts."
+msgstr "{backend} durch Aufwärmen verifiziert. Die obige Einstellung ist der Ausgangspunkt der Suche."
 
-msgid "Account"
-msgstr "Konto"
-
-msgid "Region"
-msgstr "Region"
-
-msgid "Endpoint"
-msgstr "Adresse"
-
-msgid "No translation provider is ready. Choose a local model or configure a service in Settings."
-msgstr "Kein Übersetzungsanbieter ist bereit. Wählen Sie ein lokales Modell oder richten Sie einen Dienst in den Einstellungen ein."
-
-msgid "Input service is not ready yet."
-msgstr "Der Eingabedienst ist noch nicht bereit."
-
-msgid "Wait for the current shortcut change to finish."
-msgstr "Warten Sie, bis die aktuelle Tastenkürzeländerung abgeschlossen ist."
-
-msgid "Could not apply shortcuts: {error}"
-msgstr "Tastenkürzel konnten nicht angewendet werden: {error}"
-
-msgid "Shortcut already in use. Choose another."
-msgstr "Tastenkürzel bereits belegt. Wählen Sie ein anderes."
-
-msgid "Finish the active dictation before changing shortcuts."
-msgstr "Beenden Sie das aktive Diktat, bevor Sie Tastenkürzel ändern."
-
-msgid "This shortcut was not accepted. Choose another."
-msgstr "Dieses Tastenkürzel wurde nicht akzeptiert. Wählen Sie ein anderes."
-
-msgid "A model is downloading. It resumes if it is interrupted."
-msgstr "Ein Modell wird heruntergeladen. Nach einer Unterbrechung wird der Download fortgesetzt."
-
-msgid "Translation is on, but no text route is ready yet."
-msgstr "Die Übersetzung ist aktiviert, aber noch kein Textweg ist bereit."
-
-msgid "No RU/EN layout conversion is available."
-msgstr "Die RU/EN-Tastaturumwandlung ist nicht verfügbar."
-
-msgid "That interface language is not available."
-msgstr "Diese Oberflächensprache ist nicht verfügbar."
-
-msgid "Checking backend"
-msgstr "Backend wird geprüft"
-
-msgid "That spoken language is not supported."
-msgstr "Diese gesprochene Sprache wird nicht unterstützt."
-
-msgid "Enter text to translate."
-msgstr "Geben Sie Text zum Übersetzen ein."
-
-msgid "The local translation model is still loading."
-msgstr "Das lokale Übersetzungsmodell wird noch geladen."
-
-msgid "Translating…"
-msgstr "Übersetzen…"
-
-msgid "Could not translate: {error}"
-msgstr "Übersetzung fehlgeschlagen: {error}"
-
-msgid "Copied to clipboard."
-msgstr "In die Zwischenablage kopiert."
-
-msgid "Direction will be detected again when you translate."
-msgstr "Die Richtung wird bei der nächsten Übersetzung neu erkannt."
-
-msgid "Worker error"
-msgstr "Worker-Fehler"
-
-msgid "Recovering worker"
-msgstr "Worker wird wiederhergestellt"
-
-msgid "Worker unavailable"
-msgstr "Worker nicht verfügbar"
-
-msgid "Worker mismatch"
-msgstr "Worker-Versionen stimmen nicht überein"
-
-msgid "Input ready"
-msgstr "Eingabe bereit"
-
-msgid "Shortcuts updated."
-msgstr "Tastenkürzel aktualisiert."
-
-msgid "Input worker is not ready."
-msgstr "Der Eingabe-Worker ist nicht bereit."
-
-msgid "Finishing the previous dictation…"
-msgstr "Vorheriges Diktat wird abgeschlossen…"
-
-msgid "Could not start recording: {error}"
-msgstr "Aufnahme konnte nicht gestartet werden: {error}"
-
-msgid "Listening…"
-msgstr "Hört zu…"
-
-msgid "Could not finish recording: {error}"
-msgstr "Aufnahme konnte nicht beendet werden: {error}"
-
-msgid "Processing locally…"
-msgstr "Lokale Verarbeitung…"
-
-msgid "Loading the latest transcript…"
-msgstr "Neueste Transkription wird geladen…"
-
-msgid "Reading selected text…"
-msgstr "Ausgewählter Text wird gelesen…"
-
-msgid "Translation ready, but {message}"
-msgstr "Übersetzung ist bereit, aber {message}"
-
-msgid "Selection: {message}"
-msgstr "Auswahl: {message}"
-
-msgid "Replacement was sent to the target."
-msgstr "Der Ersatz wurde an das Zielfenster gesendet."
-
-msgid "Translation copied to the clipboard."
-msgstr "Übersetzung in die Zwischenablage kopiert."
-
-msgid "Keyboard-layout correction is disabled."
-msgstr "Die Korrektur der Tastaturbelegung ist deaktiviert."
-
-msgid "All selected-text actions are disabled."
-msgstr "Alle Aktionen für ausgewählten Text sind deaktiviert."
-
-msgid "Translation is disabled in Actions."
-msgstr "Die Übersetzung ist unter Aktionen deaktiviert."
-
-msgid "Could not start translation: {error}"
-msgstr "Übersetzung konnte nicht gestartet werden: {error}"
-
-msgid "Preparing model"
-msgstr "Modell wird vorbereitet"
-
-msgid "Cloud speech ready"
-msgstr "Cloud-Spracherkennung bereit"
-
-msgid "Loading and warming the local speech engine…"
-msgstr "Lokale Sprach-Engine wird geladen und vorbereitet…"
-
-msgid "Installing {model}…"
-msgstr "{model} wird installiert…"
-
-msgid "Checking fallback"
-msgstr "Alternative wird geprüft"
-
-msgid "Speech model selected."
-msgstr "Sprachmodell ausgewählt."
-
-msgid "Transcript saved to history; target was lost."
-msgstr "Transkription im Verlauf gespeichert; Zielfenster wurde verloren."
-
-msgid "Transcribed by {provider}."
-msgstr "Transkribiert von {provider}."
-
-msgid "There is no transcript to insert yet."
-msgstr "Es gibt noch keine Transkription zum Einfügen."
-
-msgid "Downloading model… {percent}%"
-msgstr "Modell wird heruntergeladen… {percent}%"
-
-msgid "Downloading {model}: {percent}%"
-msgstr "{model} wird heruntergeladen: {percent}%"
-
-msgid "Translation cancelled."
-msgstr "Übersetzung abgebrochen."
+msgid "{code} on the selected backend; checking {backend} automatically."
+msgstr "Fehler {code} im ausgewählten Backend; {backend} wird automatisch geprüft."
 
 msgid "{code}: {message}"
 msgstr "{code}: {message}"
-msgid " anywhere in Windows to start one."
-msgstr " an einer beliebigen Stelle in Windows, um einen zu starten."
 
 msgid "{count} installed"
 msgstr "{count} installiert"
@@ -253,6 +28,9 @@ msgstr "{count} auf diesem Gerät beibehalten"
 msgid "{count} of 5 shortcuts active"
 msgstr "{count} von 5 Verknüpfungen aktiv"
 
+msgid "{field} is needed as well as the key."
+msgstr "Neben dem Schlüssel wird auch {field} benötigt."
+
 msgid "{language} · {seconds}s audio · {milliseconds}ms processing{source}"
 msgstr "{language} · {seconds} s Audio · {milliseconds} ms Verarbeitung{source}"
 
@@ -262,14 +40,53 @@ msgstr "{language} · {seconds} s Audio · {milliseconds} ms nach Loslassen{prep
 msgid "{name} · shown while recording"
 msgstr "{name} · wird während der Aufnahme angezeigt"
 
+msgid "{provider} did not accept the key."
+msgstr "{provider} hat den Schlüssel nicht akzeptiert."
+
+msgid "{provider} did not confirm the key."
+msgstr "{provider} hat den Schlüssel nicht bestätigt."
+
+msgid "{visual} · shown while recording"
+msgstr "{visual} · wird während der Aufnahme angezeigt"
+
 msgid "1 installed"
 msgstr "1 installiert"
+
+msgid "A key is needed. To remove the one already stored, use Remove key."
+msgstr "Ein Schlüssel ist erforderlich. Den gespeicherten Schlüssel entfernen Sie mit „Schlüssel entfernen“."
+
+msgid "A model is downloading. It resumes if it is interrupted."
+msgstr "Ein Modell wird heruntergeladen. Nach einer Unterbrechung wird der Download fortgesetzt."
+
+msgid "A point cloud that accelerates on voice onset"
+msgstr "Eine Punktwolke, die sich beim Einsetzen der Stimme beschleunigt"
+
+msgid "About"
+msgstr "Über"
+
+msgid "Account"
+msgstr "Konto"
+
+msgid "Act on selection"
+msgstr "Auswahl verarbeiten"
+
+msgid "ACTION"
+msgstr "AKTION"
 
 msgid "Add a key before making this the only provider"
 msgstr "Fügen Sie einen Schlüssel hinzu, bevor Sie diesen als einzigen Anbieter festlegen"
 
+msgid "Add and save this provider's key before making it the only route."
+msgstr "Fügen Sie den Schlüssel dieses Anbieters hinzu und speichern Sie ihn, bevor Sie ihn zur einzigen Route machen."
+
 msgid "Add key"
 msgstr "Schlüssel hinzufügen"
+
+msgid "All selected-text actions are disabled."
+msgstr "Alle Aktionen für ausgewählten Text sind deaktiviert."
+
+msgid "Allow the selection shortcut to translate text"
+msgstr "Erlaubt dem Tastenkürzel für die Auswahl, Text zu übersetzen"
 
 msgid "Already using the default"
 msgstr "Standard wird bereits verwendet"
@@ -279,9 +96,6 @@ msgstr "Immer fragen"
 
 msgid "Always available"
 msgstr "Immer verfügbar"
-
-msgid "Any modern GPU"
-msgstr "Jede moderne GPU"
 
 msgid "Any OpenAI-compatible address · HTTPS only"
 msgstr "Jede OpenAI-kompatible Adresse · Nur HTTPS"
@@ -325,6 +139,9 @@ msgstr "AUTO"
 msgid "Auto-detect"
 msgstr "Automatische Erkennung"
 
+msgid "Balanced local model for systems below the recommended profile."
+msgstr "Ausgewogenes lokales Modell für Systeme unterhalb des empfohlenen Profils."
+
 msgid "Best when you switch languages often"
 msgstr "Am besten geeignet, wenn Sie häufig die Sprache wechseln"
 
@@ -340,6 +157,9 @@ msgstr "Blaues Glas"
 msgid "Broadcast mic"
 msgstr "Mikrofon mit Wellen"
 
+msgid "Broadcast microphone colour updated for the next dictation."
+msgstr "Die Farbe des Sendemikrofons wurde für das nächste Diktat aktualisiert."
+
 msgid "Cancel"
 msgstr "Abbrechen"
 
@@ -349,8 +169,17 @@ msgstr "ABBRECHEN"
 msgid "Change"
 msgstr "Ändern"
 
-msgid "Choose Change, press a new key combination, then Save. It takes effect only after Windows accepts it."
-msgstr "Wählen Sie Ändern, drücken Sie die neue Kombination und speichern Sie. Sie gilt erst, wenn Windows sie akzeptiert."
+msgid "Changes the language of SayFlex menus and settings"
+msgstr "Ändert die Sprache der Menüs und Einstellungen von SayFlex"
+
+msgid "Checking {backend} with the selected Whisper model…"
+msgstr "{backend} wird mit dem ausgewählten Whisper-Modell geprüft…"
+
+msgid "Checking backend"
+msgstr "Backend wird geprüft"
+
+msgid "Checking fallback"
+msgstr "Alternative wird geprüft"
 
 msgid "checking…"
 msgstr "Wird geprüft…"
@@ -361,14 +190,23 @@ msgstr "Chinesisch (vereinfacht)"
 msgid "Chinese (Traditional)"
 msgstr "Chinesisch (traditionell)"
 
+msgid "Choose a local translation model or configure a text service in Settings first."
+msgstr "Wählen Sie zunächst ein lokales Übersetzungsmodell oder konfigurieren Sie einen Textdienst in den Einstellungen."
+
 msgid "Choose a translation model in Settings."
 msgstr "Wählen Sie in den Einstellungen ein Übersetzungsmodell aus."
+
+msgid "Choose Change, press a new key combination, then Save. It takes effect only after Windows accepts it."
+msgstr "Wählen Sie Ändern, drücken Sie die neue Kombination und speichern Sie. Sie gilt erst, wenn Windows sie akzeptiert."
 
 msgid "Chosen on the Models page"
 msgstr "Auf der Seite „Modelle“ ausgewählt"
 
 msgid "Circular"
 msgstr "Kreisspektrum"
+
+msgid "Circular spectrum palette updated for the next dictation."
+msgstr "Kreisspektrumpalette für das nächste Diktat aktualisiert."
 
 msgid "Clear history"
 msgstr "Verlauf löschen"
@@ -385,11 +223,23 @@ msgstr "Cloud-Sprachverarbeitung · Die Verfügbarkeit richtet sich nach Ihrem D
 msgid "Cloud speech · availability follows your Groq account"
 msgstr "Cloud-Sprachverarbeitung · Die Verfügbarkeit richtet sich nach Ihrem Groq-Konto"
 
+msgid "Cloud speech is ready. The local speech engine is disabled."
+msgstr "Cloud-Spracherkennung ist bereit. Die lokale Sprach-Engine ist deaktiviert."
+
+msgid "Cloud speech ready"
+msgstr "Cloud-Spracherkennung bereit"
+
 msgid "Cloud translation · availability follows your DeepL account"
 msgstr "Cloud-Übersetzung · Die Verfügbarkeit richtet sich nach Ihrem DeepL-Konto"
 
 msgid "Cloud translation · region is optional for global resources"
 msgstr "Cloud-Übersetzung · Die Region ist für globale Ressourcen optional"
+
+msgid "Cloud translation is starting. The local model is disabled."
+msgstr "Cloud-Übersetzung startet. Das lokale Modell ist deaktiviert."
+
+msgid "Cloud translation ready. The local model is disabled."
+msgstr "Cloud-Übersetzung bereit. Das lokale Modell ist deaktiviert."
 
 msgid "cold"
 msgstr "nicht geladen"
@@ -400,8 +250,26 @@ msgstr "FARBE"
 msgid "Companion orb"
 msgstr "Assistent"
 
+msgid "Companion Orb is active on the desktop."
+msgstr "Companion Orb ist auf dem Desktop aktiv."
+
+msgid "Companion Orb is unavailable: {error}"
+msgstr "Gefährtenkugel ist nicht verfügbar: {error}"
+
+msgid "Companion Orb protocol mismatch. Reinstall the complete application."
+msgstr "Die Protokollversion der Begleitkugel stimmt nicht überein. Installieren Sie die Anwendung vollständig neu."
+
+msgid "Companion Orb restarted. Dictation continued normally."
+msgstr "Companion Orb wurde neu gestartet. Das Diktat wurde normal fortgesetzt."
+
+msgid "Companion Orb: {message}"
+msgstr "Gefährtenkugel: {message}"
+
 msgid "Cooling down"
 msgstr "Abkühlphase"
+
+msgid "Copied to clipboard."
+msgstr "In die Zwischenablage kopiert."
 
 msgid "Copy"
 msgstr "Kopieren"
@@ -412,14 +280,44 @@ msgstr "Kopieren"
 msgid "Copy latest transcript"
 msgstr "Neuestes Transkript kopieren"
 
-msgid "COPY RESULT"
-msgstr "ERGEBNIS KOPIEREN"
+msgid "Copy result"
+msgstr "Übersetzung kopieren"
 
 msgid "Correct keyboard layout"
 msgstr "Tastaturlayout korrigieren"
 
 msgid "CORRECT LAYOUT"
 msgstr "LAYOUT KORRIGIEREN"
+
+msgid "Could not apply shortcuts: {error}"
+msgstr "Tastenkürzel konnten nicht angewendet werden: {error}"
+
+msgid "Could not cancel the install: {error}"
+msgstr "Die Installation konnte nicht abgebrochen werden: {error}"
+
+msgid "Could not configure translation model: {error}"
+msgstr "Das Übersetzungsmodell {error} konnte nicht konfiguriert werden"
+
+msgid "Could not finish recording: {error}"
+msgstr "Aufnahme konnte nicht beendet werden: {error}"
+
+msgid "Could not remove the local model: {error}"
+msgstr "Das lokale Modell konnte nicht entfernt werden: {error}"
+
+msgid "Could not start Companion Orb: {error}"
+msgstr "Companion Orb: {error} konnte nicht gestartet werden"
+
+msgid "Could not start recording: {error}"
+msgstr "Aufnahme konnte nicht gestartet werden: {error}"
+
+msgid "Could not start translation: {error}"
+msgstr "Übersetzung konnte nicht gestartet werden: {error}"
+
+msgid "Could not switch the interface language: {error}"
+msgstr "Oberflächensprache konnte nicht gewechselt werden: {error}"
+
+msgid "Could not translate: {error}"
+msgstr "Übersetzung fehlgeschlagen: {error}"
 
 msgid "CPU"
 msgstr "CPU"
@@ -429,6 +327,9 @@ msgstr "STRG + ALT + F"
 
 msgid "CUDA"
 msgstr "CUDA"
+
+msgid "Custom endpoint"
+msgstr "Eigener Server"
 
 msgid "Cyrillic keys → Latin layout"
 msgstr "Kyrillische Tasten → Lateinisches Layout"
@@ -448,32 +349,53 @@ msgstr "Erkennt den ausgewählten Text und folgt dann der Reihenfolge der Textan
 msgid "Deutsch"
 msgstr "Deutsch"
 
+msgid "Dictate"
+msgstr "Diktieren"
+
 msgid "Dictation"
 msgstr "Diktat"
+
+msgid "Dictation {session} is still processing; it will be inserted here when ready."
+msgstr "Diktat {session} wird noch verarbeitet und anschließend hier eingefügt."
+
+msgid "DICTATION LANGUAGE"
+msgstr "DIKTATSPRACHE"
 
 msgid "Direction is detected automatically"
 msgstr "Die Richtung wird automatisch erkannt"
 
+msgid "Direction will be detected again when you translate."
+msgstr "Die Richtung wird bei der nächsten Übersetzung neu erkannt."
+
 msgid "Disabled"
 msgstr "Deaktiviert"
-
-msgid "DOES"
-msgstr "DOES"
 
 msgid "Downloaded once, verified by SHA-256, then used from disk. An interrupted download resumes where it stopped."
 msgstr "Einmal heruntergeladen, per SHA-256 verifiziert und dann von der Festplatte verwendet. Ein unterbrochener Download wird an der Stelle fortgesetzt, an der er aufgehört hat."
 
+msgid "Downloading {model}: {percent}%"
+msgstr "{model} wird heruntergeladen: {percent}%"
+
+msgid "Downloading and verifying the translation model…"
+msgstr "Herunterladen und Überprüfen des Übersetzungsmodells…"
+
+msgid "Downloading model… {percent}%"
+msgstr "Modell wird heruntergeladen… {percent}%"
+
+msgid "Drawn by the application itself, over whatever you are typing into."
+msgstr "Wird von der Anwendung selbst über alles gezeichnet, was Sie eingeben."
+
+msgid "Drawn on its own native surface, so it can be transparent per pixel."
+msgstr "Wird auf einer eigenen nativen Oberfläche gezeichnet, sodass es pro Pixel transparent sein kann."
+
 msgid "DUAL"
 msgstr "DUAL"
-
-msgid "Efficient"
-msgstr "Effizient"
 
 msgid "Enabled"
 msgstr "Aktiviert"
 
-msgid "Engine"
-msgstr "Engine"
+msgid "Endpoint"
+msgstr "Adresse"
 
 msgid "ENGINE"
 msgstr "SYSTEM"
@@ -481,14 +403,14 @@ msgstr "SYSTEM"
 msgid "English"
 msgstr "Englisch"
 
-msgid "English ↔ Russian"
-msgstr "Englisch ↔ Russisch"
-
 msgid "English keys → Cyrillic layout"
 msgstr "Englische Tasten → kyrillische Tastaturbelegung"
 
 msgid "ENTER"
 msgstr "ENTER"
+
+msgid "Enter text to translate."
+msgstr "Geben Sie Text zum Übersetzen ein."
 
 msgid "Español"
 msgstr "Spanisch"
@@ -499,26 +421,32 @@ msgstr "Jedes abgeschlossene Diktat wird hier gespeichert – die Wörter, die D
 msgid "EVERYTHING STAYS HERE"
 msgstr "ALLES WIRD LOKAL VERARBEITET"
 
-msgid "Faster to answer, and holds memory to be"
-msgstr "Schnellere Antworten und genug Speicherplatz, um"
+msgid "Fast response"
+msgstr "Schnelle Antwort"
 
-msgid "Fastest"
-msgstr "Am schnellsten"
+msgid "Fastest available"
+msgstr "Schnellste verfügbare Option"
 
-msgid "Fastest that works"
-msgstr "Am schnellsten und funktioniert"
+msgid "Finish the active dictation before changing shortcuts."
+msgstr "Beenden Sie das aktive Diktat, bevor Sie Tastenkürzel ändern."
 
-msgid "Flex"
-msgstr "Flex"
+msgid "Finishing the previous dictation…"
+msgstr "Vorheriges Diktat wird abgeschlossen…"
 
 msgid "Flow sphere"
 msgstr "Partikelkugel"
 
+msgid "Flow Sphere palette updated for the next dictation."
+msgstr "Flow Sphere-Palette für das nächste Diktat aktualisiert."
+
 msgid "Fluid ribbon"
 msgstr "Fließendes Band"
 
-msgid "Follow Windows"
-msgstr "Windows folgen"
+msgid "Follow Windows settings"
+msgstr "Wie in Windows"
+
+msgid "Follows the level of your voice"
+msgstr "Folgt der Lautstärke Ihrer Stimme"
 
 msgid "Foreign text is translated into this language"
 msgstr "Fremdsprachiger Text wird in diese Sprache übersetzt"
@@ -535,6 +463,9 @@ msgstr "Deutsch"
 msgid "Google Cloud Translation (unsupported)"
 msgstr "Google Cloud-Übersetzung (nicht unterstützt)"
 
+msgid "Higher-quality multilingual 9B model for modern discrete GPUs."
+msgstr "Höherwertiges mehrsprachiges 9B-Modell für moderne dedizierte GPUs."
+
 msgid "Hindi"
 msgstr "Hindi"
 
@@ -544,14 +475,26 @@ msgstr "Verlauf"
 msgid "HISTORY"
 msgstr "VERLAUF"
 
+msgid "History is off. The newest dictation stays in memory until SayFlex closes, so its shortcut can still insert it."
+msgstr "Der Verlauf ist deaktiviert. Das neueste Diktat bleibt bis zum Beenden von SayFlex im Speicher und kann weiterhin per Tastenkürzel eingefügt werden."
+
 msgid "History is switched off"
 msgstr "Verlauf ist deaktiviert"
 
-msgid "Hold "
-msgstr "Halten"
+msgid "Hold {} anywhere in Windows to start a dictation."
+msgstr "Halten Sie {} in einem beliebigen Windows-Fenster gedrückt, um ein Diktat zu starten."
+
+msgid "Hold {} anywhere in Windows."
+msgstr "Halten Sie {} in einem beliebigen Windows-Fenster gedrückt."
+
+msgid "Hold {shortcut} to dictate."
+msgstr "Halten Sie {shortcut} zum Diktieren gedrückt."
 
 msgid "Hotkeys"
 msgstr "Tastenkombinationen"
+
+msgid "How completed translations are delivered"
+msgstr "Legt fest, wohin fertige Übersetzungen ausgegeben werden"
 
 msgid "Idle"
 msgstr "Inaktiv"
@@ -559,11 +502,50 @@ msgstr "Inaktiv"
 msgid "In use"
 msgstr "In Gebrauch"
 
+msgid "Input features paused. Use the pause shortcut again to resume."
+msgstr "Eingabefunktionen pausiert. Drücken Sie das Pausenkürzel erneut, um fortzufahren."
+
+msgid "Input features resumed."
+msgstr "Eingabefunktionen fortgesetzt."
+
+msgid "Input ready"
+msgstr "Eingabe bereit"
+
+msgid "Input service is not ready yet."
+msgstr "Der Eingabedienst ist noch nicht bereit."
+
+msgid "Input worker is not ready."
+msgstr "Der Eingabe-Worker ist nicht bereit."
+
+msgid "Input worker protocol mismatch. Reinstall the complete application."
+msgstr "Das Protokoll des Eingabe-Workers stimmt nicht überein. Installieren Sie die Anwendung vollständig neu."
+
+msgid "Insert latest dictation"
+msgstr "Letztes Diktat einfügen"
+
+msgid "Inserted {delivery} after the target read the private transaction in {milliseconds} ms"
+msgstr "{delivery} eingefügt, nachdem das Ziel die private Transaktion in {milliseconds} ms gelesen hat"
+
+msgid "Inserted {delivery} through the target adapter in {milliseconds} ms"
+msgstr "{delivery} über den Zieladapter in {milliseconds} ms eingefügt"
+
 msgid "Install"
 msgstr "Installieren"
 
+msgid "Install cancelled. The partial file is kept."
+msgstr "Installation abgebrochen. Die Teildatei bleibt erhalten."
+
 msgid "Installed"
 msgstr "Installiert"
+
+msgid "Installing {model}…"
+msgstr "{model} wird installiert…"
+
+msgid "INTERFACE"
+msgstr "OBERFLÄCHE"
+
+msgid "Interface language"
+msgstr "Sprache der Benutzeroberfläche"
 
 msgid "Italian"
 msgstr "Italienisch"
@@ -574,17 +556,20 @@ msgstr "Italiano"
 msgid "Japanese"
 msgstr "Japanisch"
 
+msgid "Keep ready"
+msgstr "Bereithalten"
+
+msgid "Keep the model loaded for faster translations"
+msgstr "Hält das Modell für schnellere Übersetzungen geladen"
+
 msgid "Kept from older settings · not supported by this version"
 msgstr "Aus älteren Einstellungen beibehalten · wird von dieser Version nicht unterstützt"
 
 msgid "Kept on this device"
 msgstr "Auf diesem Gerät beibehalten"
 
-msgid "Kept on this device only. Insert-last works from the newest entry."
-msgstr "Nur auf diesem Gerät beibehalten. „Am Ende einfügen“ funktioniert ab dem neuesten Eintrag."
-
-msgid "Kept warm"
-msgstr "Beibehalten"
+msgid "Kept on this device only. The insert-latest shortcut uses the newest entry."
+msgstr "Wird nur auf diesem Gerät gespeichert. Das Tastenkürzel zum Einfügen verwendet den neuesten Eintrag."
 
 msgid "Key {hint}{extra} · {about}"
 msgstr "Schlüssel {hint}{extra} · {about}"
@@ -592,17 +577,47 @@ msgstr "Schlüssel {hint}{extra} · {about}"
 msgid "Key refused"
 msgstr "Schlüssel abgelehnt"
 
+msgid "Keyboard-layout correction is disabled."
+msgstr "Die Korrektur der Tastaturbelegung ist deaktiviert."
+
 msgid "Korean"
 msgstr "Koreanisch"
 
+msgid "Latest transcript {session} copied. Shift+Insert is ready."
+msgstr "Neuestes Transkript {session} kopiert. Umschalt+Einfg ist fertig."
+
 msgid "Less GPU and battery, slightly slower"
 msgstr "Weniger GPU-Leistung und Akkulaufzeit, etwas langsamer"
+
+msgid "Level bars beside a studio microphone"
+msgstr "Pegelbalken neben einem Studiomikrofon"
+
+msgid "Listening; Companion Orb unavailable: {error}"
+msgstr "Hören; Gefährtenkugel nicht verfügbar: {error}"
+
+msgid "Listening…"
+msgstr "Hört zu…"
+
+msgid "Load when needed"
+msgstr "Bei Bedarf laden"
+
+msgid "Loading and warming the local speech engine…"
+msgstr "Lokale Sprach-Engine wird geladen und vorbereitet…"
+
+msgid "Loading the latest transcript…"
+msgstr "Neueste Transkription wird geladen…"
+
+msgid "Loading the selected translation model…"
+msgstr "Das ausgewählte Übersetzungsmodell wird geladen…"
 
 msgid "local"
 msgstr "lokal"
 
 msgid "LOCAL · PRIVATE"
 msgstr "LOKAL · PRIVAT"
+
+msgid "Local model"
+msgstr "Lokales Modell"
 
 msgid "Local speech"
 msgstr "Lokale Sprachausgabe"
@@ -613,14 +628,23 @@ msgstr "Lokale Sprachausgabe · bereit"
 msgid "Local speech · starting"
 msgstr "Lokale Sprachausgabe · wird gestartet"
 
-msgid "Local translator"
-msgstr "Lokaler Übersetzer"
+msgid "Local voice and translation history cleared."
+msgstr "Lokaler Sprach- und Übersetzungsverlauf gelöscht."
 
-msgid "LOCAL TRANSLATOR"
-msgstr "LOKALER ÜBERSETZER"
+msgid "Locally"
+msgstr "Lokal"
+
+msgid "Lower download size and resource use for less powerful computers."
+msgstr "Kompaktes Modell mit kleinerem Download und geringerer Last für schwächere Rechner."
+
+msgid "Lower resource use"
+msgstr "Ressourcensparend"
 
 msgid "Matte glass"
 msgstr "Mattglas"
+
+msgid "Maximum-quality profile for users who accept a larger download and slower inference."
+msgstr "Maximale Qualität bei größerem Download und langsamerer Verarbeitung."
 
 msgid "Model"
 msgstr "Modell"
@@ -628,11 +652,20 @@ msgstr "Modell"
 msgid "Models"
 msgstr "Modelle"
 
+msgid "Modern GPU"
+msgstr "Moderne GPU"
+
+msgid "Modern multilingual 4B model accelerated locally through Vulkan."
+msgstr "Modernes mehrsprachiges 4B-Modell mit lokaler Vulkan-Beschleunigung."
+
 msgid "Monochrome"
 msgstr "Monochrom"
 
 msgid "More reliable for short Russian phrases"
 msgstr "Zuverlässiger bei kurzen russischen Phrasen"
+
+msgid "Move item up or down"
+msgstr "Element nach oben oder unten verschieben"
 
 msgid "Never reached"
 msgstr "Übersprungen"
@@ -640,17 +673,38 @@ msgstr "Übersprungen"
 msgid "No"
 msgstr "Nein"
 
+msgid "No answer arrived from the worker, so whether the key was stored is not known yet. The row will show the stored state when the worker answers; sending again is safe."
+msgstr "Der Arbeitsprozess hat nicht geantwortet, daher ist noch nicht bekannt, ob der Schlüssel gespeichert wurde. Die Zeile zeigt nach der Antwort den tatsächlichen Zustand; erneutes Senden ist sicher."
+
 msgid "No compatible speech backend is active"
 msgstr "Keine kompatible Spracherkennungs-Engine ist aktiv"
+
+msgid "No compatible speech backend is available: {error}"
+msgstr "Kein kompatibles Sprach-Backend verfügbar: {error}"
 
 msgid "No key stored"
 msgstr "Kein Schlüssel gespeichert"
 
+msgid "No model installed. Choose Fast or Quality in Settings."
+msgstr "Kein Modell installiert. Wählen Sie Schnell oder Qualität in den Einstellungen."
+
 msgid "no overlay"
 msgstr "ohne Visualisierung"
 
+msgid "No overlay is drawn while recording"
+msgstr "Während der Aufnahme wird kein Overlay gezeichnet"
+
+msgid "No RU/EN layout conversion is available."
+msgstr "Die RU/EN-Tastaturumwandlung ist nicht verfügbar."
+
 msgid "No speech model is installed, so nothing can be dictated yet."
 msgstr "Es ist kein Sprachmodell installiert, daher kann noch nichts diktiert werden."
+
+msgid "No transcription provider is ready. Enable a local model or configure a speech service in Settings."
+msgstr "Kein Transkriptionsanbieter ist bereit. Aktivieren Sie ein lokales Modell oder konfigurieren Sie einen Sprachdienst in den Einstellungen."
+
+msgid "No translation provider is ready. Choose a local model or configure a service in Settings."
+msgstr "Kein Übersetzungsanbieter ist bereit. Wählen Sie ein lokales Modell oder richten Sie einen Dienst in den Einstellungen ein."
 
 msgid "none"
 msgstr "keines"
@@ -664,6 +718,9 @@ msgstr "Noch keines installiert"
 msgid "none selected"
 msgstr "keines ausgewählt"
 
+msgid "Not available on the CPU engine: one pass at a time, and a preview is time the transcript waits."
+msgstr "Auf der CPU-Engine nicht verfügbar: ein Durchgang nach dem anderen und eine Vorschau ist die Zeit, die das Transkript wartet."
+
 msgid "Not installed"
 msgstr "Nicht installiert"
 
@@ -672,9 +729,6 @@ msgstr "wird nicht gespeichert"
 
 msgid "Not kept"
 msgstr "Wird nicht gespeichert"
-
-msgid "Not kept. Insert-last still works for the newest one, which is held in memory until the application closes."
-msgstr "Wird nicht gespeichert. „Insert-last“ funktioniert weiterhin für den neuesten Eintrag, der bis zum Schließen der Anwendung im Speicher verbleibt."
 
 msgid "Not ready"
 msgstr "Nicht bereit"
@@ -685,8 +739,8 @@ msgstr "Diktat nicht verfügbar · Text wird an {text} gesendet"
 msgid "Nothing can transcribe right now"
 msgstr "Diktat ist derzeit nicht verfügbar"
 
-msgid "Nothing is being written to disk. Insert-last still works for the newest dictation, which is held in memory until SayFlex closes."
-msgstr "Es wird nichts auf die Festplatte geschrieben. „Insert-last“ funktioniert weiterhin für das neueste Diktat, das bis zum Beenden von SayFlex im Speicher verbleibt."
+msgid "Nothing has been saved yet. The newest dictation can still be inserted with its shortcut until SayFlex closes."
+msgstr "Noch wurde nichts gespeichert. Das neueste Diktat kann bis zum Beenden von SayFlex weiterhin per Tastenkürzel eingefügt werden."
 
 msgid "Nothing is replaced until you say so"
 msgstr "Es wird nichts ersetzt, bis Sie es anweisen"
@@ -712,11 +766,14 @@ msgstr "Für ausgewählten Text"
 msgid "On this device"
 msgstr "Auf diesem Gerät"
 
-msgid "Only"
-msgstr "Nur"
+msgid "One line that thickens with the voice"
+msgstr "Eine Zeile, die mit der Stimme dicker wird"
 
 msgid "Only for models trained for it"
 msgstr "Nur für dafür trainierte Modelle"
+
+msgid "Only this service"
+msgstr "Nur dieser Dienst"
 
 msgid "Open settings"
 msgstr "Einstellungen öffnen"
@@ -727,6 +784,9 @@ msgstr "Übersetzer öffnen"
 msgid "Open translator"
 msgstr "Übersetzer öffnen"
 
+msgid "OPEN-SOURCE NOTICES"
+msgstr "OPEN-SOURCE-LIZENZEN"
+
 msgid "ORIG"
 msgstr "ORIG"
 
@@ -736,23 +796,32 @@ msgstr "Originalsprache"
 msgid "Original selection remains active"
 msgstr "Die ursprüngliche Auswahl bleibt aktiv"
 
-msgid "OUTPUT"
-msgstr "AUSGABE"
-
 msgid "Overview"
 msgstr "Übersicht"
 
 msgid "PALETTE"
 msgstr "PALETTE"
 
+msgid "Paste dispatched {delivery} without target verification in {milliseconds} ms"
+msgstr "Einfügen {delivery} ohne Zielbestätigung in {milliseconds} ms gesendet"
+
 msgid "Paste the key"
 msgstr "Schlüssel einfügen"
+
+msgid "Pause / resume"
+msgstr "Pause/Fortsetzung"
 
 msgid "Paused · {count} shortcuts configured"
 msgstr "Angehalten · {count} Tastenkombinationen konfiguriert"
 
 msgid "PIN"
 msgstr "PIN"
+
+msgid "Pin translation"
+msgstr "Übersetzung anheften"
+
+msgid "PLATFORM"
+msgstr "PLATTFORM"
 
 msgid "Português (Brasil)"
 msgstr "Portugiesisch (Brasilien)"
@@ -769,8 +838,14 @@ msgstr "vorbereitet"
 msgid "Prepares results during natural pauses"
 msgstr "Bereitet Ergebnisse während natürlicher Pausen vor"
 
-msgid "PRESS SHORTCUT  ·  "
-msgstr "TASTENKURZBEZEICHNUNG DRÜCKEN  ·"
+msgid "Preparing model"
+msgstr "Modell wird vorbereitet"
+
+msgid "Press a new key combination"
+msgstr "Drücken Sie eine neue Tastenkombination"
+
+msgid "Press a valid shortcut first"
+msgstr "Drücken Sie zuerst ein gültiges Tastenkürzel"
 
 msgid "Preview blur"
 msgstr "Vorschau unscharf"
@@ -780,6 +855,12 @@ msgstr "Hauptsprache"
 
 msgid "Primary-language text is translated into this one"
 msgstr "Text in der Hauptsprache wird in diese Sprache übersetzt"
+
+msgid "Processing locally…"
+msgstr "Lokale Verarbeitung…"
+
+msgid "PROCESSING MODE"
+msgstr "VERARBEITUNGSMODUS"
 
 msgid "Provider order"
 msgstr "Reihenfolge der Anbieter"
@@ -793,17 +874,32 @@ msgstr "Beenden"
 msgid "Quit SayFlex"
 msgstr "SayFlex beenden"
 
+msgid "Reading selected text…"
+msgstr "Ausgewählter Text wird gelesen…"
+
 msgid "ready"
 msgstr "Bereit"
 
 msgid "Ready"
 msgstr "Bereit"
 
+msgid "Ready · hold {shortcut} to speak."
+msgstr "Bereit · Halten Sie {shortcut} zum Sprechen gedrückt."
+
+msgid "Ready · language direction is detected locally."
+msgstr "Bereit · Sprachrichtung wird lokal erkannt."
+
 msgid "recommended"
 msgstr "Empfohlen"
 
+msgid "Recommended default and the model used by the current Windows application."
+msgstr "Empfohlenes Standardmodell für die aktuelle Windows-Anwendung."
+
 msgid "recommended for your system language"
 msgstr "Empfohlen für Ihre Systemsprache"
+
+msgid "Recovering worker"
+msgstr "Worker wird wiederhergestellt"
 
 msgid "Red"
 msgstr "Rot"
@@ -814,14 +910,29 @@ msgstr "Referenz"
 msgid "Refresh"
 msgstr "Aktualisieren"
 
-msgid "RELEASE"
-msgstr "FREIGABE"
+msgid "Region"
+msgstr "Region"
+
+msgid "Remove"
+msgstr "Entfernen"
+
+msgid "Remove {model} ({size}) from this device?"
+msgstr "{model} ({size}) von diesem Gerät entfernen?"
 
 msgid "Remove key"
 msgstr "Schlüssel entfernen"
 
 msgid "Remove the stored key?"
 msgstr "Den gespeicherten Schlüssel entfernen?"
+
+msgid "Removed {size} of local model files."
+msgstr "{size} lokale Modelldateien wurden entfernt."
+
+msgid "Removing the key for {provider}…"
+msgstr "Entfernen des Schlüssels für {provider}…"
+
+msgid "Removing…"
+msgstr "Wird entfernt…"
 
 msgid "Replace key"
 msgstr "Schlüssel ersetzen"
@@ -832,11 +943,14 @@ msgstr "SCHLÜSSEL ERSETZEN"
 msgid "Replace the selection"
 msgstr "Auswahl ersetzen"
 
+msgid "Replacement was sent to the target."
+msgstr "Der Ersatz wurde an das Zielfenster gesendet."
+
 msgid "Reset"
 msgstr "Zurücksetzen"
 
-msgid "Result"
-msgstr "Ergebnis"
+msgid "Retry translation"
+msgstr "Übersetzung wiederholen"
 
 msgid "Runs on this computer · nothing leaves it"
 msgstr "Läuft lokal · es werden keine Daten gesendet"
@@ -847,17 +961,14 @@ msgstr "Russisch"
 msgid "Save"
 msgstr "Speichern"
 
-msgid "Say"
-msgstr "Say"
-
-msgid "SayFlex"
-msgstr "SayFlex"
-
-msgid "SayFlex "
-msgstr "SayFlex"
+msgid "SayFlex {} · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it."
+msgstr "SayFlex {} · lokale Werkzeuge für Sprache und Text. Kein Cloud-Konto erforderlich; Modelle werden nur auf Wunsch heruntergeladen."
 
 msgid "SayFlex Recording Indicator"
 msgstr "SayFlex-Aufnahmeanzeige"
+
+msgid "Scroll position"
+msgstr "Scrollposition"
 
 msgid "Secondary language"
 msgstr "Zweitsprache"
@@ -865,11 +976,41 @@ msgstr "Zweitsprache"
 msgid "SELECT A RESULT"
 msgstr "ERGEBNIS AUSWÄHLEN"
 
+msgid "Selected · unloaded"
+msgstr "Ausgewählt · nicht geladen"
+
+msgid "Selection action"
+msgstr "Aktion für die Auswahl"
+
+msgid "Selection translation"
+msgstr "Übersetzung der Auswahl"
+
+msgid "Selection: {message}"
+msgstr "Auswahl: {message}"
+
 msgid "Sent to a service"
 msgstr "An einen Dienst gesendet"
 
+msgid "Shortcut already in use. Choose another."
+msgstr "Tastenkürzel bereits belegt. Wählen Sie ein anderes."
+
+msgid "Previous shortcut kept"
+msgstr "Vorheriges Tastenkürzel beibehalten"
+
+msgid "That shortcut is already in use. The previous shortcut still works."
+msgstr "Dieses Tastenkürzel wird bereits verwendet. Das vorherige funktioniert weiterhin."
+
+msgid "Shortcuts updated."
+msgstr "Tastenkürzel aktualisiert."
+
 msgid "Show a preview"
 msgstr "Vorschau anzeigen"
+
+msgid "Show interleaved original and translation"
+msgstr "Original und Übersetzung abwechselnd anzeigen"
+
+msgid "Show original text"
+msgstr "Originaltext anzeigen"
 
 msgid "Showing {count} · {remote} of them went to a service"
 msgstr "{count} angezeigt · {remote} davon an einen Dienst gesendet"
@@ -883,6 +1024,12 @@ msgstr "Zeigt die Palette jedes Mal an"
 msgid "Shows the palette every time, whatever the text looks like"
 msgstr "Zeigt die Palette jedes Mal an, unabhängig davon, wie der Text aussieht"
 
+msgid "SOURCE TEXT"
+msgstr "AUSGANGSTEXT"
+
+msgid "Source text"
+msgstr "Ausgangstext"
+
 msgid "Spanish"
 msgstr "Spanisch"
 
@@ -895,23 +1042,44 @@ msgstr "Sprache"
 msgid "SPEECH — WHAT TRANSCRIBES A RECORDING"
 msgstr "DIKTAT — DIENSTE ZUR SPRACHERKENNUNG"
 
+msgid "Speech and text use separate provider lists. The first enabled provider is tried first; failed services move down. Make one provider exclusive, or place a cloud service above This computer to keep a local fallback."
+msgstr "Für Sprache und Text gibt es getrennte Anbieterlisten. Der erste aktivierte Anbieter wird zuerst verwendet; fehlgeschlagene Dienste rücken nach unten. Sie können einen Anbieter exklusiv verwenden oder einen Cloud-Dienst über Diesem Computer platzieren und die lokale Verarbeitung als Reserve behalten."
+
+msgid "Speech backend could not be changed: {error}"
+msgstr "Sprach-Backend konnte nicht gewechselt werden: {error}"
+
+msgid "Speech backend initialization failed: {error}"
+msgstr "Start des Sprach-Backends fehlgeschlagen: {error}"
+
+msgid "Speech backend verification failed: {error}"
+msgstr "Prüfung des Sprach-Backends fehlgeschlagen: {error}"
+
 msgid "SPEECH ENGINE"
 msgstr "SPRACH-ENGINE"
 
 msgid "SPEECH MODEL"
 msgstr "SPRACHMODELL"
 
+msgid "Speech model is still being prepared."
+msgstr "Das Sprachmodell wird noch vorbereitet."
+
+msgid "Speech model selected."
+msgstr "Sprachmodell ausgewählt."
+
 msgid "Speech service · unavailable"
 msgstr "Sprachdienst · nicht verfügbar"
 
-msgid "SPOKEN LANGUAGE"
-msgstr "GESPROCHENE SPRACHE"
+msgid "Speech service is still starting."
+msgstr "Der Sprachdienst startet noch."
+
+msgid "Speech translation was turned off because no enabled provider supports it."
+msgstr "Die Sprachübersetzung wurde deaktiviert, da kein aktivierter Anbieter sie unterstützt."
+
+msgid "Speech worker protocol mismatch. Reinstall the complete application."
+msgstr "Das Protokoll des Sprach-Workers stimmt nicht überein. Installieren Sie die Anwendung vollständig neu."
 
 msgid "Standing by"
 msgstr "In Bereitschaft"
-
-msgid "Started on demand"
-msgstr "Auf Abruf gestartet"
 
 msgid "Starting up"
 msgstr "Wird gestartet"
@@ -919,8 +1087,14 @@ msgstr "Wird gestartet"
 msgid "Starting workers…"
 msgstr "Worker werden gestartet…"
 
+msgid "Stays where you put it, between dictations"
+msgstr "Bleibt dort, wo Sie es hingelegt haben, zwischen den Diktaten"
+
 msgid "Stored encrypted with Windows DPAPI, in its own file and never in settings.json. Once saved it is never shown again — only the last four characters."
 msgstr "Wird verschlüsselt mit Windows DPAPI in einer eigenen Datei gespeichert, niemals in settings.json. Nach dem Speichern wird der Text nie wieder angezeigt – nur die letzten vier Zeichen."
+
+msgid "Storing the key for {provider}…"
+msgstr "Speichern des Schlüssels für {provider}…"
 
 msgid "STYLE"
 msgstr "STIL"
@@ -931,8 +1105,11 @@ msgstr "Sonnenuntergang"
 msgid "SURFACE"
 msgstr "OBERFLÄCHE"
 
-msgid "SWAP TEXT"
-msgstr "TEXT AUSTAUSCHEN"
+msgid "Swap source and target languages"
+msgstr "Ausgangs- und Zielsprache vertauschen"
+
+msgid "Swap text"
+msgstr "Texte tauschen"
 
 msgid "Switch it on above and dictations from then on are kept."
 msgstr "Schalten Sie diese Option oben ein, damit Diktate ab diesem Zeitpunkt gespeichert werden."
@@ -955,256 +1132,17 @@ msgstr "TEXT WIRD AN DIE CLOUD GESENDET"
 msgid "Text leaves this device for {text}"
 msgstr "Text wird an {text} gesendet"
 
-msgid "The backdrop behind the preview"
-msgstr "Der Hintergrund hinter der Vorschau"
-
-msgid "The original goes to the clipboard first"
-msgstr "Das Original wird zunächst in die Zwischenablage kopiert"
-
-msgid "The selection is left exactly as it was"
-msgstr "Die Auswahl bleibt genau so, wie sie war"
-
-msgid "This build does not know this service"
-msgstr "Diese Version kennt diesen Dienst nicht"
-
-msgid "This computer"
-msgstr "Dieser Computer"
-
-msgid "This model was not trained for it"
-msgstr "Dieses Modell wurde dafür nicht trainiert"
-
-msgid "Tools"
-msgstr "Werkzeuge"
-
-msgid "TRANSLATE"
-msgstr "ÜBERSETZEN"
-
-msgid "Translate to English"
-msgstr "Ins Englische übersetzen"
-
-msgid "Translated by {provider}."
-msgstr "Übersetzt von {provider}."
-
-msgid "Translates foreign text, offers layout candidates for the rest"
-msgstr "Übersetzt fremdsprachigen Text und schlägt Layout-Optionen für den Rest vor"
-
-msgid "Translation"
-msgstr "Übersetzung"
-
-msgid "TRANSLATION"
-msgstr "ÜBERSETZUNG"
-
-msgid "Translation completed locally."
-msgstr "Übersetzung lokal abgeschlossen."
-
-msgid "Translation preview"
-msgstr "Übersetzungsvorschau"
-
-msgid "Two separate lists. The first enabled row is used; failures move down. Choose Only for cloud-only use, or move a cloud service above This computer to keep local fallback."
-msgstr "Zwei separate Listen. Die erste aktivierte Zeile wird verwendet; Fehler rücken nach unten. Wählen Sie „Nur“ für die reine Cloud-Nutzung oder verschieben Sie einen Cloud-Dienst über „Dieser Computer“, um die lokale Ausweichmöglichkeit beizubehalten."
-
-msgid "Ukrainian"
-msgstr "Ukrainisch"
-
-msgid "Unavailable"
-msgstr "Nicht verfügbar"
-
-msgid "Use"
-msgstr "Verwenden"
-
-msgid "via {provider}"
-msgstr "über {provider}"
-
-msgid "Visuals"
-msgstr "Visuelle Elemente"
-
-msgid "Voice orb"
-msgstr "Sprachkugel"
-
-msgid "Vulkan"
-msgstr "Vulkan"
-
-msgid "Waiting for Windows"
-msgstr "Warten auf Windows"
-
-msgid "Waiting for Windows to accept the new shortcuts"
-msgstr "Warten darauf, dass Windows die neuen Tastenkombinationen übernimmt"
-
-msgid "What Ctrl + Alt + F does with what it finds"
-msgstr "Was „Strg + Alt + F“ mit dem gefundenen Ergebnis macht"
-
-msgid "What happens to it once it exists"
-msgstr "Was damit geschieht, sobald es existiert"
-
-msgid "Whatever you spoke, written as spoken"
-msgstr "Was auch immer Sie gesagt haben, so wie gesprochen geschrieben"
-
-msgid "Whether the selection shortcut may translate"
-msgstr "Ob die Auswahl-Tastenkombination übersetzt werden kann"
-
-msgid "White"
-msgstr "Weiß"
-
-msgid "Writing slate"
-msgstr "Schreibtafel"
-
-msgid "Yes"
-msgstr "Ja"
-
-msgid "About"
-msgstr "Über"
-
-msgid "SayFlex uses Slint for its interface. Dependency and model notices are included with the installed application."
-msgstr "SayFlex verwendet Slint für seine Oberfläche. Hinweise zu Abhängigkeiten und Modellen sind in der installierten Anwendung enthalten."
-
-msgid "Windows tools for dictation and translation."
-msgstr "Windows-Werkzeuge für Diktat und Übersetzung."
-
-msgid "Open-source notices are installed as THIRD_PARTY_NOTICES.md."
-msgstr "Open-Source-Hinweise werden als THIRD_PARTY_NOTICES.md installiert."
-msgid "Move item up or down"
-msgstr "Element nach oben oder unten verschieben"
-
-msgid "Swap source and target languages"
-msgstr "Ausgangs- und Zielsprache vertauschen"
-
-msgid "Retry translation"
-msgstr "Übersetzung wiederholen"
-
-msgid "Value"
-msgstr "Wert"
-
-msgid "Hold {shortcut} to dictate."
-msgstr "Halten Sie {shortcut} zum Diktieren gedrückt."
-
-msgid "Companion Orb protocol mismatch. Reinstall the complete application."
-msgstr "Die Protokollversion der Begleitkugel stimmt nicht überein. Installieren Sie die Anwendung vollständig neu."
-
-msgid "Translation worker protocol mismatch. Reinstall the complete application."
-msgstr "Die Protokollversion des Übersetzungsprozesses stimmt nicht überein. Installieren Sie die Anwendung vollständig neu."
-
-msgid "{code} on the selected backend; checking {backend} automatically."
-msgstr "Fehler {code} im ausgewählten Backend; {backend} wird automatisch geprüft."
-
-msgid "No model installed. Choose Fast or Quality in Settings."
-msgstr "Kein Modell installiert. Wählen Sie Schnell oder Qualität in den Einstellungen."
-
-msgid "Speech translation was turned off because no enabled provider supports it."
-msgstr "Die Sprachübersetzung wurde deaktiviert, da kein aktivierter Anbieter sie unterstützt."
-
-msgid "{backend} verified by warm-up. The preference above is where the search starts."
-msgstr "{backend} durch Aufwärmen verifiziert. Die obige Einstellung ist der Ausgangspunkt der Suche."
-
-msgid "{field} is needed as well as the key."
-msgstr "Neben dem Schlüssel wird auch {field} benötigt."
-
-msgid "{visual} · shown while recording"
-msgstr "{visual} · wird während der Aufnahme angezeigt"
-
-msgid "A point cloud that accelerates on voice onset"
-msgstr "Eine Punktwolke, die sich beim Einsetzen der Stimme beschleunigt"
-
-msgid "Act on selection"
-msgstr "Auswahl verarbeiten"
-
-msgid "Add and save this provider's key before making it the only route."
-msgstr "Fügen Sie den Schlüssel dieses Anbieters hinzu und speichern Sie ihn, bevor Sie ihn zur einzigen Route machen."
-
-msgid "Broadcast microphone colour updated for the next dictation."
-msgstr "Die Farbe des Sendemikrofons wurde für das nächste Diktat aktualisiert."
-
-msgid "Choose a local translation model or configure a text service in Settings first."
-msgstr "Wählen Sie zunächst ein lokales Übersetzungsmodell oder konfigurieren Sie einen Textdienst in den Einstellungen."
-
-msgid "Circular spectrum palette updated for the next dictation."
-msgstr "Kreisspektrumpalette für das nächste Diktat aktualisiert."
-
-msgid "Companion Orb is active on the desktop."
-msgstr "Companion Orb ist auf dem Desktop aktiv."
-
-msgid "Companion Orb is unavailable: {error}"
-msgstr "Gefährtenkugel ist nicht verfügbar: {error}"
-
-msgid "Companion Orb restarted. Dictation continued normally."
-msgstr "Companion Orb wurde neu gestartet. Das Diktat wurde normal fortgesetzt."
-
-msgid "Companion Orb: {message}"
-msgstr "Gefährtenkugel: {message}"
-
-msgid "Could not cancel the install: {error}"
-msgstr "Die Installation konnte nicht abgebrochen werden: {error}"
-
-msgid "Could not configure translation model: {error}"
-msgstr "Das Übersetzungsmodell {error} konnte nicht konfiguriert werden"
-
-msgid "Could not start Companion Orb: {error}"
-msgstr "Companion Orb: {error} konnte nicht gestartet werden"
-
-msgid "Dictate"
-msgstr "Diktieren"
-
-msgid "Downloading and verifying the translation model…"
-msgstr "Herunterladen und Überprüfen des Übersetzungsmodells…"
-
-msgid "Drawn by the application itself, over whatever you are typing into."
-msgstr "Wird von der Anwendung selbst über alles gezeichnet, was Sie eingeben."
-
-msgid "Drawn on its own native surface, so it can be transparent per pixel."
-msgstr "Wird auf einer eigenen nativen Oberfläche gezeichnet, sodass es pro Pixel transparent sein kann."
-
-msgid "Flow Sphere palette updated for the next dictation."
-msgstr "Flow Sphere-Palette für das nächste Diktat aktualisiert."
-
-msgid "Follows the level of your voice"
-msgstr "Folgt der Lautstärke Ihrer Stimme"
-
-msgid "Insert last"
-msgstr "Zuletzt einfügen"
-
-msgid "Install cancelled. The partial file is kept."
-msgstr "Installation abgebrochen. Die Teildatei bleibt erhalten."
-
-msgid "Latest transcript {session} copied. Shift+Insert is ready."
-msgstr "Neuestes Transkript {session} kopiert. Umschalt+Einfg ist fertig."
-
-msgid "Level bars beside a studio microphone"
-msgstr "Pegelbalken neben einem Studiomikrofon"
-
-msgid "Listening; Companion Orb unavailable: {error}"
-msgstr "Hören; Gefährtenkugel nicht verfügbar: {error}"
-
-msgid "Loading the selected translation model…"
-msgstr "Das ausgewählte Übersetzungsmodell wird geladen…"
-
-msgid "Local voice and translation history cleared."
-msgstr "Lokaler Sprach- und Übersetzungsverlauf gelöscht."
-
-msgid "No overlay is drawn while recording"
-msgstr "Während der Aufnahme wird kein Overlay gezeichnet"
-
-msgid "No transcription provider is ready. Enable a local model or configure a speech service in Settings."
-msgstr "Kein Transkriptionsanbieter ist bereit. Aktivieren Sie ein lokales Modell oder konfigurieren Sie einen Sprachdienst in den Einstellungen."
-
-msgid "Not available on the CPU engine: one pass at a time, and a preview is time the transcript waits."
-msgstr "Auf der CPU-Engine nicht verfügbar: ein Durchgang nach dem anderen und eine Vorschau ist die Zeit, die das Transkript wartet."
-
-msgid "One line that thickens with the voice"
-msgstr "Eine Zeile, die mit der Stimme dicker wird"
-
-msgid "Pause / resume"
-msgstr "Pause/Fortsetzung"
-
-msgid "Removing the key for {provider}…"
-msgstr "Entfernen des Schlüssels für {provider}…"
-
-msgid "Stays where you put it, between dictations"
-msgstr "Bleibt dort, wo Sie es hingelegt haben, zwischen den Diktaten"
-
-msgid "Storing the key for {provider}…"
-msgstr "Speichern des Schlüssels für {provider}…"
+msgid "That interface language is not available."
+msgstr "Diese Oberflächensprache ist nicht verfügbar."
 
 msgid "That key cannot be used as a global shortcut."
 msgstr "Diese Taste kann nicht als globale Tastenkombination verwendet werden."
+
+msgid "That spoken language is not supported."
+msgstr "Diese gesprochene Sprache wird nicht unterstützt."
+
+msgid "The backdrop behind the preview"
+msgstr "Der Hintergrund hinter der Vorschau"
 
 msgid "The endpoint must be HTTPS: the key and the audio both travel in this request."
 msgstr "Der Endpunkt muss HTTPS sein: Der Schlüssel und das Audio werden in dieser Anfrage übertragen."
@@ -1221,17 +1159,38 @@ msgstr "Der Schlüssel für {provider} wurde entfernt."
 msgid "The key for {provider} is stored."
 msgstr "Der Schlüssel für {provider} wird gespeichert."
 
+msgid "The key was not stored: {error}"
+msgstr "Der Schlüssel wurde nicht gespeichert: {error}"
+
+msgid "The latest dictation could not be inserted."
+msgstr "Das letzte Diktat konnte nicht eingefügt werden."
+
 msgid "The latest dictation was cancelled and cannot be inserted."
 msgstr "Das letzte Diktat wurde gelöscht und kann nicht eingefügt werden."
+
+msgid "The local translation model is still loading."
+msgstr "Das lokale Übersetzungsmodell wird noch geladen."
 
 msgid "The microphone and transcription keep working; only the overlay is disabled."
 msgstr "Das Mikrofon und die Transkription funktionieren weiterhin; nur das Overlay ist deaktiviert."
 
+msgid "The original goes to the clipboard first"
+msgstr "Das Original wird zunächst in die Zwischenablage kopiert"
+
 msgid "The pause/resume recovery shortcut must stay enabled."
 msgstr "Die Verknüpfung zum Anhalten/Fortsetzen der Wiederherstellung muss aktiviert bleiben."
 
+msgid "The selection is left exactly as it was"
+msgstr "Die Auswahl bleibt genau so, wie sie war"
+
 msgid "The spectrum wrapped into a ring"
 msgstr "Das Spektrum in einen Ring gewickelt"
+
+msgid "The speech backend was inconsistent; checking {backend} instead."
+msgstr "Das Sprach-Backend war inkonsistent; stattdessen wird {backend} geprüft."
+
+msgid "The transcription order could not be applied: {error}"
+msgstr "Die Transkriptionsreihenfolge konnte nicht angewendet werden: {error}"
 
 msgid "The translation order could not be applied: {error}"
 msgstr "Der Übersetzungsauftrag konnte nicht angewendet werden: {error}"
@@ -1239,194 +1198,200 @@ msgstr "Der Übersetzungsauftrag konnte nicht angewendet werden: {error}"
 msgid "The words as they are recognised"
 msgstr "Die Wörter, wie sie erkannt werden"
 
-msgid "Thirty-two bands, thirty-one times a second"
-msgstr "Zweiunddreißig Bands, einunddreißig Mal pro Sekunde"
-
-msgid "Use a letter, number, function key, Space, Tab, Enter, or arrow key."
-msgstr "Verwenden Sie einen Buchstaben, eine Zahl, eine Funktionstaste, die Leertaste, die Tabulatortaste, die Eingabetaste oder die Pfeiltaste."
-
-msgid "Visualizer updated. The next dictation uses the selected style."
-msgstr "Visualizer aktualisiert. Das nächste Diktat verwendet den ausgewählten Stil."
-
-msgid "Warming up on {backend}. If it fails, the search moves to the next one down."
-msgstr "Aufwärmen auf {backend}. Wenn dies fehlschlägt, geht die Suche zum nächstniedrigeren über."
-
-msgid "Writing Slate surface updated for the next dictation."
-msgstr "Die Oberfläche der Schreibtafel wurde für das nächste Diktat aktualisiert."
-
-msgid "Worker restarted automatically."
-msgstr "Der Arbeitsprozess wurde automatisch neu gestartet."
-
-msgid "Worker restart failed. See the diagnostic log for details."
-msgstr "Der Arbeitsprozess konnte nicht neu gestartet werden. Einzelheiten finden Sie im Diagnoseprotokoll."
-
-msgid "The latest dictation could not be inserted."
-msgstr "Das letzte Diktat konnte nicht eingefügt werden."
-
-msgid "No answer arrived from the worker, so whether the key was stored is not known yet. The row will show the stored state when the worker answers; sending again is safe."
-msgstr "Der Arbeitsprozess hat nicht geantwortet, daher ist noch nicht bekannt, ob der Schlüssel gespeichert wurde. Die Zeile zeigt nach der Antwort den tatsächlichen Zustand; erneutes Senden ist sicher."
-
-msgid "{provider} did not confirm the key."
-msgstr "{provider} hat den Schlüssel nicht bestätigt."
-
 msgid "The worker stopped before confirming the key. The row will show the stored state after recovery."
 msgstr "Der Arbeitsprozess wurde vor der Bestätigung des Schlüssels beendet. Nach der Wiederherstellung zeigt die Zeile den gespeicherten Zustand."
 
-msgid "{provider} did not accept the key."
-msgstr "{provider} hat den Schlüssel nicht akzeptiert."
-msgid "Scroll position"
-msgstr "Scrollposition"
+msgid "There is no transcript to insert yet."
+msgstr "Es gibt noch keine Transkription zum Einfügen."
 
-msgid "Show original text"
-msgstr "Originaltext anzeigen"
+msgid "Thirty-two bands, thirty-one times a second"
+msgstr "Zweiunddreißig Bands, einunddreißig Mal pro Sekunde"
 
-msgid "Show interleaved original and translation"
-msgstr "Original und Übersetzung abwechselnd anzeigen"
+msgid "This build does not know this service"
+msgstr "Diese Version kennt diesen Dienst nicht"
 
-msgid "Pin translation"
-msgstr "Übersetzung anheften"
+msgid "This computer"
+msgstr "Dieser Computer"
 
-msgid "Unpin translation"
-msgstr "Übersetzung lösen"
+msgid "This model was not trained for it"
+msgstr "Dieses Modell wurde dafür nicht trainiert"
 
-msgid "Locally"
-msgstr "Lokal"
+msgid "This model was not trained to translate. Use the selection translator instead."
+msgstr "Dieses Modell wurde nicht zum Übersetzen trainiert. Verwenden Sie den Auswahlübersetzer."
 
-msgid "Only this service"
-msgstr "Nur dieser Dienst"
+msgid "This shortcut was not accepted. Choose another."
+msgstr "Dieses Tastenkürzel wurde nicht akzeptiert. Wählen Sie ein anderes."
 
-msgid "Fastest available"
-msgstr "Schnellste verfügbare Option"
+msgid "Between dictations, point to the companion, hold Ctrl + Alt, and drag with the left mouse button. Its position is saved."
+msgstr "Zwischen Diktaten auf den Assistenten zeigen, Strg + Alt gedrückt halten und mit der linken Maustaste ziehen. Die Position wird gespeichert."
 
-msgid "Modern GPU"
-msgstr "Moderne GPU"
+msgid "Tools"
+msgstr "Werkzeuge"
 
-msgid "DICTATION LANGUAGE"
-msgstr "DIKTATSPRACHE"
+msgid "Transcribed by {provider}."
+msgstr "Transkribiert von {provider}."
 
 msgid "TRANSCRIPT LANGUAGE"
 msgstr "SPRACHE DER AUSGABE"
 
-msgid "PROCESSING MODE"
-msgstr "VERARBEITUNGSMODUS"
+msgid "Transcript saved to history; target was lost."
+msgstr "Transkription im Verlauf gespeichert; Zielfenster wurde verloren."
 
-msgid "Fast response"
-msgstr "Schnelle Antwort"
+msgid "Translate"
+msgstr "Übersetzen"
 
-msgid "Lower resource use"
-msgstr "Ressourcensparend"
+msgid "TRANSLATE"
+msgstr "ÜBERSETZEN"
 
-msgid "Hold {} anywhere in Windows."
-msgstr "Halten Sie {} in einem beliebigen Windows-Fenster gedrückt."
+msgid "Translate to English"
+msgstr "Ins Englische übersetzen"
 
-msgid "Interface language"
-msgstr "Sprache der Benutzeroberfläche"
+msgid "Translated by {provider}."
+msgstr "Übersetzt von {provider}."
 
-msgid "Changes the language of SayFlex menus and settings"
-msgstr "Ändert die Sprache der Menüs und Einstellungen von SayFlex"
+msgid "Translates foreign text, offers layout candidates for the rest"
+msgstr "Übersetzt fremdsprachigen Text und schlägt Layout-Optionen für den Rest vor"
 
-msgid "Follow Windows settings"
-msgstr "Wie in Windows"
+msgid "Translating locally…"
+msgstr "Lokale Übersetzung…"
 
-msgid "Speech and text use separate provider lists. The first enabled provider is tried first; failed services move down. Make one provider exclusive, or place a cloud service above This computer to keep a local fallback."
-msgstr "Für Sprache und Text gibt es getrennte Anbieterlisten. Der erste aktivierte Anbieter wird zuerst verwendet; fehlgeschlagene Dienste rücken nach unten. Sie können einen Anbieter exklusiv verwenden oder einen Cloud-Dienst über Diesem Computer platzieren und die lokale Verarbeitung als Reserve behalten."
+msgid "Translating locally… {chunk}/{total}"
+msgstr "Lokale Übersetzung… {chunk}/{total}"
 
-msgid "Hold {} anywhere in Windows to start a dictation."
-msgstr "Halten Sie {} in einem beliebigen Windows-Fenster gedrückt, um ein Diktat zu starten."
+msgid "Translating…"
+msgstr "Übersetzen…"
 
-msgid "Selection translation"
-msgstr "Übersetzung der Auswahl"
+msgid "Translation"
+msgstr "Übersetzung"
 
-msgid "Allow the selection shortcut to translate text"
-msgstr "Erlaubt dem Tastenkürzel für die Auswahl, Text zu übersetzen"
+msgid "TRANSLATION"
+msgstr "ÜBERSETZUNG"
 
-msgid "Local model"
-msgstr "Lokales Modell"
+msgid "Translation cancelled."
+msgstr "Übersetzung abgebrochen."
 
-msgid "Keep the model loaded for faster translations"
-msgstr "Hält das Modell für schnellere Übersetzungen geladen"
+msgid "Translation completed locally."
+msgstr "Übersetzung lokal abgeschlossen."
 
-msgid "Keep ready"
-msgstr "Bereithalten"
+msgid "Translation copied to the clipboard."
+msgstr "Übersetzung in die Zwischenablage kopiert."
 
-msgid "Load when needed"
-msgstr "Bei Bedarf laden"
+msgid "Translation is disabled in Actions."
+msgstr "Die Übersetzung ist unter Aktionen deaktiviert."
+
+msgid "Translation is on, but no text route is ready yet."
+msgstr "Die Übersetzung ist aktiviert, aber noch kein Textweg ist bereit."
+
+msgid "Translation model ready in {milliseconds} ms."
+msgstr "Übersetzungsmodell in {milliseconds} ms bereit."
+
+msgid "Translation preview"
+msgstr "Übersetzungsvorschau"
+
+msgid "Translation ready, but {message}"
+msgstr "Übersetzung ist bereit, aber {message}"
+
+msgid "Translation ready; waiting for the shortcut to be released."
+msgstr "Übersetzung bereit; das Loslassen des Kürzels wird abgewartet."
 
 msgid "Translation result"
 msgstr "Übersetzungsergebnis"
 
-msgid "How completed translations are delivered"
-msgstr "Legt fest, wohin fertige Übersetzungen ausgegeben werden"
+msgid "Translation worker protocol mismatch. Reinstall the complete application."
+msgstr "Die Protokollversion des Übersetzungsprozesses stimmt nicht überein. Installieren Sie die Anwendung vollständig neu."
 
-msgid "Selection action"
-msgstr "Aktion für die Auswahl"
+msgid "Translator"
+msgstr "Übersetzer"
 
-msgid "What the selection shortcut does"
-msgstr "Legt fest, was das Tastenkürzel für die Auswahl ausführt"
+msgid "TRANSLATOR"
+msgstr "ÜBERSETZER"
 
-msgid "PRESS SHORTCUT · {} · ESC CANCELS"
-msgstr "TASTENKÜRZEL DRÜCKEN · {} · ESC BRICHT AB"
+msgid "Ukrainian"
+msgstr "Ukrainisch"
 
-msgid "ACTION"
-msgstr "AKTION"
+msgid "Unavailable"
+msgstr "Nicht verfügbar"
 
-msgid "SayFlex {} · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it."
-msgstr "SayFlex {} · lokale Werkzeuge für Sprache und Gedanken. Kein Cloud-Konto erforderlich; ein Modell wird erst nach Ihrer Auswahl heruntergeladen."
+msgid "Unpin translation"
+msgstr "Übersetzung lösen"
 
-msgid "SayFlex {}"
-msgstr "SayFlex {}"
+msgid "Use"
+msgstr "Verwenden"
 
-msgid "Ready · hold {shortcut} to speak."
-msgstr "Bereit · Halten Sie {shortcut} zum Sprechen gedrückt."
+msgid "Use a letter, number, function key, Space, Tab, Enter, or arrow key."
+msgstr "Verwenden Sie einen Buchstaben, eine Zahl, eine Funktionstaste, die Leertaste, die Tabulatortaste, die Eingabetaste oder die Pfeiltaste."
 
-msgid "Insert latest dictation"
-msgstr "Letztes Diktat einfügen"
+msgid "Value"
+msgstr "Wert"
 
-msgid "Kept on this device only. The insert-latest shortcut uses the newest entry."
-msgstr "Wird nur auf diesem Gerät gespeichert. Das Tastenkürzel zum Einfügen verwendet den neuesten Eintrag."
-
-msgid "History is off. The newest dictation stays in memory until SayFlex closes, so its shortcut can still insert it."
-msgstr "Der Verlauf ist deaktiviert. Das neueste Diktat bleibt bis zum Beenden von SayFlex im Speicher und kann weiterhin per Tastenkürzel eingefügt werden."
-
-msgid "Nothing has been saved yet. The newest dictation can still be inserted with its shortcut until SayFlex closes."
-msgstr "Noch wurde nichts gespeichert. Das neueste Diktat kann bis zum Beenden von SayFlex weiterhin per Tastenkürzel eingefügt werden."
-
-msgid "Custom endpoint"
-msgstr "Eigener Server"
-msgid "Lower download size and resource use for less powerful computers."
-msgstr "Kompaktes Modell mit kleinerem Download und geringerer Last für schwächere Rechner."
-
-msgid "Balanced local model for systems below the recommended profile."
-msgstr "Ausgewogenes lokales Modell für Systeme unterhalb des empfohlenen Profils."
-
-msgid "Recommended default and the model used by the current Windows application."
-msgstr "Empfohlenes Standardmodell für die aktuelle Windows-Anwendung."
-
-msgid "Maximum-quality profile for users who accept a larger download and slower inference."
-msgstr "Maximale Qualität bei größerem Download und langsamerer Verarbeitung."
-
-msgid "Modern multilingual 4B model accelerated locally through Vulkan."
-msgstr "Modernes mehrsprachiges 4B-Modell mit lokaler Vulkan-Beschleunigung."
-
-msgid "Higher-quality multilingual 9B model for modern discrete GPUs."
-msgstr "Höherwertiges mehrsprachiges 9B-Modell für moderne dedizierte GPUs."
-msgid "Version, interface language, and software notices."
-msgstr "Version, Oberflächensprache und Softwarehinweise."
+msgid "Verified insertion {delivery} in {milliseconds} ms"
+msgstr "Einfügen {delivery} in {milliseconds} ms bestätigt"
 
 msgid "VERSION"
 msgstr "VERSION"
 
-msgid "INTERFACE"
-msgstr "OBERFLÄCHE"
+msgid "Version, interface language, and software notices."
+msgstr "Version, Oberflächensprache und Softwarehinweise."
 
-msgid "PLATFORM"
-msgstr "PLATTFORM"
+msgid "via {provider}"
+msgstr "über {provider}"
 
-msgid "OPEN-SOURCE NOTICES"
-msgstr "OPEN-SOURCE-LIZENZEN"
+msgid "Visualizer updated. The next dictation uses the selected style."
+msgstr "Visualizer aktualisiert. Das nächste Diktat verwendet den ausgewählten Stil."
 
-msgid "Press a new key combination"
-msgstr "Drücken Sie eine neue Tastenkombination"
+msgid "Visuals"
+msgstr "Visuelle Elemente"
 
-msgid "Press a valid shortcut first"
-msgstr "Drücken Sie zuerst ein gültiges Tastenkürzel"
+msgid "Voice orb"
+msgstr "Sprachkugel"
+
+msgid "Vulkan"
+msgstr "Vulkan"
+
+msgid "Wait for the current shortcut change to finish."
+msgstr "Warten Sie, bis die aktuelle Tastenkürzeländerung abgeschlossen ist."
+
+msgid "Waiting for Windows"
+msgstr "Warten auf Windows"
+
+msgid "Waiting for Windows to accept the new shortcuts"
+msgstr "Warten darauf, dass Windows die neuen Tastenkombinationen übernimmt"
+
+msgid "Warming up on {backend}. If it fails, the search moves to the next one down."
+msgstr "Aufwärmen auf {backend}. Wenn dies fehlschlägt, geht die Suche zum nächstniedrigeren über."
+
+msgid "What the selection shortcut does"
+msgstr "Legt fest, was das Tastenkürzel für die Auswahl ausführt"
+
+msgid "Whatever you spoke, written as spoken"
+msgstr "Was auch immer Sie gesagt haben, so wie gesprochen geschrieben"
+
+msgid "White"
+msgstr "Weiß"
+
+msgid "Windows tools for dictation and translation."
+msgstr "Windows-Werkzeuge für Diktat und Übersetzung."
+
+msgid "Worker error"
+msgstr "Worker-Fehler"
+
+msgid "Worker mismatch"
+msgstr "Worker-Versionen stimmen nicht überein"
+
+msgid "Worker restart failed. See the diagnostic log for details."
+msgstr "Der Arbeitsprozess konnte nicht neu gestartet werden. Einzelheiten finden Sie im Diagnoseprotokoll."
+
+msgid "Worker restarted automatically."
+msgstr "Der Arbeitsprozess wurde automatisch neu gestartet."
+
+msgid "Worker unavailable"
+msgstr "Worker nicht verfügbar"
+
+msgid "Writing slate"
+msgstr "Schreibtafel"
+
+msgid "Writing Slate surface updated for the next dictation."
+msgstr "Die Oberfläche der Schreibtafel wurde für das nächste Diktat aktualisiert."
+
+msgid "Yes"
+msgstr "Ja"

@@ -6,7 +6,8 @@ import { ListView, TextEdit } from "std-widgets.slint";
 import { SettingsWindow } from "settings.slint";
 import { ModelRow, ProviderRow, HistoryRow, HotkeyRow } from "rows.slint";
 import { Fact } from "parts.slint";
-import { MenuOption } from "controls.slint";
+import { MenuOption, RowAction } from "controls.slint";
+import { Sheet } from "sheet.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
 
 export { SettingsWindow, ModelRow, ProviderRow, HistoryRow, HotkeyRow, Fact, MenuOption, SlateLine }
@@ -1034,11 +1035,11 @@ export component TranslationPreview inherits Window {
 }
 
 export component TranslatorWindow inherits Window {
-    title: @tr("Local translator");
+    title: @tr("Translator");
     icon: @image-url("../assets/tray-icon.svg");
-    width: 740px;
-    height: 590px;
-    background: Theme.ink;
+    width: 780px;
+    height: 610px;
+    background: Sheet.canvas;
     default-font-family: "Segoe UI Variable Text";
 
     in-out property <string> source-text;
@@ -1052,92 +1053,131 @@ export component TranslatorWindow inherits Window {
     VerticalLayout {
         width: parent.width;
         height: parent.height;
-        padding: 22px;
-        spacing: 10px;
+        padding: 24px;
+        spacing: 14px;
 
-        HorizontalLayout {
-            height: 48px;
-            vertical-stretch: 0;
-            VerticalLayout {
-                spacing: 1px;
-                Eyebrow { height: 13px; text: @tr("LOCAL TRANSLATOR"); }
-                Text {
-                    text: @tr("English ↔ Russian");
-                    color: Theme.text;
-                    font-size: 21px;
-                    font-weight: 740;
+        Rectangle {
+            height: 88px;
+            background: Sheet.ink;
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                spacing: 22px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Text {
+                        text: "SayFlex";
+                        color: Sheet.on-ink;
+                        font-size: 24px;
+                        font-weight: 720;
+                    }
+                    Text {
+                        text: @tr("TRANSLATOR");
+                        color: Sheet.on-ink;
+                        opacity: 0.62;
+                        font-size: Sheet.label-size;
+                        font-weight: 650;
+                        letter-spacing: 2px;
+                    }
                 }
+                Rectangle { horizontal-stretch: 1; }
                 Text {
                     text: @tr("Direction is detected automatically");
-                    color: Theme.text-muted;
-                    font-size: 9px;
+                    color: Sheet.on-ink;
+                    opacity: 0.72;
+                    font-size: Sheet.detail-size;
+                    vertical-alignment: center;
                 }
             }
-            Rectangle { horizontal-stretch: 1; }
-            ActionButton {
-                width: 104px;
-                height: 32px;
-                label: @tr("SWAP TEXT");
-                clicked => { root.swap-text(); }
+        }
+
+        VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 7px;
+            HorizontalLayout {
+                height: 26px;
+                Text {
+                    text: @tr("SOURCE TEXT");
+                    color: Sheet.muted;
+                    font-size: Sheet.label-size;
+                    font-weight: 650;
+                    letter-spacing: 1.7px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                RowAction {
+                    label: @tr("Swap text");
+                    enabled: !root.processing && (root.source-text != "" || root.result-text != "");
+                    clicked => { root.swap-text(); }
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                border-width: 1px;
+                border-color: Sheet.hairline;
+                background: Sheet.raised;
+                TextEdit {
+                    x: 12px;
+                    y: 10px;
+                    width: parent.width - 24px;
+                    height: parent.height - 20px;
+                    text <=> root.source-text;
+                    wrap: word-wrap;
+                    accessible-label: @tr("Source text");
+                }
             }
         }
 
-        Rectangle {
+        VerticalLayout {
             vertical-stretch: 1;
-            border-radius: 6px;
-            border-width: 1px;
-            border-color: Theme.line;
-            background: Theme.panel;
-            TextEdit {
-                x: 11px;
-                y: 9px;
-                width: parent.width - 22px;
-                height: parent.height - 18px;
-                text <=> root.source-text;
-                wrap: word-wrap;
-            }
-        }
-
-        Rectangle {
-            vertical-stretch: 1;
-            border-radius: 6px;
-            border-width: 1px;
-            border-color: root.processing ? Theme.line : Theme.orange;
-            background: root.processing ? Theme.panel : Theme.orange-soft;
+            spacing: 7px;
             Text {
-                x: 12px;
-                y: 10px;
-                width: parent.width - 24px;
-                height: parent.height - 20px;
-                text: root.processing ? @tr("Translating locally…") : root.result-text;
-                color: root.processing ? Theme.text-muted : Theme.text;
-                font-size: 13px;
-                wrap: word-wrap;
+                height: 20px;
+                text: @tr("TRANSLATION");
+                color: Sheet.muted;
+                font-size: Sheet.label-size;
+                font-weight: 650;
+                letter-spacing: 1.7px;
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                border-width: root.processing ? 1px : 2px;
+                border-color: root.processing ? Sheet.hairline : Sheet.signal;
+                background: Sheet.raised;
+                Text {
+                    x: 12px;
+                    y: 10px;
+                    width: parent.width - 24px;
+                    height: parent.height - 20px;
+                    text: root.processing ? @tr("Translating…") : root.result-text;
+                    color: root.processing ? Sheet.muted : Sheet.ink;
+                    font-size: Sheet.body-size;
+                    wrap: word-wrap;
+                    accessible-label: @tr("Translation result");
+                }
             }
         }
 
         HorizontalLayout {
-            height: 36px;
+            height: 44px;
             vertical-stretch: 0;
-            spacing: 7px;
+            spacing: 10px;
             Text {
+                horizontal-stretch: 1;
                 text: root.status-text;
-                color: Theme.text-muted;
-                font-size: 9px;
+                color: Sheet.muted;
+                font-size: Sheet.detail-size;
                 vertical-alignment: center;
-                overflow: elide;
+                wrap: word-wrap;
             }
-            Rectangle { horizontal-stretch: 1; }
-            ActionButton {
-                width: 104px;
-                label: @tr("COPY RESULT");
+            RowAction {
+                label: @tr("Copy result");
                 enabled: !root.processing && root.result-text != "";
                 clicked => { root.copy-result(); }
             }
-            ActionButton {
-                width: 110px;
-                label: @tr("TRANSLATE");
-                accent: true;
+            RowAction {
+                label: @tr("Translate");
                 enabled: !root.processing;
                 clicked => { root.translate(); }
             }

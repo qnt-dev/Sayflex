@@ -287,6 +287,12 @@ pub struct HotkeyApplyError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyApplyOutcome {
+    pub bindings: HotkeyBindings,
+    pub failures: Vec<HotkeyApplyError>,
+}
+
 impl std::fmt::Display for HotkeyApplyError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
@@ -369,8 +375,18 @@ impl RegisteredHotkeys {
                 )),
             }
         }
+        for action in registered_actions() {
+            if bindings.binding(action).enabled
+                && !registered
+                    .registrations
+                    .iter()
+                    .any(|(registered_action, _, _)| *registered_action == action)
+            {
+                registered.bindings.binding_mut(action).enabled = false;
+            }
+        }
         refresh_registered_command_mask(&registered.registrations);
-        set_hook_bindings(bindings)?;
+        set_hook_bindings(registered.bindings.clone())?;
         Ok(registered)
     }
 
@@ -391,7 +407,10 @@ impl RegisteredHotkeys {
         Ok(registered)
     }
 
-    pub fn apply(&mut self, bindings: HotkeyBindings) -> Result<(), HotkeyApplyError> {
+    pub fn apply(
+        &mut self,
+        bindings: HotkeyBindings,
+    ) -> Result<HotkeyApplyOutcome, HotkeyApplyError> {
         rust_app_core::hotkeys::validate(&bindings).map_err(validation_error)?;
         if hook_gesture_active() {
             return Err(HotkeyApplyError {
@@ -401,58 +420,62 @@ impl RegisteredHotkeys {
             });
         }
 
-        // Register every changed chord under the inactive id bank first. The
-        // old set remains live until all new registrations have succeeded, so
-        // failure needs no best-effort rollback and never leaves a half-set.
-        let mut staged = Vec::new();
+        // Reconcile one action at a time. A conflict in one global shortcut
+        // must not roll back another shortcut Windows has already accepted.
+        // Each individual replacement remains atomic: register it under the
+        // inactive id first, then release the old id.
+        let mut effective = self.bindings.clone();
+        let mut failures = Vec::new();
         for action in registered_actions() {
-            let previous = self.bindings.binding(action);
-            let replacement = bindings.binding(action);
-            let unchanged = previous == replacement
-                && (!replacement.enabled
-                    || self
-                        .registrations
-                        .iter()
-                        .any(|(registered_action, _, spec)| {
-                            *registered_action == action && *spec == replacement.spec
-                        }));
-            if unchanged || !replacement.enabled {
+            let replacement = *bindings.binding(action);
+            let existing = self
+                .registrations
+                .iter()
+                .position(|(registered_action, _, _)| *registered_action == action);
+
+            if !replacement.enabled {
+                if let Some(index) = existing {
+                    let (_, id, _) = self.registrations.remove(index);
+                    self.backend.unregister(id);
+                }
+                *effective.binding_mut(action) = replacement;
                 continue;
             }
-            let uses_primary = self.registrations.iter().any(|(registered_action, id, _)| {
-                *registered_action == action && *id == hotkey_id(action, false)
-            });
+
+            if existing.is_some_and(|index| self.registrations[index].2 == replacement.spec) {
+                *effective.binding_mut(action) = replacement;
+                continue;
+            }
+
+            let uses_primary = existing
+                .map(|index| self.registrations[index].1 == hotkey_id(action, false))
+                .unwrap_or(false);
             let id = hotkey_id(action, uses_primary);
             if let Err(code) = self.backend.register(id, replacement.spec) {
-                for (_, staged_id, _) in staged.drain(..) {
-                    self.backend.unregister(staged_id);
+                if existing.is_none() {
+                    let actual = effective.binding_mut(action);
+                    actual.spec = replacement.spec;
+                    actual.enabled = false;
                 }
-                return Err(registration_error(action, code));
+                failures.push(registration_error(action, code));
+                continue;
             }
-            staged.push((action, id, replacement.spec));
+            if let Some(index) = existing {
+                let (_, old_id, _) = self.registrations.remove(index);
+                self.backend.unregister(old_id);
+            }
+            self.registrations.push((action, id, replacement.spec));
+            *effective.binding_mut(action) = replacement;
         }
 
-        if let Err(error) = set_hook_bindings(bindings.clone()) {
-            for (_, staged_id, _) in staged.drain(..) {
-                self.backend.unregister(staged_id);
-            }
-            return Err(error);
-        }
-
-        let mut retained = Vec::with_capacity(self.registrations.len() + staged.len());
-        for registration @ (action, id, spec) in self.registrations.drain(..) {
-            let replacement = bindings.binding(action);
-            if replacement.enabled && replacement.spec == spec {
-                retained.push(registration);
-            } else {
-                self.backend.unregister(id);
-            }
-        }
-        retained.extend(staged);
-        self.registrations = retained;
+        *effective.binding_mut(HotkeyAction::Dictate) = bindings.dictate;
+        set_hook_bindings(effective.clone())?;
         refresh_registered_command_mask(&self.registrations);
-        self.bindings = bindings;
-        Ok(())
+        self.bindings = effective.clone();
+        Ok(HotkeyApplyOutcome {
+            bindings: effective,
+            failures,
+        })
     }
 
     #[must_use]
@@ -1615,23 +1638,67 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_rebind_restores_every_previous_registration() {
+    fn one_refused_shortcut_does_not_roll_back_an_unrelated_accepted_change() {
         let backend = FakeRegistrationBackend::default();
         let observer = backend.clone();
         let mut registered =
             RegisteredHotkeys::with_backend(Box::new(backend), HotkeyBindings::default()).unwrap();
-        let previous = observer.active.borrow().clone();
         let mut replacement = HotkeyBindings::default();
         replacement.correct_layout.spec = HotkeySpec::control_alt(u16::from(b'H'));
         replacement.translate.spec = HotkeySpec::control_alt(u16::from(b'G'));
         replacement.translate.enabled = true;
         observer.fail_spec.set(Some(replacement.translate.spec));
 
-        let error = registered.apply(replacement).unwrap_err();
+        let outcome = registered.apply(replacement).unwrap();
 
-        assert_eq!(error.action, HotkeyAction::Translate);
-        assert_eq!(*observer.active.borrow(), previous);
-        assert_eq!(registered.bindings(), &HotkeyBindings::default());
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].action, HotkeyAction::Translate);
+        assert_eq!(
+            registered.bindings().correct_layout.spec,
+            HotkeySpec::control_alt(u16::from(b'H'))
+        );
+        assert!(!registered.bindings().translate.enabled);
+        assert!(
+            observer
+                .active
+                .borrow()
+                .values()
+                .any(|spec| *spec == HotkeySpec::control_alt(u16::from(b'H')))
+        );
+    }
+
+    #[test]
+    fn partial_startup_conflict_cannot_take_a_later_enabled_translate_shortcut_down() {
+        let backend = FakeRegistrationBackend::default();
+        let observer = backend.clone();
+        let mut registered =
+            RegisteredHotkeys::with_backend(Box::new(backend), HotkeyBindings::default()).unwrap();
+        let pause_index = registered
+            .registrations
+            .iter()
+            .position(|(action, _, _)| *action == HotkeyAction::PauseResume)
+            .unwrap();
+        let (_, pause_id, _) = registered.registrations.remove(pause_index);
+        registered.backend.unregister(pause_id);
+        registered.bindings.pause_resume.enabled = false;
+
+        let mut requested = HotkeyBindings::default();
+        requested.translate.enabled = true;
+        observer.fail_spec.set(Some(requested.pause_resume.spec));
+
+        let outcome = registered.apply(requested).unwrap();
+
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].action, HotkeyAction::PauseResume);
+        assert!(outcome.bindings.translate.enabled);
+        assert!(!outcome.bindings.pause_resume.enabled);
+        assert!(
+            observer
+                .active
+                .borrow()
+                .values()
+                .any(|spec| *spec == HotkeySpec::control_alt(u16::from(b'F')))
+        );
     }
 
     #[test]

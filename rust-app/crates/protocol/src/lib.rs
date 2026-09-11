@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // Version 22 adds atomic, editable hotkey configuration and acknowledgements.
+// Version 23 adds worker-owned model removal, explicit local-engine residency
+// events, and per-action hotkey application failures.
 // All packaged processes must agree on this schema before exchanging commands.
 /// The shape of every message in this file, as one number.
 ///
@@ -14,7 +16,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -666,6 +668,11 @@ pub enum InputHostEvent {
     HotkeysApplied {
         operation_id: RequestId,
         configuration: HotkeyConfiguration,
+        /// Actions Windows could not register. Other actions in the same
+        /// request are still applied and the returned configuration is the
+        /// exact effective set, never the merely requested set.
+        #[serde(default)]
+        failures: Vec<HotkeyFailure>,
     },
     HotkeysRejected {
         operation_id: RequestId,
@@ -853,6 +860,13 @@ pub enum HotkeyRejection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotkeyFailure {
+    pub action: HotkeyAction,
+    pub reason: HotkeyRejection,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum InputHostCommand {
     SetHotkeys {
@@ -894,6 +908,11 @@ pub enum TranslationWorkerCommand {
         prepare_local_model: bool,
     },
     EnsureModel {
+        tier: TranslationTier,
+    },
+    /// Removes one catalog-owned local pack after its engine is no longer in
+    /// use. The worker, not the desktop, owns the filesystem operation.
+    RemoveModel {
         tier: TranslationTier,
     },
     /// Stops a pack or runtime installation in flight, keeping partial files.
@@ -964,6 +983,21 @@ pub enum TranslationWorkerEvent {
     },
     ModelSelected {
         tier: TranslationTier,
+    },
+    /// What is resident in the local translation engine after the worker has
+    /// completed a load or unload operation.
+    LocalModelState {
+        catalog_id: Option<String>,
+        loaded: bool,
+    },
+    ModelRemoved {
+        catalog_id: String,
+        tier: TranslationTier,
+        /// Logical bytes of files removed from SayFlex-owned paths. This is not
+        /// a claim about physical allocation reclaimed by the filesystem.
+        removed_bytes: u64,
+        runtime_removed: bool,
+        models: Vec<TranslationModelSummary>,
     },
     Partial {
         request_id: RequestId,
@@ -1038,6 +1072,11 @@ pub enum SpeechWorkerCommand {
     SelectModel {
         catalog_id: String,
     },
+    /// Removes one catalog-owned local model after its inference engine is no
+    /// longer using the file.
+    RemoveModel {
+        catalog_id: String,
+    },
     /// Stops an installation in flight. The partial download is kept, so a
     /// later attempt resumes instead of starting again.
     CancelModelInstall,
@@ -1105,6 +1144,19 @@ pub enum SpeechWorkerEvent {
     },
     ModelSelected {
         catalog_id: String,
+    },
+    /// What is resident in the local speech engine after the inference actor
+    /// has completed a load or unload operation.
+    LocalModelState {
+        catalog_id: Option<String>,
+        loaded: bool,
+    },
+    ModelRemoved {
+        catalog_id: String,
+        /// Logical bytes of files removed from SayFlex-owned paths. This is not
+        /// a claim about physical allocation reclaimed by the filesystem.
+        removed_bytes: u64,
+        models: Vec<ModelSummary>,
     },
     Listening {
         session_id: SessionId,
@@ -1455,6 +1507,8 @@ pub fn translation_event_name(event: &TranslationWorkerEvent) -> &'static str {
         TranslationWorkerEvent::ModelInstalled { .. } => "model_installed",
         TranslationWorkerEvent::ModelReady { .. } => "model_ready",
         TranslationWorkerEvent::ModelSelected { .. } => "model_selected",
+        TranslationWorkerEvent::LocalModelState { .. } => "local_model_state",
+        TranslationWorkerEvent::ModelRemoved { .. } => "model_removed",
         TranslationWorkerEvent::Partial { .. } => "partial",
         TranslationWorkerEvent::Completed { .. } => "completed",
         TranslationWorkerEvent::Cancelled { .. } => "cancelled",
@@ -1474,6 +1528,8 @@ pub fn speech_event_name(event: &SpeechWorkerEvent) -> &'static str {
         SpeechWorkerEvent::ModelInstalled { .. } => "model_installed",
         SpeechWorkerEvent::ModelReady { .. } => "model_ready",
         SpeechWorkerEvent::ModelSelected { .. } => "model_selected",
+        SpeechWorkerEvent::LocalModelState { .. } => "local_model_state",
+        SpeechWorkerEvent::ModelRemoved { .. } => "model_removed",
         SpeechWorkerEvent::Listening { .. } => "listening",
         SpeechWorkerEvent::AudioLevel { .. } => "audio_level",
         SpeechWorkerEvent::Processing { .. } => "processing",
@@ -1582,8 +1638,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 22,
-            "every fingerprint below was written for protocol 22: if a shape \
+            PROTOCOL_VERSION, 23,
+            "every fingerprint below was written for protocol 23: if a shape \
              changes, this number changes with it"
         );
     }
@@ -2005,6 +2061,11 @@ mod complete_wire_schema_tests {
             InputHostEvent::HotkeysApplied {
                 operation_id: request_id,
                 configuration: HotkeyConfiguration::default(),
+                failures: vec![HotkeyFailure {
+                    action: HotkeyAction::Translate,
+                    reason: HotkeyRejection::RegistrationFailed,
+                    message: "message".to_owned(),
+                }],
             },
             InputHostEvent::HotkeysRejected {
                 operation_id: request_id,
@@ -2062,6 +2123,9 @@ mod complete_wire_schema_tests {
             TranslationWorkerCommand::EnsureModel {
                 tier: TranslationTier::Tiny,
             },
+            TranslationWorkerCommand::RemoveModel {
+                tier: TranslationTier::Tiny,
+            },
             TranslationWorkerCommand::CancelModelInstall,
             TranslationWorkerCommand::SelectTier {
                 tier: TranslationTier::Tiny,
@@ -2116,6 +2180,17 @@ mod complete_wire_schema_tests {
             },
             TranslationWorkerEvent::ModelSelected {
                 tier: TranslationTier::Tiny,
+            },
+            TranslationWorkerEvent::LocalModelState {
+                catalog_id: Some("model".to_owned()),
+                loaded: true,
+            },
+            TranslationWorkerEvent::ModelRemoved {
+                catalog_id: "model".to_owned(),
+                tier: TranslationTier::Tiny,
+                removed_bytes: 42,
+                runtime_removed: true,
+                models: vec![translation_model()],
             },
             TranslationWorkerEvent::Partial {
                 request_id,
@@ -2178,6 +2253,9 @@ mod complete_wire_schema_tests {
             SpeechWorkerCommand::SelectModel {
                 catalog_id: "model".to_owned(),
             },
+            SpeechWorkerCommand::RemoveModel {
+                catalog_id: "model".to_owned(),
+            },
             SpeechWorkerCommand::CancelModelInstall,
             SpeechWorkerCommand::SetTranscriptionProviders {
                 providers: vec![transcription_entry()],
@@ -2229,6 +2307,15 @@ mod complete_wire_schema_tests {
             },
             SpeechWorkerEvent::ModelSelected {
                 catalog_id: "model".to_owned(),
+            },
+            SpeechWorkerEvent::LocalModelState {
+                catalog_id: Some("model".to_owned()),
+                loaded: true,
+            },
+            SpeechWorkerEvent::ModelRemoved {
+                catalog_id: "model".to_owned(),
+                removed_bytes: 42,
+                models: vec![speech_model()],
             },
             SpeechWorkerEvent::Listening { session_id },
             SpeechWorkerEvent::AudioLevel {
@@ -2333,41 +2420,43 @@ mod complete_wire_schema_tests {
     );
     index_fn!(translation_command_index, TranslationWorkerCommand,
         TranslationWorkerCommand::Initialize { .. } => 0, TranslationWorkerCommand::EnsureModel { .. } => 1,
-        TranslationWorkerCommand::CancelModelInstall => 2, TranslationWorkerCommand::SelectTier { .. } => 3,
-        TranslationWorkerCommand::Translate { .. } => 4, TranslationWorkerCommand::Cancel { .. } => 5,
-        TranslationWorkerCommand::SetTranslationProviders { .. } => 6, TranslationWorkerCommand::SetTranslationProviderCredential { .. } => 7,
-        TranslationWorkerCommand::GetTranslationProviders => 8, TranslationWorkerCommand::GetHistory { .. } => 9,
-        TranslationWorkerCommand::SetHistoryEnabled { .. } => 10, TranslationWorkerCommand::ClearHistory => 11,
-        TranslationWorkerCommand::Shutdown => 12
+        TranslationWorkerCommand::RemoveModel { .. } => 2, TranslationWorkerCommand::CancelModelInstall => 3,
+        TranslationWorkerCommand::SelectTier { .. } => 4, TranslationWorkerCommand::Translate { .. } => 5,
+        TranslationWorkerCommand::Cancel { .. } => 6, TranslationWorkerCommand::SetTranslationProviders { .. } => 7,
+        TranslationWorkerCommand::SetTranslationProviderCredential { .. } => 8, TranslationWorkerCommand::GetTranslationProviders => 9,
+        TranslationWorkerCommand::GetHistory { .. } => 10, TranslationWorkerCommand::SetHistoryEnabled { .. } => 11,
+        TranslationWorkerCommand::ClearHistory => 12, TranslationWorkerCommand::Shutdown => 13
     );
     index_fn!(translation_event_index, TranslationWorkerEvent,
         TranslationWorkerEvent::Ready { .. } => 0, TranslationWorkerEvent::ModelDownloadProgress { .. } => 1,
         TranslationWorkerEvent::ModelInstalled { .. } => 2, TranslationWorkerEvent::ModelReady { .. } => 3,
-        TranslationWorkerEvent::ModelSelected { .. } => 4, TranslationWorkerEvent::Partial { .. } => 5,
-        TranslationWorkerEvent::Completed { .. } => 6, TranslationWorkerEvent::Cancelled { .. } => 7,
-        TranslationWorkerEvent::History { .. } => 8, TranslationWorkerEvent::TranslationProviders { .. } => 9,
-        TranslationWorkerEvent::CredentialSaved { .. } => 10, TranslationWorkerEvent::Failed { .. } => 11
+        TranslationWorkerEvent::ModelSelected { .. } => 4, TranslationWorkerEvent::LocalModelState { .. } => 5,
+        TranslationWorkerEvent::ModelRemoved { .. } => 6, TranslationWorkerEvent::Partial { .. } => 7,
+        TranslationWorkerEvent::Completed { .. } => 8, TranslationWorkerEvent::Cancelled { .. } => 9,
+        TranslationWorkerEvent::History { .. } => 10, TranslationWorkerEvent::TranslationProviders { .. } => 11,
+        TranslationWorkerEvent::CredentialSaved { .. } => 12, TranslationWorkerEvent::Failed { .. } => 13
     );
     index_fn!(speech_command_index, SpeechWorkerCommand,
         SpeechWorkerCommand::Initialize { .. } => 0, SpeechWorkerCommand::Begin { .. } => 1,
         SpeechWorkerCommand::End { .. } => 2, SpeechWorkerCommand::Cancel { .. } => 3,
         SpeechWorkerCommand::EnsureModel { .. } => 4, SpeechWorkerCommand::SelectModel { .. } => 5,
-        SpeechWorkerCommand::CancelModelInstall => 6, SpeechWorkerCommand::SetTranscriptionProviders { .. } => 7,
-        SpeechWorkerCommand::SetProviderCredential { .. } => 8, SpeechWorkerCommand::GetTranscriptionProviders => 9,
-        SpeechWorkerCommand::SetOutputMode { .. } => 10, SpeechWorkerCommand::SetDictationLanguage { .. } => 11,
-        SpeechWorkerCommand::SetFastReleasePreviews { .. } => 12, SpeechWorkerCommand::GetHistory { .. } => 13,
-        SpeechWorkerCommand::SetHistoryEnabled { .. } => 14, SpeechWorkerCommand::ClearHistory => 15,
-        SpeechWorkerCommand::Shutdown => 16
+        SpeechWorkerCommand::RemoveModel { .. } => 6, SpeechWorkerCommand::CancelModelInstall => 7,
+        SpeechWorkerCommand::SetTranscriptionProviders { .. } => 8, SpeechWorkerCommand::SetProviderCredential { .. } => 9,
+        SpeechWorkerCommand::GetTranscriptionProviders => 10, SpeechWorkerCommand::SetOutputMode { .. } => 11,
+        SpeechWorkerCommand::SetDictationLanguage { .. } => 12, SpeechWorkerCommand::SetFastReleasePreviews { .. } => 13,
+        SpeechWorkerCommand::GetHistory { .. } => 14, SpeechWorkerCommand::SetHistoryEnabled { .. } => 15,
+        SpeechWorkerCommand::ClearHistory => 16, SpeechWorkerCommand::Shutdown => 17
     );
     index_fn!(speech_event_index, SpeechWorkerEvent,
         SpeechWorkerEvent::Ready { .. } => 0, SpeechWorkerEvent::ModelDownloadProgress { .. } => 1,
         SpeechWorkerEvent::ModelInstalled { .. } => 2, SpeechWorkerEvent::ModelReady { .. } => 3,
-        SpeechWorkerEvent::ModelSelected { .. } => 4, SpeechWorkerEvent::Listening { .. } => 5,
-        SpeechWorkerEvent::AudioLevel { .. } => 6, SpeechWorkerEvent::Processing { .. } => 7,
-        SpeechWorkerEvent::Completed { .. } => 8, SpeechWorkerEvent::Cancelled { .. } => 9,
-        SpeechWorkerEvent::History { .. } => 10, SpeechWorkerEvent::TranscriptionProviders { .. } => 11,
-        SpeechWorkerEvent::CredentialSaved { .. } => 12, SpeechWorkerEvent::TranscribedRemotely { .. } => 13,
-        SpeechWorkerEvent::Failed { .. } => 14
+        SpeechWorkerEvent::ModelSelected { .. } => 4, SpeechWorkerEvent::LocalModelState { .. } => 5,
+        SpeechWorkerEvent::ModelRemoved { .. } => 6, SpeechWorkerEvent::Listening { .. } => 7,
+        SpeechWorkerEvent::AudioLevel { .. } => 8, SpeechWorkerEvent::Processing { .. } => 9,
+        SpeechWorkerEvent::Completed { .. } => 10, SpeechWorkerEvent::Cancelled { .. } => 11,
+        SpeechWorkerEvent::History { .. } => 12, SpeechWorkerEvent::TranscriptionProviders { .. } => 13,
+        SpeechWorkerEvent::CredentialSaved { .. } => 14, SpeechWorkerEvent::TranscribedRemotely { .. } => 15,
+        SpeechWorkerEvent::Failed { .. } => 16
     );
     index_fn!(companion_command_index, CompanionRendererCommand,
         CompanionRendererCommand::SetEnabled { .. } => 0, CompanionRendererCommand::SetHomePosition { .. } => 1,
@@ -2446,10 +2535,10 @@ mod complete_wire_schema_tests {
 
         assert_complete(&input_events, input_event_index, 17);
         assert_complete(&input_commands, input_command_index, 7);
-        assert_complete(&translation_commands, translation_command_index, 13);
-        assert_complete(&translation_events, translation_event_index, 12);
-        assert_complete(&speech_commands, speech_command_index, 17);
-        assert_complete(&speech_events, speech_event_index, 15);
+        assert_complete(&translation_commands, translation_command_index, 14);
+        assert_complete(&translation_events, translation_event_index, 14);
+        assert_complete(&speech_commands, speech_command_index, 18);
+        assert_complete(&speech_events, speech_event_index, 17);
         assert_complete(&companion_commands, companion_command_index, 8);
         assert_complete(&companion_events, companion_event_index, 3);
 
@@ -2466,7 +2555,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0xc9e8_ea62_efed_a419,
+            0x7dbd_2363_8c06_4a58,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

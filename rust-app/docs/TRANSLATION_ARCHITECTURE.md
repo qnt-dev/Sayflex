@@ -4,8 +4,10 @@
 
 - Translation is optional and disabled until the user enables it.
 - Translation runs on this machine by default. Settings → Providers holds a
-  second, separate ordered list in which DeepL, Azure Translator and Google
-  Cloud Translation can be placed above the local engine. Every row is off until
+  second, separate ordered list in which DeepL and Azure Translator can be
+  placed above the local engine. Google Cloud Translation is deliberately not
+  implemented; an old saved Google row remains visible only as unsupported so
+  it cannot silently become a routing backdoor. Every cloud row is off until
   the user switches it on and supplies a key, and the list itself is what
   decides whether text leaves the machine — the claim the window makes is read
   from it rather than from a separate setting.

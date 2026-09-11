@@ -3,10 +3,10 @@ use std::{
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc::{self, Sender},
+        mpsc::{self, Sender, SyncSender},
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use rust_protocol::{
@@ -58,7 +58,10 @@ enum InferenceCommand {
     },
     /// Releases the local model and its backend allocations. Cloud-only mode
     /// must not keep VRAM or RAM occupied by an engine it cannot route to.
-    Unload,
+    Unload {
+        only_catalog_id: Option<String>,
+        acknowledged: Option<SyncSender<Option<String>>>,
+    },
     Shutdown,
 }
 
@@ -119,9 +122,34 @@ impl InferenceHandle {
 
     pub fn unload_model(&self) {
         self.reset_segmented_session();
-        if let Err(error) = self.commands.send(InferenceCommand::Unload) {
+        if let Err(error) = self.commands.send(InferenceCommand::Unload {
+            only_catalog_id: None,
+            acknowledged: None,
+        }) {
             eprintln!("could not queue speech model unload: {error}");
         }
+    }
+
+    /// Waits until the inference actor has dropped `catalog_id`, if that is the
+    /// model it currently owns. Returning `None` means another model (or no
+    /// model) was resident, so deleting this catalog entry is still safe.
+    pub fn unload_model_if_and_wait(&self, catalog_id: &str) -> Result<Option<String>, String> {
+        self.reset_segmented_session();
+        let (acknowledged, answer) = mpsc::sync_channel(0);
+        self.commands
+            .send(InferenceCommand::Unload {
+                only_catalog_id: Some(catalog_id.to_owned()),
+                acknowledged: Some(acknowledged),
+            })
+            .map_err(|error| format!("could not queue speech model unload: {error}"))?;
+        answer
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|error| format!("speech model unload was not acknowledged: {error}"))
+    }
+
+    #[must_use]
+    pub fn has_active_session(&self) -> bool {
+        recover_lock(&self.active_session).is_some()
     }
 
     pub fn set_language(&self, language: DictationLanguage) {
@@ -250,6 +278,7 @@ fn inference_loop(
     history: mpsc::Sender<HistoryCommand>,
 ) {
     let mut engine = WhisperEngine::new();
+    let mut loaded_catalog_id: Option<String> = None;
     let mut stable_prefix: Option<PreviewResult> = None;
     for command in commands {
         match command {
@@ -267,6 +296,11 @@ fn inference_loop(
                             backend: prepared.backend.to_owned(),
                             load_duration_ms: prepared.load_duration_ms,
                             warmup_duration_ms: prepared.warmup_duration_ms,
+                        });
+                        loaded_catalog_id = Some(catalog_id.clone());
+                        let _ = events.send(SpeechWorkerEvent::LocalModelState {
+                            catalog_id: loaded_catalog_id.clone(),
+                            loaded: true,
                         });
                         if selected {
                             let _ = events.send(SpeechWorkerEvent::ModelSelected { catalog_id });
@@ -406,9 +440,29 @@ fn inference_loop(
                     }
                 }
             }
-            InferenceCommand::Unload => {
-                stable_prefix = None;
-                engine = WhisperEngine::new();
+            InferenceCommand::Unload {
+                only_catalog_id,
+                acknowledged,
+            } => {
+                let matches = loaded_catalog_id.is_none()
+                    || only_catalog_id
+                        .as_ref()
+                        .is_none_or(|expected| loaded_catalog_id.as_ref() == Some(expected));
+                let unloaded = if matches {
+                    stable_prefix = None;
+                    engine = WhisperEngine::new();
+                    let unloaded = loaded_catalog_id.take();
+                    let _ = events.send(SpeechWorkerEvent::LocalModelState {
+                        catalog_id: unloaded.clone(),
+                        loaded: false,
+                    });
+                    unloaded
+                } else {
+                    None
+                };
+                if let Some(acknowledged) = acknowledged {
+                    let _ = acknowledged.send(unloaded);
+                }
             }
             InferenceCommand::Shutdown => break,
         }
@@ -615,11 +669,13 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use rust_protocol::SessionId;
+    use std::{sync::mpsc, time::Duration};
+
+    use rust_protocol::{SessionId, SpeechWorkerEvent};
 
     use super::{
-        advance_stable_prefix, context_prompt, has_trailing_silence, join_transcript_text,
-        quiet_tail_after,
+        InferenceHandle, advance_stable_prefix, context_prompt, has_trailing_silence,
+        join_transcript_text, quiet_tail_after,
     };
     use crate::{
         audio::RecordedAudio,
@@ -635,6 +691,29 @@ mod tests {
             samples,
             sample_rate_hz: rate,
         }
+    }
+
+    #[test]
+    fn unload_acknowledges_only_after_the_actor_reports_no_resident_model() {
+        let (events, received_events) = mpsc::channel();
+        let (history, _received_history) = mpsc::channel();
+        let inference = InferenceHandle::start(events, history).unwrap();
+
+        assert_eq!(
+            inference.unload_model_if_and_wait("not-loaded").unwrap(),
+            None
+        );
+        let event = received_events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the actor must report residency before acknowledging unload");
+        assert_eq!(
+            event,
+            SpeechWorkerEvent::LocalModelState {
+                catalog_id: None,
+                loaded: false,
+            }
+        );
+        inference.shutdown();
     }
 
     #[test]

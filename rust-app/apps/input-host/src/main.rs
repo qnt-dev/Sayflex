@@ -21,8 +21,8 @@ use std::{
 };
 
 use rust_protocol::{
-    HotkeyConfiguration, InputHostCommand, InputHostEvent, PROTOCOL_VERSION, RequestId, SessionId,
-    Transcript,
+    HotkeyConfiguration, HotkeyFailure, InputHostCommand, InputHostEvent, PROTOCOL_VERSION,
+    RequestId, SessionId, Transcript,
 };
 use windows_sys::Win32::{
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
@@ -164,10 +164,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if message.message == WM_APPLY_HOTKEYS {
             while let Ok(request) = hotkey_requests.try_recv() {
                 match registered_hotkeys.apply(request.configuration.bindings.clone()) {
-                    Ok(()) => {
+                    Ok(outcome) => {
                         let _ = hotkey_events.send(InputHostEvent::HotkeysApplied {
                             operation_id: request.operation_id,
-                            configuration: request.configuration,
+                            configuration: HotkeyConfiguration {
+                                bindings: outcome.bindings,
+                            },
+                            failures: outcome
+                                .failures
+                                .into_iter()
+                                .map(|failure| HotkeyFailure {
+                                    action: failure.action,
+                                    reason: failure.reason,
+                                    message: failure.message,
+                                })
+                                .collect(),
                         });
                     }
                     Err(error) => {

@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     error::Error,
     rc::Rc,
@@ -380,6 +380,7 @@ struct AppState {
     history_loaded: bool,
     models: Vec<ModelSummary>,
     selected_model_id: String,
+    speech_loaded_model_id: Option<String>,
     speech_backend_preference: SpeechBackendPreference,
     speech_backend_active: Option<SpeechBackend>,
     output_mode: SpeechOutputMode,
@@ -394,7 +395,7 @@ struct AppState {
     input_ready: bool,
     hotkeys: HotkeyBindings,
     pending_hotkeys: Option<(RequestId, HotkeyBindings)>,
-    hotkey_error: Option<(HotkeyAction, HotkeyRejection)>,
+    hotkey_errors: HashMap<HotkeyAction, HotkeyRejection>,
     input_paused: bool,
     /// The speech process has completed its protocol handshake. This is
     /// deliberately separate from `speech_ready`: a cloud-first route can
@@ -409,6 +410,7 @@ struct AppState {
     pending_selection: Option<PendingSelection>,
     translation_models: Vec<TranslationModelSummary>,
     selected_translation_tier: Option<TranslationTier>,
+    translation_loaded_model_id: Option<String>,
     /// The translation process has completed its protocol handshake. Cloud
     /// text providers depend on this, not on whether a local model is warm.
     translation_worker_ready: bool,
@@ -433,6 +435,7 @@ struct AppState {
     /// exactly as long as a download runs, so an entry here is the same fact
     /// as "this row is downloading" and the two cannot disagree.
     downloads: HashMap<String, settings_projection::Download>,
+    removing_models: HashSet<String>,
     // Invariant: an id is in `downloads` only between a progress report and the
     // next thing the worker says about that id. `finish_download` is the only
     // way out, and every terminal event calls it.
@@ -495,6 +498,7 @@ impl AppState {
             history_loaded: false,
             models: Vec::new(),
             selected_model_id,
+            speech_loaded_model_id: None,
             speech_backend_preference: saved_settings.speech_backend_preference,
             speech_backend_active: Some(speech_backend_active),
             output_mode,
@@ -509,7 +513,7 @@ impl AppState {
             input_ready: false,
             hotkeys: saved_settings.hotkeys.clone(),
             pending_hotkeys: None,
-            hotkey_error: None,
+            hotkey_errors: HashMap::new(),
             input_paused: false,
             speech_worker_ready: false,
             speech_ready: false,
@@ -520,6 +524,7 @@ impl AppState {
             pending_selection: None,
             translation_models: Vec::new(),
             selected_translation_tier: saved_settings.selected_translation_tier,
+            translation_loaded_model_id: None,
             translation_worker_ready: false,
             translation_ready: false,
             translation_enabled: saved_settings.translation_enabled,
@@ -537,6 +542,7 @@ impl AppState {
             queued_selection_translation: None,
             translation_history: Vec::new(),
             downloads: HashMap::new(),
+            removing_models: HashSet::new(),
             transcription_providers: Vec::new(),
             transcription_chain: saved_settings.transcription_providers.clone(),
             translation_providers: Vec::new(),
@@ -750,6 +756,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if env::args().any(|argument| argument.starts_with("--settings-preview")) {
         return settings_preview::run_settings_preview();
+    }
+    if settings_preview::requested_translator_state().is_some() {
+        return settings_preview::run_translator_preview();
     }
 
     if let Err(error) = rust_app_core::product::migrate_legacy_data_root() {
@@ -1738,10 +1747,15 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
         InputHostEvent::HotkeysApplied {
             operation_id,
             configuration,
+            failures,
         } => {
             let applied = {
                 let mut state = state.borrow_mut();
                 if commit_hotkeys_if_pending(&mut state, operation_id, configuration.bindings) {
+                    state.hotkey_errors = failures
+                        .iter()
+                        .map(|failure| (failure.action, failure.reason))
+                        .collect();
                     let _ = save_settings(&state);
                     true
                 } else {
@@ -1756,7 +1770,15 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     settings.set_hotkey_capture_valid(false);
                 }
                 sync_action_settings(settings, state);
-                set_indicator_status(settings, state_text(state, UiText::ShortcutsUpdated));
+                if let Some(failure) = failures.first() {
+                    sync_hotkey_capture_status(settings, state, Some(failure.reason));
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "hotkeys action={:?} result=rejected reason={:?} detail={}",
+                        failure.action, failure.reason, failure.message
+                    ));
+                } else {
+                    set_indicator_status(settings, state_text(state, UiText::ShortcutsUpdated));
+                }
             }
         }
         InputHostEvent::HotkeysRejected {
@@ -2306,12 +2328,12 @@ fn commit_hotkeys_if_pending(
     if !state
         .pending_hotkeys
         .as_ref()
-        .is_some_and(|(pending, proposed)| *pending == operation_id && *proposed == bindings)
+        .is_some_and(|(pending, _)| *pending == operation_id)
     {
         return false;
     }
     state.pending_hotkeys = None;
-    state.hotkey_error = None;
+    state.hotkey_errors.clear();
     state.hotkeys = bindings;
     state.layout_enabled = state.hotkeys.binding(HotkeyAction::CorrectLayout).enabled;
     state.translation_enabled = state.hotkeys.binding(HotkeyAction::Translate).enabled;
@@ -2330,7 +2352,10 @@ fn reject_hotkeys_if_pending(
         .is_some_and(|(pending, _)| *pending == operation_id);
     if matches {
         state.pending_hotkeys = None;
-        state.hotkey_error = action.map(|action| (action, reason));
+        state.hotkey_errors.clear();
+        if let Some(action) = action {
+            state.hotkey_errors.insert(action, reason);
+        }
     }
     matches
 }
@@ -2907,6 +2932,37 @@ fn handle_speech_event(
             }
             sync_models(settings, state);
         }
+        SpeechWorkerEvent::LocalModelState { catalog_id, loaded } => {
+            {
+                let mut app = state.borrow_mut();
+                app.speech_loaded_model_id = loaded.then_some(catalog_id).flatten();
+                app.speech_ready = loaded && app.local_speech_enabled();
+            }
+            sync_models(settings, state);
+            sync_action_settings(settings, state);
+        }
+        SpeechWorkerEvent::ModelRemoved {
+            catalog_id,
+            removed_bytes,
+            models,
+        } => {
+            {
+                let mut app = state.borrow_mut();
+                app.removing_models.remove(&catalog_id);
+                app.models = models;
+                if app.speech_loaded_model_id.as_deref() == Some(catalog_id.as_str()) {
+                    app.speech_loaded_model_id = None;
+                    app.speech_ready = false;
+                }
+            }
+            sync_models(settings, state);
+            sync_action_settings(settings, state);
+            let size = settings_projection::human_size(removed_bytes);
+            set_indicator_status(
+                settings,
+                &state_message(state, UiText::ModelFilesRemoved, &[("size", &size)]),
+            );
+        }
         SpeechWorkerEvent::ModelReady {
             catalog_id,
             backend,
@@ -3312,6 +3368,13 @@ delivery={} target_pid={}",
             message,
             retryable,
         } => {
+            if matches!(
+                code.as_str(),
+                "model_remove" | "model_busy" | "model_in_use"
+            ) {
+                state.borrow_mut().removing_models.clear();
+                sync_models(settings, state);
+            }
             if session_id.is_none() && code == "model_prepare" {
                 rust_app_core::diagnostics::log_line(&format!(
                     "speech_backend selected={} verification=failed code={code} message={message}",
@@ -3519,6 +3582,38 @@ fn handle_translation_event(
             let _ = save_settings(&state.borrow());
             sync_translation_models(settings, state);
             sync_action_settings(settings, state);
+        }
+        TranslationWorkerEvent::LocalModelState { catalog_id, loaded } => {
+            {
+                let mut app = state.borrow_mut();
+                app.translation_loaded_model_id = loaded.then_some(catalog_id).flatten();
+                app.translation_ready = loaded && app.local_translation_enabled();
+            }
+            sync_translation_models(settings, state);
+            sync_action_settings(settings, state);
+        }
+        TranslationWorkerEvent::ModelRemoved {
+            catalog_id,
+            removed_bytes,
+            models,
+            ..
+        } => {
+            {
+                let mut app = state.borrow_mut();
+                app.removing_models.remove(&catalog_id);
+                app.translation_models = models;
+                if app.translation_loaded_model_id.as_deref() == Some(catalog_id.as_str()) {
+                    app.translation_loaded_model_id = None;
+                    app.translation_ready = false;
+                }
+            }
+            sync_translation_models(settings, state);
+            sync_action_settings(settings, state);
+            let size = settings_projection::human_size(removed_bytes);
+            set_indicator_status(
+                settings,
+                &state_message(state, UiText::ModelFilesRemoved, &[("size", &size)]),
+            );
         }
         TranslationWorkerEvent::ModelReady {
             catalog_id,
@@ -3802,6 +3897,17 @@ fn handle_translation_event(
             message,
             ..
         } => {
+            if matches!(
+                code.as_str(),
+                "model_remove" | "model_busy" | "model_in_use"
+            ) {
+                if let Some(catalog_id) = catalog_id.as_deref() {
+                    state.borrow_mut().removing_models.remove(catalog_id);
+                } else {
+                    state.borrow_mut().removing_models.clear();
+                }
+                sync_translation_models(settings, state);
+            }
             // A download that has ended stops offering a Cancel. The worker
             // names the row it belongs to, so exactly that row ends — this used
             // to guess from whatever happened to be downloading, and ended all
@@ -4549,18 +4655,20 @@ mod hotkey_ack_tests {
         assert_eq!(state.hotkeys, committed);
         assert!(state.pending_hotkeys.is_none());
         assert_eq!(
-            state.hotkey_error,
-            Some((HotkeyAction::Translate, HotkeyRejection::RegistrationFailed))
+            state.hotkey_errors.get(&HotkeyAction::Translate),
+            Some(&HotkeyRejection::RegistrationFailed)
         );
     }
 
     #[test]
-    fn only_the_matching_ack_promotes_the_exact_proposal() {
+    fn only_the_matching_ack_promotes_the_effective_configuration() {
         let mut state = state();
         let mut proposed = state.hotkeys.clone();
         proposed.binding_mut(HotkeyAction::Translate).enabled = true;
         let operation_id = RequestId::new();
         state.pending_hotkeys = Some((operation_id, proposed.clone()));
+        let mut effective = proposed.clone();
+        effective.binding_mut(HotkeyAction::Translate).enabled = false;
 
         assert!(!commit_hotkeys_if_pending(
             &mut state,
@@ -4570,10 +4678,10 @@ mod hotkey_ack_tests {
         assert!(commit_hotkeys_if_pending(
             &mut state,
             operation_id,
-            proposed.clone()
+            effective.clone()
         ));
-        assert_eq!(state.hotkeys, proposed);
-        assert!(state.hotkey_error.is_none());
+        assert_eq!(state.hotkeys, effective);
+        assert!(state.hotkey_errors.is_empty());
     }
 }
 

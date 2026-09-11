@@ -260,6 +260,7 @@ export component SettingsWindow inherits Window {
     // ── what the window can be asked to do ──
     callback choose-model(string);
     callback cancel-model-install(string);
+    callback remove-model(string);
     callback refresh-history();
     callback copy-history(int);
     callback clear-history();
@@ -502,6 +503,7 @@ export component SettingsWindow inherits Window {
                     summary: root.models-summary;
                     choose(catalog-id) => { root.choose-model(catalog-id); }
                     cancel-install(catalog-id) => { root.cancel-model-install(catalog-id); }
+                    remove(catalog-id) => { root.remove-model(catalog-id); }
                 }
 
                 if root.active-page == 4 && !work.page-owns-scroll : ProvidersPage {
@@ -653,6 +655,7 @@ export component SettingsWindow inherits Window {
                             summary: root.models-summary;
                             choose(catalog-id) => { root.choose-model(catalog-id); }
                             cancel-install(catalog-id) => { root.cancel-model-install(catalog-id); }
+                            remove(catalog-id) => { root.remove-model(catalog-id); }
                         }
 
                         if root.active-page == 4 : providers-list-page := ProvidersPage {

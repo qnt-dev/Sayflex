@@ -26,6 +26,10 @@ export struct ModelRow {
     // Stable command identity. The label is translated; dispatch must never
     // branch on translated prose.
     action-key: string,
+    removable: bool,
+    remove-label: string,
+    remove-question: string,
+    removing: bool,
     selected: bool,
     installed: bool,
     progress: float,

@@ -17,12 +17,121 @@ use std::{cell::RefCell, rc::Rc};
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::{
-    Fact, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow,
+    Fact, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow, TranslatorWindow,
     visualizer::{
         BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, VisualizerStyle,
         WritingSlateSurface, new_settings_preview,
     },
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TranslatorPreviewState {
+    Empty,
+    Processing,
+    Result,
+    Unavailable,
+    Error,
+}
+
+pub(crate) fn requested_translator_state() -> Option<TranslatorPreviewState> {
+    std::env::args().find_map(|argument| {
+        let value = argument.strip_prefix("--translator-preview=")?;
+        match value {
+            "empty" => Some(TranslatorPreviewState::Empty),
+            "processing" => Some(TranslatorPreviewState::Processing),
+            "result" => Some(TranslatorPreviewState::Result),
+            "unavailable" => Some(TranslatorPreviewState::Unavailable),
+            "error" => Some(TranslatorPreviewState::Error),
+            _ => None,
+        }
+    })
+}
+
+pub(crate) fn run_translator_preview() -> Result<(), Box<dyn Error>> {
+    let state = requested_translator_state().unwrap_or(TranslatorPreviewState::Empty);
+    let requested_locale = std::env::args()
+        .find_map(|argument| argument.strip_prefix("--ui-locale=").map(str::to_owned))
+        .and_then(|code| crate::localization::UiLocale::from_code(&code))
+        .unwrap_or(crate::localization::UiLocale::English);
+    let system_locale = rust_platform_windows::user_locale_name();
+    let locale = crate::localization::active_locale(requested_locale);
+    // Constructing the first component registers Slint's embedded catalogs;
+    // selecting a bundle before that point returns NoTranslationsBundled.
+    let catalog_seed = TranslatorWindow::new()?;
+    slint::select_bundled_translation(requested_locale.resolved_code(&system_locale))?;
+    let translator = TranslatorWindow::new()?;
+    drop(catalog_seed);
+
+    let source = "SayFlex keeps the source and result visible while you review a translation.";
+    match state {
+        TranslatorPreviewState::Empty => {
+            translator.set_status_text(
+                crate::localization::text(
+                    locale,
+                    crate::localization::UiText::ChooseTranslationModel,
+                )
+                .into(),
+            );
+        }
+        TranslatorPreviewState::Processing => {
+            translator.set_source_text(source.into());
+            translator.set_processing(true);
+            translator.set_status_text(
+                crate::localization::text(locale, crate::localization::UiText::TranslatingNow)
+                    .into(),
+            );
+        }
+        TranslatorPreviewState::Result => {
+            translator.set_source_text(source.into());
+            translator.set_result_text(
+                "SayFlex показывает исходный текст и перевод, пока вы проверяете результат.".into(),
+            );
+            translator.set_status_text(
+                crate::localization::render(
+                    locale,
+                    crate::localization::UiText::TranslationCompletedProvider,
+                    &[("provider", "DeepL")],
+                )
+                .into(),
+            );
+        }
+        TranslatorPreviewState::Unavailable => {
+            translator.set_source_text(source.into());
+            translator.set_status_text(
+                crate::localization::text(
+                    locale,
+                    crate::localization::UiText::NoTranslationProviderReady,
+                )
+                .into(),
+            );
+        }
+        TranslatorPreviewState::Error => {
+            translator.set_source_text(source.into());
+            translator.set_status_text(
+                crate::localization::render(
+                    locale,
+                    crate::localization::UiText::TechnicalFailure,
+                    &[("code", "service"), ("message", "request refused")],
+                )
+                .into(),
+            );
+        }
+    }
+    translator.on_translate(|| {});
+    translator.on_copy_result(|| {});
+    let weak = translator.as_weak();
+    translator.on_swap_text(move || {
+        if let Some(translator) = weak.upgrade() {
+            let source = translator.get_source_text();
+            translator.set_source_text(translator.get_result_text());
+            translator.set_result_text(source);
+        }
+    });
+    translator.show()?;
+    crate::configure_standard_app_window(&translator, "Translator preview");
+    slint::run_event_loop()?;
+    Ok(())
+}
 
 /// Which page to open, from `--settings-preview=4`. Looking at one page at a
 /// time is how a page gets looked at.
@@ -443,6 +552,10 @@ fn fill_models(settings: &SettingsWindow) {
             tone: "active".into(),
             action: "".into(),
             action_key: "".into(),
+            removable: true,
+            remove_label: "Remove".into(),
+            remove_question: "Remove this model?".into(),
+            removing: false,
             selected: true,
             installed: true,
             progress: 0.0,
@@ -457,6 +570,10 @@ fn fill_models(settings: &SettingsWindow) {
             tone: "working".into(),
             action: "Cancel".into(),
             action_key: "cancel".into(),
+            removable: false,
+            remove_label: "Remove".into(),
+            remove_question: "Remove this model?".into(),
+            removing: false,
             selected: false,
             installed: false,
             progress: 0.43,
@@ -471,6 +588,10 @@ fn fill_models(settings: &SettingsWindow) {
             tone: "resting".into(),
             action: "Use".into(),
             action_key: "use".into(),
+            removable: true,
+            remove_label: "Remove".into(),
+            remove_question: "Remove this model?".into(),
+            removing: false,
             selected: false,
             installed: true,
             progress: 0.0,
@@ -485,6 +606,10 @@ fn fill_models(settings: &SettingsWindow) {
             tone: "off".into(),
             action: "Install".into(),
             action_key: "install".into(),
+            removable: false,
+            remove_label: "Remove".into(),
+            remove_question: "Remove this model?".into(),
+            removing: false,
             selected: false,
             installed: false,
             progress: 0.0,
@@ -501,6 +626,10 @@ fn fill_models(settings: &SettingsWindow) {
             tone: "active".into(),
             action: "".into(),
             action_key: "".into(),
+            removable: true,
+            remove_label: "Remove".into(),
+            remove_question: "Remove this model?".into(),
+            removing: false,
             selected: true,
             installed: true,
             progress: 0.0,

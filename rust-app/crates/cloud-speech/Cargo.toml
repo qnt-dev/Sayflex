@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "multipart", "rustls-tls"] }
-rust-app-core = { version = "0.7.2", path = "../app-core" }
+rust-app-core = { version = "0.8.0", path = "../app-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

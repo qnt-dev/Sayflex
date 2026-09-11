@@ -45,6 +45,12 @@ Recommended|recommended
 RecommendedForSystemLanguage|recommended for your system language
 Cancel|Cancel
 InUse|In use
+SelectedUnloaded|Selected · unloaded
+RemovingModel|Removing…
+RemoveModel|Remove
+RemoveModelQuestion|Remove {model} ({size}) from this device?
+ModelFilesRemoved|Removed {size} of local model files.
+ModelRemoveFailed|Could not remove the local model: {error}
 Installed|Installed
 Use|Use
 NotInstalled|Not installed
@@ -130,6 +136,8 @@ InputServiceNotReady|Input service is not ready yet.
 ShortcutChangeBusy|Wait for the current shortcut change to finish.
 CouldNotApplyShortcuts|Could not apply shortcuts: {error}
 ShortcutAlreadyInUse|Shortcut already in use. Choose another.
+PreviousShortcutKept|Previous shortcut kept
+ShortcutAlreadyInUsePreviousKept|That shortcut is already in use. The previous shortcut still works.
 FinishActiveDictation|Finish the active dictation before changing shortcuts.
 ShortcutRejected|This shortcut was not accepted. Choose another.
 ModelDownloadResume|A model is downloading. It resumes if it is interrupted.
@@ -236,6 +244,7 @@ VisualMicrophoneDetail|Level bars beside a studio microphone
 VisualRingDetail|The spectrum wrapped into a ring
 VisualWordsDetail|The words as they are recognised
 VisualCompanionDetail|Stays where you put it, between dictations
+VisualCompanionHelp|Between dictations, point to the companion, hold Ctrl + Alt, and drag with the left mouse button. Its position is saved.
 VisualNoneDetail|No overlay is drawn while recording
 VisualDisabledDetail|The microphone and transcription keep working; only the overlay is disabled.
 VisualExternalDetail|Drawn on its own native surface, so it can be transparent per pixel.

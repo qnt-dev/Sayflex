@@ -23,11 +23,13 @@ export component ModelsPage inherits VerticalLayout {
 
     in property <[ModelRow]> rows;
     in property <string> summary;
+    in-out property <string> confirming-remove: "";
     // Identified by catalog id rather than by row number: one list holding two
     // kinds of model is one index arithmetic mistake away from installing the
     // wrong thing.
     callback choose(string);
     callback cancel-install(string);
+    callback remove(string);
 
     spacing: 0px;
 
@@ -72,14 +74,15 @@ export component ModelsPage inherits VerticalLayout {
 
                 ListRow {
                     title: row.title;
-                    detail: row.detail;
+                    detail: root.confirming-remove == row.catalog-id ? row.remove-question : row.detail;
                     tag: row.size;
                     state-text: row.state;
                     tone: row.tone;
                     show-progress: row.progress > 0;
                     progress: row.progress;
+                    controls-width: row.removable && row.action != "" ? 196px : 132px;
 
-                    if row.action != "" : RowAction {
+                    if row.action != "" && root.confirming-remove != row.catalog-id : RowAction {
                         label: row.action;
                         clicked => {
                             if (row.action-key == "cancel") {
@@ -88,6 +91,24 @@ export component ModelsPage inherits VerticalLayout {
                                 root.choose(row.catalog-id);
                             }
                         }
+                    }
+
+                    if row.removable && root.confirming-remove == "" : RowAction {
+                        label: row.remove-label;
+                        danger: true;
+                        clicked => { root.confirming-remove = row.catalog-id; }
+                    }
+                    if root.confirming-remove == row.catalog-id : RowAction {
+                        label: @tr("Yes");
+                        danger: true;
+                        clicked => {
+                            root.confirming-remove = "";
+                            root.remove(row.catalog-id);
+                        }
+                    }
+                    if root.confirming-remove == row.catalog-id : RowAction {
+                        label: @tr("No");
+                        clicked => { root.confirming-remove = ""; }
                     }
                 }
             }

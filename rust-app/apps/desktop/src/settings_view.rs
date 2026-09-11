@@ -17,8 +17,9 @@ use rust_app_core::{
 use rust_protocol::{
     CompanionRendererCommand, DictationLanguage, HistoryEntry, HotkeyAction, HotkeyBindings,
     HotkeyConfiguration, HotkeyModifiers, HotkeyRejection, HotkeySpec, InputHostCommand, RequestId,
-    SpeechOutputMode, SpeechWorkerCommand, TargetSnapshot, TranslationLanguage,
-    TranslationLanguagePolicy, TranslationWorkerCommand,
+    SpeechOutputMode, SpeechWorkerCommand, TargetSnapshot, TranscriptionProviderEntry,
+    TranslationLanguage, TranslationLanguagePolicy, TranslationProviderEntry,
+    TranslationWorkerCommand,
 };
 use slint::{
     ComponentHandle, Model, ModelRc, PhysicalPosition, SharedString, VecModel,
@@ -197,6 +198,8 @@ pub(crate) fn sync_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<Ref
             speech_model_row_localized(
                 model,
                 state.downloads.get(&model.catalog_id).copied(),
+                state.speech_loaded_model_id.as_deref() == Some(model.catalog_id.as_str()),
+                state.removing_models.contains(&model.catalog_id),
                 locale,
             )
         })
@@ -206,6 +209,8 @@ pub(crate) fn sync_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<Ref
             model,
             state.selected_translation_tier == Some(model.tier),
             state.downloads.get(&model.catalog_id).copied(),
+            state.translation_loaded_model_id.as_deref() == Some(model.catalog_id.as_str()),
+            state.removing_models.contains(&model.catalog_id),
             locale,
         )
     }));
@@ -448,7 +453,7 @@ pub(crate) fn sync_action_settings(
     // ── Hotkeys ──
     settings.set_hotkey_rows(ModelRc::new(VecModel::from(hotkey_rows(&state))));
     settings.set_hotkeys_summary(hotkeys_summary(&state).into());
-    settings.set_hotkeys_summary_signal(state.hotkey_error.is_some());
+    settings.set_hotkeys_summary_signal(!state.hotkey_errors.is_empty());
     settings.set_ui_locale(state.ui_locale.code().into());
     settings.set_ui_locale_label(
         if state.ui_locale == UiLocale::System {
@@ -523,6 +528,8 @@ pub(crate) fn sync_visualizer_copy(settings: &SettingsWindow, style: VisualizerS
     settings.set_visuals_note(
         if style == VisualizerStyle::Off {
             text(locale, UiText::VisualDisabledDetail)
+        } else if style == VisualizerStyle::CompanionOrb {
+            text(locale, UiText::VisualCompanionHelp)
         } else if native {
             text(locale, UiText::VisualExternalDetail)
         } else {
@@ -548,11 +555,10 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         .into_iter()
         .map(|action| {
             let binding = *state.hotkeys.binding(action);
-            let rejection = state
-                .hotkey_error
-                .filter(|(rejected_action, _)| *rejected_action == action)
-                .map(|(_, reason)| reason);
-            let (row_tone, row_state) = if rejection.is_some() {
+            let rejection = state.hotkey_errors.get(&action).copied();
+            let (row_tone, row_state) = if rejection.is_some() && binding.enabled {
+                (tone::WORKING, text(locale, UiText::PreviousShortcutKept))
+            } else if rejection.is_some() {
                 (tone::REFUSED, text(locale, UiText::Unavailable))
             } else if action == HotkeyAction::PauseResume {
                 if state.input_paused {
@@ -594,7 +600,13 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                 ),
             };
             let detail = rejection
-                .map(|reason| hotkey_rejection_detail(locale, reason))
+                .map(|reason| {
+                    if reason == HotkeyRejection::RegistrationFailed && binding.enabled {
+                        text(locale, UiText::ShortcutAlreadyInUsePreviousKept)
+                    } else {
+                        hotkey_rejection_detail(locale, reason)
+                    }
+                })
                 .unwrap_or(normal_detail);
             HotkeyRow {
                 action: hotkey_action_key(action).into(),
@@ -673,12 +685,7 @@ fn hotkeys_summary(state: &AppState) -> String {
     let locale = active_locale(state.ui_locale);
     let enabled = HotkeyAction::ALL
         .into_iter()
-        .filter(|action| {
-            state.hotkeys.binding(*action).enabled
-                && !state
-                    .hotkey_error
-                    .is_some_and(|(rejected_action, _)| rejected_action == *action)
-        })
+        .filter(|action| state.hotkeys.binding(*action).enabled)
         .count();
     if state.input_paused {
         render(
@@ -759,7 +766,7 @@ fn submit_hotkey_bindings(
         return false;
     }
     state.borrow_mut().pending_hotkeys = Some((operation_id, bindings));
-    state.borrow_mut().hotkey_error = None;
+    state.borrow_mut().hotkey_errors.clear();
     sync_action_settings(settings, state);
     true
 }
@@ -1459,6 +1466,181 @@ fn choose_translation_model(
     sync_action_settings(settings_weak, state);
 }
 
+fn speech_chain_with_local_disabled(state: &AppState) -> Vec<TranscriptionProviderEntry> {
+    let mut chain = if state.transcription_chain.is_empty() {
+        state
+            .transcription_providers
+            .iter()
+            .map(|status| TranscriptionProviderEntry {
+                id: status.id.clone(),
+                enabled: status.enabled,
+                endpoint: None,
+                model: None,
+                account: None,
+            })
+            .collect()
+    } else {
+        state.transcription_chain.clone()
+    };
+    for entry in &mut chain {
+        if entry.id == "local" {
+            entry.enabled = false;
+        }
+    }
+    chain
+}
+
+fn translation_chain_with_local_disabled(state: &AppState) -> Vec<TranslationProviderEntry> {
+    let mut chain = if state.translation_chain.is_empty() {
+        state
+            .translation_providers
+            .iter()
+            .map(|status| TranslationProviderEntry {
+                id: status.id.clone(),
+                enabled: status.enabled,
+                region: None,
+            })
+            .collect()
+    } else {
+        state.translation_chain.clone()
+    };
+    for entry in &mut chain {
+        if entry.id == "local" {
+            entry.enabled = false;
+        }
+    }
+    chain
+}
+
+/// Starts a destructive model removal only after the local route has been
+/// disabled when the selected model owns that route. Commands share one
+/// ordered writer per worker, so the unload-causing provider update reaches
+/// the actor before the remove request.
+fn remove_local_model(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    workers: &Workers,
+    catalog_id: &str,
+) {
+    if state.borrow().removing_models.contains(catalog_id) {
+        return;
+    }
+
+    let speech = state
+        .borrow()
+        .models
+        .iter()
+        .find(|model| model.catalog_id == catalog_id)
+        .cloned();
+    if let Some(model) = speech {
+        if !model.installed {
+            return;
+        }
+        if state.borrow().selected_model_id == catalog_id && state.borrow().local_speech_enabled() {
+            let chain = speech_chain_with_local_disabled(&state.borrow());
+            if let Err(error) =
+                workers
+                    .speech
+                    .send(&SpeechWorkerCommand::SetTranscriptionProviders {
+                        providers: chain.clone(),
+                    })
+            {
+                set_status_problem(
+                    settings,
+                    &render(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::ModelRemoveFailed,
+                        &[("error", &error.to_string())],
+                    ),
+                );
+                return;
+            }
+            {
+                let mut app = state.borrow_mut();
+                app.transcription_chain = chain;
+                app.speech_ready = false;
+            }
+        }
+        if let Err(error) = workers.speech.send(&SpeechWorkerCommand::RemoveModel {
+            catalog_id: catalog_id.to_owned(),
+        }) {
+            set_status_problem(
+                settings,
+                &render(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::ModelRemoveFailed,
+                    &[("error", &error.to_string())],
+                ),
+            );
+            let _ = save_settings(&state.borrow());
+            sync_providers(settings, state);
+            return;
+        }
+    } else {
+        let translation = state
+            .borrow()
+            .translation_models
+            .iter()
+            .find(|model| model.catalog_id == catalog_id)
+            .cloned();
+        let Some(model) = translation else { return };
+        if !model.installed {
+            return;
+        }
+        if state.borrow().selected_translation_tier == Some(model.tier)
+            && state.borrow().local_translation_enabled()
+        {
+            let chain = translation_chain_with_local_disabled(&state.borrow());
+            if let Err(error) =
+                workers
+                    .translation
+                    .send(&TranslationWorkerCommand::SetTranslationProviders {
+                        providers: chain.clone(),
+                    })
+            {
+                set_status_problem(
+                    settings,
+                    &render(
+                        active_locale(state.borrow().ui_locale),
+                        UiText::ModelRemoveFailed,
+                        &[("error", &error.to_string())],
+                    ),
+                );
+                return;
+            }
+            {
+                let mut app = state.borrow_mut();
+                app.translation_chain = chain;
+                app.translation_ready = false;
+            }
+        }
+        if let Err(error) = workers
+            .translation
+            .send(&TranslationWorkerCommand::RemoveModel { tier: model.tier })
+        {
+            set_status_problem(
+                settings,
+                &render(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::ModelRemoveFailed,
+                    &[("error", &error.to_string())],
+                ),
+            );
+            let _ = save_settings(&state.borrow());
+            sync_providers(settings, state);
+            return;
+        }
+    }
+
+    state
+        .borrow_mut()
+        .removing_models
+        .insert(catalog_id.to_owned());
+    let _ = save_settings(&state.borrow());
+    sync_models(settings, state);
+    sync_providers(settings, state);
+}
+
 pub(crate) fn wire_settings(
     settings: &SettingsWindow,
     translator: &TranslatorWindow,
@@ -1604,6 +1786,14 @@ pub(crate) fn wire_settings(
             } else {
                 choose_translation_model(&settings_weak, &state, &workers, &catalog_id);
             }
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_remove_model(move |catalog_id| {
+            remove_local_model(&settings_weak, &state, &workers, &catalog_id);
         });
     }
     {
@@ -3049,10 +3239,11 @@ mod hotkey_capture_tests {
             &SavedSettings::default(),
         );
         state.ui_locale = UiLocale::English;
-        state.hotkey_error = Some((
+        state.hotkey_errors.insert(
             HotkeyAction::PauseResume,
             HotkeyRejection::RegistrationFailed,
-        ));
+        );
+        state.hotkeys.pause_resume.enabled = false;
 
         let rows = hotkey_rows(&state);
         let row = &rows[4];
@@ -3061,6 +3252,31 @@ mod hotkey_capture_tests {
         assert_eq!(row.detail, "Shortcut already in use. Choose another.");
         assert!(row.locked_reason.is_empty());
         assert_eq!(hotkeys_summary(&state), "3 of 5 shortcuts active");
+    }
+
+    #[test]
+    fn a_failed_replacement_keeps_the_previous_live_shortcut_truthful() {
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        );
+        state.ui_locale = UiLocale::English;
+        state.hotkey_errors.insert(
+            HotkeyAction::CorrectLayout,
+            HotkeyRejection::RegistrationFailed,
+        );
+
+        let row = &hotkey_rows(&state)[2];
+        assert_eq!(row.tone, tone::WORKING);
+        assert_eq!(row.state, "Previous shortcut kept");
+        assert_eq!(
+            row.detail,
+            "That shortcut is already in use. The previous shortcut still works."
+        );
+        assert!(row.enabled);
+        assert_eq!(hotkeys_summary(&state), "4 of 5 shortcuts active");
     }
 
     #[test]

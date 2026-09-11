@@ -12,7 +12,11 @@ param(
     [switch]$Installed,
     # Public artifacts must prove Authenticode on every executable and the
     # exact installer named by -InstallerPath. Developer builds may omit it.
-    [switch]$RequireSignature
+    [switch]$RequireSignature,
+    # Optional Store package produced from this exact staged directory.
+    [string]$MsixPath,
+    [string]$MsixIdentityName,
+    [string]$MsixPublisher
 )
 
 $ErrorActionPreference = 'Stop'
@@ -291,6 +295,22 @@ if (-not [string]::IsNullOrWhiteSpace($InstallerPath)) {
     $failures.Add('-RequireSignature also requires the exact -InstallerPath')
 }
 
+$msixChecked = $false
+if (-not [string]::IsNullOrWhiteSpace($MsixPath)) {
+    if ([string]::IsNullOrWhiteSpace($MsixIdentityName) -or
+        [string]::IsNullOrWhiteSpace($MsixPublisher)) {
+        $failures.Add('-MsixPath also requires -MsixIdentityName and -MsixPublisher')
+    } else {
+        $msixChecked = $true
+        Get-MsixArtifactFailures `
+            -MsixPath $MsixPath `
+            -ExpectedVersion $expectedVersion `
+            -ExpectedIdentityName $MsixIdentityName `
+            -ExpectedPublisher $MsixPublisher |
+            ForEach-Object { $failures.Add($_) }
+    }
+}
+
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Host "FAILED: $_" }
     throw "Release validation failed with $($failures.Count) problem(s)."
@@ -298,6 +318,7 @@ if ($failures.Count -gt 0) {
 
 $checked = @('file set', 'build manifest', 'binary build identity', 'Cargo.lock', 'backend manifest', 'versions', "protocol $protocol")
 if ($installerChecked) { $checked += 'installer checksum' }
+if ($msixChecked) { $checked += 'MSIX identity, checksum and payload' }
 if ($RequireSignature) { $checked += 'Authenticode signatures' }
 if ($Installed) { $checked += 'installed hashes'; $checked += 'uninstall registration' }
 Write-Host "SayFlex $expectedVersion checked: $($checked -join ', ')."

@@ -22,11 +22,11 @@ use audio::AudioRecorder;
 use engine::WhisperEngine;
 use history_actor::HistoryCommand;
 use inference::InferenceHandle;
-use model_actor::ModelCommand;
-use rust_model_manager::{BuiltInCatalog, HttpFetcher, ModelCatalog, ModelInstaller, ModelTier};
+use model_actor::{ModelCommand, model_summaries};
+use rust_model_manager::{BuiltInCatalog, HttpFetcher, ModelCatalog, ModelInstaller};
 use rust_protocol::{
-    ModelSummary, PROTOCOL_VERSION, SessionId, SpeechOutputMode, SpeechWorkerCommand,
-    SpeechWorkerEvent, Transcript, TranscriptionLatency,
+    PROTOCOL_VERSION, SessionId, SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent,
+    Transcript, TranscriptionLatency,
 };
 use speculation::SpeculationScheduler;
 use transcription::TranscriptionCommand;
@@ -402,6 +402,19 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                     });
                 }
             }
+            SpeechWorkerCommand::RemoveModel { catalog_id } => {
+                if local_model_enabled && catalog_id == selected_model_id {
+                    let _ = events.send(SpeechWorkerEvent::Failed {
+                        session_id: None,
+                        code: "model_in_use".to_owned(),
+                        message: "Switch off the local speech provider before removing its selected model."
+                            .to_owned(),
+                        retryable: true,
+                    });
+                } else {
+                    models.remove(catalog_id, selected_model_id.clone());
+                }
+            }
             SpeechWorkerCommand::SetOutputMode {
                 output_mode: requested,
             } => {
@@ -495,27 +508,6 @@ fn run_protocol_smoke(
         }
     }
     Ok(())
-}
-
-fn model_summaries(
-    catalog: &ModelCatalog,
-    installer: &ModelInstaller,
-    selected: &str,
-) -> Vec<ModelSummary> {
-    catalog
-        .models
-        .iter()
-        .map(|model| ModelSummary {
-            catalog_id: model.id.clone(),
-            display_name: model.display_name.clone(),
-            description: model.description.clone(),
-            size_bytes: model.artifact.bytes,
-            installed: installer.is_installed(model).unwrap_or(false),
-            selected: model.id == selected,
-            recommended: model.tier == ModelTier::Recommended,
-            supports_speech_translation: model.supports_speech_translation,
-        })
-        .collect()
 }
 
 fn application_data_root() -> PathBuf {

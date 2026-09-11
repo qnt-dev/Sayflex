@@ -130,3 +130,98 @@ Describe 'SayFlex installed smoke runner wiring' {
         $runner | Should Match 'installer_sha256 = \$installerHash'
     }
 }
+
+Describe 'SayFlex MSIX layout validation' {
+    BeforeEach {
+        $fixtureId = [Guid]::NewGuid().ToString('N')
+        $script:staged = Join-Path $TestDrive "$fixtureId\staged"
+        $script:layout = Join-Path $TestDrive "$fixtureId\layout"
+        New-Item -ItemType Directory -Path $script:staged, $script:layout | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $script:staged 'SayFlex.exe'), 'desktop')
+        Copy-Item -LiteralPath (Join-Path $script:staged 'SayFlex.exe') -Destination $script:layout
+        $hash = (Get-FileHash -LiteralPath (Join-Path $script:staged 'SayFlex.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+        [ordered]@{
+            schema_version = 1
+            product = 'SayFlex'
+            version = '0.8.0'
+            files = @([ordered]@{ path = 'SayFlex.exe'; bytes = 7; sha256 = $hash })
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $script:staged 'build-manifest.json') -Encoding utf8
+        Copy-Item -LiteralPath (Join-Path $script:staged 'build-manifest.json') -Destination $script:layout
+        New-Item -ItemType Directory -Path (Join-Path $script:layout 'Assets') | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $script:layout 'Assets\StoreLogo.png'), 'logo')
+        [System.IO.File]::WriteAllText((Join-Path $script:layout 'Assets\Square44x44Logo.png'), 'logo')
+        [System.IO.File]::WriteAllText((Join-Path $script:layout 'Assets\Square150x150Logo.png'), 'logo')
+        @'
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap rescap">
+  <Identity Name="qnt-dev.SayFlex" Publisher="CN=SayFlex Development" Version="0.8.0.0" ProcessorArchitecture="x64" />
+  <Properties><DisplayName>SayFlex</DisplayName><PublisherDisplayName>SayFlex</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
+  <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
+  <Resources><Resource Language="en" /></Resources>
+  <Applications><Application Id="SayFlex" Executable="SayFlex.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements DisplayName="SayFlex" Description="SayFlex" BackgroundColor="transparent" Square44x44Logo="Assets\Square44x44Logo.png" Square150x150Logo="Assets\Square150x150Logo.png" /></Application></Applications>
+  <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
+</Package>
+'@ | Set-Content -LiteralPath (Join-Path $script:layout 'AppxManifest.xml') -Encoding utf8
+    }
+
+    It 'accepts a layout bound to its staged bytes and Partner Center identity' {
+        $failures = @(Get-MsixLayoutFailures `
+            -LayoutPath $script:layout `
+            -BuildManifestPath (Join-Path $script:staged 'build-manifest.json') `
+            -ExpectedIdentityName 'qnt-dev.SayFlex' `
+            -ExpectedPublisher 'CN=SayFlex Development')
+
+        $failures | Should BeNullOrEmpty
+    }
+
+    It 'rejects identity and version drift' {
+        [xml]$manifest = Get-Content -LiteralPath (Join-Path $script:layout 'AppxManifest.xml') -Raw
+        $manifest.Package.Identity.Name = 'stale.identity'
+        $manifest.Package.Identity.Version = '0.7.2.0'
+        $manifest.Save((Join-Path $script:layout 'AppxManifest.xml'))
+
+        $failures = @(Get-MsixLayoutFailures `
+            -LayoutPath $script:layout `
+            -BuildManifestPath (Join-Path $script:staged 'build-manifest.json') `
+            -ExpectedIdentityName 'qnt-dev.SayFlex' `
+            -ExpectedPublisher 'CN=SayFlex Development')
+
+        ($failures -join "`n") | Should Match 'identity'
+        ($failures -join "`n") | Should Match 'version'
+    }
+
+    It 'rejects missing, changed, and extra payload files' {
+        [System.IO.File]::WriteAllText((Join-Path $script:layout 'SayFlex.exe'), 'changed')
+        [System.IO.File]::WriteAllText((Join-Path $script:layout 'stale.dll'), 'extra')
+
+        $failures = @(Get-MsixLayoutFailures `
+            -LayoutPath $script:layout `
+            -BuildManifestPath (Join-Path $script:staged 'build-manifest.json') `
+            -ExpectedIdentityName 'qnt-dev.SayFlex' `
+            -ExpectedPublisher 'CN=SayFlex Development')
+
+        ($failures -join "`n") | Should Match 'SayFlex.exe does not match'
+        ($failures -join "`n") | Should Match 'unexpected file'
+    }
+
+    It 'validates the identity and payload inside the final package' {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $msix = Join-Path $TestDrive 'SayFlex-0.8.0-win-x64-store-unsigned.msix'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($script:layout, $msix)
+        $hash = (Get-FileHash -LiteralPath $msix -Algorithm SHA256).Hash
+        Set-Content -LiteralPath "$msix.sha256" -Encoding ascii -NoNewline -Value (
+            "$hash  $([System.IO.Path]::GetFileName($msix))"
+        )
+
+        $failures = @(Get-MsixArtifactFailures `
+            -MsixPath $msix `
+            -ExpectedVersion '0.8.0' `
+            -ExpectedIdentityName 'qnt-dev.SayFlex' `
+            -ExpectedPublisher 'CN=SayFlex Development')
+
+        $failures | Should BeNullOrEmpty
+    }
+}

@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use history::TranslationHistory;
 use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
@@ -80,6 +80,9 @@ enum InstallCommand {
     EnsureModel {
         tier: TranslationTier,
     },
+    RemoveModel {
+        tier: TranslationTier,
+    },
     SelectTier {
         tier: TranslationTier,
         keep_warm: bool,
@@ -117,6 +120,7 @@ impl InstallActor {
                     // which row it belongs to, and after this the command is
                     // gone.
                     let installing = installing_tier(&command);
+                    let failure_code = install_failure_code(&command);
                     if let Err(error) = run_install(command, &state, &writer) {
                         let cancelled = error
                             .downcast_ref::<ModelInstallError>()
@@ -135,7 +139,7 @@ impl InstallActor {
                             code: if cancelled {
                                 "model_install_cancelled".to_owned()
                             } else {
-                                "translation_worker".to_owned()
+                                failure_code.to_owned()
                             },
                             message: format!("{error:#}"),
                             retryable: true,
@@ -158,6 +162,13 @@ impl InstallActor {
 
     fn cancel(&self) {
         self.cancellation.cancel();
+    }
+}
+
+fn install_failure_code(command: &InstallCommand) -> &'static str {
+    match command {
+        InstallCommand::RemoveModel { .. } => "model_remove",
+        _ => "translation_worker",
     }
 }
 
@@ -388,6 +399,11 @@ fn handle_command(
             coordinator.cancel_all();
             installs.send(InstallCommand::EnsureModel { tier });
         }
+        TranslationWorkerCommand::RemoveModel { tier } => {
+            coordinator.cancel_all();
+            installs.cancel();
+            installs.send(InstallCommand::RemoveModel { tier });
+        }
         TranslationWorkerCommand::CancelModelInstall => installs.cancel(),
         TranslationWorkerCommand::SelectTier { tier, keep_warm } => {
             coordinator.cancel_all();
@@ -500,9 +516,9 @@ fn local_translation_enabled(entries: &[TranslationProviderEntry]) -> bool {
 const fn installing_tier(command: &InstallCommand) -> Option<TranslationTier> {
     match command {
         InstallCommand::Initialize { selected_tier, .. } => *selected_tier,
-        InstallCommand::EnsureModel { tier } | InstallCommand::SelectTier { tier, .. } => {
-            Some(*tier)
-        }
+        InstallCommand::EnsureModel { tier }
+        | InstallCommand::RemoveModel { tier }
+        | InstallCommand::SelectTier { tier, .. } => Some(*tier),
         InstallCommand::SetLocalEnabled { .. } | InstallCommand::Shutdown => None,
     }
 }
@@ -536,9 +552,18 @@ fn run_install(
                 state.ensure_runtime(writer, &catalog_id)?;
                 let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
-                    catalog_id,
+                    catalog_id: catalog_id.clone(),
                     tier,
                     load_duration_ms,
+                })?;
+                writer.send(&TranslationWorkerEvent::LocalModelState {
+                    catalog_id: Some(catalog_id),
+                    loaded: true,
+                })?;
+            } else {
+                writer.send(&TranslationWorkerEvent::LocalModelState {
+                    catalog_id: None,
+                    loaded: false,
                 })?;
             }
         }
@@ -580,11 +605,51 @@ fn run_install(
                 let keep_warm = state.keep_warm;
                 let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
-                    catalog_id,
+                    catalog_id: catalog_id.clone(),
                     tier,
                     load_duration_ms,
                 })?;
+                writer.send(&TranslationWorkerEvent::LocalModelState {
+                    catalog_id: Some(catalog_id),
+                    loaded: true,
+                })?;
             }
+        }
+        InstallCommand::RemoveModel { tier } => {
+            let mut state = recover_lock(state);
+            let pack = state.pack(tier)?.clone();
+            if state.selected_tier == Some(tier) && state.local_model_enabled {
+                bail!(
+                    "switch off the local translation provider before removing its selected model"
+                );
+            }
+            if state.selected_tier == Some(tier) {
+                let had_engine = state.engine.take().is_some();
+                if had_engine {
+                    writer.send(&TranslationWorkerEvent::LocalModelState {
+                        catalog_id: Some(pack.id.clone()),
+                        loaded: false,
+                    })?;
+                }
+            }
+            let mut removed = state.installer.remove_complete(&pack.as_bundle())?;
+            let last_pack_removed = !state
+                .catalog
+                .packs
+                .iter()
+                .any(|candidate| state.model_installed(candidate.tier));
+            if last_pack_removed {
+                let runtime = state.runtime.remove()?;
+                removed.removed_files = removed.removed_files.saturating_add(runtime.removed_files);
+                removed.removed_bytes = removed.removed_bytes.saturating_add(runtime.removed_bytes);
+            }
+            writer.send(&TranslationWorkerEvent::ModelRemoved {
+                catalog_id: pack.id,
+                tier,
+                removed_bytes: removed.removed_bytes,
+                runtime_removed: last_pack_removed,
+                models: state.summaries(),
+            })?;
         }
         InstallCommand::SelectTier { tier, keep_warm } => {
             let mut state = recover_lock(state);
@@ -599,29 +664,60 @@ fn run_install(
                 state.ensure_runtime(writer, &catalog_id)?;
                 let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
-                    catalog_id,
+                    catalog_id: catalog_id.clone(),
                     tier,
                     load_duration_ms,
+                })?;
+                writer.send(&TranslationWorkerEvent::LocalModelState {
+                    catalog_id: Some(catalog_id),
+                    loaded: true,
                 })?;
             }
         }
         InstallCommand::SetLocalEnabled { enabled } => {
             let mut state = recover_lock(state);
             if state.local_model_enabled == enabled {
+                writer.send(&TranslationWorkerEvent::LocalModelState {
+                    catalog_id: if state.engine.is_some() {
+                        state
+                            .selected_tier
+                            .and_then(|tier| state.pack(tier).ok())
+                            .map(|pack| pack.id.clone())
+                    } else {
+                        None
+                    },
+                    loaded: state.engine.is_some(),
+                })?;
                 return Ok(());
             }
             state.local_model_enabled = enabled;
             if !enabled {
-                state.engine = None;
+                let had_engine = state.engine.take().is_some();
+                let unloaded = if had_engine {
+                    state
+                        .selected_tier
+                        .and_then(|tier| state.pack(tier).ok())
+                        .map(|pack| pack.id.clone())
+                } else {
+                    None
+                };
+                writer.send(&TranslationWorkerEvent::LocalModelState {
+                    catalog_id: unloaded,
+                    loaded: false,
+                })?;
             } else if let Some(tier) = state.selected_tier {
                 let catalog_id = state.pack(tier)?.id.clone();
                 state.ensure_runtime(writer, &catalog_id)?;
                 let keep_warm = state.keep_warm;
                 let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
-                    catalog_id,
+                    catalog_id: catalog_id.clone(),
                     tier,
                     load_duration_ms,
+                })?;
+                writer.send(&TranslationWorkerEvent::LocalModelState {
+                    catalog_id: Some(catalog_id),
+                    loaded: true,
                 })?;
             }
         }
@@ -1114,9 +1210,9 @@ mod direction_tests {
 
 #[cfg(test)]
 mod local_model_policy_tests {
-    use rust_protocol::TranslationProviderEntry;
+    use rust_protocol::{TranslationProviderEntry, TranslationTier};
 
-    use super::local_translation_enabled;
+    use super::{InstallCommand, install_failure_code, local_translation_enabled};
 
     fn entry(id: &str, enabled: bool) -> TranslationProviderEntry {
         TranslationProviderEntry {
@@ -1140,5 +1236,21 @@ mod local_model_policy_tests {
             entry("deepl", true),
             entry("local", false),
         ]));
+    }
+
+    #[test]
+    fn a_remove_failure_can_release_the_desktop_removing_state() {
+        assert_eq!(
+            install_failure_code(&InstallCommand::RemoveModel {
+                tier: TranslationTier::Tiny,
+            }),
+            "model_remove"
+        );
+        assert_eq!(
+            install_failure_code(&InstallCommand::EnsureModel {
+                tier: TranslationTier::Tiny,
+            }),
+            "translation_worker"
+        );
     }
 }

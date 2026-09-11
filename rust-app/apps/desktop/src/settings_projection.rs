@@ -59,7 +59,7 @@ pub(crate) mod tone {
     pub(crate) const OFF: &str = "off";
 }
 
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
         format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
     } else {
@@ -69,18 +69,25 @@ fn human_size(bytes: u64) -> String {
 
 /// One row of the speech-model list.
 ///
-/// The verb belongs to the row it acts on, and there is one at rest: Install
-/// for something not here yet, Use for something installed but not chosen,
-/// Cancel while a download runs. There is no Remove, because no command in the
-/// protocol removes a model and a button that cannot do its job is worse than
-/// no button.
+/// The verbs belong to the row they act on: Install for something not here
+/// yet, Use for something installed but not chosen, Cancel while a download
+/// runs, and Remove for installed data that is not already changing.
 pub(crate) fn speech_model_row_localized(
     model: &ModelSummary,
     download: Option<Download>,
+    loaded: bool,
+    removing: bool,
     locale: UiLocale,
 ) -> ModelRow {
-    let (state, tone, action, progress) =
-        model_progress_localized(model.installed, model.selected, download, locale);
+    let (state, tone, action, progress) = model_progress_localized(
+        model.installed,
+        model.selected,
+        loaded,
+        removing,
+        download,
+        locale,
+    );
+    let size = human_size(model.size_bytes);
     ModelRow {
         catalog_id: model.catalog_id.clone().into(),
         section: text(locale, UiText::SpeechSection).into(),
@@ -95,11 +102,20 @@ pub(crate) fn speech_model_row_localized(
             }
         )
         .into(),
-        size: human_size(model.size_bytes).into(),
+        size: size.clone().into(),
         state: state.into(),
         tone: tone.into(),
         action: action.into(),
         action_key: model_action_key(model.installed, model.selected, download).into(),
+        removable: model.installed && download.is_none() && !removing,
+        remove_label: text(locale, UiText::RemoveModel).into(),
+        remove_question: render(
+            locale,
+            UiText::RemoveModelQuestion,
+            &[("model", &model.display_name), ("size", &size)],
+        )
+        .into(),
+        removing,
         selected: model.selected,
         installed: model.installed,
         progress,
@@ -111,10 +127,19 @@ pub(crate) fn translation_model_row_localized(
     model: &TranslationModelSummary,
     selected: bool,
     download: Option<Download>,
+    loaded: bool,
+    removing: bool,
     locale: UiLocale,
 ) -> ModelRow {
-    let (state, tone, action, progress) =
-        model_progress_localized(model.installed, selected, download, locale);
+    let (state, tone, action, progress) = model_progress_localized(
+        model.installed,
+        selected,
+        loaded,
+        removing,
+        download,
+        locale,
+    );
+    let size = human_size(model.size_bytes);
     ModelRow {
         catalog_id: model.catalog_id.clone().into(),
         section: text(locale, UiText::TranslationSection).into(),
@@ -130,11 +155,20 @@ pub(crate) fn translation_model_row_localized(
             }
         )
         .into(),
-        size: human_size(model.size_bytes).into(),
+        size: size.clone().into(),
         state: state.into(),
         tone: tone.into(),
         action: action.into(),
         action_key: model_action_key(model.installed, selected, download).into(),
+        removable: model.installed && download.is_none() && !removing,
+        remove_label: text(locale, UiText::RemoveModel).into(),
+        remove_question: render(
+            locale,
+            UiText::RemoveModelQuestion,
+            &[("model", &model.display_name), ("size", &size)],
+        )
+        .into(),
+        removing,
         selected,
         installed: model.installed,
         progress,
@@ -174,14 +208,25 @@ fn model_action_key(installed: bool, selected: bool, download: Option<Download>)
 fn model_progress(
     installed: bool,
     selected: bool,
+    loaded: bool,
+    removing: bool,
     download: Option<Download>,
 ) -> (String, &'static str, String, f32) {
-    model_progress_localized(installed, selected, download, UiLocale::English)
+    model_progress_localized(
+        installed,
+        selected,
+        loaded,
+        removing,
+        download,
+        UiLocale::English,
+    )
 }
 
 fn model_progress_localized(
     installed: bool,
     selected: bool,
+    loaded: bool,
+    removing: bool,
     download: Option<Download>,
     locale: UiLocale,
 ) -> (String, &'static str, String, f32) {
@@ -190,6 +235,14 @@ fn model_progress_localized(
     // event; this is the rule stated where the row is drawn, so that forgetting
     // one of those events costs a stale entry rather than a row stuck at
     // "100 %" with a Cancel button that cancels nothing.
+    if removing {
+        return (
+            text(locale, UiText::RemovingModel).to_owned(),
+            tone::WORKING,
+            String::new(),
+            0.0,
+        );
+    }
     let download = download.filter(|_| !installed);
     if let Some(download) = download {
         return (
@@ -199,10 +252,18 @@ fn model_progress_localized(
             download.fraction(),
         );
     }
-    if selected {
+    if selected && loaded {
         return (
             text(locale, UiText::InUse).to_owned(),
             tone::ACTIVE,
+            String::new(),
+            0.0,
+        );
+    }
+    if selected {
+        return (
+            text(locale, UiText::SelectedUnloaded).to_owned(),
+            tone::RESTING,
             String::new(),
             0.0,
         );
@@ -805,12 +866,19 @@ mod tests {
             license: "Apache-2.0".to_owned(),
         };
 
-        let speech_row =
-            speech_model_row_localized(&speech, None, crate::localization::UiLocale::Russian);
+        let speech_row = speech_model_row_localized(
+            &speech,
+            None,
+            false,
+            false,
+            crate::localization::UiLocale::Russian,
+        );
         let translation_row = translation_model_row_localized(
             &translation,
             false,
             None,
+            false,
+            false,
             crate::localization::UiLocale::Russian,
         );
 
@@ -1029,30 +1097,44 @@ mod tests {
 
     #[test]
     fn a_model_offers_one_verb_at_rest_and_cancel_while_it_runs() {
-        let (state, tone, action, progress) = model_progress(false, false, None);
+        let (state, tone, action, progress) = model_progress(false, false, false, false, None);
         assert_eq!(
             (state.as_str(), tone, action.as_str()),
             ("Not installed", "off", "Install")
         );
         assert!((progress - 0.0).abs() < f32::EPSILON);
 
-        let (state, tone, action, _) = model_progress(true, false, None);
+        let (state, tone, action, _) = model_progress(true, false, false, false, None);
         assert_eq!(
             (state.as_str(), tone, action.as_str()),
             ("Installed", "resting", "Use")
         );
 
-        let (state, tone, action, _) = model_progress(true, true, None);
+        let (state, tone, action, _) = model_progress(true, true, true, false, None);
         assert_eq!(
             (state.as_str(), tone, action.as_str()),
             ("In use", "active", "")
         );
 
+        let (state, tone, action, _) = model_progress(true, true, false, false, None);
+        assert_eq!(
+            (state.as_str(), tone, action.as_str()),
+            ("Selected · unloaded", "resting", "")
+        );
+
+        let (state, tone, action, progress) = model_progress(true, true, false, true, None);
+        assert_eq!(
+            (state.as_str(), tone, action.as_str()),
+            ("Removing…", "working", "")
+        );
+        assert!((progress - 0.0).abs() < f32::EPSILON);
+
         let running = Download {
             downloaded_bytes: 43,
             total_bytes: 100,
         };
-        let (state, tone, action, progress) = model_progress(false, false, Some(running));
+        let (state, tone, action, progress) =
+            model_progress(false, false, false, false, Some(running));
         assert_eq!(
             (state.as_str(), tone, action.as_str()),
             ("43 %", "working", "Cancel")
@@ -1071,7 +1153,8 @@ mod tests {
             downloaded_bytes: 100,
             total_bytes: 100,
         };
-        let (state, tone, action, progress) = model_progress(true, false, Some(finished));
+        let (state, tone, action, progress) =
+            model_progress(true, false, false, false, Some(finished));
 
         assert_eq!(
             (state.as_str(), tone, action.as_str()),
@@ -1086,7 +1169,7 @@ mod tests {
             downloaded_bytes: 900,
             total_bytes: 0,
         };
-        let (state, _, _, progress) = model_progress(false, false, Some(unknown));
+        let (state, _, _, progress) = model_progress(false, false, false, false, Some(unknown));
         assert_eq!(state, "0 %");
         assert!((progress - 0.0).abs() < f32::EPSILON);
     }

@@ -263,7 +263,7 @@ mod tests {
                     ("Modern GPU", "Современная видеокарта"),
                     ("Custom endpoint", "Свой сервер"),
                     ("Providers", "Провайдеры"),
-                    ("OUTPUT", "РЕЗУЛЬТАТ"),
+                    ("SOURCE TEXT", "ИСХОДНЫЙ ТЕКСТ"),
                     (
                         "Runs on this computer · nothing leaves it",
                         "Работает локально · данные никуда не отправляются",
@@ -313,7 +313,7 @@ mod tests {
                     ("Modern GPU", "Сучасна відеокарта"),
                     ("Custom endpoint", "Власний сервер"),
                     ("Providers", "Провайдери"),
-                    ("OUTPUT", "РЕЗУЛЬТАТ"),
+                    ("SOURCE TEXT", "ВИХІДНИЙ ТЕКСТ"),
                     (
                         "Runs on this computer · nothing leaves it",
                         "Працює локально · дані нікуди не надсилаються",
@@ -363,7 +363,7 @@ mod tests {
                     ("Modern GPU", "GPU moderna"),
                     ("Custom endpoint", "Servidor propio"),
                     ("Providers", "Proveedores"),
-                    ("OUTPUT", "RESULTADO"),
+                    ("SOURCE TEXT", "TEXTO ORIGINAL"),
                     (
                         "Runs on this computer · nothing leaves it",
                         "Funciona de forma local · no se envían datos",
@@ -416,7 +416,7 @@ mod tests {
                     ("Modern GPU", "GPU moderna"),
                     ("Custom endpoint", "Servidor personalizado"),
                     ("Providers", "Provedores"),
-                    ("OUTPUT", "RESULTADO"),
+                    ("SOURCE TEXT", "TEXTO ORIGINAL"),
                     (
                         "Runs on this computer · nothing leaves it",
                         "Funciona localmente · nenhum dado é enviado",
@@ -466,7 +466,7 @@ mod tests {
                     ("Modern GPU", "Moderne GPU"),
                     ("Custom endpoint", "Eigener Server"),
                     ("Providers", "Anbieter"),
-                    ("OUTPUT", "AUSGABE"),
+                    ("SOURCE TEXT", "AUSGANGSTEXT"),
                     (
                         "Runs on this computer · nothing leaves it",
                         "Läuft lokal · es werden keine Daten gesendet",
@@ -516,7 +516,7 @@ mod tests {
                     ("Modern GPU", "GPU récente"),
                     ("Custom endpoint", "Serveur personnalisé"),
                     ("Providers", "Services"),
-                    ("OUTPUT", "RÉSULTAT"),
+                    ("SOURCE TEXT", "TEXTE SOURCE"),
                     (
                         "Runs on this computer · nothing leaves it",
                         "Fonctionne en local · aucune donnée n’est envoyée",
@@ -569,7 +569,7 @@ mod tests {
                     ("Modern GPU", "GPU moderna"),
                     ("Custom endpoint", "Server personalizzato"),
                     ("Providers", "Provider"),
-                    ("OUTPUT", "RISULTATO"),
+                    ("SOURCE TEXT", "TESTO ORIGINALE"),
                     (
                         "Runs on this computer · nothing leaves it",
                         "Funziona in locale · nessun dato viene inviato",
@@ -622,7 +622,7 @@ mod tests {
                     ("Modern GPU", "최신 GPU"),
                     ("Custom endpoint", "사용자 지정 서버"),
                     ("Providers", "서비스"),
-                    ("OUTPUT", "결과"),
+                    ("SOURCE TEXT", "원문"),
                     (
                         "Runs on this computer · nothing leaves it",
                         "로컬에서 실행 · 데이터를 전송하지 않음",
@@ -716,9 +716,7 @@ mod tests {
 
         for (language, source) in catalogs {
             let entries = catalog(source);
-            for label in [
-                "CPU", "CUDA", "Vulkan", "PIN", "ORIG", "DUAL", "Say", "Flex", "SayFlex",
-            ] {
+            for label in ["CPU", "CUDA", "Vulkan", "PIN", "ORIG", "DUAL"] {
                 assert_eq!(
                     entries.get(label).map(String::as_str),
                     Some(label),
@@ -1491,6 +1489,10 @@ mod tests {
                 tone: "working".into(),
                 action: entries["Cancel"].clone().into(),
                 action_key: "cancel".into(),
+                removable: false,
+                remove_label: entries["Remove"].clone().into(),
+                remove_question: "Remove model?".into(),
+                removing: false,
                 selected: false,
                 installed: false,
                 progress: 0.5,
@@ -1519,6 +1521,136 @@ mod tests {
             assert!(!chose.get(), "{locale}: localized Cancel must not choose");
         }
         drop(seed);
+    }
+
+    #[test]
+    fn localized_model_use_and_remove_flow_fit_and_dispatch_the_right_actions() {
+        use std::{cell::RefCell, rc::Rc};
+
+        use i_slint_backend_testing::{ElementHandle, ElementRoot};
+        use slint::{ComponentHandle, ModelRc, VecModel};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.set_model_rows(ModelRc::new(VecModel::from(vec![crate::ModelRow {
+                catalog_id: "whisper-medium".into(),
+                section: entries["Speech"].clone().into(),
+                title: "Whisper Medium".into(),
+                detail: "Installed model".into(),
+                size: "1.5 GB".into(),
+                state: entries["Installed"].clone().into(),
+                tone: "resting".into(),
+                action: entries["Use"].clone().into(),
+                action_key: "use".into(),
+                removable: true,
+                remove_label: entries["Remove"].clone().into(),
+                remove_question: format!("{} · Whisper Medium · 1.5 GB", entries["Remove"]).into(),
+                removing: false,
+                selected: false,
+                installed: true,
+                progress: 0.0,
+            }])));
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let chose = Rc::clone(&calls);
+            settings.on_choose_model(move |id| chose.borrow_mut().push(format!("use:{id}")));
+            let removed = Rc::clone(&calls);
+            settings.on_remove_model(move |id| removed.borrow_mut().push(format!("remove:{id}")));
+            settings.show().expect("show headless settings surface");
+            settings.set_active_page(3);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            let surface = settings.root_element().size();
+            for label in [&entries["Use"], &entries["Remove"]] {
+                let control = ElementHandle::find_by_accessible_label(&settings, label)
+                    .next()
+                    .unwrap_or_else(|| panic!("{locale}: missing model action {label}"));
+                let position = control.absolute_position();
+                assert!(
+                    position.x >= -0.5 && position.x + control.size().width <= surface.width + 0.5,
+                    "{locale}: model action {label:?} leaves the client area",
+                );
+            }
+
+            ElementHandle::find_by_accessible_label(&settings, &entries["Use"])
+                .next()
+                .expect("Use action")
+                .invoke_accessible_default_action();
+            ElementHandle::find_by_accessible_label(&settings, &entries["Remove"])
+                .next()
+                .expect("Remove action")
+                .invoke_accessible_default_action();
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+            ElementHandle::find_by_accessible_label(&settings, &entries["Yes"])
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: missing removal confirmation"))
+                .invoke_accessible_default_action();
+
+            assert_eq!(
+                calls.borrow().as_slice(),
+                ["use:whisper-medium", "remove:whisper-medium"],
+                "{locale}: model actions must keep stable identities",
+            );
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn companion_help_is_contextual_and_names_the_complete_gesture() {
+        i_slint_backend_testing::init_no_event_loop();
+        let settings = crate::SettingsWindow::new().expect("settings surface");
+        settings.set_ui_locale("en".into());
+
+        crate::settings_view::sync_visualizer_copy(
+            &settings,
+            crate::visualizer::VisualizerStyle::CompanionOrb,
+        );
+        let companion_help = settings.get_visuals_note().to_string();
+        assert!(companion_help.contains("Ctrl + Alt"));
+        assert!(companion_help.contains("left mouse button"));
+        assert!(companion_help.contains("position is saved"));
+
+        crate::settings_view::sync_visualizer_copy(
+            &settings,
+            crate::visualizer::VisualizerStyle::VoiceOrb,
+        );
+        assert_ne!(settings.get_visuals_note().as_str(), companion_help);
     }
 
     #[test]
@@ -2025,6 +2157,80 @@ mod tests {
             i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
         }
         assert_eq!(selected.borrow().as_str(), "uk");
+        drop(seed);
+    }
+
+    #[test]
+    fn translator_controls_fit_and_remain_addressable_in_every_locale() {
+        use i_slint_backend_testing::{ElementHandle, ElementRoot};
+        use slint::{ComponentHandle, PhysicalSize};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::TranslatorWindow::new().expect("seed translator surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let translator = crate::TranslatorWindow::new().expect("translator surface");
+            translator.set_source_text("A sentence to translate".into());
+            translator.set_result_text("Translated sentence".into());
+            translator.window().set_size(PhysicalSize::new(620, 460));
+            translator.show().expect("show headless translator surface");
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+            let surface = translator.root_element().size();
+
+            for label in [
+                &entries["Source text"],
+                &entries["Swap text"],
+                &entries["Copy result"],
+                &entries["Translate"],
+            ] {
+                let control = ElementHandle::find_by_accessible_label(&translator, label)
+                    .next()
+                    .unwrap_or_else(|| panic!("{locale}: missing translator control {label}"));
+                let position = control.absolute_position();
+                let size = control.size();
+                assert!(
+                    position.x >= -0.5
+                        && position.y >= -0.5
+                        && position.x + size.width <= surface.width + 0.5
+                        && position.y + size.height <= surface.height + 0.5,
+                    "{locale}: translator control {label:?} leaves the client area"
+                );
+            }
+        }
         drop(seed);
     }
 }
