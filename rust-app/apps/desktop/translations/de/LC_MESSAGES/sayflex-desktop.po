@@ -871,9 +871,6 @@ msgstr "Anbieter"
 msgid "Quit"
 msgstr "Beenden"
 
-msgid "Quit SayFlex"
-msgstr "SayFlex beenden"
-
 msgid "Reading selected text…"
 msgstr "Ausgewählter Text wird gelesen…"
 
@@ -1434,3 +1431,6 @@ msgstr "Das lokale Übersetzungsmodell ist nicht installiert oder noch nicht ber
 
 msgid "Translation failed. Try again or check Providers."
 msgstr "Die Übersetzung ist fehlgeschlagen. Versuchen Sie es erneut oder prüfen Sie Anbieter."
+
+msgid "Quick translation"
+msgstr "Schnell übersetzen"

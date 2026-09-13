@@ -321,3 +321,4 @@ JapaneseLanguage|Japanese
 KoreanLanguage|Korean
 HindiLanguage|Hindi
 ArabicLanguage|Arabic
+QuickTranslation|Quick translation

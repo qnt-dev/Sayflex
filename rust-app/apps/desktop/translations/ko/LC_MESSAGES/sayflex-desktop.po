@@ -871,9 +871,6 @@ msgstr "서비스"
 msgid "Quit"
 msgstr "종료"
 
-msgid "Quit SayFlex"
-msgstr "SayFlex 종료"
-
 msgid "Reading selected text…"
 msgstr "선택한 텍스트를 읽는 중…"
 
@@ -1434,3 +1431,6 @@ msgstr "로컬 번역 모델이 설치되지 않았거나 아직 준비되지 �
 
 msgid "Translation failed. Try again or check Providers."
 msgstr "번역하지 못했습니다. 다시 시도하거나 공급자 설정을 확인하세요."
+
+msgid "Quick translation"
+msgstr "빠른 번역"

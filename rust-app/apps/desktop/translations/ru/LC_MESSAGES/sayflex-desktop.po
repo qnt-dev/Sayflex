@@ -871,9 +871,6 @@ msgstr "Провайдеры"
 msgid "Quit"
 msgstr "Выход"
 
-msgid "Quit SayFlex"
-msgstr "Выйти из SayFlex"
-
 msgid "Reading selected text…"
 msgstr "Чтение выделенного текста…"
 
@@ -1434,3 +1431,6 @@ msgstr "Локальная модель перевода не установле
 
 msgid "Translation failed. Try again or check Providers."
 msgstr "Не удалось выполнить перевод. Повторите попытку или проверьте раздел «Провайдеры»."
+
+msgid "Quick translation"
+msgstr "Быстрый перевод"

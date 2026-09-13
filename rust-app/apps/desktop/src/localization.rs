@@ -148,6 +148,20 @@ mod tests {
     }
 
     #[test]
+    fn settings_shell_owns_quick_translation_but_not_process_exit_or_duplicate_page_number() {
+        let settings = include_str!("../ui/settings.slint");
+        let tray = include_str!("../ui/app.slint");
+
+        assert!(settings.contains("label: @tr(\"Quick translation\")"));
+        assert!(settings.contains("clicked => { root.open-translator(); }"));
+        assert!(!settings.contains("callback quit-requested();"));
+        assert!(!settings.contains("root.quit-requested()"));
+        assert!(!settings.contains("page-numbers"));
+        assert!(tray.contains("callback quit-requested();"));
+        assert!(tray.contains("title: @tr(\"Quit\")"));
+    }
+
+    #[test]
     fn ready_status_uses_the_configured_shortcut_in_the_active_language() {
         assert_eq!(
             super::render(

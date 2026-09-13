@@ -196,9 +196,6 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     wire(&settings);
     let animation = new_settings_preview(&settings);
     let animation_timer = start_visual_preview_animation(settings.as_weak(), animation);
-    settings.on_quit_requested(|| {
-        let _ = slint::quit_event_loop();
-    });
     settings.show()?;
     // The same native dressing the real window gets, so the preview shows the
     // whole thing including its title bar rather than the page inside a piece

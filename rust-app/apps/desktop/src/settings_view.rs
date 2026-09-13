@@ -2806,16 +2806,6 @@ pub(crate) fn wire_settings(
             sync_action_settings(&settings_weak, &state);
         });
     }
-    {
-        let workers = Rc::clone(workers);
-        settings.on_quit_requested(move || {
-            rust_app_core::diagnostics::log_line(
-                "desktop lifecycle=exit_requested reason=settings_quit",
-            );
-            workers.shutdown();
-            let _ = slint::quit_event_loop();
-        });
-    }
 }
 
 pub(crate) fn wire_tray(

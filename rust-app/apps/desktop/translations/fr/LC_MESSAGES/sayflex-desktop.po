@@ -871,9 +871,6 @@ msgstr "Services"
 msgid "Quit"
 msgstr "Quitter"
 
-msgid "Quit SayFlex"
-msgstr "Quitter SayFlex"
-
 msgid "Reading selected text…"
 msgstr "Lecture du texte sélectionné…"
 
@@ -1434,3 +1431,6 @@ msgstr "Le modèle de traduction local n’est pas installé ou n’est pas enco
 
 msgid "Translation failed. Try again or check Providers."
 msgstr "Échec de la traduction. Réessayez ou vérifiez les fournisseurs."
+
+msgid "Quick translation"
+msgstr "Traduction rapide"
