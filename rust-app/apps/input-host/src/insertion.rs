@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     io,
+    ops::ControlFlow,
     sync::{
         Arc, Mutex,
         mpsc::{self, Sender},
@@ -9,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{clipboard, hotkeys, insertion_adapter};
+use crate::{clipboard, hotkeys, insertion_adapter, sta_dispatcher};
 use rust_protocol::{
     InputHostEvent, InsertionDelivery, InsertionMethod, RequestId, SessionId, TargetSnapshot,
     Transcript,
@@ -40,7 +41,7 @@ enum InsertionCommand {
 }
 
 pub struct InsertionService {
-    commands: Sender<InsertionCommand>,
+    commands: sta_dispatcher::StaCommandSender<InsertionCommand>,
     pending_inserts: Arc<Mutex<HashSet<InsertionKey>>>,
 }
 
@@ -63,13 +64,17 @@ impl InsertionKey {
 
 impl InsertionService {
     pub fn start(events: Sender<InputHostEvent>) -> std::io::Result<Self> {
-        let (commands, receiver) = mpsc::channel();
+        let (commands, dispatcher) = sta_dispatcher::StaDispatcher::channel();
         let pending_inserts = Arc::new(Mutex::new(HashSet::new()));
         let worker_pending_inserts = Arc::clone(&pending_inserts);
         let (startup, startup_result) = mpsc::sync_channel::<Result<(), String>>(1);
         thread::Builder::new()
             .name("input-insertion-worker".to_owned())
             .spawn(move || {
+                if let Err(error) = dispatcher.bind_current_thread() {
+                    let _ = startup.send(Err(error.to_string()));
+                    return;
+                }
                 let apartment = match clipboard::ClipboardApartment::initialize() {
                     Ok(apartment) => apartment,
                     Err(error) => {
@@ -86,12 +91,7 @@ impl InsertionService {
                     }
                 };
                 let _ = startup.send(Ok(()));
-                loop {
-                    let command = receiver.recv().ok();
-                    let Some(command) = command else {
-                        break;
-                    };
-                    match command {
+                let run_result = dispatcher.run(|command| match command {
                         InsertionCommand::Insert {
                             transcript,
                             target,
@@ -123,6 +123,7 @@ impl InsertionService {
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .remove(&key);
+                            ControlFlow::Continue(())
                         }
                         InsertionCommand::Copy { transcript } => {
                             match clipboard::set_text(&transcript.text) {
@@ -139,6 +140,7 @@ impl InsertionService {
                                     });
                                 }
                             }
+                            ControlFlow::Continue(())
                         }
                         InsertionCommand::CopyText { request_id, text } => {
                             match clipboard::set_text(&text) {
@@ -153,31 +155,37 @@ impl InsertionService {
                                     });
                                 }
                             }
+                            ControlFlow::Continue(())
                         }
                         InsertionCommand::ReplaceSelection {
                             request_id,
                             target,
                             text,
-                        } => match replace_selection(
-                            &mut clipboard_host,
-                            &events,
-                            request_id,
-                            target,
-                            &text,
-                        ) {
-                            Ok(()) => {}
-                            Err(error) => {
-                                let _ = events.send(InputHostEvent::Failed {
-                                    session_id: None,
-                                    code: "replace_selection".to_owned(),
-                                    message: error,
-                                });
+                        } => {
+                            match replace_selection(
+                                &mut clipboard_host,
+                                &events,
+                                request_id,
+                                target,
+                                &text,
+                            ) {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    let _ = events.send(InputHostEvent::Failed {
+                                        session_id: None,
+                                        code: "replace_selection".to_owned(),
+                                        message: error,
+                                    });
+                                }
                             }
-                        },
-                        InsertionCommand::Shutdown => {
-                            break;
+                            ControlFlow::Continue(())
                         }
-                    }
+                        InsertionCommand::Shutdown => ControlFlow::Break(()),
+                    });
+                if let Err(error) = run_result {
+                    crate::diagnostic_line(&format!(
+                        "insertion_worker lifecycle=failed stage=message_loop error={error}"
+                    ));
                 }
             })?;
         match startup_result.recv() {

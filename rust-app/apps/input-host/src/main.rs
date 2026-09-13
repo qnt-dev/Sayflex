@@ -6,6 +6,7 @@ mod inject;
 mod insertion;
 mod insertion_adapter;
 mod selection_capture;
+mod sta_dispatcher;
 mod target;
 mod uia_selection;
 mod wezterm;
