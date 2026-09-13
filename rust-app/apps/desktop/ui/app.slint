@@ -1307,6 +1307,191 @@ export component TranslatorWindow inherits Window {
 
 }
 
+export component FirstRunWindow inherits Window {
+    title: @tr("Welcome to SayFlex");
+    icon: @image-url("../assets/tray-icon.svg");
+    width: 680px;
+    height: 460px;
+    background: Sheet.canvas;
+    default-font-family: "Segoe UI Variable Text";
+
+    in property <string> model-name;
+    in property <string> model-size;
+    in-out property <bool> download-recommended: true;
+    callback continue-requested();
+
+    VerticalLayout {
+        width: parent.width;
+        height: parent.height;
+        padding: 28px;
+        spacing: 18px;
+
+        Rectangle {
+            height: 88px;
+            background: Sheet.ink;
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                spacing: 20px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Text {
+                        text: "SayFlex";
+                        color: Sheet.on-ink;
+                        font-size: 24px;
+                        font-weight: 720;
+                    }
+                    Text {
+                        text: @tr("FIRST START");
+                        color: Sheet.on-ink;
+                        opacity: 0.62;
+                        font-size: Sheet.label-size;
+                        font-weight: 650;
+                        letter-spacing: 2px;
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: @tr("Your choice controls the download");
+                    color: Sheet.on-ink;
+                    opacity: 0.72;
+                    font-size: Sheet.detail-size;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 6px;
+            Text {
+                text: @tr("Set up local dictation");
+                color: Sheet.ink;
+                font-size: 22px;
+                font-weight: 700;
+            }
+            Text {
+                text: @tr("SayFlex can transcribe speech on this computer. The recommended model keeps audio on the device and can be removed later in Models.");
+                color: Sheet.muted;
+                font-size: Sheet.body-size;
+                wrap: word-wrap;
+            }
+        }
+
+        choice := Rectangle {
+            height: 86px;
+            border-width: choice-focus.has-focus ? 2px : 1px;
+            border-color: root.download-recommended ? Sheet.signal : Sheet.hairline;
+            background: root.download-recommended ? Sheet.signal-soft : Sheet.raised;
+            accessible-role: checkbox;
+            accessible-label: @tr("Download the recommended local model");
+            accessible-enabled: true;
+            accessible-checkable: true;
+            accessible-checked: root.download-recommended;
+            accessible-action-default => { root.download-recommended = !root.download-recommended; }
+            forward-focus: choice-focus;
+
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                spacing: 14px;
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    y: (parent.height - self.height) / 2;
+                    border-width: 1px;
+                    border-color: root.download-recommended ? Sheet.signal : Sheet.ink;
+                    background: root.download-recommended ? Sheet.signal : transparent;
+                    if root.download-recommended : Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        background: Sheet.on-ink;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 5px;
+                    Text {
+                        text: @tr("Download {} ({})", root.model-name, root.model-size);
+                        color: Sheet.ink;
+                        font-size: Sheet.body-size;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: root.download-recommended
+                            ? @tr("Starts only after you press Continue")
+                            : @tr("No model will be downloaded; you can configure a cloud provider instead");
+                        color: Sheet.muted;
+                        font-size: Sheet.detail-size;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            choice-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    choice-focus.focus();
+                    root.download-recommended = !root.download-recommended;
+                }
+            }
+            choice-focus := FocusScope {
+                key-pressed(event) => {
+                    if event.text == " " || event.text == Key.Return {
+                        root.download-recommended = !root.download-recommended;
+                        return accept;
+                    }
+                    reject
+                }
+            }
+        }
+
+        Rectangle {
+            height: 50px;
+            background: Sheet.raised;
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 4px;
+                height: parent.height;
+                background: Sheet.signal;
+            }
+            Text {
+                x: 16px;
+                width: parent.width - 32px;
+                text: @tr("Nothing is downloaded before confirmation. You can change this choice later in Providers and Models.");
+                color: Sheet.muted;
+                font-size: Sheet.detail-size;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+        Rectangle {
+            height: 46px;
+            HorizontalLayout {
+                width: parent.width;
+                height: 26px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: @tr("Closing this window leaves SayFlex unconfigured.");
+                    color: Sheet.muted;
+                    font-size: Sheet.label-size;
+                    vertical-alignment: center;
+                }
+                RowAction {
+                    label: @tr("Continue");
+                    primary: true;
+                    clicked => { root.continue-requested(); }
+                }
+            }
+        }
+    }
+}
+
 export component AppTray inherits SystemTrayIcon {
     icon: @image-url("../assets/tray-icon.svg");
     tooltip: "SayFlex";

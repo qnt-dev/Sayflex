@@ -2265,6 +2265,76 @@ mod tests {
     }
 
     #[test]
+    fn first_run_choice_and_confirmation_fit_in_every_locale() {
+        use i_slint_backend_testing::{ElementHandle, ElementRoot};
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::FirstRunWindow::new().expect("seed first-run surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let first_run = crate::FirstRunWindow::new().expect("first-run surface");
+            crate::first_run::configure_first_run_window(&first_run, true).expect("catalog model");
+            first_run.show().expect("show headless first-run surface");
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+            let surface = first_run.root_element().size();
+
+            for label in [
+                &entries["Download the recommended local model"],
+                &entries["Continue"],
+            ] {
+                let control = ElementHandle::find_by_accessible_label(&first_run, label)
+                    .next()
+                    .unwrap_or_else(|| panic!("{locale}: missing first-run control {label}"));
+                let position = control.absolute_position();
+                let size = control.size();
+                assert!(
+                    position.x >= -0.5
+                        && position.y >= -0.5
+                        && position.x + size.width <= surface.width + 0.5
+                        && position.y + size.height <= surface.height + 0.5,
+                    "{locale}: first-run control {label:?} leaves the client area"
+                );
+            }
+        }
+        drop(seed);
+    }
+
+    #[test]
     fn translator_surface_uses_one_material_and_explicit_interaction_states() {
         let source = include_str!("../ui/app.slint");
 

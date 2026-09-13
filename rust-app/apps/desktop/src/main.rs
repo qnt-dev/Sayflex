@@ -37,7 +37,10 @@ use rust_protocol::{
     TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use serde::{Deserialize, Serialize};
-use settings_document::{SavedSettings, data_root, load_settings, save_settings};
+use settings_document::{
+    SavedSettings, apply_first_run_choice, data_root, load_settings, save_first_run_settings,
+    save_settings,
+};
 use settings_view::{
     precreate_action_windows, prepend_history_row, set_indicator_status, set_runtime_status,
     set_status_problem, show_layout_chooser, sync_action_settings, sync_history,
@@ -69,6 +72,7 @@ use worker_supervisor::{
     Workers, spawn_initial_workers,
 };
 
+mod first_run;
 mod flow_sphere;
 mod localization;
 mod overlay_presenter;
@@ -755,6 +759,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if env::args().any(|argument| argument == "--layout-preview") {
         return run_layout_preview();
     }
+    if let Some(download_recommended) = settings_preview::requested_first_run_state() {
+        return settings_preview::run_first_run_preview(download_recommended);
+    }
     if env::args().any(|argument| argument.starts_with("--settings-preview")) {
         return settings_preview::run_settings_preview();
     }
@@ -773,9 +780,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
-    let saved_settings = load_settings();
+    let loaded_settings = load_settings();
+    let mut saved_settings = loaded_settings.settings;
     let system_locale = rust_platform_windows::user_locale_name();
     slint::select_bundled_translation(saved_settings.ui_locale.resolved_code(&system_locale))?;
+    if loaded_settings.needs_first_run_choice {
+        let Some(choice) = first_run::request_first_run_choice()? else {
+            rust_app_core::diagnostics::log_line(
+                "desktop lifecycle=startup_aborted reason=first_run_not_confirmed",
+            );
+            run_session.finish("first_run_not_confirmed");
+            return Ok(());
+        };
+        saved_settings = apply_first_run_choice(saved_settings, choice);
+        save_first_run_settings(&saved_settings)?;
+    }
     settings.set_today(
         rust_platform_windows::local_date_line_for_locale(
             active_locale(saved_settings.ui_locale).code(),

@@ -1434,3 +1434,39 @@ msgstr "Быстрый перевод"
 
 msgid "Translate (Ctrl+Enter)"
 msgstr "Перевести (Ctrl+Enter)"
+
+msgid "Welcome to SayFlex"
+msgstr "Добро пожаловать в SayFlex"
+
+msgid "FIRST START"
+msgstr "ПЕРВЫЙ ЗАПУСК"
+
+msgid "Your choice controls the download"
+msgstr "Загрузка — только по вашему выбору"
+
+msgid "Set up local dictation"
+msgstr "Настройте локальную диктовку"
+
+msgid "SayFlex can transcribe speech on this computer. The recommended model keeps audio on the device and can be removed later in Models."
+msgstr "SayFlex может распознавать речь на этом компьютере. Рекомендуемая модель не отправляет аудио в облако; её можно удалить позже в разделе «Модели»."
+
+msgid "Download the recommended local model"
+msgstr "Скачать рекомендуемую локальную модель"
+
+msgid "Download {} ({})"
+msgstr "Скачать {} ({})"
+
+msgid "Starts only after you press Continue"
+msgstr "Загрузка начнётся только после нажатия «Продолжить»"
+
+msgid "No model will be downloaded; you can configure a cloud provider instead"
+msgstr "Модель не будет загружена; вместо неё можно настроить облачный сервис"
+
+msgid "Nothing is downloaded before confirmation. You can change this choice later in Providers and Models."
+msgstr "До подтверждения ничего не загружается. Позже выбор можно изменить в разделах «Провайдеры» и «Модели»."
+
+msgid "Closing this window leaves SayFlex unconfigured."
+msgstr "Если закрыть это окно, SayFlex останется без первоначальной настройки."
+
+msgid "Continue"
+msgstr "Продолжить"

@@ -39,6 +39,17 @@ pub(crate) struct SettingsStorage {
     primary: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoadedSettings {
+    pub(crate) settings: SavedSettings,
+    pub(crate) needs_first_run_choice: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FirstRunChoice {
+    pub(crate) download_recommended_speech_model: bool,
+}
+
 impl SettingsStorage {
     pub(crate) fn new(primary: PathBuf) -> Self {
         Self { primary }
@@ -55,7 +66,12 @@ impl SettingsStorage {
     /// Reads the newest valid candidate left by either a completed or an
     /// interrupted replacement. Invalid candidates are retained under a
     /// diagnostic name instead of being silently overwritten.
+    #[cfg(test)]
     pub(crate) fn load_recovering(&self) -> SavedSettings {
+        self.load_recovering_with_origin().settings
+    }
+
+    pub(crate) fn load_recovering_with_origin(&self) -> LoadedSettings {
         let previous = self.previous();
         let temporary = self.temporary();
         let mut candidates = [&self.primary, &previous, &temporary]
@@ -82,7 +98,10 @@ impl SettingsStorage {
         }
 
         let Some((source, bytes, _, settings)) = valid.into_iter().next() else {
-            return SavedSettings::default();
+            return LoadedSettings {
+                settings: SavedSettings::default(),
+                needs_first_run_choice: true,
+            };
         };
         if source != self.primary
             && let Err(error) = self.replace_bytes_atomically(&bytes)
@@ -92,7 +111,10 @@ impl SettingsStorage {
                 source.display()
             ));
         }
-        settings
+        LoadedSettings {
+            settings,
+            needs_first_run_choice: false,
+        }
     }
 
     pub(crate) fn replace_atomically(&self, settings: &SavedSettings) -> io::Result<()> {
@@ -432,8 +454,34 @@ fn parse_settings_checked(bytes: &[u8]) -> Result<SavedSettings, serde_json::Err
     serde_json::from_slice::<SavedSettings>(bytes).map(SavedSettings::sanitized)
 }
 
-pub(crate) fn load_settings() -> SavedSettings {
-    SettingsStorage::new(settings_path()).load_recovering()
+pub(crate) fn load_settings() -> LoadedSettings {
+    SettingsStorage::new(settings_path()).load_recovering_with_origin()
+}
+
+const TRANSCRIPTION_PROVIDER_IDS: [&str; 6] =
+    ["local", "groq", "cloudflare", "azure", "deepgram", "custom"];
+
+pub(crate) fn apply_first_run_choice(
+    mut settings: SavedSettings,
+    choice: FirstRunChoice,
+) -> SavedSettings {
+    settings.selected_model_id = Some("whisper-large-v3-turbo".to_owned());
+    settings.transcription_providers = TRANSCRIPTION_PROVIDER_IDS
+        .into_iter()
+        .map(|id| TranscriptionProviderEntry {
+            id: id.to_owned(),
+            enabled: id == "local" && choice.download_recommended_speech_model,
+            endpoint: None,
+            model: None,
+            account: None,
+        })
+        .collect();
+    settings
+}
+
+pub(crate) fn save_first_run_settings(settings: &SavedSettings) -> Result<(), Box<dyn Error>> {
+    SettingsStorage::new(settings_path()).replace_atomically(settings)?;
+    Ok(())
 }
 
 pub(crate) fn save_settings(state: &AppState) -> Result<(), Box<dyn Error>> {
@@ -454,8 +502,9 @@ mod settings_document_tests {
     use tempfile::tempdir;
 
     use super::{
-        AppState, BroadcastMicPalette, MAX_TRANSLATION_BLUR_RADIUS, SETTINGS_SCHEMA_VERSION,
-        SavedSettings, SettingsStorage, TextActionMode, VisualizerStyle, parse_settings,
+        AppState, BroadcastMicPalette, FirstRunChoice, MAX_TRANSLATION_BLUR_RADIUS,
+        SETTINGS_SCHEMA_VERSION, SavedSettings, SettingsStorage, TextActionMode, VisualizerStyle,
+        apply_first_run_choice, parse_settings,
     };
 
     /// Exactly what the 0.5.27 build wrote, before the document carried a
@@ -713,5 +762,95 @@ mod settings_document_tests {
             parse_settings(&fs::read(primary.with_extension("previous")).unwrap()).history_enabled
         );
         assert!(!primary.with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn a_missing_profile_requires_an_explicit_first_run_choice() {
+        let directory = tempdir().unwrap();
+        let storage = SettingsStorage::new(directory.path().join("settings.json"));
+
+        let loaded = storage.load_recovering_with_origin();
+
+        assert!(loaded.needs_first_run_choice);
+        assert_eq!(loaded.settings, SavedSettings::default());
+    }
+
+    #[test]
+    fn an_existing_valid_profile_never_reopens_first_run() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let storage = SettingsStorage::new(primary);
+        storage.replace_atomically(&history_setting(false)).unwrap();
+
+        let loaded = storage.load_recovering_with_origin();
+
+        assert!(!loaded.needs_first_run_choice);
+        assert!(!loaded.settings.history_enabled);
+    }
+
+    #[test]
+    fn an_unrecoverable_profile_is_quarantined_and_requires_a_choice() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let storage = SettingsStorage::new(primary.clone());
+        fs::write(&primary, b"{broken").unwrap();
+
+        let loaded = storage.load_recovering_with_origin();
+
+        assert!(loaded.needs_first_run_choice);
+        assert!(fs::read_dir(directory.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.corrupt-")
+        }));
+    }
+
+    #[test]
+    fn declining_the_recommended_download_persists_cloud_ready_defaults() {
+        let settings = apply_first_run_choice(
+            SavedSettings::default(),
+            FirstRunChoice {
+                download_recommended_speech_model: false,
+            },
+        );
+        let state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &settings,
+        );
+
+        assert!(!state.local_speech_enabled());
+        assert_eq!(settings.transcription_providers.len(), 6);
+        assert!(
+            settings
+                .transcription_providers
+                .iter()
+                .all(|entry| !entry.enabled)
+        );
+    }
+
+    #[test]
+    fn accepting_the_recommended_download_enables_only_the_local_default() {
+        let settings = apply_first_run_choice(
+            SavedSettings::default(),
+            FirstRunChoice {
+                download_recommended_speech_model: true,
+            },
+        );
+        let enabled = settings
+            .transcription_providers
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(enabled, vec!["local"]);
+        assert_eq!(
+            settings.selected_model_id.as_deref(),
+            Some("whisper-large-v3-turbo")
+        );
     }
 }

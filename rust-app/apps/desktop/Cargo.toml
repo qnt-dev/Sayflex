@@ -11,6 +11,7 @@ pet_orb = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_orb" }
 pet_particles = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_particles" }
 pet_render = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_render" }
 rust-app-core = { version = "0.8.0", path = "../../crates/app-core" }
+rust-model-manager = { version = "0.8.0", path = "../../crates/model-manager" }
 rust-platform-windows = { version = "0.8.0", path = "../../crates/platform-windows" }
 rust-protocol = { version = "0.8.0", path = "../../crates/protocol" }
 serde.workspace = true

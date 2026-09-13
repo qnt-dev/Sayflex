@@ -1432,5 +1432,41 @@ msgstr "번역하지 못했습니다. 다시 시도하거나 공급자 설정을
 msgid "Quick translation"
 msgstr "빠른 번역"
 
+msgid "Welcome to SayFlex"
+msgstr "SayFlex에 오신 것을 환영합니다"
+
+msgid "FIRST START"
+msgstr "첫 실행"
+
+msgid "Your choice controls the download"
+msgstr "다운로드 여부를 직접 선택합니다"
+
+msgid "Set up local dictation"
+msgstr "로컬 받아쓰기 설정"
+
+msgid "SayFlex can transcribe speech on this computer. The recommended model keeps audio on the device and can be removed later in Models."
+msgstr "SayFlex는 이 컴퓨터에서 음성을 텍스트로 변환할 수 있습니다. 권장 모델을 사용하면 오디오가 기기에만 보관되며, 나중에 ‘모델’에서 삭제할 수 있습니다."
+
+msgid "Download the recommended local model"
+msgstr "권장 로컬 모델 다운로드"
+
+msgid "Download {} ({})"
+msgstr "{} 다운로드 ({})"
+
+msgid "Starts only after you press Continue"
+msgstr "‘계속’을 선택한 뒤에만 다운로드가 시작됩니다"
+
+msgid "No model will be downloaded; you can configure a cloud provider instead"
+msgstr "모델을 다운로드하지 않고 클라우드 서비스를 설정할 수 있습니다"
+
+msgid "Nothing is downloaded before confirmation. You can change this choice later in Providers and Models."
+msgstr "확인하기 전에는 아무것도 다운로드되지 않습니다. 이 선택은 나중에 ‘서비스’와 ‘모델’에서 변경할 수 있습니다."
+
+msgid "Closing this window leaves SayFlex unconfigured."
+msgstr "이 창을 닫으면 SayFlex의 초기 설정이 완료되지 않습니다."
+
+msgid "Continue"
+msgstr "계속"
+
 msgid "Translate (Ctrl+Enter)"
 msgstr "번역 (Ctrl+Enter)"

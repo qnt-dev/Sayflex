@@ -1432,5 +1432,41 @@ msgstr "No se pudo traducir. Inténtalo de nuevo o revisa Proveedores."
 msgid "Quick translation"
 msgstr "Traducción rápida"
 
+msgid "Welcome to SayFlex"
+msgstr "Te damos la bienvenida a SayFlex"
+
+msgid "FIRST START"
+msgstr "PRIMER INICIO"
+
+msgid "Your choice controls the download"
+msgstr "Tú decides si se descarga"
+
+msgid "Set up local dictation"
+msgstr "Configura el dictado local"
+
+msgid "SayFlex can transcribe speech on this computer. The recommended model keeps audio on the device and can be removed later in Models."
+msgstr "SayFlex puede transcribir voz en este equipo. Con el modelo recomendado, el audio permanece en el dispositivo; podrás eliminarlo después en «Modelos»."
+
+msgid "Download the recommended local model"
+msgstr "Descargar el modelo local recomendado"
+
+msgid "Download {} ({})"
+msgstr "Descargar {} ({})"
+
+msgid "Starts only after you press Continue"
+msgstr "La descarga comenzará cuando pulses «Continuar»"
+
+msgid "No model will be downloaded; you can configure a cloud provider instead"
+msgstr "No se descargará ningún modelo; puedes configurar un servicio en la nube"
+
+msgid "Nothing is downloaded before confirmation. You can change this choice later in Providers and Models."
+msgstr "No se descarga nada antes de confirmar. Podrás cambiar esta opción después en «Proveedores» y «Modelos»."
+
+msgid "Closing this window leaves SayFlex unconfigured."
+msgstr "Si cierras esta ventana, SayFlex quedará sin configurar."
+
+msgid "Continue"
+msgstr "Continuar"
+
 msgid "Translate (Ctrl+Enter)"
 msgstr "Traducir (Ctrl+Enter)"

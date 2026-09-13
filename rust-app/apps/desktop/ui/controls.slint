@@ -28,6 +28,7 @@ export struct MenuOption {
 export component RowAction inherits Rectangle {
     in property <string> label;
     in property <bool> danger: false;
+    in property <bool> primary: false;
     in property <bool> enabled: true;
     // Why it cannot be pressed. A disabled control with no reason is a dead
     // end; with one it is an explanation.
@@ -44,18 +45,24 @@ export component RowAction inherits Rectangle {
     width: caption.preferred-width + 22px;
     border-width: focus.has-focus ? 2px : 1px;
     border-color: focus.has-focus ? Sheet.ink : (root.enabled
-        ? (root.danger ? Sheet.signal : Sheet.hairline)
+        ? (root.primary || root.danger ? Sheet.signal : Sheet.hairline)
         : Sheet.hairline-faint);
-    background: touch.has-hover && root.enabled
-        ? (root.danger ? Sheet.signal : Sheet.ink)
-        : transparent;
+    background: !root.enabled
+        ? transparent
+        : root.primary
+            ? (touch.pressed || touch.has-hover ? Sheet.signal-text : Sheet.signal)
+            : touch.has-hover
+                ? (root.danger ? Sheet.signal : Sheet.ink)
+                : transparent;
     opacity: root.enabled ? 1.0 : 0.55;
 
     caption := Text {
         text: root.label;
-        color: touch.has-hover && root.enabled
+        color: root.primary && root.enabled
             ? Sheet.on-ink
-            : (root.danger ? Sheet.signal-text : Sheet.ink);
+            : touch.has-hover && root.enabled
+                ? Sheet.on-ink
+                : (root.danger ? Sheet.signal-text : Sheet.ink);
         font-size: Sheet.label-size;
         font-weight: 700;
         letter-spacing: 1px;

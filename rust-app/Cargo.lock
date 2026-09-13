@@ -4855,6 +4855,7 @@ dependencies = [
  "pet_particles",
  "pet_render",
  "rust-app-core",
+ "rust-model-manager",
  "rust-platform-windows",
  "rust-protocol",
  "serde",

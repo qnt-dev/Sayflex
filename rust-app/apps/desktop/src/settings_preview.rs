@@ -17,12 +17,39 @@ use std::{cell::RefCell, rc::Rc};
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::{
-    Fact, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow, TranslatorWindow,
+    Fact, FirstRunWindow, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow,
+    TranslatorWindow,
     visualizer::{
         BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, VisualizerStyle,
         WritingSlateSurface, new_settings_preview,
     },
 };
+
+pub(crate) fn requested_first_run_state() -> Option<bool> {
+    std::env::args().find_map(|argument| match argument.as_str() {
+        "--first-run-preview=checked" => Some(true),
+        "--first-run-preview=unchecked" => Some(false),
+        _ => None,
+    })
+}
+
+pub(crate) fn run_first_run_preview(download_recommended: bool) -> Result<(), Box<dyn Error>> {
+    let requested_locale = std::env::args()
+        .find_map(|argument| argument.strip_prefix("--ui-locale=").map(str::to_owned))
+        .and_then(|code| crate::localization::UiLocale::from_code(&code))
+        .unwrap_or(crate::localization::UiLocale::English);
+    let system_locale = rust_platform_windows::user_locale_name();
+    let catalog_seed = FirstRunWindow::new()?;
+    slint::select_bundled_translation(requested_locale.resolved_code(&system_locale))?;
+    let window = FirstRunWindow::new()?;
+    drop(catalog_seed);
+    crate::first_run::configure_first_run_window(&window, download_recommended)?;
+    window.on_continue_requested(|| {});
+    window.show()?;
+    crate::configure_standard_app_window(&window, "First-run preview");
+    slint::run_event_loop()?;
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TranslatorPreviewState {
