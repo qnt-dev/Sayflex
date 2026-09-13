@@ -1234,9 +1234,6 @@ msgstr "ЯЗЫК РЕЗУЛЬТАТА"
 msgid "Transcript saved to history; target was lost."
 msgstr "Расшифровка сохранена в истории; целевое окно потеряно."
 
-msgid "Translate"
-msgstr "Перевести"
-
 msgid "TRANSLATE"
 msgstr "ПЕРЕВОД"
 
@@ -1434,3 +1431,6 @@ msgstr "Не удалось выполнить перевод. Повторит�
 
 msgid "Quick translation"
 msgstr "Быстрый перевод"
+
+msgid "Translate (Ctrl+Enter)"
+msgstr "Перевести (Ctrl+Enter)"

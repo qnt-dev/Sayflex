@@ -2229,7 +2229,7 @@ mod tests {
                 &entries["Source text"],
                 &entries["Swap text"],
                 &entries["Copy result"],
-                &entries["Translate"],
+                &entries["Translate (Ctrl+Enter)"],
             ] {
                 let control = ElementHandle::find_by_accessible_label(&translator, label)
                     .next()
@@ -2244,7 +2244,65 @@ mod tests {
                     "{locale}: translator control {label:?} leaves the client area"
                 );
             }
+
+            let copy =
+                ElementHandle::find_by_accessible_label(&translator, &entries["Copy result"])
+                    .next()
+                    .expect("copy action");
+            let translate = ElementHandle::find_by_accessible_label(
+                &translator,
+                &entries["Translate (Ctrl+Enter)"],
+            )
+            .next()
+            .expect("translate action");
+            assert_eq!(
+                copy.size().height,
+                translate.size().height,
+                "{locale}: translator actions must share one height"
+            );
         }
         drop(seed);
+    }
+
+    #[test]
+    fn translator_surface_uses_one_material_and_explicit_interaction_states() {
+        let source = include_str!("../ui/app.slint");
+
+        assert!(source.contains("in-out property <int> presentation-state"));
+        assert!(source.contains("source-input.has-focus ? Sheet.signal"));
+        assert!(source.contains("background: Sheet.raised"));
+        assert!(source.contains("callback submit-shortcut();"));
+        assert!(source.contains("source-input.clear-focus();"));
+        assert!(source.contains("source: @image-url(\"../assets/action-copy.svg\")"));
+        assert!(source.contains("source: @image-url(\"../assets/action-swap.svg\")"));
+        assert!(source.contains("label: @tr(\"Copy result\")"));
+        assert!(source.contains("label: @tr(\"Swap text\")"));
+        assert!(!source.contains("import { ListView, TextEdit }"));
+    }
+
+    #[test]
+    fn translator_shortcut_callback_invokes_translate_once_and_releases_focus() {
+        use std::{cell::Cell, rc::Rc};
+
+        use i_slint_backend_testing::ElementHandle;
+        use slint::{ComponentHandle, platform::PointerEventButton};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let translator = crate::TranslatorWindow::new().expect("translator surface");
+        translator.show().expect("show translator surface");
+        let calls = Rc::new(Cell::new(0));
+        let calls_from_callback = Rc::clone(&calls);
+        translator.on_translate(move || calls_from_callback.set(calls_from_callback.get() + 1));
+
+        let source = ElementHandle::find_by_accessible_label(&translator, "Source text")
+            .next()
+            .expect("source field in accessibility tree");
+        source.mock_single_click(PointerEventButton::Left);
+        assert!(translator.get_source_focused());
+        translator.invoke_submit_shortcut();
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+        assert_eq!(calls.get(), 1);
+        assert!(!translator.get_source_focused());
     }
 }

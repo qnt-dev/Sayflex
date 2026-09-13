@@ -1234,9 +1234,6 @@ msgstr "결과 언어"
 msgid "Transcript saved to history; target was lost."
 msgstr "받아쓰기를 기록에 저장했지만 대상 창을 찾지 못했습니다."
 
-msgid "Translate"
-msgstr "번역하기"
-
 msgid "TRANSLATE"
 msgstr "번역"
 
@@ -1434,3 +1431,6 @@ msgstr "번역하지 못했습니다. 다시 시도하거나 공급자 설정을
 
 msgid "Quick translation"
 msgstr "빠른 번역"
+
+msgid "Translate (Ctrl+Enter)"
+msgstr "번역 (Ctrl+Enter)"

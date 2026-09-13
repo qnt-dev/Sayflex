@@ -3018,6 +3018,7 @@ pub(crate) fn wire_translator(
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
 ) {
+    install_translator_keyboard_shortcut(translator);
     {
         let translator_weak = translator.as_weak();
         let state = Rc::clone(state);
@@ -3029,7 +3030,11 @@ pub(crate) fn wire_translator(
             let source_text = translator.get_source_text().trim().to_owned();
             let locale = active_locale(state.borrow().ui_locale);
             if source_text.is_empty() {
-                translator.set_status_text(text(locale, UiText::EnterTextToTranslate).into());
+                let message = text(locale, UiText::EnterTextToTranslate);
+                translator.set_presentation_state(4);
+                translator.set_notice_headline(message.into());
+                translator.set_notice_detail("".into());
+                translator.set_status_text(message.into());
                 return;
             }
             let (selected_tier, path_ready, waits_for_local) = {
@@ -3041,11 +3046,19 @@ pub(crate) fn wire_translator(
                 )
             };
             if !(path_ready || selected_tier.is_some() && waits_for_local) {
-                translator.set_status_text(text(locale, UiText::NoTranslationProviderReady).into());
+                let message = text(locale, UiText::NoTranslationProviderReady);
+                translator.set_presentation_state(4);
+                translator.set_notice_headline(message.into());
+                translator.set_notice_detail("".into());
+                translator.set_status_text(message.into());
                 return;
             }
             if !path_ready {
-                translator.set_status_text(text(locale, UiText::LocalTranslationLoading).into());
+                let message = text(locale, UiText::LocalTranslationLoading);
+                translator.set_presentation_state(1);
+                translator.set_notice_headline("".into());
+                translator.set_notice_detail("".into());
+                translator.set_status_text(message.into());
                 return;
             }
             let request_id = RequestId::new();
@@ -3060,7 +3073,10 @@ pub(crate) fn wire_translator(
                 },
             );
             translator.set_processing(true);
+            translator.set_presentation_state(1);
             translator.set_result_text("".into());
+            translator.set_notice_headline("".into());
+            translator.set_notice_detail("".into());
             translator.set_status_text(text(locale, UiText::TranslatingNow).into());
             if let Err(error) = workers
                 .translation
@@ -3077,14 +3093,15 @@ pub(crate) fn wire_translator(
             {
                 state.borrow_mut().pending_translations.remove(&request_id);
                 translator.set_processing(false);
-                translator.set_status_text(
-                    render(
-                        locale,
-                        UiText::CouldNotTranslate,
-                        &[("error", &error.to_string())],
-                    )
-                    .into(),
+                let message = render(
+                    locale,
+                    UiText::CouldNotTranslate,
+                    &[("error", &error.to_string())],
                 );
+                translator.set_presentation_state(4);
+                translator.set_notice_headline(message.clone().into());
+                translator.set_notice_detail("".into());
+                translator.set_status_text(message.into());
             }
         });
     }
@@ -3103,6 +3120,9 @@ pub(crate) fn wire_translator(
                     text: result_text,
                 });
                 let locale = active_locale(state.borrow().ui_locale);
+                translator.set_presentation_state(2);
+                translator.set_notice_headline("".into());
+                translator.set_notice_detail("".into());
                 translator.set_status_text(text(locale, UiText::CopiedToClipboard).into());
             }
         });
@@ -3117,9 +3137,98 @@ pub(crate) fn wire_translator(
                 translator.set_source_text(result);
                 translator.set_result_text(source);
                 let locale = active_locale(state.borrow().ui_locale);
+                translator.set_presentation_state(0);
+                translator.set_notice_headline("".into());
+                translator.set_notice_detail("".into());
                 translator.set_status_text(text(locale, UiText::DirectionDetectAgain).into());
             }
         });
+    }
+}
+
+pub(crate) fn install_translator_keyboard_shortcut(translator: &TranslatorWindow) {
+    let translator = translator.as_weak();
+    let modifiers = Rc::new(Cell::new(ModifiersState::default()));
+    let modifiers_for_event = Rc::clone(&modifiers);
+    translator
+        .upgrade()
+        .expect("translator exists while its shortcut is installed")
+        .window()
+        .on_winit_window_event(move |_, event| {
+            if let WindowEvent::ModifiersChanged(next) = event {
+                modifiers_for_event.set(next.state());
+                return EventResult::Propagate;
+            }
+            let WindowEvent::KeyboardInput { event, .. } = event else {
+                return EventResult::Propagate;
+            };
+            let PhysicalKey::Code(code) = event.physical_key else {
+                return EventResult::Propagate;
+            };
+            if !translator_submit_shortcut(
+                modifiers_for_event.get(),
+                code,
+                event.state,
+                event.repeat,
+            ) {
+                return EventResult::Propagate;
+            }
+            if let Some(translator) = translator.upgrade() {
+                translator.invoke_submit_shortcut();
+            }
+            EventResult::PreventDefault
+        });
+}
+
+fn translator_submit_shortcut(
+    modifiers: ModifiersState,
+    code: KeyCode,
+    state: ElementState,
+    repeat: bool,
+) -> bool {
+    state == ElementState::Pressed
+        && !repeat
+        && modifiers.control_key()
+        && matches!(code, KeyCode::Enter | KeyCode::NumpadEnter)
+}
+
+#[cfg(test)]
+mod translator_shortcut_tests {
+    use slint::winit_030::winit::{
+        event::ElementState,
+        keyboard::{KeyCode, ModifiersState},
+    };
+
+    use super::translator_submit_shortcut;
+
+    #[test]
+    fn ctrl_enter_is_a_single_non_repeating_window_command() {
+        for code in [KeyCode::Enter, KeyCode::NumpadEnter] {
+            assert!(translator_submit_shortcut(
+                ModifiersState::CONTROL,
+                code,
+                ElementState::Pressed,
+                false,
+            ));
+        }
+        assert!(!translator_submit_shortcut(
+            ModifiersState::empty(),
+            KeyCode::Enter,
+            ElementState::Pressed,
+            false,
+        ));
+        assert!(!translator_submit_shortcut(
+            ModifiersState::CONTROL,
+            KeyCode::Enter,
+            ElementState::Released,
+            false,
+        ));
+        assert!(!translator_submit_shortcut(
+            ModifiersState::CONTROL,
+            KeyCode::Enter,
+            ElementState::Pressed,
+            true,
+        ));
     }
 }
 

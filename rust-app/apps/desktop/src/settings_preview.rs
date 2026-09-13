@@ -29,6 +29,7 @@ pub(crate) enum TranslatorPreviewState {
     Empty,
     Processing,
     Result,
+    Fallback,
     Unavailable,
     Error,
 }
@@ -40,6 +41,7 @@ pub(crate) fn requested_translator_state() -> Option<TranslatorPreviewState> {
             "empty" => Some(TranslatorPreviewState::Empty),
             "processing" => Some(TranslatorPreviewState::Processing),
             "result" => Some(TranslatorPreviewState::Result),
+            "fallback" => Some(TranslatorPreviewState::Fallback),
             "unavailable" => Some(TranslatorPreviewState::Unavailable),
             "error" => Some(TranslatorPreviewState::Error),
             _ => None,
@@ -61,6 +63,7 @@ pub(crate) fn run_translator_preview() -> Result<(), Box<dyn Error>> {
     slint::select_bundled_translation(requested_locale.resolved_code(&system_locale))?;
     let translator = TranslatorWindow::new()?;
     drop(catalog_seed);
+    crate::settings_view::install_translator_keyboard_shortcut(&translator);
 
     let source = "SayFlex keeps the source and result visible while you review a translation.";
     match state {
@@ -76,6 +79,7 @@ pub(crate) fn run_translator_preview() -> Result<(), Box<dyn Error>> {
         TranslatorPreviewState::Processing => {
             translator.set_source_text(source.into());
             translator.set_processing(true);
+            translator.set_presentation_state(1);
             translator.set_status_text(
                 crate::localization::text(locale, crate::localization::UiText::TranslatingNow)
                     .into(),
@@ -86,6 +90,7 @@ pub(crate) fn run_translator_preview() -> Result<(), Box<dyn Error>> {
             translator.set_result_text(
                 "SayFlex показывает исходный текст и перевод, пока вы проверяете результат.".into(),
             );
+            translator.set_presentation_state(2);
             translator.set_status_text(
                 crate::localization::render(
                     locale,
@@ -95,8 +100,20 @@ pub(crate) fn run_translator_preview() -> Result<(), Box<dyn Error>> {
                 .into(),
             );
         }
+        TranslatorPreviewState::Fallback => {
+            translator.set_source_text(source.into());
+            translator.set_result_text(
+                "SayFlex показывает исходный текст и перевод, пока вы проверяете результат.".into(),
+            );
+            translator.set_presentation_state(3);
+            translator.set_notice_headline("Квота DeepL закончилась.".into());
+            translator.set_notice_detail("Перевод завершён локально.".into());
+            translator
+                .set_status_text("Квота DeepL закончилась. Перевод завершён локально.".into());
+        }
         TranslatorPreviewState::Unavailable => {
             translator.set_source_text(source.into());
+            translator.set_presentation_state(4);
             translator.set_status_text(
                 crate::localization::text(
                     locale,
@@ -107,17 +124,65 @@ pub(crate) fn run_translator_preview() -> Result<(), Box<dyn Error>> {
         }
         TranslatorPreviewState::Error => {
             translator.set_source_text(source.into());
-            translator.set_status_text(
-                crate::localization::render(
-                    locale,
-                    crate::localization::UiText::TechnicalFailure,
-                    &[("code", "service"), ("message", "request refused")],
-                )
-                .into(),
+            translator.set_presentation_state(4);
+            let message = crate::localization::render(
+                locale,
+                crate::localization::UiText::TranslationProviderCredential,
+                &[("provider", "DeepL")],
             );
+            translator.set_notice_headline(message.clone().into());
+            translator.set_status_text(message.into());
         }
     }
-    translator.on_translate(|| {});
+    {
+        let weak = translator.as_weak();
+        translator.on_translate(move || {
+            let Some(translator) = weak.upgrade() else {
+                return;
+            };
+            translator.set_processing(true);
+            translator.set_presentation_state(1);
+            translator.set_result_text("".into());
+            translator.set_notice_headline("".into());
+            translator.set_notice_detail("".into());
+            translator.set_status_text(
+                crate::localization::text(locale, crate::localization::UiText::TranslatingNow)
+                    .into(),
+            );
+            let weak = translator.as_weak();
+            slint::Timer::single_shot(std::time::Duration::from_millis(350), move || {
+                if let Some(translator) = weak.upgrade() {
+                    translator.set_processing(false);
+                    let source = translator.get_source_text();
+                    let translated = match source.trim() {
+                        "SayFlex keeps the source" => Some("SayFlex сохраняет исходный текст."),
+                        "SayFlex keeps the source and result visible while you review a translation." => Some(
+                            "SayFlex сохраняет исходный текст и перевод видимыми, пока вы проверяете результат.",
+                        ),
+                        _ => None,
+                    };
+                    if let Some(translated) = translated {
+                        translator.set_presentation_state(2);
+                        translator.set_result_text(translated.into());
+                        translator.set_status_text(
+                            crate::localization::render(
+                                locale,
+                                crate::localization::UiText::TranslationCompletedProvider,
+                                &[("provider", "preview")],
+                            )
+                            .into(),
+                        );
+                    } else {
+                        let message = "Визуальное превью не подключено к переводчику.";
+                        translator.set_presentation_state(4);
+                        translator.set_notice_headline(message.into());
+                        translator.set_notice_detail("".into());
+                        translator.set_status_text(message.into());
+                    }
+                }
+            });
+        });
+    }
     translator.on_copy_result(|| {});
     let weak = translator.as_weak();
     translator.on_swap_text(move || {

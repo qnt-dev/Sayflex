@@ -1,4 +1,4 @@
-import { ListView, TextEdit } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
 
 // The settings window is a document and is drawn as one; the overlays below sit
 // on top of other people's applications and keep their own material. Splitting
@@ -120,6 +120,69 @@ component ActionButton inherits Rectangle {
                 return accept;
             }
             reject
+        }
+    }
+}
+
+component IconAction inherits Rectangle {
+    in property <image> source;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    forward-focus: focus;
+    width: 30px;
+    height: 26px;
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus ? Sheet.ink : Sheet.hairline;
+    background: touch.has-hover && root.enabled ? Sheet.raised-strong : transparent;
+    opacity: root.enabled ? 1 : 0.42;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+
+    Image {
+        x: 8px;
+        y: 6px;
+        width: 14px;
+        height: 14px;
+        source: root.source;
+        image-fit: contain;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { focus.focus(); root.clicked(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    if touch.has-hover && root.enabled : Rectangle {
+        z: 20;
+        y: parent.height + 4px;
+        x: parent.width - self.width;
+        width: tooltip-text.preferred-width + 16px;
+        height: 26px;
+        background: Sheet.ink;
+        tooltip-text := Text {
+            text: root.label;
+            color: Sheet.on-ink;
+            font-size: Sheet.label-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
         }
     }
 }
@@ -1046,9 +1109,19 @@ export component TranslatorWindow inherits Window {
     in-out property <string> result-text;
     in-out property <string> status-text: @tr("Choose a translation model in Settings.");
     in-out property <bool> processing: false;
+    // 0 idle, 1 processing, 2 result, 3 fallback result, 4 terminal error.
+    in-out property <int> presentation-state: 0;
+    in-out property <string> notice-headline;
+    in-out property <string> notice-detail;
+    out property <bool> source-focused: source-input.has-focus;
     callback translate();
+    callback submit-shortcut();
     callback copy-result();
     callback swap-text();
+    submit-shortcut => {
+        source-input.clear-focus();
+        root.translate();
+    }
 
     VerticalLayout {
         width: parent.width;
@@ -1106,25 +1179,46 @@ export component TranslatorWindow inherits Window {
                     vertical-alignment: center;
                 }
                 Rectangle { horizontal-stretch: 1; }
-                RowAction {
+                IconAction {
+                    source: @image-url("../assets/action-swap.svg");
                     label: @tr("Swap text");
                     enabled: !root.processing && (root.source-text != "" || root.result-text != "");
                     clicked => { root.swap-text(); }
                 }
             }
-            Rectangle {
+            source-panel := Rectangle {
                 vertical-stretch: 1;
-                border-width: 1px;
-                border-color: Sheet.hairline;
+                clip: true;
+                border-width: source-input.has-focus ? 2px : 1px;
+                border-color: source-input.has-focus ? Sheet.signal : Sheet.hairline;
                 background: Sheet.raised;
-                TextEdit {
+
+                input-scroll := Flickable {
                     x: 12px;
                     y: 10px;
                     width: parent.width - 24px;
                     height: parent.height - 20px;
-                    text <=> root.source-text;
-                    wrap: word-wrap;
-                    accessible-label: @tr("Source text");
+                    viewport-width: self.width;
+                    viewport-height: max(self.height, source-input.preferred-height);
+
+                    source-input := TextInput {
+                        width: input-scroll.width;
+                        height: input-scroll.viewport-height;
+                        text <=> root.source-text;
+                        color: Sheet.ink;
+                        selection-foreground-color: Sheet.on-ink;
+                        selection-background-color: Sheet.signal;
+                        font-size: Sheet.body-size;
+                        wrap: word-wrap;
+                        accessible-label: @tr("Source text");
+                        cursor-position-changed(position) => {
+                            if (position.y + input-scroll.viewport-y < 0px) {
+                                input-scroll.viewport-y = -position.y;
+                            } else if (position.y + self.font-size + input-scroll.viewport-y > input-scroll.height) {
+                                input-scroll.viewport-y = input-scroll.height - position.y - self.font-size;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1142,8 +1236,10 @@ export component TranslatorWindow inherits Window {
             }
             Rectangle {
                 vertical-stretch: 1;
-                border-width: root.processing ? 1px : 2px;
-                border-color: root.processing ? Sheet.hairline : Sheet.signal;
+                border-width: !source-input.has-focus && root.presentation-state >= 2 ? 2px : 1px;
+                border-color: !source-input.has-focus && root.presentation-state >= 2
+                    ? Sheet.signal
+                    : Sheet.hairline;
                 background: Sheet.raised;
                 Text {
                     x: 12px;
@@ -1160,24 +1256,49 @@ export component TranslatorWindow inherits Window {
         }
 
         HorizontalLayout {
-            height: 44px;
+            height: 52px;
             vertical-stretch: 0;
             spacing: 10px;
-            Text {
+            HorizontalLayout {
                 horizontal-stretch: 1;
-                text: root.status-text;
-                color: Sheet.muted;
-                font-size: Sheet.detail-size;
-                vertical-alignment: center;
-                wrap: word-wrap;
+                spacing: 9px;
+                Rectangle {
+                    width: 8px;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        y: (parent.height - self.height) / 2;
+                        background: root.presentation-state >= 3 ? Sheet.signal : Sheet.hairline;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: root.notice-headline == "" ? root.status-text : root.notice-headline;
+                        color: root.presentation-state >= 3 ? Sheet.signal-text : Sheet.muted;
+                        font-size: Sheet.detail-size;
+                        font-weight: root.presentation-state >= 3 ? 650 : 400;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                    if root.notice-detail != "" : Text {
+                        text: root.notice-detail;
+                        color: Sheet.muted;
+                        font-size: Sheet.label-size;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                }
             }
-            RowAction {
+            IconAction {
+                source: @image-url("../assets/action-copy.svg");
                 label: @tr("Copy result");
                 enabled: !root.processing && root.result-text != "";
                 clicked => { root.copy-result(); }
             }
             RowAction {
-                label: @tr("Translate");
+                label: @tr("Translate (Ctrl+Enter)");
                 enabled: !root.processing;
                 clicked => { root.translate(); }
             }

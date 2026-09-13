@@ -3754,6 +3754,7 @@ fn handle_translation_event(
                         };
                         translator.set_status_text(status.into());
                         translator.set_processing(true);
+                        translator.set_presentation_state(1);
                     }
                 }
                 TranslationOrigin::Selection {
@@ -3834,6 +3835,9 @@ fn handle_translation_event(
                 Some(TranslationOrigin::Translator) => {
                     if let Some(translator) = translator.upgrade() {
                         translator.set_processing(false);
+                        translator.set_presentation_state(4);
+                        translator.set_notice_headline(notice.headline.clone().into());
+                        translator.set_notice_detail(notice.detail.clone().into());
                         translator.set_status_text(message.clone().into());
                     }
                 }
@@ -3927,6 +3931,9 @@ fn handle_translation_event(
             ) && let Some(translator) = translator.upgrade()
             {
                 translator.set_processing(false);
+                translator.set_presentation_state(0);
+                translator.set_notice_headline("".into());
+                translator.set_notice_detail("".into());
                 translator.set_status_text(state_text(state, UiText::TranslationCancelled).into());
             }
             let request_slot = { translation_previews.borrow().slot_for_request(request_id) };
@@ -4078,6 +4085,21 @@ fn route_translation_result(
                         )
                     },
                     translator_status::TranslatorNotice::message,
+                );
+                translator.set_presentation_state(if fallback_notice.is_some() { 3 } else { 2 });
+                translator.set_notice_headline(
+                    fallback_notice
+                        .as_ref()
+                        .map(|notice| notice.headline.as_str())
+                        .unwrap_or("")
+                        .into(),
+                );
+                translator.set_notice_detail(
+                    fallback_notice
+                        .as_ref()
+                        .map(|notice| notice.detail.as_str())
+                        .unwrap_or("")
+                        .into(),
                 );
                 translator.set_status_text(status.into());
                 translator.set_processing(false);

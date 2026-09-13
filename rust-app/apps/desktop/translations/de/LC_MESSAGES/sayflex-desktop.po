@@ -1234,9 +1234,6 @@ msgstr "SPRACHE DER AUSGABE"
 msgid "Transcript saved to history; target was lost."
 msgstr "Transkription im Verlauf gespeichert; Zielfenster wurde verloren."
 
-msgid "Translate"
-msgstr "Übersetzen"
-
 msgid "TRANSLATE"
 msgstr "ÜBERSETZEN"
 
@@ -1434,3 +1431,6 @@ msgstr "Die Übersetzung ist fehlgeschlagen. Versuchen Sie es erneut oder prüfe
 
 msgid "Quick translation"
 msgstr "Schnell übersetzen"
+
+msgid "Translate (Ctrl+Enter)"
+msgstr "Übersetzen (Strg+Enter)"
