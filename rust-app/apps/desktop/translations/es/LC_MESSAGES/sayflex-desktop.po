@@ -1395,3 +1395,42 @@ msgstr "Superficie de escritura Slate actualizada para el próximo dictado."
 
 msgid "Yes"
 msgstr "Sí"
+
+msgid "{provider} rejected the API key. Check or replace it in Providers."
+msgstr "{provider} rechazó la clave de API. Compruébala o sustitúyela en Proveedores."
+
+msgid "{provider} needs different settings. Check it in Providers."
+msgstr "{provider} necesita una configuración distinta. Revísala en Proveedores."
+
+msgid "{provider} has no quota left."
+msgstr "La cuota de {provider} se ha agotado."
+
+msgid "{provider} is temporarily rate limited."
+msgstr "{provider} ha limitado temporalmente la frecuencia de solicitudes."
+
+msgid "{provider} did not answer in time."
+msgstr "{provider} no respondió a tiempo."
+
+msgid "{provider} is unavailable."
+msgstr "{provider} no está disponible."
+
+msgid "{provider} does not support this translation request."
+msgstr "{provider} no admite esta solicitud de traducción."
+
+msgid "{provider} rejected this translation request."
+msgstr "{provider} rechazó esta solicitud de traducción."
+
+msgid "{provider} returned an empty translation."
+msgstr "{provider} devolvió una traducción vacía."
+
+msgid "Translation completed with {provider}."
+msgstr "La traducción se completó con {provider}."
+
+msgid "No translation provider is available. Enable a local model or a cloud provider in Settings."
+msgstr "No hay ningún traductor disponible. Activa un modelo local o un proveedor en la nube en Ajustes."
+
+msgid "The local translation model is not installed or ready. Choose a model in Settings."
+msgstr "El modelo de traducción local no está instalado o aún no está listo. Elige un modelo en Ajustes."
+
+msgid "Translation failed. Try again or check Providers."
+msgstr "No se pudo traducir. Inténtalo de nuevo o revisa Proveedores."

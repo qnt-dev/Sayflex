@@ -1395,3 +1395,42 @@ msgstr "Поверхность «Доски для записи» обновле
 
 msgid "Yes"
 msgstr "Да"
+
+msgid "{provider} rejected the API key. Check or replace it in Providers."
+msgstr "{provider} отклонил API-ключ. Проверьте или замените его в разделе «Провайдеры»."
+
+msgid "{provider} needs different settings. Check it in Providers."
+msgstr "Для {provider} нужны другие настройки. Проверьте раздел «Провайдеры»."
+
+msgid "{provider} has no quota left."
+msgstr "Квота {provider} закончилась."
+
+msgid "{provider} is temporarily rate limited."
+msgstr "{provider} временно ограничил частоту запросов."
+
+msgid "{provider} did not answer in time."
+msgstr "{provider} не ответил вовремя."
+
+msgid "{provider} is unavailable."
+msgstr "{provider} сейчас недоступен."
+
+msgid "{provider} does not support this translation request."
+msgstr "{provider} не поддерживает такой перевод."
+
+msgid "{provider} rejected this translation request."
+msgstr "{provider} отклонил запрос на перевод."
+
+msgid "{provider} returned an empty translation."
+msgstr "{provider} вернул пустой перевод."
+
+msgid "Translation completed with {provider}."
+msgstr "Перевод выполнен через {provider}."
+
+msgid "No translation provider is available. Enable a local model or a cloud provider in Settings."
+msgstr "Нет доступного переводчика. Включите локальную модель или облачный сервис в настройках."
+
+msgid "The local translation model is not installed or ready. Choose a model in Settings."
+msgstr "Локальная модель перевода не установлена или ещё не готова. Выберите модель в настройках."
+
+msgid "Translation failed. Try again or check Providers."
+msgstr "Не удалось выполнить перевод. Повторите попытку или проверьте раздел «Провайдеры»."

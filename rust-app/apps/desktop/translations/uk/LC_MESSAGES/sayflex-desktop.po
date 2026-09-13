@@ -1395,3 +1395,42 @@ msgstr "Поверхню Slate для письма оновлено для на�
 
 msgid "Yes"
 msgstr "Так"
+
+msgid "{provider} rejected the API key. Check or replace it in Providers."
+msgstr "{provider} відхилив API-ключ. Перевірте або замініть його в розділі «Провайдери»."
+
+msgid "{provider} needs different settings. Check it in Providers."
+msgstr "Для {provider} потрібні інші налаштування. Перевірте розділ «Провайдери»."
+
+msgid "{provider} has no quota left."
+msgstr "Квота {provider} вичерпана."
+
+msgid "{provider} is temporarily rate limited."
+msgstr "Тимчасово обмежено частоту запитів до {provider}."
+
+msgid "{provider} did not answer in time."
+msgstr "{provider} не відповів вчасно."
+
+msgid "{provider} is unavailable."
+msgstr "{provider} зараз недоступний."
+
+msgid "{provider} does not support this translation request."
+msgstr "{provider} не підтримує такий запит на переклад."
+
+msgid "{provider} rejected this translation request."
+msgstr "{provider} відхилив запит на переклад."
+
+msgid "{provider} returned an empty translation."
+msgstr "{provider} повернув порожній переклад."
+
+msgid "Translation completed with {provider}."
+msgstr "Переклад виконано через {provider}."
+
+msgid "No translation provider is available. Enable a local model or a cloud provider in Settings."
+msgstr "Немає доступного перекладача. Увімкніть локальну модель або хмарний сервіс у налаштуваннях."
+
+msgid "The local translation model is not installed or ready. Choose a model in Settings."
+msgstr "Локальну модель перекладу не встановлено або вона ще не готова. Виберіть модель у налаштуваннях."
+
+msgid "Translation failed. Try again or check Providers."
+msgstr "Не вдалося виконати переклад. Спробуйте ще раз або перевірте розділ «Провайдери»."

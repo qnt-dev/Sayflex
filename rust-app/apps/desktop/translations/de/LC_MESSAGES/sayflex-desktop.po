@@ -1395,3 +1395,42 @@ msgstr "Die Oberfläche der Schreibtafel wurde für das nächste Diktat aktualis
 
 msgid "Yes"
 msgstr "Ja"
+
+msgid "{provider} rejected the API key. Check or replace it in Providers."
+msgstr "{provider} hat den API-Schlüssel abgelehnt. Prüfen oder ersetzen Sie ihn unter Anbieter."
+
+msgid "{provider} needs different settings. Check it in Providers."
+msgstr "{provider} benötigt andere Einstellungen. Prüfen Sie den Eintrag unter Anbieter."
+
+msgid "{provider} has no quota left."
+msgstr "Das Kontingent von {provider} ist aufgebraucht."
+
+msgid "{provider} is temporarily rate limited."
+msgstr "{provider} begrenzt die Anfragerate vorübergehend."
+
+msgid "{provider} did not answer in time."
+msgstr "{provider} hat nicht rechtzeitig geantwortet."
+
+msgid "{provider} is unavailable."
+msgstr "{provider} ist nicht verfügbar."
+
+msgid "{provider} does not support this translation request."
+msgstr "{provider} unterstützt diese Übersetzungsanfrage nicht."
+
+msgid "{provider} rejected this translation request."
+msgstr "{provider} hat diese Übersetzungsanfrage abgelehnt."
+
+msgid "{provider} returned an empty translation."
+msgstr "{provider} hat eine leere Übersetzung zurückgegeben."
+
+msgid "Translation completed with {provider}."
+msgstr "Die Übersetzung wurde mit {provider} abgeschlossen."
+
+msgid "No translation provider is available. Enable a local model or a cloud provider in Settings."
+msgstr "Kein Übersetzungsanbieter ist verfügbar. Aktivieren Sie in den Einstellungen ein lokales Modell oder einen Cloud-Anbieter."
+
+msgid "The local translation model is not installed or ready. Choose a model in Settings."
+msgstr "Das lokale Übersetzungsmodell ist nicht installiert oder noch nicht bereit. Wählen Sie in den Einstellungen ein Modell aus."
+
+msgid "Translation failed. Try again or check Providers."
+msgstr "Die Übersetzung ist fehlgeschlagen. Versuchen Sie es erneut oder prüfen Sie Anbieter."

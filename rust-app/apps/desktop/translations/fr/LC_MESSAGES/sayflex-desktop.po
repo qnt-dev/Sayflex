@@ -1395,3 +1395,42 @@ msgstr "Surface d'écriture Slate mise à jour pour la prochaine dictée."
 
 msgid "Yes"
 msgstr "Oui"
+
+msgid "{provider} rejected the API key. Check or replace it in Providers."
+msgstr "{provider} a refusé la clé API. Vérifiez-la ou remplacez-la dans Fournisseurs."
+
+msgid "{provider} needs different settings. Check it in Providers."
+msgstr "{provider} nécessite d’autres paramètres. Vérifiez-les dans Fournisseurs."
+
+msgid "{provider} has no quota left."
+msgstr "Le quota de {provider} est épuisé."
+
+msgid "{provider} is temporarily rate limited."
+msgstr "{provider} limite temporairement le nombre de requêtes."
+
+msgid "{provider} did not answer in time."
+msgstr "{provider} n’a pas répondu à temps."
+
+msgid "{provider} is unavailable."
+msgstr "{provider} est indisponible."
+
+msgid "{provider} does not support this translation request."
+msgstr "{provider} ne prend pas en charge cette demande de traduction."
+
+msgid "{provider} rejected this translation request."
+msgstr "{provider} a refusé cette demande de traduction."
+
+msgid "{provider} returned an empty translation."
+msgstr "{provider} a renvoyé une traduction vide."
+
+msgid "Translation completed with {provider}."
+msgstr "La traduction a été effectuée avec {provider}."
+
+msgid "No translation provider is available. Enable a local model or a cloud provider in Settings."
+msgstr "Aucun service de traduction n’est disponible. Activez un modèle local ou un fournisseur cloud dans les paramètres."
+
+msgid "The local translation model is not installed or ready. Choose a model in Settings."
+msgstr "Le modèle de traduction local n’est pas installé ou n’est pas encore prêt. Choisissez un modèle dans les paramètres."
+
+msgid "Translation failed. Try again or check Providers."
+msgstr "Échec de la traduction. Réessayez ou vérifiez les fournisseurs."

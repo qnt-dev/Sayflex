@@ -189,6 +189,20 @@ DownloadingModel|Downloading model… {percent}%
 DownloadingNamedModel|Downloading {model}: {percent}%
 TranslationCancelled|Translation cancelled.
 TechnicalFailure|{code}: {message}
+TranslationProviderCredential|{provider} rejected the API key. Check or replace it in Providers.
+TranslationProviderMisconfigured|{provider} needs different settings. Check it in Providers.
+TranslationProviderQuota|{provider} has no quota left.
+TranslationProviderRateLimited|{provider} is temporarily rate limited.
+TranslationProviderTimeout|{provider} did not answer in time.
+TranslationProviderUnavailable|{provider} is unavailable.
+TranslationProviderUnsupported|{provider} does not support this translation request.
+TranslationProviderRejected|{provider} rejected this translation request.
+TranslationProviderEmpty|{provider} returned an empty translation.
+TranslationFallbackLocal|Translation completed locally.
+TranslationFallbackProvider|Translation completed with {provider}.
+NoTranslationProviderAvailable|No translation provider is available. Enable a local model or a cloud provider in Settings.
+LocalTranslationModelUnavailable|The local translation model is not installed or ready. Choose a model in Settings.
+TranslationFailedTryAgain|Translation failed. Try again or check Providers.
 Account|Account
 Region|Region
 Endpoint|Endpoint

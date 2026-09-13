@@ -80,6 +80,7 @@ mod settings_projection;
 mod settings_view;
 mod speech_backend;
 mod translation_view;
+mod translator_status;
 mod visualizer;
 mod worker_supervisor;
 
@@ -3816,6 +3817,66 @@ fn handle_translation_event(
                 workers,
             );
         }
+        TranslationWorkerEvent::RequestFailed {
+            request_id,
+            failure,
+        } => {
+            let pending = {
+                let mut app = state.borrow_mut();
+                app.selection_release_gates.remove(&request_id);
+                app.pending_translations.remove(&request_id)
+            };
+            let locale = active_locale(state.borrow().ui_locale);
+            let notice = translator_status::failure_notice(locale, &failure);
+            let message = notice.message();
+
+            match pending.as_ref().map(|pending| pending.origin) {
+                Some(TranslationOrigin::Translator) => {
+                    if let Some(translator) = translator.upgrade() {
+                        translator.set_processing(false);
+                        translator.set_status_text(message.clone().into());
+                    }
+                }
+                Some(TranslationOrigin::Selection { target, .. }) => {
+                    if translation_previews
+                        .borrow()
+                        .slot_for_request(request_id)
+                        .is_none()
+                    {
+                        translation_previews
+                            .borrow_mut()
+                            .reserve_current(request_id);
+                    }
+                    show_selection_translation_preview(
+                        request_id,
+                        target,
+                        &pending.as_ref().expect("pending translation").source_text,
+                        &message,
+                        translation_previews,
+                        true,
+                        TranslationPreviewLanguages {
+                            resolved: None,
+                            locale,
+                        },
+                    );
+                }
+                None => {}
+            }
+
+            match notice.severity {
+                translator_status::TranslatorSeverity::Warning => {
+                    set_indicator_status(settings, &message);
+                }
+                translator_status::TranslatorSeverity::Error => {
+                    set_status_problem(settings, &message);
+                }
+            }
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_pipeline request={request_id} stage=failed kind={:?} provider={}",
+                failure.kind,
+                failure.provider_id.as_deref().unwrap_or("none")
+            ));
+        }
         TranslationWorkerEvent::CredentialSaved {
             operation_id,
             provider_id,
@@ -3996,6 +4057,7 @@ fn route_translation_result(
     // announced in its own event just before this one, and then overwritten
     // here by a sentence that said "locally" whatever had happened.
     let locale = active_locale(state.borrow().ui_locale);
+    let fallback_notice = translator_status::completion_notice(locale, &result);
     let origin =
         settings_projection::translation_origin_localized(result.provider.as_deref(), locale);
     let completed = settings_projection::translation_completed_sentence_localized(
@@ -4006,18 +4068,23 @@ fn route_translation_result(
         TranslationOrigin::Translator => {
             if let Some(translator) = translator.upgrade() {
                 translator.set_result_text(result.translated_text.into());
-                translator.set_status_text(
-                    format!(
-                        "{} → {} · {} ms · {origin}",
-                        result.source_language.code().to_uppercase(),
-                        result.target_language.code().to_uppercase(),
-                        result.processing_duration_ms
-                    )
-                    .into(),
+                let status = fallback_notice.as_ref().map_or_else(
+                    || {
+                        format!(
+                            "{} → {} · {} ms · {origin}",
+                            result.source_language.code().to_uppercase(),
+                            result.target_language.code().to_uppercase(),
+                            result.processing_duration_ms
+                        )
+                    },
+                    translator_status::TranslatorNotice::message,
                 );
+                translator.set_status_text(status.into());
                 translator.set_processing(false);
             }
-            completed
+            fallback_notice
+                .as_ref()
+                .map_or(completed, translator_status::TranslatorNotice::message)
         }
         TranslationOrigin::Selection { target, delivery } => match delivery {
             TranslationDelivery::Preview => {

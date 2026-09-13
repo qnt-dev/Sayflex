@@ -1395,3 +1395,42 @@ msgstr "다음 받아쓰기를 위해 쓰기 슬레이트 표면이 업데이트
 
 msgid "Yes"
 msgstr "예"
+
+msgid "{provider} rejected the API key. Check or replace it in Providers."
+msgstr "{provider}에서 API 키를 거부했습니다. 공급자에서 키를 확인하거나 교체하세요."
+
+msgid "{provider} needs different settings. Check it in Providers."
+msgstr "{provider}에 다른 설정이 필요합니다. 공급자에서 확인하세요."
+
+msgid "{provider} has no quota left."
+msgstr "{provider} 할당량이 소진되었습니다."
+
+msgid "{provider} is temporarily rate limited."
+msgstr "{provider}의 요청 빈도가 일시적으로 제한되었습니다."
+
+msgid "{provider} did not answer in time."
+msgstr "{provider}에서 제시간에 응답하지 않았습니다."
+
+msgid "{provider} is unavailable."
+msgstr "{provider} 서비스는 현재 사용할 수 없습니다."
+
+msgid "{provider} does not support this translation request."
+msgstr "{provider} 서비스는 이 번역 요청을 지원하지 않습니다."
+
+msgid "{provider} rejected this translation request."
+msgstr "{provider} 서비스가 이 번역 요청을 거부했습니다."
+
+msgid "{provider} returned an empty translation."
+msgstr "{provider} 서비스가 빈 번역을 반환했습니다."
+
+msgid "Translation completed with {provider}."
+msgstr "{provider} 서비스로 번역을 완료했습니다."
+
+msgid "No translation provider is available. Enable a local model or a cloud provider in Settings."
+msgstr "사용 가능한 번역 공급자가 없습니다. 설정에서 로컬 모델 또는 클라우드 공급자를 활성화하세요."
+
+msgid "The local translation model is not installed or ready. Choose a model in Settings."
+msgstr "로컬 번역 모델이 설치되지 않았거나 아직 준비되지 않았습니다. 설정에서 모델을 선택하세요."
+
+msgid "Translation failed. Try again or check Providers."
+msgstr "번역하지 못했습니다. 다시 시도하거나 공급자 설정을 확인하세요."
