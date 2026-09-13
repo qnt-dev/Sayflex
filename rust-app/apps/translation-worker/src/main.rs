@@ -17,12 +17,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use history::TranslationHistory;
 use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
 use rust_protocol::{
-    PROTOCOL_VERSION, RequestId, TranslationHistoryEntry, TranslationLanguage,
+    PROTOCOL_VERSION, RequestId, TranslationAttemptReport, TranslationFailureKind,
+    TranslationFailureReport, TranslationHistoryEntry, TranslationLanguage,
     TranslationLanguagePolicy, TranslationModelSummary, TranslationProviderEntry,
     TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
@@ -33,6 +34,32 @@ use rust_translation_engine::{
 
 use crate::provider_actor::ProviderActorHandle;
 use crate::providers::{Providers, Routed};
+
+#[derive(Debug)]
+struct TranslationRequestFailure(TranslationFailureReport);
+
+impl std::fmt::Display for TranslationRequestFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0.detail)
+    }
+}
+
+impl std::error::Error for TranslationRequestFailure {}
+
+fn request_failure(
+    kind: TranslationFailureKind,
+    detail: impl Into<String>,
+    attempts: Vec<TranslationAttemptReport>,
+) -> anyhow::Error {
+    TranslationRequestFailure(TranslationFailureReport {
+        kind,
+        provider_id: None,
+        retry_after_ms: None,
+        detail: detail.into(),
+        attempts,
+    })
+    .into()
+}
 
 #[derive(Clone)]
 struct EventWriter {
@@ -866,10 +893,22 @@ fn translate_request(
     // Nothing to translate is refused here rather than sent to a service, which
     // would spend an allowance to be told the same thing.
     if text.trim().is_empty() {
-        anyhow::bail!("there is no text to translate");
+        return Err(request_failure(
+            TranslationFailureKind::NoText,
+            "there is no text to translate",
+            Vec::new(),
+        ));
     }
     let (source, target) =
-        resolve_direction(&text, source_language, target_language, language_policy)?;
+        resolve_direction(&text, source_language, target_language, language_policy).map_err(
+            |error| {
+                request_failure(
+                    TranslationFailureKind::UnsupportedRequest,
+                    format!("{error:#}"),
+                    Vec::new(),
+                )
+            },
+        )?;
 
     // The list decides first, and the local engine is one row in it. When it is
     // the only row switched on — the default — this costs one comparison and
@@ -885,12 +924,19 @@ fn translate_request(
     }
     let routed = providers
         .map(|snapshot| snapshot.translate(&text, Some(source.code()), target.code(), &is_current));
+    let mut provider_attempts = Vec::new();
     if let Some(routed) = routed {
         match routed {
             Routed::Translated {
                 provider,
                 text: translated,
+                attempts,
             } => {
+                let backend_request_count = attempts
+                    .len()
+                    .saturating_add(1)
+                    .try_into()
+                    .unwrap_or(u32::MAX);
                 // The state is taken only to record the result, not for the
                 // walk that produced it.
                 return finish(
@@ -904,35 +950,53 @@ fn translate_request(
                         target_language: target,
                         tier: None,
                         provider: Some(provider),
+                        attempts,
                         processing_duration_ms: elapsed_ms(started),
                         first_token_duration_ms: 0,
-                        backend_request_count: 1,
+                        backend_request_count,
                         tokenize_duration_ms: 0,
                         chunk_count: 1,
                     },
                 );
             }
             Routed::Cancelled => return Err(TranslationCancelled.into()),
-            Routed::Exhausted { detail } => {
+            Routed::Exhausted { failure } => {
                 // Nobody in the list could answer, and the local engine was not
                 // in it or was switched off. Saying which service said what is
                 // the only way the user can fix it.
-                return Err(anyhow::anyhow!(detail));
+                return Err(TranslationRequestFailure(failure).into());
             }
             // The walk reached the local engine. Below is what it does.
-            Routed::UseLocalEngine => {}
+            Routed::UseLocalEngine { attempts } => provider_attempts = attempts,
         }
     }
 
     // The engine, and only now the worker's state.
     let state = &mut *recover_lock(state);
-    let tier = state.ensure_engine(writer)?;
+    let local_failure_kind = if state.selected_tier.is_some() {
+        TranslationFailureKind::Internal
+    } else {
+        TranslationFailureKind::LocalModelMissing
+    };
+    let tier = state.ensure_engine(writer).map_err(|error| {
+        request_failure(
+            local_failure_kind.clone(),
+            format!("{error:#}"),
+            provider_attempts.clone(),
+        )
+    })?;
     let mut last_partial_at = None;
     let mut last_partial_text = String::new();
     let output = state
         .engine
         .as_mut()
-        .context("translation engine failed to initialize")?
+        .ok_or_else(|| {
+            request_failure(
+                local_failure_kind,
+                "translation engine failed to initialize",
+                provider_attempts.clone(),
+            )
+        })?
         .translate_streaming(
             &text,
             Some(source),
@@ -967,7 +1031,18 @@ fn translate_request(
                 }
                 true
             },
-        )?;
+        )
+        .map_err(|error| {
+            if error.downcast_ref::<TranslationCancelled>().is_some() {
+                error
+            } else {
+                request_failure(
+                    TranslationFailureKind::Internal,
+                    format!("{error:#}"),
+                    provider_attempts.clone(),
+                )
+            }
+        })?;
     if !is_current() {
         return Err(TranslationCancelled.into());
     }
@@ -979,6 +1054,7 @@ fn translate_request(
         target_language: output.target_language,
         tier: Some(tier),
         provider: None,
+        attempts: provider_attempts,
         processing_duration_ms: elapsed_ms(started),
         first_token_duration_ms: output.first_token_duration_ms,
         backend_request_count: output.backend_request_count,

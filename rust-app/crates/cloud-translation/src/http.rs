@@ -101,7 +101,7 @@ impl RequestExecutor for HttpExecutor {
 
 fn network_failure(error: reqwest::Error) -> ProviderFailure {
     if error.is_timeout() {
-        return ProviderFailure::Unavailable("the service did not answer in time".to_owned());
+        return ProviderFailure::Timeout("the service did not answer in time".to_owned());
     }
     if error.is_connect() {
         return ProviderFailure::Unavailable("the service could not be reached".to_owned());

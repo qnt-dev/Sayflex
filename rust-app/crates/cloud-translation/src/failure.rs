@@ -51,6 +51,10 @@ pub enum ProviderFailure {
     RateLimited { retry_after: Duration },
     /// The service is down, unreachable, or timed out.
     Unavailable(String),
+    /// The service did not answer inside the request budget.
+    Timeout(String),
+    /// The provider cannot serve the requested language or request shape.
+    Unsupported(String),
     /// The service understood the request and refused it: a language pair it
     /// does not have, a text longer than it takes.
     Rejected(String),
@@ -125,6 +129,8 @@ impl ProviderFailure {
                 retry_after.as_secs().max(1)
             ),
             Self::Unavailable(detail) => format!("Unavailable: {detail}"),
+            Self::Timeout(detail) => format!("Timed out: {detail}"),
+            Self::Unsupported(detail) => format!("Unsupported request: {detail}"),
             Self::Rejected(detail) => format!("Refused this request: {detail}"),
             Self::Empty => "Answered with nothing".to_owned(),
         }
@@ -162,7 +168,8 @@ pub fn classify_response(
                 }
             }
         }
-        408 | 500..=599 => ProviderFailure::Unavailable(detail),
+        408 => ProviderFailure::Timeout(detail),
+        500..=599 => ProviderFailure::Unavailable(detail),
         _ => ProviderFailure::Rejected(detail),
     }
 }
@@ -334,6 +341,17 @@ mod tests {
             "an empty answer to a text that had words in it is this service failing"
         );
         assert!(ProviderFailure::Rejected("no such language pair".into()).should_fail_over());
+    }
+
+    #[test]
+    fn timeout_and_unsupported_request_remain_distinct_for_the_ui() {
+        let timeout = ProviderFailure::Timeout("request deadline elapsed".to_owned());
+        let unsupported = ProviderFailure::Unsupported("language pair is unavailable".to_owned());
+
+        assert!(timeout.should_fail_over());
+        assert!(unsupported.should_fail_over());
+        assert!(timeout.describe().starts_with("Timed out:"));
+        assert!(unsupported.describe().starts_with("Unsupported request:"));
     }
 
     #[test]

@@ -10,7 +10,8 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use rust_protocol::{
-    RequestId, TranslationProviderEntry, TranslationProviderStatus, TranslationWorkerEvent,
+    RequestId, TranslationFailureKind, TranslationFailureReport, TranslationProviderEntry,
+    TranslationProviderStatus, TranslationWorkerEvent,
 };
 use rust_translation_engine::TranslationCancelled;
 
@@ -429,18 +430,26 @@ fn run_job(
     if cancelled {
         let _ = writer.send(&TranslationWorkerEvent::Cancelled { request_id });
     } else if let Err(error) = result {
-        let has_model = recover_lock(&state).selected_tier.is_some();
-        let _ = writer.send(&TranslationWorkerEvent::Failed {
-            request_id: Some(request_id),
-            catalog_id: None,
-            code: if has_model {
-                "translation_failed"
-            } else {
-                "model_required"
-            }
-            .to_owned(),
-            message: format!("{error:#}"),
-            retryable: has_model,
+        let failure = error
+            .downcast_ref::<super::TranslationRequestFailure>()
+            .map(|failure| failure.0.clone())
+            .unwrap_or_else(|| {
+                let has_model = recover_lock(&state).selected_tier.is_some();
+                TranslationFailureReport {
+                    kind: if has_model {
+                        TranslationFailureKind::Internal
+                    } else {
+                        TranslationFailureKind::LocalModelMissing
+                    },
+                    provider_id: None,
+                    retry_after_ms: None,
+                    detail: format!("{error:#}"),
+                    attempts: Vec::new(),
+                }
+            });
+        let _ = writer.send(&TranslationWorkerEvent::RequestFailed {
+            request_id,
+            failure,
         });
     }
     let mut active = recover_lock(current_request);

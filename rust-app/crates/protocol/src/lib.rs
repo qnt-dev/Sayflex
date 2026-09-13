@@ -16,7 +16,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -414,6 +414,51 @@ pub struct TranslationModelSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationFailureKind {
+    Credential,
+    Misconfigured,
+    QuotaExhausted,
+    RateLimited,
+    Timeout,
+    Unavailable,
+    UnsupportedRequest,
+    Rejected,
+    EmptyResponse,
+    NoText,
+    NoProviderAvailable,
+    LocalModelMissing,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationAttemptReport {
+    pub provider_id: String,
+    pub kind: TranslationFailureKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    /// Redacted provider detail for diagnostics. User-facing copy is projected
+    /// from `kind`, never inferred by parsing this field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationFailureReport {
+    pub kind: TranslationFailureKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    /// Redacted technical context. The desktop renders localized copy from the
+    /// typed fields and keeps this secondary.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<TranslationAttemptReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranslationResult {
     pub request_id: RequestId,
     pub source_text: String,
@@ -427,6 +472,10 @@ pub struct TranslationResult {
     /// The service that produced it, when one did. `None` means the machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Providers tried before the successful provider or local engine. This is
+    /// empty for a direct success.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<TranslationAttemptReport>,
     pub processing_duration_ms: u64,
     #[serde(default)]
     pub first_token_duration_ms: u64,
@@ -1028,6 +1077,10 @@ pub enum TranslationWorkerEvent {
         /// Empty when it worked. The store's own words when it did not.
         error: String,
     },
+    RequestFailed {
+        request_id: RequestId,
+        failure: TranslationFailureReport,
+    },
     Failed {
         request_id: Option<RequestId>,
         /// The model the failure belongs to, when it belongs to one.
@@ -1272,7 +1325,8 @@ mod tests {
         CompanionRendererCommand, DictationCommand, DictationLanguage, HotkeyAction,
         HotkeyConfiguration, InputHostCommand, InputHostEvent, InsertionDelivery, InsertionMethod,
         RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerEvent, TargetSnapshot,
-        TextActionIntent, Transcript, TranscriptionLatency, TranslationLanguage, TranslationResult,
+        TextActionIntent, Transcript, TranscriptionLatency, TranslationAttemptReport,
+        TranslationFailureKind, TranslationFailureReport, TranslationLanguage, TranslationResult,
         TranslationTier, TranslationWorkerEvent,
     };
 
@@ -1437,6 +1491,7 @@ mod tests {
                 target_language: TranslationLanguage::Russian,
                 tier: Some(TranslationTier::Tiny),
                 provider: None,
+                attempts: Vec::new(),
                 processing_duration_ms: 12,
                 first_token_duration_ms: 4,
                 backend_request_count: 1,
@@ -1491,6 +1546,54 @@ mod tests {
             input_released
         );
     }
+
+    #[test]
+    fn translation_attempt_reports_round_trip_as_typed_redacted_data() {
+        let request_id = RequestId::new();
+        let quota = TranslationAttemptReport {
+            provider_id: "deepl".to_owned(),
+            kind: TranslationFailureKind::QuotaExhausted,
+            retry_after_ms: Some(3_600_000),
+            detail: "allowance spent; key <redacted>".to_owned(),
+        };
+        let completed = TranslationWorkerEvent::Completed {
+            result: TranslationResult {
+                request_id,
+                source_text: "hello".to_owned(),
+                translated_text: "привет".to_owned(),
+                source_language: TranslationLanguage::English,
+                target_language: TranslationLanguage::Russian,
+                tier: Some(TranslationTier::Tiny),
+                provider: None,
+                attempts: vec![quota.clone()],
+                processing_duration_ms: 12,
+                first_token_duration_ms: 4,
+                backend_request_count: 1,
+                tokenize_duration_ms: 0,
+                chunk_count: 1,
+            },
+            created_unix_ms: 123,
+        };
+        let failed = TranslationWorkerEvent::RequestFailed {
+            request_id,
+            failure: TranslationFailureReport {
+                kind: TranslationFailureKind::UnsupportedRequest,
+                provider_id: Some("deepl".to_owned()),
+                retry_after_ms: None,
+                detail: "language pair is unavailable".to_owned(),
+                attempts: vec![quota],
+            },
+        };
+
+        for event in [completed, failed] {
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(!json.contains("279a2e9d-83b3-c416-7e2d-f721593e42a0:fx"));
+            assert_eq!(
+                serde_json::from_str::<TranslationWorkerEvent>(&json).unwrap(),
+                event
+            );
+        }
+    }
 }
 
 /// The name every message carries on the wire, from an exhaustive match.
@@ -1515,6 +1618,7 @@ pub fn translation_event_name(event: &TranslationWorkerEvent) -> &'static str {
         TranslationWorkerEvent::History { .. } => "history",
         TranslationWorkerEvent::TranslationProviders { .. } => "translation_providers",
         TranslationWorkerEvent::CredentialSaved { .. } => "credential_saved",
+        TranslationWorkerEvent::RequestFailed { .. } => "request_failed",
         TranslationWorkerEvent::Failed { .. } => "failed",
     }
 }
@@ -1627,6 +1731,12 @@ mod wire_schema_tests {
             target_language: TranslationLanguage::Russian,
             tier: Some(TranslationTier::Tiny),
             provider: Some(String::new()),
+            attempts: vec![TranslationAttemptReport {
+                provider_id: String::new(),
+                kind: TranslationFailureKind::QuotaExhausted,
+                retry_after_ms: Some(0),
+                detail: "detail".to_owned(),
+            }],
             processing_duration_ms: 0,
             first_token_duration_ms: 0,
             backend_request_count: 0,
@@ -1638,8 +1748,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 23,
-            "every fingerprint below was written for protocol 23: if a shape \
+            PROTOCOL_VERSION, 24,
+            "every fingerprint below was written for protocol 24: if a shape \
              changes, this number changes with it"
         );
     }
@@ -1658,6 +1768,10 @@ mod wire_schema_tests {
         assert_eq!(
             fields,
             vec![
+                "attempts[].detail:string",
+                "attempts[].kind:string",
+                "attempts[].provider_id:string",
+                "attempts[].retry_after_ms:number",
                 "backend_request_count:number",
                 "chunk_count:number",
                 "first_token_duration_ms:number",
@@ -1725,6 +1839,21 @@ mod wire_schema_tests {
                 provider_id: String::new(),
                 error: String::new(),
             },
+            TranslationWorkerEvent::RequestFailed {
+                request_id,
+                failure: TranslationFailureReport {
+                    kind: TranslationFailureKind::UnsupportedRequest,
+                    provider_id: Some(String::new()),
+                    retry_after_ms: Some(0),
+                    detail: "detail".to_owned(),
+                    attempts: vec![TranslationAttemptReport {
+                        provider_id: String::new(),
+                        kind: TranslationFailureKind::QuotaExhausted,
+                        retry_after_ms: Some(0),
+                        detail: "detail".to_owned(),
+                    }],
+                },
+            },
             TranslationWorkerEvent::Failed {
                 request_id: Some(request_id),
                 catalog_id: Some(String::new()),
@@ -1738,8 +1867,10 @@ mod wire_schema_tests {
             shapes,
             vec![
                 "cancelled(request_id:string)",
-                "completed(created_unix_ms:number,result.backend_request_count:number,\
-result.chunk_count:number,result.first_token_duration_ms:number,\
+                "completed(created_unix_ms:number,result.attempts[].detail:string,\
+ result.attempts[].kind:string,result.attempts[].provider_id:string,\
+ result.attempts[].retry_after_ms:number,result.backend_request_count:number,\
+ result.chunk_count:number,result.first_token_duration_ms:number,\
 result.processing_duration_ms:number,result.provider:string,result.request_id:string,\
 result.source_language:string,result.source_text:string,result.target_language:string,\
 result.tier:string,result.tokenize_duration_ms:number,result.translated_text:string)",
@@ -1755,6 +1886,10 @@ total_bytes:number)",
                 "partial(chunk_count:number,chunk_index:number,first_token_duration_ms:number,\
 request_id:string,tokenize_duration_ms:number,translated_text:string)",
                 "ready(models[],protocol_version:number,selected_tier:string)",
+                "request_failed(failure.attempts[].detail:string,failure.attempts[].kind:string,\
+ failure.attempts[].provider_id:string,failure.attempts[].retry_after_ms:number,\
+ failure.detail:string,failure.kind:string,failure.provider_id:string,\
+ failure.retry_after_ms:number,request_id:string)",
                 "translation_providers(statuses[])",
             ]
         );
@@ -1994,6 +2129,12 @@ mod complete_wire_schema_tests {
             target_language: TranslationLanguage::Russian,
             tier: Some(TranslationTier::Tiny),
             provider: Some("provider".to_owned()),
+            attempts: vec![TranslationAttemptReport {
+                provider_id: "fallback".to_owned(),
+                kind: TranslationFailureKind::RateLimited,
+                retry_after_ms: Some(1_000),
+                detail: "detail".to_owned(),
+            }],
             processing_duration_ms: 1,
             first_token_duration_ms: 2,
             backend_request_count: 3,
@@ -2219,6 +2360,21 @@ mod complete_wire_schema_tests {
                 provider_id: "provider".to_owned(),
                 error: "error".to_owned(),
             },
+            TranslationWorkerEvent::RequestFailed {
+                request_id,
+                failure: TranslationFailureReport {
+                    kind: TranslationFailureKind::UnsupportedRequest,
+                    provider_id: Some("provider".to_owned()),
+                    retry_after_ms: Some(1_000),
+                    detail: "detail".to_owned(),
+                    attempts: vec![TranslationAttemptReport {
+                        provider_id: "provider".to_owned(),
+                        kind: TranslationFailureKind::UnsupportedRequest,
+                        retry_after_ms: Some(1_000),
+                        detail: "detail".to_owned(),
+                    }],
+                },
+            },
             TranslationWorkerEvent::Failed {
                 request_id: Some(request_id),
                 catalog_id: Some("model".to_owned()),
@@ -2434,7 +2590,8 @@ mod complete_wire_schema_tests {
         TranslationWorkerEvent::ModelRemoved { .. } => 6, TranslationWorkerEvent::Partial { .. } => 7,
         TranslationWorkerEvent::Completed { .. } => 8, TranslationWorkerEvent::Cancelled { .. } => 9,
         TranslationWorkerEvent::History { .. } => 10, TranslationWorkerEvent::TranslationProviders { .. } => 11,
-        TranslationWorkerEvent::CredentialSaved { .. } => 12, TranslationWorkerEvent::Failed { .. } => 13
+        TranslationWorkerEvent::CredentialSaved { .. } => 12, TranslationWorkerEvent::RequestFailed { .. } => 13,
+        TranslationWorkerEvent::Failed { .. } => 14
     );
     index_fn!(speech_command_index, SpeechWorkerCommand,
         SpeechWorkerCommand::Initialize { .. } => 0, SpeechWorkerCommand::Begin { .. } => 1,
@@ -2536,7 +2693,7 @@ mod complete_wire_schema_tests {
         assert_complete(&input_events, input_event_index, 17);
         assert_complete(&input_commands, input_command_index, 7);
         assert_complete(&translation_commands, translation_command_index, 14);
-        assert_complete(&translation_events, translation_event_index, 14);
+        assert_complete(&translation_events, translation_event_index, 15);
         assert_complete(&speech_commands, speech_command_index, 18);
         assert_complete(&speech_events, speech_event_index, 17);
         assert_complete(&companion_commands, companion_command_index, 8);
@@ -2555,7 +2712,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x7dbd_2363_8c06_4a58,
+            0x7bdb_eb57_d51f_dc41,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

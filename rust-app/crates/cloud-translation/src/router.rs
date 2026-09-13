@@ -230,7 +230,7 @@ impl Router {
 fn plan_failure(entry: &ProviderEntry, error: &PlanError) -> ProviderFailure {
     match error {
         PlanError::MissingSetting(_) => ProviderFailure::Misconfigured(error.to_string()),
-        PlanError::Unsupported(_) => ProviderFailure::Rejected(error.to_string()),
+        PlanError::Unsupported(_) => ProviderFailure::Unsupported(error.to_string()),
         PlanError::NoTargetLanguage => {
             ProviderFailure::Rejected(format!("{} was asked for no language", entry.id.as_str()))
         }
@@ -247,6 +247,12 @@ fn redact(failure: ProviderFailure, secret: &str) -> ProviderFailure {
         }
         ProviderFailure::Unavailable(detail) => {
             ProviderFailure::Unavailable(redact_secret(&detail, secret))
+        }
+        ProviderFailure::Timeout(detail) => {
+            ProviderFailure::Timeout(redact_secret(&detail, secret))
+        }
+        ProviderFailure::Unsupported(detail) => {
+            ProviderFailure::Unsupported(redact_secret(&detail, secret))
         }
         ProviderFailure::Rejected(detail) => {
             ProviderFailure::Rejected(redact_secret(&detail, secret))

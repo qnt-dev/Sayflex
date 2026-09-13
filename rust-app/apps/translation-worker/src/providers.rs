@@ -17,7 +17,10 @@ use rust_cloud_translation::{
     RouteOutcome, Router, Translation, Unavailable, redact_secret,
 };
 use rust_platform_windows::credentials::DpapiCipher;
-use rust_protocol::{TranslationProviderEntry, TranslationProviderStatus};
+use rust_protocol::{
+    TranslationAttemptReport, TranslationFailureKind, TranslationFailureReport,
+    TranslationProviderEntry, TranslationProviderStatus,
+};
 
 pub struct Providers {
     router: Router,
@@ -41,13 +44,19 @@ pub struct ProvidersSnapshot {
 /// What the walk decided, in the terms the worker acts on.
 pub enum Routed {
     /// A service translated it. The worker sends this and stops.
-    Translated { provider: String, text: String },
+    Translated {
+        provider: String,
+        text: String,
+        attempts: Vec<TranslationAttemptReport>,
+    },
     /// The walk reached the local engine, or never had anywhere else to go.
-    UseLocalEngine,
+    UseLocalEngine {
+        attempts: Vec<TranslationAttemptReport>,
+    },
     /// The user stopped waiting.
     Cancelled,
     /// Everyone in the list was asked and nobody answered.
-    Exhausted { detail: String },
+    Exhausted { failure: TranslationFailureReport },
 }
 
 impl Providers {
@@ -169,11 +178,19 @@ impl ProvidersSnapshot {
                 .iter()
                 .any(|entry| entry.enabled && entry.id.is_local())
             {
-                Routed::UseLocalEngine
+                Routed::UseLocalEngine {
+                    attempts: Vec::new(),
+                }
             } else {
                 Routed::Exhausted {
-                    detail: "No network client could be created, and the local engine is switched off in the translation order."
-                        .to_owned(),
+                    failure: TranslationFailureReport {
+                        kind: TranslationFailureKind::NoProviderAvailable,
+                        provider_id: None,
+                        retry_after_ms: None,
+                        detail: "No network client could be created, and the local engine is switched off in the translation order."
+                            .to_owned(),
+                        attempts: Vec::new(),
+                    },
                 }
             };
         };
@@ -199,26 +216,96 @@ impl ProvidersSnapshot {
             );
         }
         match outcome {
-            RouteOutcome::Translated { provider, text, .. } => Routed::Translated {
+            RouteOutcome::Translated {
+                provider,
+                text,
+                attempts,
+            } => Routed::Translated {
                 provider: provider.as_str().to_owned(),
                 text,
+                attempts: attempts.iter().map(report_attempt).collect(),
             },
-            RouteOutcome::UseLocalEngine { .. } => Routed::UseLocalEngine,
+            RouteOutcome::UseLocalEngine { attempts } => Routed::UseLocalEngine {
+                attempts: attempts.iter().map(report_attempt).collect(),
+            },
             RouteOutcome::Cancelled { .. } => Routed::Cancelled,
             RouteOutcome::Exhausted { attempts } => Routed::Exhausted {
-                detail: attempts.last().map_or_else(
-                    || "Every translation provider is switched off.".to_owned(),
-                    |attempt| {
-                        format!(
-                            "{}: {}",
-                            attempt.provider.as_str(),
-                            describe_outcome(&attempt.outcome)
-                        )
-                    },
-                ),
+                failure: failure_report(&attempts),
             },
         }
     }
+}
+
+fn failure_report(attempts: &[Attempt]) -> TranslationFailureReport {
+    let attempts = attempts.iter().map(report_attempt).collect::<Vec<_>>();
+    let last = attempts.last();
+    TranslationFailureReport {
+        kind: last.map_or(TranslationFailureKind::NoProviderAvailable, |attempt| {
+            attempt.kind.clone()
+        }),
+        provider_id: last.map(|attempt| attempt.provider_id.clone()),
+        retry_after_ms: last.and_then(|attempt| attempt.retry_after_ms),
+        detail: last.map_or_else(
+            || "Every translation provider is switched off or unavailable.".to_owned(),
+            |attempt| attempt.detail.clone(),
+        ),
+        attempts,
+    }
+}
+
+fn report_attempt(attempt: &Attempt) -> TranslationAttemptReport {
+    let (kind, retry_after_ms, detail) = match &attempt.outcome {
+        AttemptOutcome::Skipped(reason) => (TranslationFailureKind::Timeout, None, reason.clone()),
+        AttemptOutcome::Failed(failure) => report_failure(failure),
+    };
+    TranslationAttemptReport {
+        provider_id: attempt.provider.as_str().to_owned(),
+        kind,
+        retry_after_ms,
+        detail,
+    }
+}
+
+fn report_failure(
+    failure: &rust_cloud_translation::ProviderFailure,
+) -> (TranslationFailureKind, Option<u64>, String) {
+    use rust_cloud_translation::ProviderFailure;
+
+    match failure {
+        ProviderFailure::Credential(detail) => {
+            (TranslationFailureKind::Credential, None, detail.clone())
+        }
+        ProviderFailure::Misconfigured(detail) => {
+            (TranslationFailureKind::Misconfigured, None, detail.clone())
+        }
+        ProviderFailure::QuotaExhausted { retry_after } => (
+            TranslationFailureKind::QuotaExhausted,
+            retry_after.map(duration_ms),
+            String::new(),
+        ),
+        ProviderFailure::RateLimited { retry_after } => (
+            TranslationFailureKind::RateLimited,
+            Some(duration_ms(*retry_after)),
+            String::new(),
+        ),
+        ProviderFailure::Timeout(detail) => (TranslationFailureKind::Timeout, None, detail.clone()),
+        ProviderFailure::Unavailable(detail) => {
+            (TranslationFailureKind::Unavailable, None, detail.clone())
+        }
+        ProviderFailure::Unsupported(detail) => (
+            TranslationFailureKind::UnsupportedRequest,
+            None,
+            detail.clone(),
+        ),
+        ProviderFailure::Rejected(detail) => {
+            (TranslationFailureKind::Rejected, None, detail.clone())
+        }
+        ProviderFailure::Empty => (TranslationFailureKind::EmptyResponse, None, String::new()),
+    }
+}
+
+fn duration_ms(duration: std::time::Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn attempts_of(outcome: &RouteOutcome) -> &[Attempt] {
@@ -262,8 +349,11 @@ fn describe(unavailable: Option<&Unavailable>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::describe;
-    use rust_cloud_translation::Unavailable;
+    use super::{describe, report_attempt};
+    use rust_cloud_translation::{
+        Attempt, AttemptOutcome, ProviderFailure, ProviderId, Unavailable,
+    };
+    use rust_protocol::TranslationFailureKind;
     use std::time::Duration;
 
     #[test]
@@ -286,5 +376,19 @@ mod tests {
             .starts_with("Waiting 1s"),
             "a wait under a second still reads as a wait, not as none"
         );
+    }
+
+    #[test]
+    fn provider_failures_cross_the_wire_without_parsing_display_text() {
+        let report = report_attempt(&Attempt {
+            provider: ProviderId::new(ProviderId::DEEPL),
+            outcome: AttemptOutcome::Failed(ProviderFailure::QuotaExhausted {
+                retry_after: Some(Duration::from_secs(60)),
+            }),
+        });
+
+        assert_eq!(report.provider_id, ProviderId::DEEPL);
+        assert_eq!(report.kind, TranslationFailureKind::QuotaExhausted);
+        assert_eq!(report.retry_after_ms, Some(60_000));
     }
 }
