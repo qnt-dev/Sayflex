@@ -4864,6 +4864,7 @@ dependencies = [
  "slint-build",
  "tempfile",
  "unicode-segmentation",
+ "url",
  "winresource",
 ]
 

@@ -268,6 +268,7 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
         );
     }
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
+    settings.set_support_visible(std::env::args().any(|argument| argument == "--support-preview"));
     let preview_locale = crate::localization::UiLocale::from_code(&settings.get_ui_locale())
         .map(crate::localization::active_locale)
         .unwrap_or(crate::localization::UiLocale::English);

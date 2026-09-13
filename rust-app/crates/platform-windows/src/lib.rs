@@ -50,6 +50,36 @@ pub use session_end::{SessionEndEvent, SessionEndMonitor, session_is_ending};
 #[cfg(windows)]
 pub use single_instance::SingleInstanceGuard;
 
+#[cfg(windows)]
+pub fn open_https_url(url: &str) -> io::Result<()> {
+    use std::{iter, ptr};
+    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+    let operation = "open"
+        .encode_utf16()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let target = url.encode_utf16().chain(iter::once(0)).collect::<Vec<_>>();
+    // SAFETY: both strings are NUL-terminated for the duration of the call;
+    // null optional arguments ask the Windows shell to use its defaults.
+    let result = unsafe {
+        ShellExecuteW(
+            ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if result <= 32 {
+        return Err(io::Error::other(format!(
+            "Windows shell refused the support page (code {result})"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessExit {
     pub exit_code: Option<u32>,

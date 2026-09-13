@@ -958,8 +958,8 @@ msgstr "Russe"
 msgid "Save"
 msgstr "Enregistrer"
 
-msgid "SayFlex {} · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it."
-msgstr "SayFlex {} · outils locaux pour la voix et le texte. Aucun compte cloud n'est requis ; les modèles ne sont téléchargés qu'à votre demande."
+msgid "Local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it."
+msgstr "Outils locaux pour la voix et le texte. Aucun compte cloud n'est requis ; les modèles ne sont téléchargés qu'à votre demande."
 
 msgid "SayFlex Recording Indicator"
 msgstr "Indicateur d'enregistrement SayFlex"
@@ -1467,6 +1467,12 @@ msgstr "Si vous fermez cette fenêtre, SayFlex restera non configuré."
 
 msgid "Continue"
 msgstr "Continuer"
+
+msgid "Support the developer"
+msgstr "Soutenir le développeur"
+
+msgid "Could not open the support page: {error}"
+msgstr "Impossible d’ouvrir la page de soutien : {error}"
 
 msgid "Translate (Ctrl+Enter)"
 msgstr "Traduire (Ctrl+Entrée)"

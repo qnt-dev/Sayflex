@@ -23,7 +23,6 @@ export component OverviewPage inherits VerticalLayout {
     in property <string> note-text;
     in property <string> note-action;
     in property <bool> note-signal: false;
-    in property <string> version;
     callback note-acted();
 
     spacing: 0px;
@@ -64,12 +63,12 @@ export component OverviewPage inherits VerticalLayout {
 
     FactList { facts: root.facts; }
 
-    // What used to be a page of its own: the version, and the one claim about
-    // this application that is not tied to a particular page.
+    // The one product claim that is not tied to a particular page. Version
+    // identity lives only on About, where people expect to look for it.
     Text {
         height: 64px;
         vertical-alignment: bottom;
-        text: @tr("SayFlex {} · local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it.", root.version);
+        text: @tr("Local tools for language and thought. No cloud account is required, and a model is downloaded only when you choose it.");
         color: Sheet.muted;
         font-size: Sheet.detail-size;
         wrap: word-wrap;

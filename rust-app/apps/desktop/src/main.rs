@@ -45,7 +45,8 @@ use settings_view::{
     precreate_action_windows, prepend_history_row, set_indicator_status, set_runtime_status,
     set_status_problem, show_layout_chooser, sync_action_settings, sync_history,
     sync_hotkey_capture_status, sync_models, sync_output_mode, sync_translation_models,
-    wire_action_palette, wire_chooser, wire_settings, wire_translator, wire_tray,
+    wire_action_palette, wire_chooser, wire_settings, wire_support_action, wire_translator,
+    wire_tray,
 };
 use slint::winit_030::{
     WinitWindowAccessor,
@@ -83,6 +84,7 @@ mod settings_preview;
 mod settings_projection;
 mod settings_view;
 mod speech_backend;
+mod support_action;
 mod translation_view;
 mod translator_status;
 mod visualizer;
@@ -780,6 +782,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
+    let support_url = support_action::configured_support_url();
+    settings.set_support_visible(support_url.is_some());
     let loaded_settings = load_settings();
     let mut saved_settings = loaded_settings.settings;
     let system_locale = rust_platform_windows::user_locale_name();
@@ -1025,6 +1029,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    wire_support_action(&settings, support_url);
     wire_settings(
         &settings,
         &translator,

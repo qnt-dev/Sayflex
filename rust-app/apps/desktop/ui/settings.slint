@@ -282,6 +282,7 @@ export component SettingsWindow inherits Window {
     callback set-translation-primary-language(string);
     callback set-translation-secondary-language(string);
     callback open-translator();
+    callback open-support();
     callback set-hotkey-enabled(int, bool);
     callback change-hotkey(int);
     callback reset-hotkey(int);
@@ -296,6 +297,7 @@ export component SettingsWindow inherits Window {
     callback update-provider-draft(string, string, string);
     callback discard-provider-draft(string);
     callback forget-provider-key(string);
+    in property <bool> support-visible: false;
     /// What the last save was refused for, and which row asked. Written by the
     /// one owner in Rust so the form cannot decide it locally and be wrong.
     in-out property <string> provider-problem;
@@ -326,24 +328,9 @@ export component SettingsWindow inherits Window {
                 }
             }
             Rectangle { horizontal-stretch: 1; }
-            HorizontalLayout {
-                spacing: 16px;
-                alignment: end;
-                Text {
-                    text: "SayFlex";
-                    color: Sheet.muted;
-                    font-size: Sheet.label-size;
-                    font-weight: 650;
-                    letter-spacing: 2.4px;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: root.app-version;
-                    color: Sheet.ink;
-                    font-size: 16px;
-                    font-weight: 650;
-                    vertical-alignment: center;
-                }
+            RowAction {
+                label: @tr("Quick translation");
+                clicked => { root.open-translator(); }
             }
         }
 
@@ -434,7 +421,6 @@ export component SettingsWindow inherits Window {
                     note-text: root.overview-note;
                     note-action: root.overview-note-action;
                     note-signal: root.overview-note-signal;
-                    version: root.app-version;
                     note-acted => { root.active-page = 3; }
                 }
 
@@ -881,11 +867,26 @@ export component SettingsWindow inherits Window {
                     }
                 }
 
-                VerticalLayout {
+                if root.support-visible : HorizontalLayout {
                     alignment: end;
-                    RowAction {
-                        label: @tr("Quick translation");
-                        clicked => { root.open-translator(); }
+                    spacing: 10px;
+                    VerticalLayout {
+                        height: 48px;
+                        // The steam raises the image's geometric centre above
+                        // the visual centre of the cup. Centre the action on
+                        // the cup itself, which is the perceived anchor.
+                        padding-top: 10px;
+                        alignment: center;
+                        RowAction {
+                            label: @tr("Support the developer");
+                            clicked => { root.open-support(); }
+                        }
+                    }
+                    Image {
+                        width: 48px;
+                        height: 48px;
+                        source: @image-url("../assets/action-coffee.svg");
+                        image-fit: contain;
                     }
                 }
             }

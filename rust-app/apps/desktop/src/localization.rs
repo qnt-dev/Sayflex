@@ -154,6 +154,19 @@ mod tests {
 
         assert!(settings.contains("label: @tr(\"Quick translation\")"));
         assert!(settings.contains("clicked => { root.open-translator(); }"));
+        let quick_translation = settings
+            .find("label: @tr(\"Quick translation\")")
+            .expect("quick translation action");
+        let workspace = settings
+            .find("// ── workspace ──")
+            .expect("workspace boundary");
+        assert!(quick_translation < workspace);
+        assert_eq!(
+            settings.matches("version: root.app-version").count(),
+            1,
+            "the version belongs only to About"
+        );
+        assert!(!settings.contains("text: \"SayFlex\";"));
         assert!(!settings.contains("callback quit-requested();"));
         assert!(!settings.contains("root.quit-requested()"));
         assert!(!settings.contains("page-numbers"));
@@ -2331,6 +2344,146 @@ mod tests {
                 );
             }
         }
+        drop(seed);
+    }
+
+    #[test]
+    fn support_action_is_conditional_secondary_and_fits_in_every_locale() {
+        use std::{cell::Cell, rc::Rc};
+
+        use i_slint_backend_testing::{ElementHandle, ElementRoot};
+        use slint::ComponentHandle;
+
+        let settings_ui = include_str!("../ui/settings.slint");
+        let about_ui = include_str!("../ui/pages_instruments.slint");
+        assert!(settings_ui.contains("if root.support-visible : HorizontalLayout"));
+        assert!(settings_ui.contains("label: @tr(\"Support the developer\")"));
+        assert!(settings_ui.contains("source: @image-url(\"../assets/action-coffee.svg\")"));
+        assert!(!about_ui.contains("label: @tr(\"Support the developer\")"));
+        assert!(!settings_ui.contains("buymeacoffee.com"));
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let settings = crate::SettingsWindow::new().expect("settings surface");
+            settings.set_active_page(8);
+            settings.show().expect("show headless settings surface");
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            let label = &entries["Support the developer"];
+            assert!(
+                ElementHandle::find_by_accessible_label(&settings, label)
+                    .next()
+                    .is_none(),
+                "{locale}: support action must be absent without configuration"
+            );
+
+            let activations = Rc::new(Cell::new(0));
+            let activations_from_callback = Rc::clone(&activations);
+            settings.on_open_support(move || {
+                activations_from_callback.set(activations_from_callback.get() + 1);
+            });
+            settings.set_support_visible(true);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+            let action = ElementHandle::find_by_accessible_label(&settings, label)
+                .next()
+                .unwrap_or_else(|| panic!("{locale}: configured support action is missing"));
+            let position = action.absolute_position();
+            let size = action.size();
+            let surface = settings.root_element().size();
+            assert!(
+                position.x >= -0.5
+                    && position.y >= -0.5
+                    && position.x + size.width <= surface.width + 0.5
+                    && position.y + size.height <= surface.height + 0.5,
+                "{locale}: support action leaves the settings surface"
+            );
+            action.invoke_accessible_default_action();
+            assert_eq!(
+                activations.get(),
+                1,
+                "{locale}: support action did not fire"
+            );
+        }
+        drop(seed);
+    }
+
+    #[test]
+    fn support_action_is_aligned_with_its_coffee_icon() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SettingsWindow::new().expect("seed settings surface");
+        slint::select_bundled_translation("ru").expect("select translated bundle");
+        let entries = catalog(include_str!(
+            "../translations/ru/LC_MESSAGES/sayflex-desktop.po"
+        ));
+        let settings = crate::SettingsWindow::new().expect("settings surface");
+        settings.set_active_page(8);
+        settings.set_support_visible(true);
+        settings.show().expect("show headless settings surface");
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+        let action =
+            ElementHandle::find_by_accessible_label(&settings, &entries["Support the developer"])
+                .next()
+                .expect("configured support action");
+        let icon = ElementHandle::find_by_element_type_name(&settings, "Image")
+            .next()
+            .expect("coffee icon");
+        let action_center = action.absolute_position().y + action.size().height / 2.0;
+        let icon_center = icon.absolute_position().y + icon.size().height / 2.0;
+        let action_to_icon_gap =
+            icon.absolute_position().x - (action.absolute_position().x + action.size().width);
+
+        let optical_cup_center = icon_center + 5.0;
+        assert!(
+            (action_center - optical_cup_center).abs() <= 0.5,
+            "support action center {action_center} differs from coffee cup optical center {optical_cup_center}"
+        );
+        assert!(
+            (action_to_icon_gap - 10.0).abs() <= 0.5,
+            "support action gap is {action_to_icon_gap}, expected 10"
+        );
+        assert_eq!(icon.size().width, 48.0, "coffee icon width");
+        assert_eq!(icon.size().height, 48.0, "coffee icon height");
         drop(seed);
     }
 

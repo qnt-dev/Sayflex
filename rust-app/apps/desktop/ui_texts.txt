@@ -323,3 +323,4 @@ HindiLanguage|Hindi
 ArabicLanguage|Arabic
 QuickTranslation|Quick translation
 TranslateCtrlEnter|Translate (Ctrl+Enter)
+CouldNotOpenSupport|Could not open the support page: {error}
