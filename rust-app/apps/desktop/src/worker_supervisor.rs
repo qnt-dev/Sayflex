@@ -1173,8 +1173,11 @@ mod startup_session_gate_tests {
             .recv_timeout(Duration::from_secs(2))
             .unwrap();
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
-        gate.observe(SessionEndEvent::Cancelled);
         session_is_ending.store(false, Ordering::Release);
+        // WM_ENDSESSION clears the process-wide flag before it publishes the
+        // Cancelled event. Mirror that production ordering so the test cannot
+        // make the retry observe a synthetic half-cancelled state.
+        gate.observe(SessionEndEvent::Cancelled);
 
         assert_eq!(thread.join().unwrap().unwrap(), Some("worker"));
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
