@@ -444,16 +444,11 @@ export component VisualsPage inherits HorizontalLayout {
 
         GroupLabel { text: @tr("STYLE"); height: 24px; }
 
-        // All eight the product draws, and off. A style that exists in the
-        // application and not here would be deleted by omission.
+        // Only the approved release styles, plus off. The three retired panel
+        // styles remain readable from old settings solely for migration.
         GridLayout {
-            height: 190px;
+            height: 124px;
             spacing: 6px;
-            Row {
-                ChoiceTile { label: @tr("Voice orb"); selected: root.selected == 0; clicked => { root.select-visualizer(0); } }
-                ChoiceTile { label: @tr("Spectrum"); selected: root.selected == 1; clicked => { root.select-visualizer(1); } }
-                ChoiceTile { label: @tr("Fluid ribbon"); selected: root.selected == 2; clicked => { root.select-visualizer(2); } }
-            }
             Row {
                 ChoiceTile { label: @tr("Broadcast mic"); selected: root.selected == 3; clicked => { root.select-visualizer(3); } }
                 ChoiceTile { label: @tr("Circular"); selected: root.selected == 4; clicked => { root.select-visualizer(4); } }

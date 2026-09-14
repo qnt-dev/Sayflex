@@ -106,9 +106,6 @@ StartingUp|Starting up
 ShowPreview|Show a preview
 ReplaceSelection|Replace the selection
 CopyIt|Copy it
-VoiceOrb|Voice orb
-Spectrum|Spectrum
-FluidRibbon|Fluid ribbon
 BroadcastMic|Broadcast mic
 Circular|Circular
 FlowSphere|Flow sphere
@@ -251,9 +248,6 @@ LatestTranscriptCopied|Latest transcript {session} copied. Shift+Insert is ready
 ChooseTranslationRoute|Choose a local translation model or configure a text service in Settings first.
 LatestDictationCancelled|The latest dictation was cancelled and cannot be inserted.
 WarmingBackend|Warming up on {backend}. If it fails, the search moves to the next one down.
-VisualLevelDetail|Follows the level of your voice
-VisualBandsDetail|Thirty-two bands, thirty-one times a second
-VisualLineDetail|One line that thickens with the voice
 VisualMicrophoneDetail|Level bars beside a studio microphone
 VisualRingDetail|The spectrum wrapped into a ring
 VisualWordsDetail|The words as they are recognised

@@ -1075,6 +1075,42 @@ mod tests {
     }
 
     #[test]
+    fn retired_visualizers_are_absent_from_the_visuals_page() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let settings = crate::SettingsWindow::new().expect("settings surface");
+        settings.show().expect("show headless settings surface");
+        settings.set_active_page(5);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+        for retired in ["Voice orb", "Spectrum", "Fluid ribbon"] {
+            assert!(
+                ElementHandle::find_by_accessible_label(&settings, retired)
+                    .next()
+                    .is_none(),
+                "retired visualizer remains selectable: {retired}"
+            );
+        }
+        for released in [
+            "Broadcast mic",
+            "Circular",
+            "Flow sphere",
+            "Writing slate",
+            "Companion orb",
+            "Off",
+        ] {
+            assert!(
+                ElementHandle::find_by_accessible_label(&settings, released)
+                    .next()
+                    .is_some(),
+                "released visualizer is missing: {released}"
+            );
+        }
+    }
+
+    #[test]
     fn translated_provider_actions_fit_side_by_side() {
         use i_slint_backend_testing::ElementHandle;
         use slint::{ComponentHandle, ModelRc, VecModel};
@@ -1675,7 +1711,7 @@ mod tests {
 
         crate::settings_view::sync_visualizer_copy(
             &settings,
-            crate::visualizer::VisualizerStyle::VoiceOrb,
+            crate::visualizer::VisualizerStyle::BroadcastMic,
         );
         assert_ne!(settings.get_visuals_note().as_str(), companion_help);
     }

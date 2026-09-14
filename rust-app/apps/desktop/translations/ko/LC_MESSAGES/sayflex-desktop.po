@@ -439,14 +439,10 @@ msgstr "입자 구체"
 msgid "Flow Sphere palette updated for the next dictation."
 msgstr "다음 받아쓰기를 위해 Flow Sphere 팔레트가 업데이트되었습니다."
 
-msgid "Fluid ribbon"
-msgstr "유동적인 리본"
 
 msgid "Follow Windows settings"
 msgstr "Windows 설정 따르기"
 
-msgid "Follows the level of your voice"
-msgstr "당신의 목소리 수준을 따릅니다"
 
 msgid "Foreign text is translated into this language"
 msgstr "외국어 텍스트가 이 언어로 번역됩니다"
@@ -766,8 +762,6 @@ msgstr "선택한 텍스트에 적용"
 msgid "On this device"
 msgstr "이 기기에서"
 
-msgid "One line that thickens with the voice"
-msgstr "목소리와 함께 굵어지는 한 줄"
 
 msgid "Only for models trained for it"
 msgstr "해당 기능으로 훈련된 모델에만"
@@ -1030,8 +1024,6 @@ msgstr "원문"
 msgid "Spanish"
 msgstr "스페인어"
 
-msgid "Spectrum"
-msgstr "스펙트럼"
 
 msgid "Speech"
 msgstr "음성"
@@ -1201,8 +1193,6 @@ msgstr "키를 확인하기 전에 작업 프로세스가 중지되었습니다.
 msgid "There is no transcript to insert yet."
 msgstr "아직 삽입할 받아쓰기가 없습니다."
 
-msgid "Thirty-two bands, thirty-one times a second"
-msgstr "32개의 밴드, 1초에 31번"
 
 msgid "This build does not know this service"
 msgstr "이 빌드에서는 이 서비스를 인식하지 못합니다"
@@ -1336,8 +1326,6 @@ msgstr "시각화 도구가 업데이트되었습니다. 다음 받아쓰기에�
 msgid "Visuals"
 msgstr "시각 효과"
 
-msgid "Voice orb"
-msgstr "음성 오브"
 
 msgid "Vulkan"
 msgstr "Vulkan"

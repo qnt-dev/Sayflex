@@ -439,14 +439,10 @@ msgstr "Esfera de partículas"
 msgid "Flow Sphere palette updated for the next dictation."
 msgstr "Paleta Flow Sphere atualizada para o próximo ditado."
 
-msgid "Fluid ribbon"
-msgstr "Fita dinâmica"
 
 msgid "Follow Windows settings"
 msgstr "Como no Windows"
 
-msgid "Follows the level of your voice"
-msgstr "Segue o nível da sua voz"
 
 msgid "Foreign text is translated into this language"
 msgstr "Texto em outro idioma é traduzido para este idioma"
@@ -766,8 +762,6 @@ msgstr "Ativado no texto selecionado"
 msgid "On this device"
 msgstr "Neste dispositivo"
 
-msgid "One line that thickens with the voice"
-msgstr "Uma linha que engrossa com a voz"
 
 msgid "Only for models trained for it"
 msgstr "Apenas para modelos treinados para isso"
@@ -1030,8 +1024,6 @@ msgstr "Texto original"
 msgid "Spanish"
 msgstr "Espanhol"
 
-msgid "Spectrum"
-msgstr "Espectro"
 
 msgid "Speech"
 msgstr "Fala"
@@ -1201,8 +1193,6 @@ msgstr "O processo parou antes de confirmar a chave. A linha mostrará o estado 
 msgid "There is no transcript to insert yet."
 msgstr "Ainda não há transcrição para inserir."
 
-msgid "Thirty-two bands, thirty-one times a second"
-msgstr "Trinta e duas bandas, trinta e uma vezes por segundo"
 
 msgid "This build does not know this service"
 msgstr "Esta versão não reconhece este serviço"
@@ -1336,8 +1326,6 @@ msgstr "Visualizador atualizado. O próximo ditado usa o estilo selecionado."
 msgid "Visuals"
 msgstr "Elementos visuais"
 
-msgid "Voice orb"
-msgstr "Esfera de voz"
 
 msgid "Vulkan"
 msgstr "Vulkan"

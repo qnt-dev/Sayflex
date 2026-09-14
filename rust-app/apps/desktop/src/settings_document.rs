@@ -287,6 +287,7 @@ impl<'de> Deserialize<'de> for SavedSettings {
             "visualizer_style",
             &mut settings.visualizer_style,
         );
+        settings.visualizer_style = settings.visualizer_style.released_or_default();
         read(
             &document,
             "circular_spectrum_palette",
@@ -566,6 +567,22 @@ mod settings_document_tests {
         expected_hotkeys.correct_layout.enabled = settings.layout_enabled;
         expected_hotkeys.translate.enabled = settings.translation_enabled;
         assert_eq!(settings.hotkeys, expected_hotkeys);
+    }
+
+    #[test]
+    fn retired_visualizers_migrate_to_the_first_supported_style() {
+        assert_eq!(
+            SavedSettings::default().visualizer_style,
+            VisualizerStyle::BroadcastMic
+        );
+        for retired in ["voice_orb", "symmetric_spectrum", "fluid_ribbon"] {
+            let document = format!(r#"{{"visualizer_style":"{retired}"}}"#);
+            assert_eq!(
+                parse_settings(document.as_bytes()).visualizer_style,
+                VisualizerStyle::BroadcastMic,
+                "retired style {retired}"
+            );
+        }
     }
 
     #[test]

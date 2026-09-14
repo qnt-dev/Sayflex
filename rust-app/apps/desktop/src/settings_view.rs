@@ -473,22 +473,11 @@ pub(crate) fn sync_action_settings(
 /// Transparent visualizers are drawn on a native surface of their own. That is
 /// not decoration, it is why they behave differently, so the page says it.
 pub(crate) fn sync_visualizer_copy(settings: &SettingsWindow, style: VisualizerStyle) {
+    let style = style.released_or_default();
     let locale = UiLocale::from_code(settings.get_ui_locale().as_str())
         .map(active_locale)
         .unwrap_or(UiLocale::English);
     let (name, caption) = match style {
-        VisualizerStyle::VoiceOrb => (
-            text(locale, UiText::VoiceOrb),
-            text(locale, UiText::VisualLevelDetail),
-        ),
-        VisualizerStyle::SymmetricSpectrum => (
-            text(locale, UiText::Spectrum),
-            text(locale, UiText::VisualBandsDetail),
-        ),
-        VisualizerStyle::FluidRibbon => (
-            text(locale, UiText::FluidRibbon),
-            text(locale, UiText::VisualLineDetail),
-        ),
         VisualizerStyle::BroadcastMic => (
             text(locale, UiText::BroadcastMic),
             text(locale, UiText::VisualMicrophoneDetail),
@@ -513,6 +502,9 @@ pub(crate) fn sync_visualizer_copy(settings: &SettingsWindow, style: VisualizerS
             text(locale, UiText::Off),
             text(locale, UiText::VisualNoneDetail),
         ),
+        VisualizerStyle::VoiceOrb
+        | VisualizerStyle::SymmetricSpectrum
+        | VisualizerStyle::FluidRibbon => unreachable!("retired visualizer was normalized"),
     };
     let native =
         style.recording_surface() == Some(crate::visualizer::RecordingSurface::Transparent);
@@ -1851,7 +1843,7 @@ pub(crate) fn wire_settings(
         let indicator_animation = Rc::clone(indicator_animation);
         let workers = Rc::clone(workers);
         settings.on_select_visualizer(move |index| {
-            let Some(style) = VisualizerStyle::from_index(index) else {
+            let Some(style) = VisualizerStyle::from_selectable_index(index) else {
                 return;
             };
             if style.uses_external_renderer() {

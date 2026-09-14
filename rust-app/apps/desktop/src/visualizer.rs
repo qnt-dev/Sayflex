@@ -31,10 +31,10 @@ pub(crate) const INDICATOR_BAR_PROFILE: [f32; 10] =
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum VisualizerStyle {
-    #[default]
     VoiceOrb,
     SymmetricSpectrum,
     FluidRibbon,
+    #[default]
     BroadcastMic,
     CircularSpectrum,
     #[serde(alias = "flow_sphere_preview")]
@@ -138,6 +138,20 @@ impl WritingSlateSurface {
 }
 
 impl VisualizerStyle {
+    pub(crate) const fn released_or_default(self) -> Self {
+        match self {
+            Self::VoiceOrb | Self::SymmetricSpectrum | Self::FluidRibbon => Self::BroadcastMic,
+            released => released,
+        }
+    }
+
+    pub(crate) const fn from_selectable_index(index: i32) -> Option<Self> {
+        match Self::from_index(index) {
+            Some(Self::VoiceOrb | Self::SymmetricSpectrum | Self::FluidRibbon) => None,
+            style => style,
+        }
+    }
+
     pub(crate) const fn from_index(index: i32) -> Option<Self> {
         match index {
             0 => Some(Self::VoiceOrb),
@@ -948,9 +962,7 @@ pub(crate) fn new_recording_indicators() -> Result<
 
 pub(crate) fn indicator_preview_style_for_argument(argument: &str) -> Option<VisualizerStyle> {
     match argument {
-        "--indicator-preview" | "--indicator-preview=orb" => Some(VisualizerStyle::VoiceOrb),
-        "--indicator-preview=spectrum" => Some(VisualizerStyle::SymmetricSpectrum),
-        "--indicator-preview=ribbon" => Some(VisualizerStyle::FluidRibbon),
+        "--indicator-preview" => Some(VisualizerStyle::BroadcastMic),
         "--indicator-preview=mic" | "--indicator-preview=microphone" => {
             Some(VisualizerStyle::BroadcastMic)
         }
@@ -1066,9 +1078,10 @@ mod indicator_animation_tests {
     }
 
     #[test]
-    fn every_enabled_visualizer_has_a_live_settings_preview() {
-        for index in 0..8 {
-            let style = VisualizerStyle::from_index(index).expect("known visualizer index");
+    fn every_released_visualizer_has_a_live_settings_preview() {
+        for index in 3..8 {
+            let style =
+                VisualizerStyle::from_selectable_index(index).expect("released visualizer index");
             assert!(style.has_live_settings_preview(), "{style:?}");
         }
         assert!(!VisualizerStyle::Off.has_live_settings_preview());
@@ -1141,38 +1154,29 @@ mod indicator_animation_tests {
     #[test]
     fn every_visible_visualizer_choice_maps_to_a_style() {
         assert_eq!(
-            VisualizerStyle::from_index(0),
-            Some(VisualizerStyle::VoiceOrb)
-        );
-        assert_eq!(
-            VisualizerStyle::from_index(1),
-            Some(VisualizerStyle::SymmetricSpectrum)
-        );
-        assert_eq!(
-            VisualizerStyle::from_index(2),
-            Some(VisualizerStyle::FluidRibbon)
-        );
-        assert_eq!(
-            VisualizerStyle::from_index(3),
+            VisualizerStyle::from_selectable_index(3),
             Some(VisualizerStyle::BroadcastMic)
         );
         assert_eq!(
-            VisualizerStyle::from_index(4),
+            VisualizerStyle::from_selectable_index(4),
             Some(VisualizerStyle::CircularSpectrum)
         );
         assert_eq!(
-            VisualizerStyle::from_index(5),
+            VisualizerStyle::from_selectable_index(5),
             Some(VisualizerStyle::FlowSphere)
         );
         assert_eq!(
-            VisualizerStyle::from_index(6),
+            VisualizerStyle::from_selectable_index(6),
             Some(VisualizerStyle::WritingSlate)
         );
         assert_eq!(
-            VisualizerStyle::from_index(7),
+            VisualizerStyle::from_selectable_index(7),
             Some(VisualizerStyle::CompanionOrb)
         );
-        assert_eq!(VisualizerStyle::from_index(8), Some(VisualizerStyle::Off));
+        assert_eq!(
+            VisualizerStyle::from_selectable_index(8),
+            Some(VisualizerStyle::Off)
+        );
         assert_eq!(
             serde_json::to_string(&VisualizerStyle::FlowSphere).unwrap(),
             "\"flow_sphere\""
@@ -1189,6 +1193,46 @@ mod indicator_animation_tests {
             serde_json::from_str::<VisualizerStyle>("\"writing_slate_preview\"").unwrap(),
             VisualizerStyle::WritingSlate
         );
+    }
+
+    #[test]
+    fn retired_visualizers_cannot_be_selected() {
+        for index in 0..=2 {
+            assert_eq!(VisualizerStyle::from_selectable_index(index), None);
+        }
+        for index in 3..=8 {
+            assert!(
+                VisualizerStyle::from_selectable_index(index).is_some(),
+                "released visualizer index {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_indicator_surfaces_default_to_a_released_visualizer() {
+        i_slint_backend_testing::init_no_event_loop();
+        let (indicator, _) = super::new_indicator().expect("recording indicator");
+
+        assert_eq!(
+            indicator.get_visualizer_style(),
+            VisualizerStyle::BroadcastMic.index()
+        );
+        assert!(indicator.get_transparent_surface());
+    }
+
+    #[test]
+    fn retired_visualizer_preview_arguments_are_not_addressable() {
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview"),
+            Some(VisualizerStyle::BroadcastMic)
+        );
+        for argument in [
+            "--indicator-preview=orb",
+            "--indicator-preview=spectrum",
+            "--indicator-preview=ribbon",
+        ] {
+            assert_eq!(indicator_preview_style_for_argument(argument), None);
+        }
     }
 
     #[test]

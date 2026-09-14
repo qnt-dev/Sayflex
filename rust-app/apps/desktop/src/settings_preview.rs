@@ -488,7 +488,7 @@ fn wire(settings: &SettingsWindow) {
         let weak = settings.as_weak();
         settings.on_select_visualizer(move |index| {
             if let Some(settings) = weak.upgrade() {
-                let Some(style) = VisualizerStyle::from_index(index) else {
+                let Some(style) = VisualizerStyle::from_selectable_index(index) else {
                     return;
                 };
                 settings.set_selected_visualizer(style.index());

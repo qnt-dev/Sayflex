@@ -439,14 +439,10 @@ msgstr "Сфера з частинками"
 msgid "Flow Sphere palette updated for the next dictation."
 msgstr "Палітру Flow Sphere оновлено для наступного диктування."
 
-msgid "Fluid ribbon"
-msgstr "Жива стрічка"
 
 msgid "Follow Windows settings"
 msgstr "Як у Windows"
 
-msgid "Follows the level of your voice"
-msgstr "Стежить за рівнем вашого голосу"
 
 msgid "Foreign text is translated into this language"
 msgstr "Текст іноземною мовою перекладається на цю мову"
@@ -766,8 +762,6 @@ msgstr "На вибраному тексті"
 msgid "On this device"
 msgstr "На цьому пристрої"
 
-msgid "One line that thickens with the voice"
-msgstr "Одна лінія, яка згущується разом із голосом"
 
 msgid "Only for models trained for it"
 msgstr "Тільки для моделей, навчених для цього"
@@ -1030,8 +1024,6 @@ msgstr "Вихідний текст"
 msgid "Spanish"
 msgstr "Іспанська"
 
-msgid "Spectrum"
-msgstr "Спектр"
 
 msgid "Speech"
 msgstr "Мова"
@@ -1201,8 +1193,6 @@ msgstr "Робочий процес зупинився до підтвердже
 msgid "There is no transcript to insert yet."
 msgstr "Ще немає розшифровки для вставлення."
 
-msgid "Thirty-two bands, thirty-one times a second"
-msgstr "Тридцять дві смуги, тридцять один раз на секунду"
 
 msgid "This build does not know this service"
 msgstr "Ця збірка не знає цю службу"
@@ -1336,8 +1326,6 @@ msgstr "Візуалізатор оновлений. У наступному д�
 msgid "Visuals"
 msgstr "Візуальні ефекти"
 
-msgid "Voice orb"
-msgstr "Голосова сфера"
 
 msgid "Vulkan"
 msgstr "Vulkan"
