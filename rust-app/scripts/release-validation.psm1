@@ -1,5 +1,34 @@
 Set-StrictMode -Version Latest
 
+function Get-SayFlexInteractiveSmokeCheckIds {
+    @(
+        'dictation_editor'
+        'dictation_browser'
+        'dictation_terminal'
+        'translation_popup'
+        'translation_orig'
+        'translation_dual'
+        'translation_pin_resize'
+        'translation_multi_pin'
+        'translation_click_away'
+        'translation_quota_fallback'
+        'translation_bad_key'
+        'translation_no_providers'
+        'translation_timeout'
+        'translation_unsupported_pair'
+        'translation_empty_source'
+        'translation_ctrl_enter'
+        'translation_copy'
+        'translation_swap'
+        'microphone_switch'
+        'provider_fallback'
+        'settings_wheel_touchpad_rail'
+        'recording_visuals'
+        'fresh_install'
+        'upgrade_install'
+    )
+}
+
 function Get-InstallerArtifactFailures {
     [CmdletBinding()]
     param(
@@ -352,4 +381,4 @@ function Get-MsixArtifactFailures {
     return $failures
 }
 
-Export-ModuleMember -Function Get-InstallerArtifactFailures, Get-SmokeEvidenceFailures, Get-MsixLayoutFailures, Get-MsixArtifactFailures
+Export-ModuleMember -Function Get-SayFlexInteractiveSmokeCheckIds, Get-InstallerArtifactFailures, Get-SmokeEvidenceFailures, Get-MsixLayoutFailures, Get-MsixArtifactFailures

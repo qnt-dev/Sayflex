@@ -3,6 +3,45 @@ $ErrorActionPreference = 'Stop'
 $module = Join-Path $PSScriptRoot '..\release-validation.psm1'
 Import-Module $module -Force
 
+Describe 'SayFlex installed smoke contract' {
+    It 'publishes one authoritative interactive check catalog' {
+        Get-Command Get-SayFlexInteractiveSmokeCheckIds -ErrorAction SilentlyContinue |
+            Should Not BeNullOrEmpty
+    }
+
+    It 'requires every release interaction and translation outcome separately' {
+        $actual = @(Get-SayFlexInteractiveSmokeCheckIds)
+        $expected = @(
+            'dictation_editor'
+            'dictation_browser'
+            'dictation_terminal'
+            'translation_popup'
+            'translation_orig'
+            'translation_dual'
+            'translation_pin_resize'
+            'translation_multi_pin'
+            'translation_click_away'
+            'translation_quota_fallback'
+            'translation_bad_key'
+            'translation_no_providers'
+            'translation_timeout'
+            'translation_unsupported_pair'
+            'translation_empty_source'
+            'translation_ctrl_enter'
+            'translation_copy'
+            'translation_swap'
+            'microphone_switch'
+            'provider_fallback'
+            'settings_wheel_touchpad_rail'
+            'recording_visuals'
+            'fresh_install'
+            'upgrade_install'
+        )
+
+        ($actual -join ',') | Should Be ($expected -join ',')
+    }
+}
+
 Describe 'SayFlex installer artifact validation' {
     BeforeEach {
         $script:fixture = Join-Path $TestDrive 'SayFlex-0.7.0-win-x64-setup.exe'

@@ -54,23 +54,7 @@ try {
     Set-SmokeResult 'artifact_identity' 'FAIL' $_.Exception.Message
 }
 
-$interactive = @(
-    'dictation_editor',
-    'dictation_browser',
-    'dictation_terminal',
-    'translation_popup',
-    'translation_orig',
-    'translation_dual',
-    'translation_pin_resize',
-    'translation_multi_pin',
-    'translation_click_away',
-    'microphone_switch',
-    'provider_fallback',
-    'settings_wheel_touchpad_rail',
-    'recording_visuals',
-    'fresh_install',
-    'upgrade_install'
-)
+$interactive = @(Get-SayFlexInteractiveSmokeCheckIds)
 foreach ($id in $interactive) {
     Set-SmokeResult $id 'NOT_RUN' 'No witnessed evidence was supplied for this installed artifact.'
 }
