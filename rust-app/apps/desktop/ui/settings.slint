@@ -236,11 +236,13 @@ export component SettingsWindow inherits Window {
     in-out property <int> selected-circular-palette: 0;
     in-out property <int> selected-broadcast-mic-palette: 0;
     in-out property <int> selected-flow-sphere-palette: 0;
+    in-out property <int> selected-pulse-matrix-palette: 0;
     in-out property <int> selected-writing-slate-surface: 0;
     in property <[float]> visual-preview-bars;
     in property <[float]> visual-preview-spectrum;
     in property <[SlateLine]> visual-preview-slate-lines;
     in property <image> visual-preview-flow-sphere-frame;
+    in property <image> visual-preview-pulse-matrix-frame;
     in property <image> visual-preview-companion-frame;
     in property <bool> visual-preview-processing: false;
     in property <float> visual-preview-signal-opacity: 0.8;
@@ -273,6 +275,7 @@ export component SettingsWindow inherits Window {
     callback select-circular-palette(int);
     callback select-broadcast-mic-palette(int);
     callback select-flow-sphere-palette(int);
+    callback select-pulse-matrix-palette(int);
     callback select-writing-slate-surface(int);
     callback set-translation-enabled(bool);
     callback set-translation-delivery(string);
@@ -520,11 +523,13 @@ export component SettingsWindow inherits Window {
                     circular-palette: root.selected-circular-palette;
                     broadcast-mic-palette: root.selected-broadcast-mic-palette;
                     sphere-palette: root.selected-flow-sphere-palette;
+                    pulse-matrix-palette: root.selected-pulse-matrix-palette;
                     slate-surface: root.selected-writing-slate-surface;
                     preview-bars: root.visual-preview-bars;
                     preview-spectrum: root.visual-preview-spectrum;
                     preview-slate-lines: root.visual-preview-slate-lines;
                     preview-flow-sphere-frame: root.visual-preview-flow-sphere-frame;
+                    preview-pulse-matrix-frame: root.visual-preview-pulse-matrix-frame;
                     preview-companion-frame: root.visual-preview-companion-frame;
                     preview-processing: root.visual-preview-processing;
                     preview-signal-opacity: root.visual-preview-signal-opacity;
@@ -544,6 +549,7 @@ export component SettingsWindow inherits Window {
                     select-circular-palette(index) => { root.select-circular-palette(index); }
                     select-broadcast-mic-palette(index) => { root.select-broadcast-mic-palette(index); }
                     select-sphere-palette(index) => { root.select-flow-sphere-palette(index); }
+                    select-pulse-matrix-palette(index) => { root.select-pulse-matrix-palette(index); }
                     select-slate-surface(index) => { root.select-writing-slate-surface(index); }
                 }
 

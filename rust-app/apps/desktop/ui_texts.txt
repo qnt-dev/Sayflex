@@ -109,6 +109,7 @@ CopyIt|Copy it
 BroadcastMic|Broadcast mic
 Circular|Circular
 FlowSphere|Flow sphere
+PulseMatrix|Pulse matrix
 WritingSlate|Writing slate
 CompanionOrb|Companion orb
 Dictation|Dictation
@@ -250,6 +251,7 @@ LatestDictationCancelled|The latest dictation was cancelled and cannot be insert
 WarmingBackend|Warming up on {backend}. If it fails, the search moves to the next one down.
 VisualMicrophoneDetail|Level bars beside a studio microphone
 VisualRingDetail|The spectrum wrapped into a ring
+VisualPulseMatrixDetail|Dots surface in waves with your voice
 VisualWordsDetail|The words as they are recognised
 VisualCompanionDetail|Stays where you put it, between dictations
 VisualCompanionHelp|Between dictations, point to the companion, hold Ctrl + Alt, and drag with the left mouse button. Its position is saved.
@@ -266,6 +268,7 @@ VisualizerUpdated|Visualizer updated. The next dictation uses the selected style
 BroadcastColourUpdated|Broadcast microphone colour updated for the next dictation.
 CircularPaletteUpdated|Circular spectrum palette updated for the next dictation.
 FlowPaletteUpdated|Flow Sphere palette updated for the next dictation.
+PulseMatrixPaletteUpdated|Pulse Matrix palette updated for the next dictation.
 SlateSurfaceUpdated|Writing Slate surface updated for the next dictation.
 HistoryCleared|Local voice and translation history cleared.
 ProviderKeyNeededForOnly|Add and save this provider's key before making it the only route.

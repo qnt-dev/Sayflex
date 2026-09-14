@@ -328,11 +328,13 @@ export component VisualsPage inherits HorizontalLayout {
     in property <int> circular-palette: 0;
     in property <int> broadcast-mic-palette: 0;
     in property <int> sphere-palette: 0;
+    in property <int> pulse-matrix-palette: 0;
     in property <int> slate-surface: 0;
     in property <[float]> preview-bars;
     in property <[float]> preview-spectrum;
     in property <[SlateLine]> preview-slate-lines;
     in property <image> preview-flow-sphere-frame;
+    in property <image> preview-pulse-matrix-frame;
     in property <image> preview-companion-frame;
     in property <bool> preview-processing: false;
     in property <float> preview-signal-opacity: 0.8;
@@ -353,6 +355,7 @@ export component VisualsPage inherits HorizontalLayout {
     callback select-circular-palette(int);
     callback select-broadcast-mic-palette(int);
     callback select-sphere-palette(int);
+    callback select-pulse-matrix-palette(int);
     callback select-slate-surface(int);
 
     spacing: 24px;
@@ -386,7 +389,7 @@ export component VisualsPage inherits HorizontalLayout {
                         vertical-alignment: center;
                     }
 
-                    if root.selected < 7 : RecordingVisual {
+                    if root.selected < 7 || root.selected == 9 : RecordingVisual {
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
                         visualizer-style: root.selected;
@@ -397,6 +400,7 @@ export component VisualsPage inherits HorizontalLayout {
                         spectrum-heights: root.preview-spectrum;
                         slate-lines: root.preview-slate-lines;
                         flow-sphere-frame: root.preview-flow-sphere-frame;
+                        pulse-matrix-frame: root.preview-pulse-matrix-frame;
                         processing: root.preview-processing;
                         signal-opacity: root.preview-signal-opacity;
                         disc-opacity: root.preview-disc-opacity;
@@ -447,7 +451,7 @@ export component VisualsPage inherits HorizontalLayout {
         // Only the approved release styles, plus off. The three retired panel
         // styles remain readable from old settings solely for migration.
         GridLayout {
-            height: 124px;
+            height: 190px;
             spacing: 6px;
             Row {
                 ChoiceTile { label: @tr("Broadcast mic"); selected: root.selected == 3; clicked => { root.select-visualizer(3); } }
@@ -457,7 +461,12 @@ export component VisualsPage inherits HorizontalLayout {
             Row {
                 ChoiceTile { label: @tr("Writing slate"); selected: root.selected == 6; clicked => { root.select-visualizer(6); } }
                 ChoiceTile { label: @tr("Companion orb"); selected: root.selected == 7; clicked => { root.select-visualizer(7); } }
+                ChoiceTile { label: @tr("Pulse matrix"); selected: root.selected == 9; clicked => { root.select-visualizer(9); } }
+            }
+            Row {
+                Rectangle { background: transparent; }
                 ChoiceTile { label: @tr("Off"); selected: root.selected == 8; clicked => { root.select-visualizer(8); } }
+                Rectangle { background: transparent; }
             }
         }
 
@@ -506,6 +515,20 @@ export component VisualsPage inherits HorizontalLayout {
                 { value: "1", label: @tr("Black and yellow") },
             ];
             chosen(value) => { root.select-sphere-palette(value == "0" ? 0 : 1); }
+        }
+
+        if root.selected == 9 : GroupLabel { text: @tr("PALETTE"); height: 30px; }
+        if root.selected == 9 : MenuButton {
+            text: root.pulse-matrix-palette == 0 ? @tr("Cyan")
+                : root.pulse-matrix-palette == 1 ? @tr("Graphite and silver") : @tr("Red and amber");
+            value: root.pulse-matrix-palette == 0 ? "0" : root.pulse-matrix-palette == 1 ? "1" : "2";
+            current-index: root.pulse-matrix-palette;
+            options: [
+                { value: "0", label: @tr("Cyan") },
+                { value: "1", label: @tr("Graphite and silver") },
+                { value: "2", label: @tr("Red and amber") },
+            ];
+            chosen(value) => { root.select-pulse-matrix-palette(value == "0" ? 0 : value == "1" ? 1 : 2); }
         }
 
         if root.selected == 6 : GroupLabel { text: @tr("SURFACE"); height: 30px; }

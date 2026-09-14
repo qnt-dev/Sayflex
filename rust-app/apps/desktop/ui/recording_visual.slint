@@ -13,14 +13,18 @@ export struct SlateLine {
 }
 
 export component RecordingVisual inherits Rectangle {
-    width: root.visualizer-style == 6
+    width: root.visualizer-style == 9
+        ? 128px
+        : root.visualizer-style == 6
         ? 128px
         : root.visualizer-style == 5
             ? 116px
             : root.visualizer-style == 4
                 ? 92px
                 : 118px;
-    height: root.visualizer-style == 6
+    height: root.visualizer-style == 9
+        ? 128px
+        : root.visualizer-style == 6
         ? 154px
         : root.visualizer-style == 5
             ? 116px
@@ -33,6 +37,7 @@ export component RecordingVisual inherits Rectangle {
     in property <int> circular-palette: 0;
     in property <int> broadcast-mic-palette: 0;
     in property <image> flow-sphere-frame;
+    in property <image> pulse-matrix-frame;
     in property <[SlateLine]> slate-lines;
     in property <int> writing-slate-surface: 0;
     property <bool> writing-slate-blue-glass: root.writing-slate-surface == 2;
@@ -82,6 +87,13 @@ export component RecordingVisual inherits Rectangle {
 
             if root.visualizer-style == 5 : Image {
                 source: root.flow-sphere-frame;
+                width: parent.width;
+                height: parent.height;
+                image-fit: contain;
+            }
+
+            if root.visualizer-style == 9 : Image {
+                source: root.pulse-matrix-frame;
                 width: parent.width;
                 height: parent.height;
                 image-fit: contain;
@@ -189,7 +201,9 @@ export component RecordingVisual inherits Rectangle {
             }
 
             HorizontalLayout {
-                visible: root.visualizer-style != 5 && root.visualizer-style != 6;
+                visible: root.visualizer-style != 5
+                    && root.visualizer-style != 6
+                    && root.visualizer-style != 9;
                 y: (parent.height - self.height) / 2;
                 height: root.visualizer-style == 4 ? 88px : 19px;
                 padding-left: root.visualizer-style >= 4 ? 0px : 9px;

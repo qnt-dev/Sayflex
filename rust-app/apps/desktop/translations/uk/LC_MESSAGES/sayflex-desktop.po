@@ -1464,3 +1464,21 @@ msgstr "Не вдалося відкрити сторінку підтримки
 
 msgid "Translate (Ctrl+Enter)"
 msgstr "Перекласти (Ctrl+Enter)"
+
+msgid "Pulse matrix"
+msgstr "Матриця імпульсів"
+
+msgid "Dots surface in waves with your voice"
+msgstr "Крапки з’являються хвилями в такт вашому голосу"
+
+msgid "Cyan"
+msgstr "Ціанова"
+
+msgid "Graphite and silver"
+msgstr "Графіт і срібло"
+
+msgid "Red and amber"
+msgstr "Червоно-бурштинова"
+
+msgid "Pulse Matrix palette updated for the next dictation."
+msgstr "Палітра «Матриці імпульсів» застосовуватиметься під час наступного диктування."

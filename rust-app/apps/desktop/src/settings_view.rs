@@ -48,6 +48,7 @@ use crate::{
         check_translation_provider_configuration, discard_provider_draft, edit_provider_draft,
         locate, row_display_name_localized, split_row_id, sync_providers, update_provider_draft,
     },
+    pulse_matrix::PulseMatrixPalette,
     settings_document::save_settings,
     settings_projection::{
         departure_badge_localized, departures, history_row_localized, privacy_claim_localized,
@@ -447,6 +448,7 @@ pub(crate) fn sync_action_settings(
     settings.set_selected_circular_palette(state.circular_spectrum_palette.index());
     settings.set_selected_broadcast_mic_palette(state.broadcast_mic_palette.index());
     settings.set_selected_flow_sphere_palette(state.flow_sphere_palette.index());
+    settings.set_selected_pulse_matrix_palette(state.pulse_matrix_palette.index());
     settings.set_selected_writing_slate_surface(state.writing_slate_surface.index());
     sync_visualizer_copy(&settings, state.visualizer_style);
 
@@ -489,6 +491,10 @@ pub(crate) fn sync_visualizer_copy(settings: &SettingsWindow, style: VisualizerS
         VisualizerStyle::FlowSphere => (
             text(locale, UiText::FlowSphere),
             text(locale, UiText::VisualFlowDetail),
+        ),
+        VisualizerStyle::PulseMatrix => (
+            text(locale, UiText::PulseMatrix),
+            text(locale, UiText::VisualPulseMatrixDetail),
         ),
         VisualizerStyle::WritingSlate => (
             text(locale, UiText::WritingSlate),
@@ -1950,6 +1956,29 @@ pub(crate) fn wire_settings(
                 text(
                     active_locale(state.borrow().ui_locale),
                     UiText::FlowPaletteUpdated,
+                ),
+            );
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let indicator_animation = Rc::clone(indicator_animation);
+        settings.on_select_pulse_matrix_palette(move |index| {
+            let Some(palette) = PulseMatrixPalette::from_index(index) else {
+                return;
+            };
+            state.borrow_mut().pulse_matrix_palette = palette;
+            indicator_animation
+                .borrow_mut()
+                .set_pulse_matrix_palette(palette);
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
+            set_indicator_status(
+                &settings_weak,
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::PulseMatrixPaletteUpdated,
                 ),
             );
         });

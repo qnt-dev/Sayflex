@@ -20,6 +20,7 @@ use preview_modes::{
     translation_presentation_probe_cycles, translation_preview_mode,
 };
 use providers_view::sync_providers;
+use pulse_matrix::PulseMatrixPalette;
 use rust_app_core::{
     BeginDisposition, EndDisposition, LayoutCandidate, SessionPhase, SessionRegistry,
     dictation::{CompletionDelivery, HistoryUpdate, plan_completion},
@@ -79,6 +80,7 @@ mod localization;
 mod overlay_presenter;
 mod preview_modes;
 mod providers_view;
+mod pulse_matrix;
 mod settings_document;
 mod settings_preview;
 mod settings_projection;
@@ -397,6 +399,7 @@ struct AppState {
     circular_spectrum_palette: CircularSpectrumPalette,
     broadcast_mic_palette: BroadcastMicPalette,
     flow_sphere_palette: flow_sphere::FlowSpherePalette,
+    pulse_matrix_palette: PulseMatrixPalette,
     writing_slate_surface: WritingSlateSurface,
     companion_home_position: Option<(i32, i32)>,
     input_ready: bool,
@@ -515,6 +518,7 @@ impl AppState {
             circular_spectrum_palette: saved_settings.circular_spectrum_palette,
             broadcast_mic_palette: saved_settings.broadcast_mic_palette,
             flow_sphere_palette: saved_settings.flow_sphere_palette,
+            pulse_matrix_palette: saved_settings.pulse_matrix_palette,
             writing_slate_surface: saved_settings.writing_slate_surface,
             companion_home_position: saved_settings.companion_home_position,
             input_ready: false,
@@ -839,6 +843,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     indicator_animation
         .borrow_mut()
         .set_flow_sphere_palette(saved_settings.flow_sphere_palette);
+    indicator_animation
+        .borrow_mut()
+        .set_pulse_matrix_palette(saved_settings.pulse_matrix_palette);
     recording_overlays.set_style(saved_settings.visualizer_style);
     recording_overlays.set_circular_palette(saved_settings.circular_spectrum_palette);
     recording_overlays.set_broadcast_mic_palette(saved_settings.broadcast_mic_palette);

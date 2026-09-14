@@ -1099,6 +1099,7 @@ mod tests {
             "Flow sphere",
             "Writing slate",
             "Companion orb",
+            "Pulse matrix",
             "Off",
         ] {
             assert!(

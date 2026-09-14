@@ -1464,3 +1464,21 @@ msgstr "Die Support-Seite konnte nicht geöffnet werden: {error}"
 
 msgid "Translate (Ctrl+Enter)"
 msgstr "Übersetzen (Strg+Enter)"
+
+msgid "Pulse matrix"
+msgstr "Impulsmatrix"
+
+msgid "Dots surface in waves with your voice"
+msgstr "Die Punkte erscheinen wellenförmig im Takt Ihrer Stimme"
+
+msgid "Cyan"
+msgstr "Cyanblau"
+
+msgid "Graphite and silver"
+msgstr "Graphit und Silber"
+
+msgid "Red and amber"
+msgstr "Rot und Bernstein"
+
+msgid "Pulse Matrix palette updated for the next dictation."
+msgstr "Die Palette der Pulsmatrix wird bei der nächsten Diktation verwendet."

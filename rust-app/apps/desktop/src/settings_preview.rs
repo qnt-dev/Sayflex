@@ -19,6 +19,7 @@ use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use crate::{
     Fact, FirstRunWindow, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow,
     TranslatorWindow,
+    pulse_matrix::PulseMatrixPalette,
     visualizer::{
         BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, VisualizerStyle,
         WritingSlateSurface, new_settings_preview,
@@ -523,6 +524,17 @@ fn wire(settings: &SettingsWindow) {
         settings.on_select_flow_sphere_palette(move |index| {
             if let Some(settings) = weak.upgrade() {
                 settings.set_selected_flow_sphere_palette(index.clamp(0, 1));
+            }
+        });
+    }
+    {
+        let weak = settings.as_weak();
+        settings.on_select_pulse_matrix_palette(move |index| {
+            let Some(settings) = weak.upgrade() else {
+                return;
+            };
+            if let Some(palette) = PulseMatrixPalette::from_index(index) {
+                settings.set_selected_pulse_matrix_palette(palette.index());
             }
         });
     }

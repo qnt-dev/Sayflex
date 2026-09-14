@@ -1464,3 +1464,21 @@ msgstr "Поддержать разработчика"
 
 msgid "Could not open the support page: {error}"
 msgstr "Не удалось открыть страницу поддержки: {error}"
+
+msgid "Pulse matrix"
+msgstr "Матрица импульсов"
+
+msgid "Dots surface in waves with your voice"
+msgstr "Точки проявляются волнами в такт вашему голосу"
+
+msgid "Cyan"
+msgstr "Циановая"
+
+msgid "Graphite and silver"
+msgstr "Графит и серебро"
+
+msgid "Red and amber"
+msgstr "Красно-янтарная"
+
+msgid "Pulse Matrix palette updated for the next dictation."
+msgstr "Палитра «Матрицы импульсов» применится при следующей диктовке."

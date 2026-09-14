@@ -35,6 +35,7 @@ use crate::{
     start_indicator_animation, unix_ms,
     visualizer::{
         CircularSpectrumPalette, IndicatorMode, VisualizerStyle, WritingSlateSurface,
+        indicator_preview_pulse_matrix_palette_for_argument,
         indicator_preview_slate_surface_for_argument, indicator_preview_style_for_argument,
         new_indicator,
     },
@@ -107,6 +108,12 @@ pub(crate) fn indicator_preview_flow_sphere_palette() -> flow_sphere::FlowSphere
         .unwrap_or_default()
 }
 
+pub(crate) fn indicator_preview_pulse_matrix_palette() -> crate::pulse_matrix::PulseMatrixPalette {
+    env::args()
+        .find_map(|argument| indicator_preview_pulse_matrix_palette_for_argument(&argument))
+        .unwrap_or_default()
+}
+
 pub(crate) fn translation_preview_mode() -> Option<bool> {
     env::args().find_map(|argument| match argument.as_str() {
         "--translation-preview" => Some(false),
@@ -127,6 +134,7 @@ pub(crate) fn run_indicator_preview(
         let mut animation = animation.borrow_mut();
         animation.set_style(style);
         animation.set_flow_sphere_palette(indicator_preview_flow_sphere_palette());
+        animation.set_pulse_matrix_palette(indicator_preview_pulse_matrix_palette());
         animation.begin_listening();
     }
     indicator.set_visualizer_style(style.index());

@@ -1464,3 +1464,21 @@ msgstr "Não foi possível abrir a página de apoio: {error}"
 
 msgid "Translate (Ctrl+Enter)"
 msgstr "Traduzir (Ctrl+Enter)"
+
+msgid "Pulse matrix"
+msgstr "Matriz de pulsos"
+
+msgid "Dots surface in waves with your voice"
+msgstr "Os pontos surgem em ondas no ritmo da sua voz"
+
+msgid "Cyan"
+msgstr "Ciano"
+
+msgid "Graphite and silver"
+msgstr "Grafite e prata"
+
+msgid "Red and amber"
+msgstr "Vermelho e âmbar"
+
+msgid "Pulse Matrix palette updated for the next dictation."
+msgstr "A paleta da Matriz de pulsos será aplicada no próximo ditado."

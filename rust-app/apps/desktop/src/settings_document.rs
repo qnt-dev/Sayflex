@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{
     AppState, BroadcastMicPalette, CircularSpectrumPalette, DEFAULT_TRANSLATION_BLUR_RADIUS,
     MAX_TRANSLATION_BLUR_RADIUS, TextActionMode, TranslationDelivery, VisualizerStyle,
-    WritingSlateSurface, flow_sphere, localization::UiLocale,
+    WritingSlateSurface, flow_sphere, localization::UiLocale, pulse_matrix,
     speech_backend::SpeechBackendPreference,
 };
 
@@ -185,6 +185,7 @@ pub(crate) struct SavedSettings {
     pub(crate) circular_spectrum_palette: CircularSpectrumPalette,
     pub(crate) broadcast_mic_palette: BroadcastMicPalette,
     pub(crate) flow_sphere_palette: flow_sphere::FlowSpherePalette,
+    pub(crate) pulse_matrix_palette: pulse_matrix::PulseMatrixPalette,
     pub(crate) writing_slate_surface: WritingSlateSurface,
     pub(crate) companion_home_position: Option<(i32, i32)>,
     pub(crate) selected_translation_tier: Option<TranslationTier>,
@@ -218,6 +219,7 @@ impl Default for SavedSettings {
             circular_spectrum_palette: CircularSpectrumPalette::default(),
             broadcast_mic_palette: BroadcastMicPalette::default(),
             flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
+            pulse_matrix_palette: pulse_matrix::PulseMatrixPalette::default(),
             writing_slate_surface: WritingSlateSurface::default(),
             companion_home_position: None,
             selected_translation_tier: None,
@@ -305,6 +307,11 @@ impl<'de> Deserialize<'de> for SavedSettings {
         );
         read(
             &document,
+            "pulse_matrix_palette",
+            &mut settings.pulse_matrix_palette,
+        );
+        read(
+            &document,
             "writing_slate_surface",
             &mut settings.writing_slate_surface,
         );
@@ -389,6 +396,7 @@ impl SavedSettings {
             circular_spectrum_palette: state.circular_spectrum_palette,
             broadcast_mic_palette: state.broadcast_mic_palette,
             flow_sphere_palette: state.flow_sphere_palette,
+            pulse_matrix_palette: state.pulse_matrix_palette,
             writing_slate_surface: state.writing_slate_surface,
             companion_home_position: state.companion_home_position,
             selected_translation_tier: state.selected_translation_tier,
@@ -499,7 +507,7 @@ mod settings_document_tests {
         TranslationLanguage, TranslationTier,
     };
 
-    use crate::speech_backend::SpeechBackend;
+    use crate::{pulse_matrix::PulseMatrixPalette, speech_backend::SpeechBackend};
     use tempfile::tempdir;
 
     use super::{
@@ -559,6 +567,7 @@ mod settings_document_tests {
             settings.broadcast_mic_palette,
             defaults.broadcast_mic_palette
         );
+        assert_eq!(settings.pulse_matrix_palette, defaults.pulse_matrix_palette);
         assert_eq!(
             settings.writing_slate_surface,
             defaults.writing_slate_surface
@@ -657,6 +666,7 @@ mod settings_document_tests {
             companion_home_position: Some((-640, 320)),
             visualizer_style: VisualizerStyle::default(),
             broadcast_mic_palette: BroadcastMicPalette::Red,
+            pulse_matrix_palette: PulseMatrixPalette::RedAmber,
             text_action_mode: TextActionMode::default(),
             ..SavedSettings::default()
         };

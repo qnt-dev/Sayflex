@@ -199,14 +199,18 @@ export component RecordingIndicator inherits Window {
     in property <string> indicator-title: @tr("SayFlex Recording Indicator");
     title: root.indicator-title;
     icon: @image-url("../assets/tray-icon.svg");
-    width: root.visualizer-style == 6
+    width: root.visualizer-style == 9
+        ? 128px
+        : root.visualizer-style == 6
         ? 128px
         : root.visualizer-style == 5
             ? 116px
             : root.visualizer-style == 4
                 ? 92px
                 : 118px;
-    height: root.visualizer-style == 6
+    height: root.visualizer-style == 9
+        ? 128px
+        : root.visualizer-style == 6
         ? 154px
         : root.visualizer-style == 5
             ? 116px
@@ -224,6 +228,7 @@ export component RecordingIndicator inherits Window {
     in property <int> circular-palette: 0;
     in property <int> broadcast-mic-palette: 0;
     in property <image> flow-sphere-frame;
+    in property <image> pulse-matrix-frame;
     in property <[SlateLine]> slate-lines;
     in property <int> writing-slate-surface: 0;
     property <bool> writing-slate-blue-glass: root.writing-slate-surface == 2;
@@ -258,6 +263,7 @@ export component RecordingIndicator inherits Window {
         circular-palette: root.circular-palette;
         broadcast-mic-palette: root.broadcast-mic-palette;
         flow-sphere-frame: root.flow-sphere-frame;
+        pulse-matrix-frame: root.pulse-matrix-frame;
         slate-lines: root.slate-lines;
         writing-slate-surface: root.writing-slate-surface;
         writing-slate-glass-backdrop: root.writing-slate-glass-backdrop;

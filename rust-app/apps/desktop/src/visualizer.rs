@@ -21,7 +21,9 @@ use pet_orb::OrbActor;
 use pet_particles::Vec2;
 use pet_render::{Canvas, Sprite, SpriteSource};
 
-use crate::{RecordingIndicator, SettingsWindow, SlateLine, flow_sphere};
+use crate::{
+    RecordingIndicator, SettingsWindow, SlateLine, flow_sphere, pulse_matrix::PulseMatrixPalette,
+};
 
 pub(crate) const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -43,6 +45,7 @@ pub(crate) enum VisualizerStyle {
     WritingSlate,
     CompanionOrb,
     Off,
+    PulseMatrix,
 }
 
 /// Native composition is an HWND-creation-time contract, not a property to
@@ -163,6 +166,7 @@ impl VisualizerStyle {
             6 => Some(Self::WritingSlate),
             7 => Some(Self::CompanionOrb),
             8 => Some(Self::Off),
+            9 => Some(Self::PulseMatrix),
             _ => None,
         }
     }
@@ -178,6 +182,7 @@ impl VisualizerStyle {
             Self::WritingSlate => 6,
             Self::CompanionOrb => 7,
             Self::Off => 8,
+            Self::PulseMatrix => 9,
         }
     }
 
@@ -187,7 +192,8 @@ impl VisualizerStyle {
             | Self::CircularSpectrum
             | Self::FlowSphere
             | Self::WritingSlate
-            | Self::CompanionOrb => Some(RecordingSurface::Transparent),
+            | Self::CompanionOrb
+            | Self::PulseMatrix => Some(RecordingSurface::Transparent),
             Self::VoiceOrb | Self::SymmetricSpectrum | Self::FluidRibbon => {
                 Some(RecordingSurface::Panel)
             }
@@ -234,8 +240,10 @@ pub(crate) struct IndicatorAnimation {
     pub(crate) mode_progress: f32,
     pub(crate) flow_voice_impulse: f32,
     pub(crate) flow_sphere_palette: flow_sphere::FlowSpherePalette,
+    pub(crate) pulse_matrix_palette: PulseMatrixPalette,
     pub(crate) last_frame: Instant,
     pub(crate) flow_sphere_renderer: Option<flow_sphere::FlowSphereRenderer>,
+    pub(crate) pulse_matrix_renderer: Option<crate::pulse_matrix::PulseMatrixRenderer>,
     companion_preview_renderer: Option<CompanionPreviewRenderer>,
     pub(crate) writing_slate: WritingSlateAnimation,
 }
@@ -530,19 +538,27 @@ impl IndicatorAnimation {
             mode_progress: 0.0,
             flow_voice_impulse: 0.0,
             flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
+            pulse_matrix_palette: PulseMatrixPalette::default(),
             last_frame: Instant::now(),
             flow_sphere_renderer: None,
+            pulse_matrix_renderer: None,
             companion_preview_renderer: None,
             writing_slate: WritingSlateAnimation::default(),
         }
     }
 
     pub(crate) fn set_style(&mut self, style: VisualizerStyle) {
+        let style = style.released_or_default();
         self.style = style;
         if style == VisualizerStyle::FlowSphere && self.flow_sphere_renderer.is_none() {
             self.flow_sphere_renderer = Some(flow_sphere::FlowSphereRenderer::start());
         } else if style != VisualizerStyle::FlowSphere {
             self.flow_sphere_renderer = None;
+        }
+        if style == VisualizerStyle::PulseMatrix && self.pulse_matrix_renderer.is_none() {
+            self.pulse_matrix_renderer = Some(crate::pulse_matrix::PulseMatrixRenderer::start());
+        } else if style != VisualizerStyle::PulseMatrix {
+            self.pulse_matrix_renderer = None;
         }
         if style == VisualizerStyle::CompanionOrb && self.companion_preview_renderer.is_none() {
             self.companion_preview_renderer = CompanionPreviewRenderer::new().ok();
@@ -553,6 +569,10 @@ impl IndicatorAnimation {
 
     pub(crate) fn set_flow_sphere_palette(&mut self, palette: flow_sphere::FlowSpherePalette) {
         self.flow_sphere_palette = palette;
+    }
+
+    pub(crate) fn set_pulse_matrix_palette(&mut self, palette: PulseMatrixPalette) {
+        self.pulse_matrix_palette = palette;
     }
 
     pub(crate) fn begin_listening(&mut self) {
@@ -633,6 +653,18 @@ impl IndicatorAnimation {
         } else {
             None
         };
+        let pulse_matrix_frame = if self.style == VisualizerStyle::PulseMatrix {
+            self.pulse_matrix_renderer.as_ref().and_then(|renderer| {
+                renderer.render_latest(
+                    self.phase,
+                    self.display_level,
+                    self.pulse_matrix_palette,
+                    frame.visual_opacity,
+                )
+            })
+        } else {
+            None
+        };
 
         for indicator in indicators {
             indicator.set_visualizer_style(self.style.index());
@@ -654,6 +686,9 @@ impl IndicatorAnimation {
             indicator.set_visual_opacity(frame.visual_opacity);
             if let Some(flow_frame) = &flow_frame {
                 indicator.set_flow_sphere_frame(flow_frame.clone());
+            }
+            if let Some(pulse_matrix_frame) = &pulse_matrix_frame {
+                indicator.set_pulse_matrix_frame(pulse_matrix_frame.clone());
             }
         }
     }
@@ -687,7 +722,7 @@ impl IndicatorAnimation {
     /// as the recording overlay.  The microphone signal is synthetic so the
     /// choices remain comparable without starting a recording.
     pub(crate) fn tick_settings_preview(&mut self, settings: &SettingsWindow) {
-        let selected = VisualizerStyle::from_index(settings.get_selected_visualizer());
+        let selected = VisualizerStyle::from_selectable_index(settings.get_selected_visualizer());
         if !settings.window().is_visible()
             || settings.get_active_page() != 5
             || selected.is_none_or(|style| !style.has_live_settings_preview())
@@ -695,7 +730,10 @@ impl IndicatorAnimation {
             if self.mode != IndicatorMode::Hidden {
                 self.stop();
             }
-            if self.style == VisualizerStyle::FlowSphere {
+            if matches!(
+                self.style,
+                VisualizerStyle::FlowSphere | VisualizerStyle::PulseMatrix
+            ) {
                 self.set_style(VisualizerStyle::Off);
             }
             return;
@@ -708,6 +746,10 @@ impl IndicatorAnimation {
         }
         self.set_flow_sphere_palette(
             flow_sphere::FlowSpherePalette::from_index(settings.get_selected_flow_sphere_palette())
+                .unwrap_or_default(),
+        );
+        self.set_pulse_matrix_palette(
+            PulseMatrixPalette::from_index(settings.get_selected_pulse_matrix_palette())
                 .unwrap_or_default(),
         );
 
@@ -757,6 +799,18 @@ impl IndicatorAnimation {
         {
             settings.set_visual_preview_flow_sphere_frame(flow_frame);
         }
+
+        if style == VisualizerStyle::PulseMatrix
+            && let Some(renderer) = &self.pulse_matrix_renderer
+            && let Some(pulse_matrix_frame) = renderer.render_latest(
+                self.phase,
+                self.display_level,
+                self.pulse_matrix_palette,
+                1.0,
+            )
+        {
+            settings.set_visual_preview_pulse_matrix_frame(pulse_matrix_frame);
+        }
     }
 
     pub(crate) fn advance_frame(&mut self, frame_scale: f32) -> IndicatorFrame {
@@ -768,6 +822,12 @@ impl IndicatorAnimation {
                 0.34
             } else {
                 0.085
+            }
+        } else if self.style == VisualizerStyle::PulseMatrix {
+            if self.target_level > self.display_level {
+                0.2
+            } else {
+                0.075
             }
         } else {
             0.18
@@ -793,6 +853,9 @@ impl IndicatorAnimation {
         let phase_step = match self.mode {
             IndicatorMode::Listening if self.style == VisualizerStyle::FlowSphere => {
                 0.045 + flow_activity * 0.245 + self.flow_voice_impulse * 0.075
+            }
+            IndicatorMode::Listening if self.style == VisualizerStyle::PulseMatrix => {
+                0.035 + self.display_level * 0.075
             }
             IndicatorMode::Listening => 0.29,
             IndicatorMode::Processing => 0.18,
@@ -972,6 +1035,7 @@ pub(crate) fn indicator_preview_style_for_argument(argument: &str) -> Option<Vis
         "--indicator-preview=flow-sphere" | "--indicator-preview=sphere" => {
             Some(VisualizerStyle::FlowSphere)
         }
+        "--indicator-preview=pulse-matrix" => Some(VisualizerStyle::PulseMatrix),
         "--indicator-preview=slate" | "--indicator-preview=writing-slate" => {
             Some(VisualizerStyle::WritingSlate)
         }
@@ -989,6 +1053,7 @@ pub(crate) fn indicator_preview_style_for_argument(argument: &str) -> Option<Vis
         "--indicator-preview-live=flow-sphere" | "--indicator-preview-live=sphere" => {
             Some(VisualizerStyle::FlowSphere)
         }
+        "--indicator-preview-live=pulse-matrix" => Some(VisualizerStyle::PulseMatrix),
         "--indicator-preview-live=slate" | "--indicator-preview-live=writing-slate" => {
             Some(VisualizerStyle::WritingSlate)
         }
@@ -1001,6 +1066,21 @@ pub(crate) fn indicator_preview_style_for_argument(argument: &str) -> Option<Vis
         "--indicator-preview-live=slate-blue-glass"
         | "--indicator-preview-live=writing-slate-blue-glass" => {
             Some(VisualizerStyle::WritingSlate)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn indicator_preview_pulse_matrix_palette_for_argument(
+    argument: &str,
+) -> Option<PulseMatrixPalette> {
+    match argument {
+        "--pulse-matrix-palette=cyan" => Some(PulseMatrixPalette::Cyan),
+        "--pulse-matrix-palette=graphite-silver" | "--pulse-matrix-palette=graphite" => {
+            Some(PulseMatrixPalette::GraphiteSilver)
+        }
+        "--pulse-matrix-palette=red-amber" | "--pulse-matrix-palette=amber" => {
+            Some(PulseMatrixPalette::RedAmber)
         }
         _ => None,
     }
@@ -1038,9 +1118,10 @@ mod indicator_animation_tests {
     use super::{
         CircularSpectrumPalette, CompanionPreviewRenderer, IndicatorAnimation, IndicatorMode,
         RecordingSurface, SlateLine, VisualizerStyle, WritingSlateAnimation, WritingSlateSurface,
-        flow_sphere, indicator_preview_slate_surface_for_argument,
-        indicator_preview_style_for_argument,
+        flow_sphere, indicator_preview_pulse_matrix_palette_for_argument,
+        indicator_preview_slate_surface_for_argument, indicator_preview_style_for_argument,
     };
+    use crate::pulse_matrix::PulseMatrixPalette;
 
     fn animation() -> IndicatorAnimation {
         IndicatorAnimation::new(
@@ -1066,6 +1147,7 @@ mod indicator_animation_tests {
             VisualizerStyle::FlowSphere,
             VisualizerStyle::WritingSlate,
             VisualizerStyle::CompanionOrb,
+            VisualizerStyle::PulseMatrix,
         ] {
             assert_eq!(
                 style.recording_surface(),
@@ -1079,7 +1161,7 @@ mod indicator_animation_tests {
 
     #[test]
     fn every_released_visualizer_has_a_live_settings_preview() {
-        for index in 3..8 {
+        for index in [3, 4, 5, 6, 7, 9] {
             let style =
                 VisualizerStyle::from_selectable_index(index).expect("released visualizer index");
             assert!(style.has_live_settings_preview(), "{style:?}");
@@ -1178,6 +1260,10 @@ mod indicator_animation_tests {
             Some(VisualizerStyle::Off)
         );
         assert_eq!(
+            VisualizerStyle::from_selectable_index(9),
+            Some(VisualizerStyle::PulseMatrix)
+        );
+        assert_eq!(
             serde_json::to_string(&VisualizerStyle::FlowSphere).unwrap(),
             "\"flow_sphere\""
         );
@@ -1200,7 +1286,7 @@ mod indicator_animation_tests {
         for index in 0..=2 {
             assert_eq!(VisualizerStyle::from_selectable_index(index), None);
         }
-        for index in 3..=8 {
+        for index in 3..=9 {
             assert!(
                 VisualizerStyle::from_selectable_index(index).is_some(),
                 "released visualizer index {index}"
@@ -1233,6 +1319,58 @@ mod indicator_animation_tests {
         ] {
             assert_eq!(indicator_preview_style_for_argument(argument), None);
         }
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview=pulse-matrix"),
+            Some(VisualizerStyle::PulseMatrix)
+        );
+        assert_eq!(
+            indicator_preview_style_for_argument("--indicator-preview-live=pulse-matrix"),
+            Some(VisualizerStyle::PulseMatrix)
+        );
+    }
+
+    #[test]
+    fn pulse_matrix_renderer_lives_only_while_that_style_is_active() {
+        let mut animation = animation();
+        animation.set_style(VisualizerStyle::PulseMatrix);
+        assert!(animation.pulse_matrix_renderer.is_some());
+
+        animation.set_style(VisualizerStyle::BroadcastMic);
+        assert!(animation.pulse_matrix_renderer.is_none());
+    }
+
+    #[test]
+    fn pulse_matrix_preview_palette_arguments_are_explicit() {
+        assert_eq!(
+            indicator_preview_pulse_matrix_palette_for_argument(
+                "--pulse-matrix-palette=graphite-silver"
+            ),
+            Some(PulseMatrixPalette::GraphiteSilver)
+        );
+        assert_eq!(
+            indicator_preview_pulse_matrix_palette_for_argument("--pulse-matrix-palette=red-amber"),
+            Some(PulseMatrixPalette::RedAmber)
+        );
+        assert_eq!(
+            indicator_preview_pulse_matrix_palette_for_argument("--pulse-matrix-palette=green"),
+            None
+        );
+    }
+
+    #[test]
+    fn pulse_matrix_keeps_the_approved_calm_motion_timing() {
+        let mut animation = animation();
+        animation.set_style(VisualizerStyle::PulseMatrix);
+        animation.begin_listening();
+        animation.set_microphone_signal(0.64, &[]);
+        animation.advance_frame(1.0);
+
+        assert!(animation.phase >= 0.035);
+        assert!(
+            animation.phase <= 0.11,
+            "phase advanced too quickly: {}",
+            animation.phase
+        );
     }
 
     #[test]

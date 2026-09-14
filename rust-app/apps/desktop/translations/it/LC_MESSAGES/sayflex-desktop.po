@@ -1464,3 +1464,21 @@ msgstr "Impossibile aprire la pagina di supporto: {error}"
 
 msgid "Translate (Ctrl+Enter)"
 msgstr "Traduci (Ctrl+Invio)"
+
+msgid "Pulse matrix"
+msgstr "Matrice a impulsi"
+
+msgid "Dots surface in waves with your voice"
+msgstr "I punti compaiono a onde seguendo il ritmo della voce"
+
+msgid "Cyan"
+msgstr "Ciano"
+
+msgid "Graphite and silver"
+msgstr "Grafite e argento"
+
+msgid "Red and amber"
+msgstr "Rosso e ambra"
+
+msgid "Pulse Matrix palette updated for the next dictation."
+msgstr "La tavolozza della matrice di impulsi verrà usata alla prossima dettatura."

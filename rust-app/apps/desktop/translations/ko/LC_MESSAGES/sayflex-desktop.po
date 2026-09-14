@@ -1464,3 +1464,21 @@ msgstr "후원 페이지를 열 수 없습니다: {error}"
 
 msgid "Translate (Ctrl+Enter)"
 msgstr "번역 (Ctrl+Enter)"
+
+msgid "Pulse matrix"
+msgstr "펄스 매트릭스"
+
+msgid "Dots surface in waves with your voice"
+msgstr "음성에 맞춰 점들이 파동처럼 나타납니다"
+
+msgid "Cyan"
+msgstr "시안"
+
+msgid "Graphite and silver"
+msgstr "흑연과 은색"
+
+msgid "Red and amber"
+msgstr "레드 앰버"
+
+msgid "Pulse Matrix palette updated for the next dictation."
+msgstr "펄스 매트릭스 팔레트는 다음 받아쓰기부터 적용됩니다."
