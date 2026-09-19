@@ -1144,6 +1144,7 @@ mod startup_session_gate_tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let retries = Arc::new(AtomicUsize::new(0));
         let (failed_sender, failed_receiver) = mpsc::sync_channel(1);
+        let (ending_observed_sender, ending_observed_receiver) = mpsc::sync_channel(1);
         let worker_gate = Arc::clone(&gate);
         let worker_ending = Arc::clone(&session_is_ending);
         let worker_attempts = Arc::clone(&attempts);
@@ -1162,7 +1163,13 @@ mod startup_session_gate_tests {
                         Ok("worker")
                     }
                 },
-                || worker_ending.load(Ordering::Acquire),
+                || {
+                    let ending = worker_ending.load(Ordering::Acquire);
+                    if ending {
+                        let _ = ending_observed_sender.send(());
+                    }
+                    ending
+                },
                 || {
                     worker_retries.fetch_add(1, Ordering::Relaxed);
                 },
@@ -1173,6 +1180,9 @@ mod startup_session_gate_tests {
             .recv_timeout(Duration::from_secs(2))
             .unwrap();
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        ending_observed_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
         session_is_ending.store(false, Ordering::Release);
         // WM_ENDSESSION clears the process-wide flag before it publishes the
         // Cancelled event. Mirror that production ordering so the test cannot
