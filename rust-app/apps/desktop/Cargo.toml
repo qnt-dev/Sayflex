@@ -14,11 +14,11 @@ rust-app-core = { version = "0.8.0", path = "../../crates/app-core" }
 rust-model-manager = { version = "0.8.0", path = "../../crates/model-manager" }
 rust-platform-windows = { version = "0.8.0", path = "../../crates/platform-windows" }
 rust-protocol = { version = "0.8.0", path = "../../crates/protocol" }
+qrcode = { version = "0.14.1", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 slint.workspace = true
 unicode-segmentation.workspace = true
-url.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
@@ -28,6 +28,7 @@ winresource = "0.1.23"
 
 [dev-dependencies]
 i-slint-backend-testing = "1.17.1"
+rqrr = { version = "0.11.0", default-features = false }
 tempfile.workspace = true
 
 [features]

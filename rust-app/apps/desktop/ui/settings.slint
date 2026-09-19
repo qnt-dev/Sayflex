@@ -300,7 +300,6 @@ export component SettingsWindow inherits Window {
     callback update-provider-draft(string, string, string);
     callback discard-provider-draft(string);
     callback forget-provider-key(string);
-    in property <bool> support-visible: false;
     /// What the last save was refused for, and which row asked. Written by the
     /// one owner in Rust so the form cannot decide it locally and be wrong.
     in-out property <string> provider-problem;
@@ -873,7 +872,7 @@ export component SettingsWindow inherits Window {
                     }
                 }
 
-                if root.support-visible : HorizontalLayout {
+                HorizontalLayout {
                     alignment: end;
                     spacing: 10px;
                     VerticalLayout {

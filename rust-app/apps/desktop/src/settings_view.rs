@@ -1639,30 +1639,6 @@ fn remove_local_model(
     sync_providers(settings, state);
 }
 
-pub(crate) fn wire_support_action(settings: &SettingsWindow, support_url: Option<String>) {
-    let settings_weak = settings.as_weak();
-    settings.on_open_support(move || {
-        let Some(url) = support_url.as_deref() else {
-            return;
-        };
-        if let Err(error) = crate::support_action::open_configured_support(url) {
-            let locale = settings_weak
-                .upgrade()
-                .and_then(|settings| UiLocale::from_code(&settings.get_ui_locale()))
-                .map(active_locale)
-                .unwrap_or(UiLocale::English);
-            set_status_problem(
-                &settings_weak,
-                &render(
-                    locale,
-                    UiText::CouldNotOpenSupport,
-                    &[("error", &error.to_string())],
-                ),
-            );
-        }
-    });
-}
-
 pub(crate) fn wire_settings(
     settings: &SettingsWindow,
     translator: &TranslatorWindow,

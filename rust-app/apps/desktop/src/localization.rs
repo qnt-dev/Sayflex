@@ -2385,19 +2385,11 @@ mod tests {
     }
 
     #[test]
-    fn support_action_is_conditional_secondary_and_fits_in_every_locale() {
+    fn support_action_is_always_available_and_fits_in_every_locale() {
         use std::{cell::Cell, rc::Rc};
 
         use i_slint_backend_testing::{ElementHandle, ElementRoot};
         use slint::ComponentHandle;
-
-        let settings_ui = include_str!("../ui/settings.slint");
-        let about_ui = include_str!("../ui/pages_instruments.slint");
-        assert!(settings_ui.contains("if root.support-visible : HorizontalLayout"));
-        assert!(settings_ui.contains("label: @tr(\"Support the developer\")"));
-        assert!(settings_ui.contains("source: @image-url(\"../assets/action-coffee.svg\")"));
-        assert!(!about_ui.contains("label: @tr(\"Support the developer\")"));
-        assert!(!settings_ui.contains("buymeacoffee.com"));
 
         i_slint_backend_testing::init_no_event_loop();
         let seed = crate::SettingsWindow::new().expect("seed settings surface");
@@ -2443,24 +2435,14 @@ mod tests {
             i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
             let label = &entries["Support the developer"];
-            assert!(
-                ElementHandle::find_by_accessible_label(&settings, label)
-                    .next()
-                    .is_none(),
-                "{locale}: support action must be absent without configuration"
-            );
-
             let activations = Rc::new(Cell::new(0));
             let activations_from_callback = Rc::clone(&activations);
             settings.on_open_support(move || {
                 activations_from_callback.set(activations_from_callback.get() + 1);
             });
-            settings.set_support_visible(true);
-            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
-
             let action = ElementHandle::find_by_accessible_label(&settings, label)
                 .next()
-                .unwrap_or_else(|| panic!("{locale}: configured support action is missing"));
+                .unwrap_or_else(|| panic!("{locale}: support action is missing"));
             let position = action.absolute_position();
             let size = action.size();
             let surface = settings.root_element().size();
@@ -2494,7 +2476,6 @@ mod tests {
         ));
         let settings = crate::SettingsWindow::new().expect("settings surface");
         settings.set_active_page(8);
-        settings.set_support_visible(true);
         settings.show().expect("show headless settings surface");
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
@@ -2521,6 +2502,113 @@ mod tests {
         );
         assert_eq!(icon.size().width, 48.0, "coffee icon width");
         assert_eq!(icon.size().height, 48.0, "coffee icon height");
+        drop(seed);
+    }
+
+    #[test]
+    fn support_wallet_window_exposes_both_network_specific_copy_actions() {
+        use std::{cell::Cell, rc::Rc};
+
+        use i_slint_backend_testing::{ElementHandle, ElementRoot};
+        use slint::{ComponentHandle, Image};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let seed = crate::SupportWindow::new().expect("seed support surface");
+        for (locale, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            slint::select_bundled_translation(locale).expect("select translated bundle");
+            let entries = catalog(source);
+            let support = crate::SupportWindow::new().expect("support surface");
+            let destinations = crate::support_action::support_destinations();
+            support.set_bnb_address(destinations[0].address.into());
+            support.set_tron_address(destinations[1].address.into());
+            support.set_bnb_qr(Image::from_rgba8(
+                crate::support_action::render_qr_pixels(destinations[0].address).expect("BNB QR"),
+            ));
+            support.set_tron_qr(Image::from_rgba8(
+                crate::support_action::render_qr_pixels(destinations[1].address).expect("TRON QR"),
+            ));
+
+            let bnb_copies = Rc::new(Cell::new(0));
+            let bnb_copies_from_callback = Rc::clone(&bnb_copies);
+            support.on_copy_bnb(move || {
+                bnb_copies_from_callback.set(bnb_copies_from_callback.get() + 1)
+            });
+            let tron_copies = Rc::new(Cell::new(0));
+            let tron_copies_from_callback = Rc::clone(&tron_copies);
+            support.on_copy_tron(move || {
+                tron_copies_from_callback.set(tron_copies_from_callback.get() + 1)
+            });
+
+            support.show().expect("show headless support surface");
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+            let surface = support.root_element().size();
+            for (label, expected_address, copy_count) in [
+                (
+                    &entries["Copy BNB Smart Chain address"],
+                    destinations[0].address,
+                    &bnb_copies,
+                ),
+                (
+                    &entries["Copy TRON address"],
+                    destinations[1].address,
+                    &tron_copies,
+                ),
+            ] {
+                let action = ElementHandle::find_by_accessible_label(&support, label)
+                    .next()
+                    .unwrap_or_else(|| panic!("{locale}: missing {label:?}"));
+                let position = action.absolute_position();
+                let size = action.size();
+                assert!(
+                    position.x >= -0.5
+                        && position.y >= -0.5
+                        && position.x + size.width <= surface.width + 0.5
+                        && position.y + size.height <= surface.height + 0.5,
+                    "{locale}: {label:?} leaves the support surface"
+                );
+                assert!(
+                    ElementHandle::find_by_accessible_label(&support, expected_address)
+                        .next()
+                        .is_some(),
+                    "{locale}: public address is not exposed to accessibility"
+                );
+                action.invoke_accessible_default_action();
+                assert_eq!(copy_count.get(), 1, "{locale}: {label:?} did not fire");
+            }
+        }
         drop(seed);
     }
 

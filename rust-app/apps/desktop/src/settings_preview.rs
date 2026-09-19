@@ -18,13 +18,39 @@ use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::{
     Fact, FirstRunWindow, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow,
-    TranslatorWindow,
+    SupportWindow, TranslatorWindow,
     pulse_matrix::PulseMatrixPalette,
     visualizer::{
         BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, VisualizerStyle,
         WritingSlateSurface, new_settings_preview,
     },
 };
+
+pub(crate) fn support_wallet_preview_requested() -> bool {
+    std::env::args().any(|argument| argument == "--support-wallet-preview")
+}
+
+pub(crate) fn run_support_wallet_preview() -> Result<(), Box<dyn Error>> {
+    let requested_locale = std::env::args()
+        .find_map(|argument| argument.strip_prefix("--ui-locale=").map(str::to_owned))
+        .and_then(|code| crate::localization::UiLocale::from_code(&code))
+        .unwrap_or(crate::localization::UiLocale::English);
+    let system_locale = rust_platform_windows::user_locale_name();
+    let catalog_seed = SupportWindow::new()?;
+    slint::select_bundled_translation(requested_locale.resolved_code(&system_locale))?;
+    let support = SupportWindow::new()?;
+    drop(catalog_seed);
+    crate::support_action::configure_support_window(&support)?;
+    support.on_copy_bnb(|| {});
+    support.on_copy_tron(|| {});
+    support.on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+    });
+    support.show()?;
+    crate::configure_standard_app_window(&support, "Developer support preview");
+    slint::run_event_loop()?;
+    Ok(())
+}
 
 pub(crate) fn requested_first_run_state() -> Option<bool> {
     std::env::args().find_map(|argument| match argument.as_str() {
@@ -269,7 +295,6 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
         );
     }
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
-    settings.set_support_visible(std::env::args().any(|argument| argument == "--support-preview"));
     let preview_locale = crate::localization::UiLocale::from_code(&settings.get_ui_locale())
         .map(crate::localization::active_locale)
         .unwrap_or(crate::localization::UiLocale::English);

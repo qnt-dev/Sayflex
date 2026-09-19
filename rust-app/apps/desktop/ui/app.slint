@@ -4,13 +4,14 @@ import { ListView } from "std-widgets.slint";
 // on top of other people's applications and keep their own material. Splitting
 // them apart is what lets each be judged on its own terms.
 import { SettingsWindow } from "settings.slint";
+import { SupportWindow } from "support.slint";
 import { ModelRow, ProviderRow, HistoryRow, HotkeyRow } from "rows.slint";
 import { Fact } from "parts.slint";
 import { MenuOption, RowAction } from "controls.slint";
 import { Sheet } from "sheet.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
 
-export { SettingsWindow, ModelRow, ProviderRow, HistoryRow, HotkeyRow, Fact, MenuOption, SlateLine }
+export { SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, HotkeyRow, Fact, MenuOption, SlateLine }
 
 export struct TranslationPair {
     source: string,

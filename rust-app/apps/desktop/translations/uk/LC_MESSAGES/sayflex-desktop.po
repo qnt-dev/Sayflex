@@ -1459,9 +1459,6 @@ msgstr "Продовжити"
 msgid "Support the developer"
 msgstr "Підтримати розробника"
 
-msgid "Could not open the support page: {error}"
-msgstr "Не вдалося відкрити сторінку підтримки: {error}"
-
 msgid "Translate (Ctrl+Enter)"
 msgstr "Перекласти (Ctrl+Enter)"
 
@@ -1482,3 +1479,21 @@ msgstr "Червоно-бурштинова"
 
 msgid "Pulse Matrix palette updated for the next dictation."
 msgstr "Палітра «Матриці імпульсів» застосовуватиметься під час наступного диктування."
+
+msgid "Scan or copy a public wallet address."
+msgstr "Відскануйте QR-код або скопіюйте публічну адресу."
+
+msgid "Only send assets on the network shown on the card."
+msgstr "Надсилайте кошти лише через мережу, зазначену на картці."
+
+msgid "Copy BNB Smart Chain address"
+msgstr "Скопіювати адресу BNB Smart Chain"
+
+msgid "Copy TRON address"
+msgstr "Скопіювати адресу TRON"
+
+msgid "Address copied"
+msgstr "Адресу скопійовано"
+
+msgid "Close"
+msgstr "Закрити"

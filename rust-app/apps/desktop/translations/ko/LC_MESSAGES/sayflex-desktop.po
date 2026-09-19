@@ -1459,9 +1459,6 @@ msgstr "계속"
 msgid "Support the developer"
 msgstr "개발자 후원"
 
-msgid "Could not open the support page: {error}"
-msgstr "후원 페이지를 열 수 없습니다: {error}"
-
 msgid "Translate (Ctrl+Enter)"
 msgstr "번역 (Ctrl+Enter)"
 
@@ -1482,3 +1479,21 @@ msgstr "레드 앰버"
 
 msgid "Pulse Matrix palette updated for the next dictation."
 msgstr "펄스 매트릭스 팔레트는 다음 받아쓰기부터 적용됩니다."
+
+msgid "Scan or copy a public wallet address."
+msgstr "QR 코드를 스캔하거나 공개 주소를 복사하세요."
+
+msgid "Only send assets on the network shown on the card."
+msgstr "카드에 표시된 네트워크로만 자산을 보내세요."
+
+msgid "Copy BNB Smart Chain address"
+msgstr "BNB 스마트 체인 주소 복사"
+
+msgid "Copy TRON address"
+msgstr "TRON 주소 복사"
+
+msgid "Address copied"
+msgstr "주소가 복사되었습니다"
+
+msgid "Close"
+msgstr "닫기"

@@ -1459,9 +1459,6 @@ msgstr "Continuer"
 msgid "Support the developer"
 msgstr "Soutenir le développeur"
 
-msgid "Could not open the support page: {error}"
-msgstr "Impossible d’ouvrir la page de soutien : {error}"
-
 msgid "Translate (Ctrl+Enter)"
 msgstr "Traduire (Ctrl+Entrée)"
 
@@ -1482,3 +1479,21 @@ msgstr "Rouge et ambre"
 
 msgid "Pulse Matrix palette updated for the next dictation."
 msgstr "La palette de la matrice d'impulsions sera utilisée à la prochaine dictée."
+
+msgid "Scan or copy a public wallet address."
+msgstr "Scannez le code QR ou copiez une adresse publique."
+
+msgid "Only send assets on the network shown on the card."
+msgstr "Envoyez des fonds uniquement via le réseau indiqué sur la carte."
+
+msgid "Copy BNB Smart Chain address"
+msgstr "Copier l’adresse BNB Smart Chain"
+
+msgid "Copy TRON address"
+msgstr "Copier l’adresse TRON"
+
+msgid "Address copied"
+msgstr "Adresse copiée"
+
+msgid "Close"
+msgstr "Fermer"

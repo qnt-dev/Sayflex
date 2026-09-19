@@ -1462,9 +1462,6 @@ msgstr "Продолжить"
 msgid "Support the developer"
 msgstr "Поддержать разработчика"
 
-msgid "Could not open the support page: {error}"
-msgstr "Не удалось открыть страницу поддержки: {error}"
-
 msgid "Pulse matrix"
 msgstr "Матрица импульсов"
 
@@ -1482,3 +1479,21 @@ msgstr "Красно-янтарная"
 
 msgid "Pulse Matrix palette updated for the next dictation."
 msgstr "Палитра «Матрицы импульсов» применится при следующей диктовке."
+
+msgid "Scan or copy a public wallet address."
+msgstr "Отсканируйте QR-код или скопируйте публичный адрес."
+
+msgid "Only send assets on the network shown on the card."
+msgstr "Отправляйте средства только через сеть, указанную на карточке."
+
+msgid "Copy BNB Smart Chain address"
+msgstr "Скопировать адрес BNB Smart Chain"
+
+msgid "Copy TRON address"
+msgstr "Скопировать адрес TRON"
+
+msgid "Address copied"
+msgstr "Адрес скопирован"
+
+msgid "Close"
+msgstr "Закрыть"

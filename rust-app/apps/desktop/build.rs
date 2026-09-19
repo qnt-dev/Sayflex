@@ -3,7 +3,6 @@ include!("../../build/windows_manifest.rs");
 use std::{collections::BTreeMap, fs, path::Path};
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=SAYFLEX_SUPPORT_URL");
     embed_windows_manifest();
     generate_typed_ui_catalog();
     #[cfg(target_os = "windows")]

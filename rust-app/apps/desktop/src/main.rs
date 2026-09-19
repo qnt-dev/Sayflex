@@ -46,8 +46,7 @@ use settings_view::{
     precreate_action_windows, prepend_history_row, set_indicator_status, set_runtime_status,
     set_status_problem, show_layout_chooser, sync_action_settings, sync_history,
     sync_hotkey_capture_status, sync_models, sync_output_mode, sync_translation_models,
-    wire_action_palette, wire_chooser, wire_settings, wire_support_action, wire_translator,
-    wire_tray,
+    wire_action_palette, wire_chooser, wire_settings, wire_translator, wire_tray,
 };
 use slint::winit_030::{
     WinitWindowAccessor,
@@ -768,6 +767,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(download_recommended) = settings_preview::requested_first_run_state() {
         return settings_preview::run_first_run_preview(download_recommended);
     }
+    if settings_preview::support_wallet_preview_requested() {
+        return settings_preview::run_support_wallet_preview();
+    }
     if env::args().any(|argument| argument.starts_with("--settings-preview")) {
         return settings_preview::run_settings_preview();
     }
@@ -786,8 +788,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
     settings.set_app_version(env!("CARGO_PKG_VERSION").into());
-    let support_url = support_action::configured_support_url();
-    settings.set_support_visible(support_url.is_some());
+    let support = SupportWindow::new()?;
+    support_action::configure_support_window(&support)?;
     let loaded_settings = load_settings();
     let mut saved_settings = loaded_settings.settings;
     let system_locale = rust_platform_windows::user_locale_name();
@@ -1036,7 +1038,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    wire_support_action(&settings, support_url);
+    {
+        let workers = Rc::clone(&workers);
+        support_action::wire_support_with(&settings, &support, move |address| {
+            let _ = workers.input.send(&InputHostCommand::CopyText {
+                request_id: RequestId::new(),
+                text: address.to_owned(),
+            });
+        });
+    }
     wire_settings(
         &settings,
         &translator,
