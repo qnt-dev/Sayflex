@@ -313,24 +313,51 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    insertion.shutdown();
     let method = method.ok_or("insertion smoke timed out")?;
     let delivery = delivery.ok_or("insertion smoke did not report delivery confidence")?;
-    serde_json::to_writer(
-        io::stdout().lock(),
-        &serde_json::json!({
-            "session_id": session_id,
-            "method": format!("{method:?}"),
-            "delivery": format!("{delivery:?}"),
-            "dispatch_duration_ms": dispatch_duration_ms,
-            "clipboard_policy": match method {
-                rust_protocol::InsertionMethod::ClipboardTransaction => "transaction_restored",
-                rust_protocol::InsertionMethod::NativeEditMessage
-                | rust_protocol::InsertionMethod::WezTermCli => "untouched",
-            },
-            "chars": text.chars().count(),
-        }),
-    )?;
+    let result = serde_json::json!({
+        "session_id": session_id,
+        "method": format!("{method:?}"),
+        "delivery": format!("{delivery:?}"),
+        "dispatch_duration_ms": dispatch_duration_ms,
+        "clipboard_policy": match method {
+            rust_protocol::InsertionMethod::ClipboardTransaction => "transaction_restored",
+            rust_protocol::InsertionMethod::NativeEditMessage
+            | rust_protocol::InsertionMethod::WezTermCli => "untouched",
+        },
+        "chars": text.chars().count(),
+    });
+    let release_file = std::env::var_os("SAYFLEX_INSERTION_SMOKE_RELEASE_FILE").map(PathBuf::from);
+    if release_file.is_none() {
+        insertion.shutdown();
+    }
+    {
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        serde_json::to_writer(&mut writer, &result)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    if let Some(release_file) = release_file {
+        let timeout = std::env::var("SAYFLEX_INSERTION_SMOKE_RELEASE_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_secs(120));
+        let deadline = Instant::now() + timeout;
+        while !release_file.is_file() {
+            if Instant::now() >= deadline {
+                insertion.shutdown();
+                return Err(format!(
+                    "insertion smoke release signal timed out: {}",
+                    release_file.display()
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        insertion.shutdown();
+    }
     Ok(())
 }
 

@@ -7,6 +7,8 @@ Describe 'SayFlex installed smoke contract' {
     It 'publishes one authoritative interactive check catalog' {
         Get-Command Get-SayFlexInteractiveSmokeCheckIds -ErrorAction SilentlyContinue |
             Should Not BeNullOrEmpty
+        Get-Command Get-SayFlexAutomatedSmokeCheckIds -ErrorAction SilentlyContinue |
+            Should Not BeNullOrEmpty
     }
 
     It 'requires every release interaction and translation outcome separately' {
@@ -15,6 +17,8 @@ Describe 'SayFlex installed smoke contract' {
             'dictation_editor'
             'dictation_browser'
             'dictation_terminal'
+            'clipboard_delayed_image_firefox'
+            'clipboard_delayed_image_telegram'
             'translation_popup'
             'translation_orig'
             'translation_dual'
@@ -39,6 +43,17 @@ Describe 'SayFlex installed smoke contract' {
         )
 
         ($actual -join ',') | Should Be ($expected -join ',')
+        (@(Get-SayFlexAutomatedSmokeCheckIds) -join ',') |
+            Should Be 'clipboard_delayed_image_fixture'
+    }
+
+    It 'keeps witnessed evidence schema aligned with the interactive catalog' {
+        $schema = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\smoke-evidence.schema.json') -Raw |
+            ConvertFrom-Json
+        $schemaIds = @($schema.properties.checks.properties.PSObject.Properties.Name | Sort-Object)
+        $interactiveIds = @(Get-SayFlexInteractiveSmokeCheckIds | Sort-Object)
+
+        ($schemaIds -join ',') | Should Be ($interactiveIds -join ',')
     }
 }
 
@@ -154,12 +169,91 @@ Describe 'SayFlex witnessed smoke evidence validation' {
     }
 }
 
+Describe 'SayFlex delayed clipboard image evidence validation' {
+    BeforeEach {
+        $script:imageHash = ('a' * 64)
+        $script:receipt = [pscustomobject]@{
+            schema_version = 1
+            product = 'SayFlex'
+            input_host_sha256 = ('b' * 64)
+            witnessed_utc = '2026-09-19T12:30:00Z'
+            cases = @(
+                0, 1, 10, 60 | ForEach-Object {
+                    [pscustomobject]@{
+                        provider_process = 'SayFlex.DelayedImageProvider'
+                        consumer_process = 'FixtureConsumer'
+                        delay_seconds = $_
+                        source_sha256 = $script:imageHash
+                        received_sha256 = $script:imageHash
+                        responsive = $true
+                        provider_probe_exit_code = 0
+                        input_host_exit_code = 0
+                        consumer_probe_exit_code = 0
+                        status = 'PASS'
+                    }
+                }
+            )
+        }
+    }
+
+    It 'accepts exactly one successful case for every required delay and consumer' {
+        $failures = @(Get-DelayedClipboardImageReceiptFailures `
+            -Receipt $script:receipt `
+            -ExpectedDelays @(0, 1, 10, 60) `
+            -ExpectedConsumers @('FixtureConsumer'))
+
+        $failures | Should BeNullOrEmpty
+    }
+
+    It 'accepts a receipt timestamp after a JSON round trip converts it to DateTime' {
+        $roundTripped = $script:receipt | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+
+        $failures = @(Get-DelayedClipboardImageReceiptFailures `
+            -Receipt $roundTripped `
+            -ExpectedDelays @(0, 1, 10, 60) `
+            -ExpectedConsumers @('FixtureConsumer'))
+
+        $failures | Should BeNullOrEmpty
+    }
+
+    It 'rejects missing delays, changed images, an unresponsive consumer, and failed probes' {
+        $script:receipt.cases = @($script:receipt.cases | Where-Object delay_seconds -ne 10)
+        $script:receipt.cases[0].received_sha256 = ('c' * 64)
+        $script:receipt.cases[1].responsive = $false
+        $script:receipt.cases[2].consumer_probe_exit_code = 5
+
+        $failures = @(Get-DelayedClipboardImageReceiptFailures `
+            -Receipt $script:receipt `
+            -ExpectedDelays @(0, 1, 10, 60) `
+            -ExpectedConsumers @('FixtureConsumer'))
+
+        ($failures -join "`n") | Should Match 'delay 10'
+        ($failures -join "`n") | Should Match 'image hash'
+        ($failures -join "`n") | Should Match 'responsive'
+        ($failures -join "`n") | Should Match 'consumer probe exit code'
+    }
+
+    It 'validates a complete persisted receipt through the public smoke command' {
+        $receiptPath = Join-Path $TestDrive 'delayed-image-receipt.json'
+        $script:receipt | ConvertTo-Json -Depth 6 |
+            Set-Content -LiteralPath $receiptPath -Encoding utf8
+
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $PSScriptRoot '..\test-delayed-clipboard-image.ps1') `
+            -ValidateReceiptPath $receiptPath
+
+        $LASTEXITCODE | Should Be 0
+    }
+}
+
 Describe 'SayFlex installed smoke runner wiring' {
     It 'imports the evidence validator it invokes' {
         $runner = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\smoke-installed.ps1') -Raw
 
         $runner | Should Match 'Import-Module \$validationModule -Force'
         $runner | Should Match 'Get-SmokeEvidenceFailures'
+        $runner | Should Match 'Get-DelayedClipboardImageReceiptFailures'
+        $runner | Should Match 'DelayedImageReceiptPath'
     }
 
     It 'records the exact installer hash without requiring witnessed evidence' {

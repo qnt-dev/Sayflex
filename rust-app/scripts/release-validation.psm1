@@ -5,6 +5,8 @@ function Get-SayFlexInteractiveSmokeCheckIds {
         'dictation_editor'
         'dictation_browser'
         'dictation_terminal'
+        'clipboard_delayed_image_firefox'
+        'clipboard_delayed_image_telegram'
         'translation_popup'
         'translation_orig'
         'translation_dual'
@@ -27,6 +29,10 @@ function Get-SayFlexInteractiveSmokeCheckIds {
         'fresh_install'
         'upgrade_install'
     )
+}
+
+function Get-SayFlexAutomatedSmokeCheckIds {
+    @('clipboard_delayed_image_fixture')
 }
 
 function Get-InstallerArtifactFailures {
@@ -151,6 +157,99 @@ function Get-SmokeEvidenceFailures {
         }
         if ([string]::IsNullOrWhiteSpace("$($property.Value.detail)")) {
             $failures.Add("smoke evidence check '$($property.Name)' has no detail")
+        }
+    }
+    return $failures
+}
+
+function Get-DelayedClipboardImageReceiptFailures {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [psobject]$Receipt,
+        [Parameter(Mandatory)]
+        [int[]]$ExpectedDelays,
+        [Parameter(Mandatory)]
+        [string[]]$ExpectedConsumers
+    )
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    foreach ($field in @('schema_version', 'product', 'input_host_sha256', 'witnessed_utc', 'cases')) {
+        if ($null -eq $Receipt.PSObject.Properties[$field]) {
+            $failures.Add("delayed-image receipt is missing '$field'")
+        }
+    }
+    if ($failures.Count -gt 0) { return $failures }
+
+    if ($Receipt.schema_version -ne 1) {
+        $failures.Add("delayed-image receipt schema '$($Receipt.schema_version)' is unsupported")
+    }
+    if ($Receipt.product -ne 'SayFlex') {
+        $failures.Add("delayed-image receipt names product '$($Receipt.product)', not SayFlex")
+    }
+    if ("$($Receipt.input_host_sha256)" -notmatch '^[0-9A-Fa-f]{64}$') {
+        $failures.Add('delayed-image receipt has an invalid input-host SHA-256')
+    }
+    $witnessed = [DateTimeOffset]::MinValue
+    $timestampIsValid = $Receipt.witnessed_utc -is [DateTime] -or
+        $Receipt.witnessed_utc -is [DateTimeOffset] -or
+        [DateTimeOffset]::TryParse(
+            "$($Receipt.witnessed_utc)",
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$witnessed
+        )
+    if (-not $timestampIsValid) {
+        $failures.Add("delayed-image receipt witnessed_utc '$($Receipt.witnessed_utc)' is invalid")
+    }
+
+    $cases = @($Receipt.cases)
+    foreach ($consumer in $ExpectedConsumers) {
+        if ([string]::IsNullOrWhiteSpace($consumer)) {
+            $failures.Add('expected delayed-image consumer cannot be empty')
+            continue
+        }
+        foreach ($delay in $ExpectedDelays) {
+            $matching = @($cases | Where-Object {
+                "$($_.consumer_process)" -ceq $consumer -and $_.delay_seconds -eq $delay
+            })
+            if ($matching.Count -ne 1) {
+                $failures.Add(
+                    "delayed-image receipt requires exactly one case for consumer '$consumer' at delay $delay seconds; found $($matching.Count)"
+                )
+            }
+        }
+    }
+
+    foreach ($case in $cases) {
+        $identity = "consumer '$($case.consumer_process)' at delay $($case.delay_seconds) seconds"
+        if ([string]::IsNullOrWhiteSpace("$($case.provider_process)")) {
+            $failures.Add("delayed-image case $identity has no provider process")
+        }
+        if ([string]::IsNullOrWhiteSpace("$($case.consumer_process)")) {
+            $failures.Add("delayed-image case at delay $($case.delay_seconds) seconds has no consumer process")
+        }
+        $sourceHash = "$($case.source_sha256)"
+        $receivedHash = "$($case.received_sha256)"
+        if ($sourceHash -notmatch '^[0-9A-Fa-f]{64}$' -or
+            $receivedHash -notmatch '^[0-9A-Fa-f]{64}$' -or
+            -not $sourceHash.Equals($receivedHash, [StringComparison]::OrdinalIgnoreCase)) {
+            $failures.Add("delayed-image case $identity has a changed image hash")
+        }
+        if ($case.responsive -ne $true) {
+            $failures.Add("delayed-image case $identity did not remain responsive")
+        }
+        foreach ($exitCode in @(
+            @('provider probe exit code', $case.provider_probe_exit_code),
+            @('input-host exit code', $case.input_host_exit_code),
+            @('consumer probe exit code', $case.consumer_probe_exit_code)
+        )) {
+            if ($exitCode[1] -ne 0) {
+                $failures.Add("delayed-image case $identity has $($exitCode[0]) '$($exitCode[1])'")
+            }
+        }
+        if ("$($case.status)" -cne 'PASS') {
+            $failures.Add("delayed-image case $identity has status '$($case.status)', not PASS")
         }
     }
     return $failures
@@ -381,4 +480,4 @@ function Get-MsixArtifactFailures {
     return $failures
 }
 
-Export-ModuleMember -Function Get-SayFlexInteractiveSmokeCheckIds, Get-InstallerArtifactFailures, Get-SmokeEvidenceFailures, Get-MsixLayoutFailures, Get-MsixArtifactFailures
+Export-ModuleMember -Function Get-SayFlexInteractiveSmokeCheckIds, Get-SayFlexAutomatedSmokeCheckIds, Get-InstallerArtifactFailures, Get-SmokeEvidenceFailures, Get-DelayedClipboardImageReceiptFailures, Get-MsixLayoutFailures, Get-MsixArtifactFailures

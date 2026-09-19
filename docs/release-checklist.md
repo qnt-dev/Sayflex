@@ -25,6 +25,8 @@ into a pass.
 | `dictation_editor` | Dictation reaches an editor once. |
 | `dictation_browser` | Dictation reaches a browser field once. |
 | `dictation_terminal` | Dictation reaches the supported terminal path once. |
+| `clipboard_delayed_image_firefox` | After a real insertion, Firefox remains responsive and receives the exact pre-existing image after the witnessed delay. |
+| `clipboard_delayed_image_telegram` | After a real insertion, Telegram remains responsive and receives the exact pre-existing image after the witnessed delay. |
 | `translation_popup` | Selected-text success or terminal error opens at the selection anchor. |
 | `translation_orig` | ORIG displays the original text correctly. |
 | `translation_dual` | DUAL displays the paired original and translation. |
@@ -53,8 +55,11 @@ dictation text, or translated output.
 
 ## Artifact closure
 
+- Run the automated delayed-image matrix against the installed InputHost:
+  `powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -Command "& 'rust-app/scripts/test-delayed-clipboard-image.ps1' -InputHostPath (Join-Path $env:LOCALAPPDATA 'Programs\SayFlex\SayFlex.InputHost.exe') -Consumers @('FixtureConsumer') -DelaySeconds @(0,1,10,60) -ReceiptPath 'rust-app/dist/delayed-clipboard-image-receipt.json'"`.
 - Install the exact candidate and run `rust-app/scripts/smoke-installed.ps1`
-  with its installer path and witnessed evidence JSON.
+  with its installer path, witnessed evidence JSON, and
+  `-DelayedImageReceiptPath rust-app/dist/delayed-clipboard-image-receipt.json`.
 - Require a complete receipt before publishing.
 - Verify staged, installed, and packaged hashes refer to the same commit.
 - Run dictation and translation once more from the installed copy, not `target`.

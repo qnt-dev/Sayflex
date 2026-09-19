@@ -4,6 +4,7 @@ param(
     [string]$StagedDirectory,
     [string]$InstallerPath,
     [string]$EvidencePath,
+    [string]$DelayedImageReceiptPath,
     [string]$ReceiptPath,
     [switch]$RequireComplete,
     [switch]$RequireSignature
@@ -58,6 +59,10 @@ $interactive = @(Get-SayFlexInteractiveSmokeCheckIds)
 foreach ($id in $interactive) {
     Set-SmokeResult $id 'NOT_RUN' 'No witnessed evidence was supplied for this installed artifact.'
 }
+$automated = @(Get-SayFlexAutomatedSmokeCheckIds)
+foreach ($id in $automated) {
+    Set-SmokeResult $id 'NOT_RUN' 'No delayed-image receipt was supplied for this installed artifact.'
+}
 
 $manifestPath = Join-Path $StagedDirectory 'build-manifest.json'
 $manifest = if (Test-Path -LiteralPath $manifestPath) {
@@ -92,6 +97,40 @@ if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
     }
 }
 
+if (-not [string]::IsNullOrWhiteSpace($DelayedImageReceiptPath)) {
+    try {
+        $resolvedDelayedReceipt = [System.IO.Path]::GetFullPath($DelayedImageReceiptPath)
+        if (-not (Test-Path -LiteralPath $resolvedDelayedReceipt -PathType Leaf)) {
+            throw "Delayed-image receipt was not found: $resolvedDelayedReceipt"
+        }
+        $delayedReceipt = Get-Content -LiteralPath $resolvedDelayedReceipt -Raw | ConvertFrom-Json
+        $delayedFailures = @(Get-DelayedClipboardImageReceiptFailures `
+            -Receipt $delayedReceipt `
+            -ExpectedDelays @(0, 1, 10, 60) `
+            -ExpectedConsumers @('FixtureConsumer'))
+        $installedInputHost = Join-Path $AppDirectory 'SayFlex.InputHost.exe'
+        if (-not (Test-Path -LiteralPath $installedInputHost -PathType Leaf)) {
+            $delayedFailures += "installed input host was not found: $installedInputHost"
+        } else {
+            $installedInputHostHash = (Get-FileHash -LiteralPath $installedInputHost -Algorithm SHA256).Hash
+            if (-not $installedInputHostHash.Equals(
+                    "$($delayedReceipt.input_host_sha256)",
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                $delayedFailures += 'delayed-image receipt belongs to a different InputHost binary'
+            }
+        }
+        if ($delayedFailures.Count -gt 0) {
+            throw ($delayedFailures -join '; ')
+        }
+        Set-SmokeResult `
+            'clipboard_delayed_image_fixture' `
+            'PASS' `
+            'Installed InputHost restored the exact image after 0, 1, 10 and 60 seconds without an unresponsive consumer.'
+    } catch {
+        Set-SmokeResult 'clipboard_delayed_image_fixture' 'FAIL' $_.Exception.Message
+    }
+}
+
 $receipt = [ordered]@{
     schema_version = 1
     product = 'SayFlex'
@@ -102,6 +141,9 @@ $receipt = [ordered]@{
     created_utc = [DateTime]::UtcNow.ToString('o')
     witnessed_utc = if ($evidence) { $evidence.witnessed_utc } else { $null }
     installer_sha256 = $installerHash
+    delayed_image_receipt_path = if ($DelayedImageReceiptPath) {
+        [System.IO.Path]::GetFullPath($DelayedImageReceiptPath)
+    } else { $null }
     checks = $checks
 }
 

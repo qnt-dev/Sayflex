@@ -5,29 +5,28 @@ use std::{
 };
 
 use thiserror::Error;
-use windows_sys::{
-    Win32::{
-        Foundation::{GlobalFree, HWND, LPARAM, LRESULT, WPARAM},
-        System::{
-            DataExchange::{
-                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner,
-                GetClipboardSequenceNumber, GetOpenClipboardWindow, IsClipboardFormatAvailable,
-                OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
-            },
-            LibraryLoader::GetModuleHandleW,
-            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
-            Ole::{
-                CF_UNICODETEXT, OleGetClipboard, OleInitialize, OleSetClipboard, OleUninitialize,
-            },
+use windows_sys::Win32::{
+    Foundation::{GlobalFree, HANDLE, HWND, LPARAM, LRESULT, WPARAM},
+    System::{
+        Com::{STGMEDIUM, STGMEDIUM_0, TYMED_ENHMF, TYMED_GDI, TYMED_HGLOBAL, TYMED_MFPICT},
+        DataExchange::{
+            CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+            GetClipboardOwner, GetClipboardSequenceNumber, GetOpenClipboardWindow,
+            IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
         },
-        UI::WindowsAndMessaging::{
-            CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-            GA_ROOT, GWLP_USERDATA, GetAncestor, GetForegroundWindow, GetWindowLongPtrW,
-            GetWindowThreadProcessId, HWND_MESSAGE, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
-            SetWindowLongPtrW, TranslateMessage, WM_NCCREATE, WM_RENDERFORMAT, WNDCLASSW,
+        LibraryLoader::GetModuleHandleW,
+        Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
+        Ole::{
+            CF_BITMAP, CF_ENHMETAFILE, CF_METAFILEPICT, CF_PALETTE, CF_UNICODETEXT,
+            OleDuplicateData, OleInitialize, OleUninitialize, ReleaseStgMedium,
         },
     },
-    core::IUnknown_Vtbl,
+    UI::WindowsAndMessaging::{
+        CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
+        GWLP_USERDATA, GetAncestor, GetForegroundWindow, GetWindowLongPtrW,
+        GetWindowThreadProcessId, HWND_MESSAGE, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
+        SetWindowLongPtrW, TranslateMessage, WM_NCCREATE, WM_RENDERFORMAT, WNDCLASSW,
+    },
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -869,9 +868,44 @@ pub fn dispatch_paste(
     })
 }
 
+struct ClipboardFormatSnapshot {
+    format: u32,
+    handle: HANDLE,
+}
+
+impl ClipboardFormatSnapshot {
+    fn release_to_clipboard(&mut self) {
+        self.handle = ptr::null_mut();
+    }
+}
+
+impl Drop for ClipboardFormatSnapshot {
+    fn drop(&mut self) {
+        if self.handle.is_null() {
+            return;
+        }
+        let tymed = match self.format as u16 {
+            CF_BITMAP | CF_PALETTE => TYMED_GDI,
+            CF_METAFILEPICT => TYMED_MFPICT,
+            CF_ENHMETAFILE => TYMED_ENHMF,
+            _ => TYMED_HGLOBAL,
+        } as u32;
+        let mut medium = STGMEDIUM {
+            tymed,
+            u: STGMEDIUM_0 {
+                hGlobal: self.handle,
+            },
+            pUnkForRelease: ptr::null_mut(),
+        };
+        unsafe {
+            ReleaseStgMedium(&raw mut medium);
+        }
+        self.handle = ptr::null_mut();
+    }
+}
+
 struct ClipboardSnapshot {
-    data_object: *mut c_void,
-    fallback_text: Option<String>,
+    formats: Vec<ClipboardFormatSnapshot>,
 }
 
 impl ClipboardSnapshot {
@@ -888,67 +922,49 @@ impl ClipboardSnapshot {
     }
 
     fn capture() -> Result<Self, ClipboardError> {
-        let fallback_text = get_text().ok();
-        let mut last_error = 0;
-        for attempt in 0..12 {
-            let mut data_object = ptr::null_mut();
-            // SAFETY: OLE is initialized on the current worker thread and the
-            // out-pointer is valid for the duration of the call.
-            let result = unsafe { OleGetClipboard(&mut data_object) };
-            if result >= 0 {
-                return Ok(Self {
-                    data_object,
-                    fallback_text,
+        with_open_clipboard(|| {
+            let mut formats = Vec::new();
+            let mut previous = 0;
+            loop {
+                let format = unsafe { EnumClipboardFormats(previous) };
+                if format == 0 {
+                    break;
+                }
+                let clipboard_handle = unsafe { GetClipboardData(format) };
+                if clipboard_handle.is_null() {
+                    return Err(ClipboardError::InvalidData);
+                }
+                let clipboard_format =
+                    u16::try_from(format).map_err(|_| ClipboardError::InvalidData)?;
+                let duplicated =
+                    unsafe { OleDuplicateData(clipboard_handle, clipboard_format, GMEM_MOVEABLE) };
+                if duplicated.is_null() {
+                    return Err(ClipboardError::Allocation);
+                }
+                formats.push(ClipboardFormatSnapshot {
+                    format,
+                    handle: duplicated,
                 });
+                previous = format;
             }
-            last_error = result;
-            if attempt < 11 {
-                thread::sleep(Duration::from_millis(15));
-            }
-        }
-        Err(ClipboardError::Ole(last_error))
+            Ok(Self { formats })
+        })
     }
 
     fn restore(&mut self) -> Result<(), ClipboardError> {
-        let mut last_error = 0;
-        for attempt in 0..12 {
-            // SAFETY: data_object is the AddRef'd IDataObject returned by
-            // OleGetClipboard while this apartment remains initialized.
-            let result = unsafe { OleSetClipboard(self.data_object) };
-            if result >= 0 {
-                if let Some(fallback) = &self.fallback_text {
-                    let text_was_restored = get_text().is_ok_and(|restored| restored == *fallback);
-                    if !text_was_restored {
-                        // Some transient clipboard owners expose an IDataObject
-                        // whose delayed text becomes unavailable after the owner
-                        // exits. Preserve at least the original text instead of
-                        // silently leaving the clipboard empty.
-                        set_text(fallback)?;
-                    }
+        with_open_clipboard(|| {
+            if unsafe { EmptyClipboard() } == 0 {
+                return Err(ClipboardError::Busy);
+            }
+            for format in &mut self.formats {
+                let accepted = unsafe { SetClipboardData(format.format, format.handle) };
+                if accepted.is_null() {
+                    return Err(ClipboardError::Allocation);
                 }
-                return Ok(());
+                format.release_to_clipboard();
             }
-            last_error = result;
-            if attempt < 11 {
-                thread::sleep(Duration::from_millis(15));
-            }
-        }
-        Err(ClipboardError::Ole(last_error))
-    }
-}
-
-impl Drop for ClipboardSnapshot {
-    fn drop(&mut self) {
-        if !self.data_object.is_null() {
-            unsafe {
-                // SAFETY: OleGetClipboard returned an AddRef'd IDataObject.
-                // OleSetClipboard retains its own reference when restoration
-                // succeeds, so this releases exactly our snapshot reference.
-                let vtable = *(self.data_object.cast::<*const IUnknown_Vtbl>());
-                ((*vtable).Release)(self.data_object);
-            }
-            self.data_object = ptr::null_mut();
-        }
+            Ok(())
+        })
     }
 }
 
