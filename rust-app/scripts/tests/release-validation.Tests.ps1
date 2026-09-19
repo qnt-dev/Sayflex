@@ -82,8 +82,10 @@ Describe 'SayFlex public repository presentation' {
         (Get-FileHash -LiteralPath $windowsPowerShellOutput -Algorithm SHA256).Hash |
             Should Be (Get-FileHash -LiteralPath $powerShellOutput -Algorithm SHA256).Hash
         $content = Get-Content -LiteralPath $windowsPowerShellOutput -Raw -Encoding utf8
-        $content | Should Match 'Copyright © SixtyFPS'
-        $content | Should Not Match 'Copyright Â© SixtyFPS'
+        $copyrightNotice = "Copyright $([char]0x00A9) SixtyFPS"
+        $mojibakeNotice = "Copyright $([char]0x00C2)$([char]0x00A9) SixtyFPS"
+        $content | Should Match ([regex]::Escape($copyrightNotice))
+        $content | Should Not Match ([regex]::Escape($mojibakeNotice))
     }
 
     It 'discloses the proprietary NVIDIA runtime bundled by the universal installer' {
