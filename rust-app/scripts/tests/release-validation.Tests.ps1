@@ -40,6 +40,15 @@ Describe 'SayFlex public repository presentation' {
         }
     }
 
+    It 'describes only translation providers that the current router can use' {
+        $security = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\SECURITY.md') -Raw
+
+        $security | Should Match 'DeepL'
+        $security | Should Match 'Azure Translator'
+        $security | Should Not Match 'Google Cloud Translation'
+        $security | Should Match 'Every cloud row in both lists starts switched off'
+    }
+
     It 'resolves the notice output after Windows PowerShell initializes PSScriptRoot' {
         $generator = Get-Content -LiteralPath (
             Join-Path $PSScriptRoot '..\generate-third-party-notices.ps1'

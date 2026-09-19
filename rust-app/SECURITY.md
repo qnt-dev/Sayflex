@@ -12,17 +12,18 @@ decision:
 - **Speech.** A recording can be transcribed by Groq, Cloudflare Workers AI,
   Azure Speech, Deepgram or a custom OpenAI-compatible endpoint instead of by
   the model on this machine.
-- **Text.** A selection can be translated by DeepL, Azure Translator or Google
-  Cloud Translation instead of by the engine on this machine.
+- **Text.** A selection can be translated by DeepL or Azure Translator instead
+  of by the engine on this machine.
 
 They are deliberately not one list and not one switch. A key for Azure
 Translator is not a key for Azure Speech, the free allowances are counted
 separately, and somebody willing to send a few seconds of audio to a service is
 not thereby willing to send the contents of their documents.
 
-Every row in both lists starts switched off and stays off until the user
-supplies a key. The local engine is a row in each list, and the walk stops the
-moment it reaches an enabled one — so anything placed below it is never asked.
+Every cloud row in both lists starts switched off and stays off until the user
+supplies a key. The local engine starts enabled as a row in each list, and the
+walk stops the moment it reaches an enabled one — so anything placed below it
+is never asked.
 What the window claims about audio or text leaving the machine is computed from
 these lists themselves, not from a separate setting that could disagree with
 them.
