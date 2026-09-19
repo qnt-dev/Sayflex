@@ -14,6 +14,14 @@ Describe 'SayFlex public repository presentation' {
         $content | Should Match 'rust-app'
     }
 
+    It 'preserves legacy copyright while naming the current SayFlex contributors' {
+        $license = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\..\LICENSE') -Raw
+
+        $license | Should Match '(?m)^MIT License\r?$'
+        $license | Should Match '(?m)^Copyright \(c\) 2026 Keyboop for Windows contributors\r?$'
+        $license | Should Match '(?m)^Copyright \(c\) 2026 SayFlex contributors\r?$'
+    }
+
     It 'keeps every repository-relative README link resolvable' {
         $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
         $repositoryReadme = Join-Path $repositoryRoot 'README.md'
