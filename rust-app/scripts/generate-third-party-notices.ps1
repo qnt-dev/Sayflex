@@ -1,10 +1,16 @@
 [CmdletBinding()]
 param(
-    [string]$OutputPath = (Join-Path $PSScriptRoot '..\THIRD_PARTY_NOTICES.md')
+    [string]$OutputPath
 )
 
 $ErrorActionPreference = 'Stop'
 $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    # Windows PowerShell evaluates default parameter expressions before it has
+    # populated PSScriptRoot. Resolve the script-relative default in the body
+    # so the same release command works in both powershell.exe and pwsh.exe.
+    $OutputPath = Join-Path $rustRoot 'THIRD_PARTY_NOTICES.md'
+}
 $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
 
 Push-Location $rustRoot
@@ -27,11 +33,14 @@ try {
 }
 
 $metadata = $metadataJson | ConvertFrom-Json
-$dependencies = @(
-    $metadata.packages |
-        Where-Object { $null -ne $_.source } |
-        Sort-Object name, version -Unique
+$dependencyIndex = [System.Collections.Generic.SortedDictionary[string, object]]::new(
+    [System.StringComparer]::Ordinal
 )
+foreach ($package in @($metadata.packages | Where-Object { $null -ne $_.source })) {
+    $sortKey = "$($package.name)`0$($package.version)`0$($package.source)"
+    $dependencyIndex.Add($sortKey, $package)
+}
+$dependencies = @($dependencyIndex.Values)
 foreach ($package in $dependencies) {
     if ([string]::IsNullOrWhiteSpace($package.license)) {
         throw "Dependency $($package.name) $($package.version) has no declared license."
@@ -51,7 +60,7 @@ $lines.Add('The user interface uses Slint 1.17 under the Slint Royalty-free Desk
 $lines.Add('Mobile, and Web Applications License 2.0. Public distribution must also')
 $lines.Add('satisfy one of the attribution methods in section 2 of that license.')
 $lines.Add('')
-$lines.Add('Copyright © SixtyFPS GmbH <info@slint.dev>')
+$lines.Add("Copyright $([char]0x00A9) SixtyFPS GmbH <info@slint.dev>")
 $lines.Add('')
 $lines.Add('<https://slint.dev/>')
 $lines.Add('')

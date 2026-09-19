@@ -20,6 +20,10 @@ work needed before broader Windows testing.
 - Hotkey changes use a visible capture field and an explicit Save boundary.
   Windows registration is reconciled per action: a conflicting replacement
   keeps the previous working shortcut without rolling back unrelated changes.
+- Dictation no longer republishes a delayed clipboard image through the same
+  Windows OLE data object. SayFlex materializes and independently duplicates
+  each clipboard format before inserting text, so restoring an image cannot
+  recurse into the application's own delayed-data provider.
 - The standalone translator now follows the SayFlex sheet design, keeps source
   and result visible, and exposes localized status and accessibility labels.
 - Companion visual settings explain the complete move gesture: between
@@ -27,6 +31,11 @@ work needed before broader Windows testing.
   mouse button. Its saved position is restored.
 - Protocol 23 adds typed model lifecycle events and per-action hotkey failures.
   Wire-shape fingerprints cover every process direction and nested payload.
+- The locked TLS stack includes the patched `rustls` 0.23.45 release. Release
+  checks now reject known dependency advisories and generate byte-identical
+  third-party notices in Windows PowerShell and PowerShell 7.
+- The public repository landing page identifies the current SayFlex 0.8.0
+  product, privacy boundary, optional model downloads and verification status.
 - Store-oriented MSIX packaging and exact payload validation are available for
   Partner Center testing. This does not replace Microsoft account enrollment,
   Store certification, live packaged-app testing or Authenticode signing for

@@ -1,85 +1,83 @@
-# Keyboop for Windows
+# SayFlex
 
-Local-first Windows keyboard-layout correction, explicit selection conversion,
-and real-time dictation.
+SayFlex is a local-first Windows utility for voice dictation, selected-text
+translation, and RU/EN keyboard-layout correction. The current Rust/Slint
+release candidate is version **0.8.0**.
 
-The project is an independent Windows implementation inspired by the MIT-licensed
-Keyboop project for macOS. Visual parity is not a goal. Reliability, privacy, and
-native Windows behavior take precedence.
+Audio, local speech recognition, layout correction, and installed translation
+models run on the user's computer by default. Optional cloud providers remain
+off until the user supplies credentials and enables them.
 
-## Product direction
+## Features
 
-- Manual-first RU/EN layout correction: select text, press `Ctrl+Alt+K`, inspect the
-  local preview, and explicitly apply or cancel.
-- Ordinary typing is not inspected, buffered, or automatically modified.
-- Local real-time dictation through a persistent CUDA speech worker.
-- Selected-text conversion preserves case, whitespace, and punctuation.
-- WPF tray application, model manager, microphone test, and privacy-safe diagnostics.
-- Portable and per-user Inno Setup distributions. Public code signing is
-  intentionally not required for development or private use.
+- Hold `Ctrl + Alt + Space` to dictate into the currently focused application.
+- Press `Ctrl + Alt + V` to insert the newest successful dictation.
+- Press `Ctrl + Alt + F` to translate selected text.
+- Press `Ctrl + Alt + K` to correct the keyboard layout of selected text.
+- Use the standalone Quick translation window for pasted text.
+- Choose verified local Whisper and Qwen model packs or configure optional
+  cloud speech and translation providers.
+- Remove installed local model packs from Settings to recover disk space.
+- Use CUDA, Vulkan, or CPU speech backends, with automatic verified fallback.
+- Keep dictation and translation history locally, or disable and clear it.
 
-Snippets, local RU/EN translation, application profiles, and updates remain
-planned capabilities rather than claims of the current `0.1.16` build. Optional
-bounded local dictation history and recovery of the most recent transcript are
-implemented.
+Global shortcuts are configurable in Settings. A conflicting replacement does
+not discard the previous working shortcut.
 
-## Install and use
+## Privacy and downloads
 
-Run `dist\Keyboop-0.1.16-win-x64-setup.exe`. Installation is per-user and does not
-require administrator rights.
+The installer does not bundle multi-gigabyte model files. The first-run screen
+asks before downloading the recommended local Whisper model, and translation
+models are downloaded only after an explicit choice in Settings. Every model
+and local runtime download is pinned and verified by byte length and SHA-256.
 
-- Layout: select text, press `Ctrl+Alt+K`, inspect the preview, then press Enter.
-- Dictation (hold): `Ctrl+Win`; release both keys to transcribe and insert.
-- Recover the last successful transcript: release `Shift+Alt+X`. Keyboop copies
-  the text to the clipboard. Paste it with `Shift+Insert` in WezTerm or `Ctrl+V`
-  in ordinary applications.
-- Pause/resume input features: `Ctrl+Alt+P`.
+Cloud speech and translation are separate provider lists. They are disabled by
+default, and the application explains when audio or text may leave the device.
+Provider keys are protected with Windows DPAPI for the current user.
 
-Start dictation while the caret is in the field that should receive the text. A
-compact dark-and-yellow waveform confirms that the global hotkey reached
-Keyboop. Its `#272727` background, subtly lighter `#2C2F31` frame, and moderately
-rounded corners match the desktop palette without looking like a pill. A narrow
-transparent gap separates the outer frame from the inset dark body and reveals
-the surface behind the indicator without additional corner accents. Its integral
-3-DIP inset keeps that gap geometrically equal on all four sides under WPF layout
-rounding. The same
-waveform smoothly settles into its processing motion after the keys are released,
-without changing size or visual language. Each recording is
-streamed to a temporary local WAV file instead of being accumulated in RAM. A
-warning appears at 19 minutes and the recording stops at 20 minutes.
+See [Security and privacy](rust-app/SECURITY.md) for the complete data-handling
+and trust-boundary description.
 
-Dictation insertion uses a guarded clipboard transaction for compatibility with
-web and Electron editors. Keyboop restores the previous clipboard only if no
-other application changed it during the operation, and falls back to Unicode
-input if the clipboard path is unavailable.
+## Release status
 
-Dictation history is an explicit setting. When enabled, up to 200 successful
-transcripts are stored locally in `%LOCALAPPDATA%\Keyboop\dictation-history.json`
-before insertion is attempted. Raw audio is never retained. The settings window
-can inspect, copy, delete, or clear these entries.
+Version 0.8.0 is undergoing release hardening. A public installer is not ready
+until the exact installed artifact passes the Windows interaction matrix and
+carries a valid Authenticode signature. Do not treat files from a local `dist`
+directory as an official release.
 
-Every recording has an immutable session ID shared by capture, finalization,
-history, insertion, and recovery. `Shift+Alt+X` waits for that exact session
-instead of reading a mutable global “last transcript”, so overlapping processing
-and reversed request timing cannot return the previous recording.
+The current release notes are in
+[rust-app/RELEASE_0.8.0.md](rust-app/RELEASE_0.8.0.md).
 
-The selected Whisper model is downloaded separately to
-`%LOCALAPPDATA%\Keyboop\models` and is verified by size and SHA-256. On the target
-RTX 3080 Ti machine, Keyboop preloads it through CUDA so the first dictated phrase
-does not pay the model-loading delay.
+## Build and test
 
-Wispr Flow and Keyboop must not run with the same `Ctrl+Win` hotkey at the same
-time. Exit one application before testing the other.
+The maintained application lives in `rust-app`. The older C# implementation in
+the repository root is retained for history and is not a build dependency of
+SayFlex 0.8.0.
 
-## Solution
+```powershell
+cd rust-app
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+./scripts/check-ui-translations.ps1
+./scripts/build-installer.ps1
+```
 
-- `src/Keyboop.Core` — deterministic detector and input-domain state machines.
-- `src/Keyboop.Protocol` — versioned IPC messages.
-- `src/Keyboop.InputHost` — isolated Windows hook and replacement transaction.
-- `src/Keyboop.UI` — .NET 10 WPF tray and settings application.
-- `src/Keyboop.SpeechWorker` — persistent local ASR process.
-- `tests/Keyboop.Core.Tests` — detector and language-data golden tests.
-- `tests/Keyboop.InputReplay.Tests` — keyboard event/replacement replay tests.
+Building the universal installer also requires the Windows C++ toolchain, LLVM,
+the pinned CUDA/Vulkan build prerequisites, and Inno Setup. The release scripts
+refuse dirty source trees, record the exact Git commit and dependency lock hash,
+and validate the staged payload before packaging.
 
-See [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md) and
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Architecture, Windows integration fixtures, and release commands are documented
+in [rust-app/README.md](rust-app/README.md). The Store hand-off is documented in
+[rust-app/docs/MICROSOFT_STORE_SUBMISSION.md](rust-app/docs/MICROSOFT_STORE_SUBMISSION.md).
+
+## License
+
+SayFlex-owned source files are available under the [MIT License](LICENSE).
+Third-party components and optional downloaded models keep their respective
+licenses; see [third-party notices](rust-app/THIRD_PARTY_NOTICES.md) and
+[model licenses](rust-app/docs/THIRD_PARTY_MODELS.md).
+
+The current release configuration consumes Slint under its royalty-free desktop
+application license. That distribution choice may change before public release
+to meet the requirements of the selected open-source signing program.

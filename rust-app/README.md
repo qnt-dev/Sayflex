@@ -121,9 +121,11 @@ Transient windows have isolated visual preview modes that do not register the
 global hook or touch another application:
 
 ```powershell
-.\target\debug\sayflex-desktop.exe --indicator-preview=orb
-.\target\debug\sayflex-desktop.exe --indicator-preview=spectrum
-.\target\debug\sayflex-desktop.exe --indicator-preview=ribbon
+.\target\debug\sayflex-desktop.exe --indicator-preview=mic
+.\target\debug\sayflex-desktop.exe --indicator-preview=circle
+.\target\debug\sayflex-desktop.exe --indicator-preview=flow-sphere
+.\target\debug\sayflex-desktop.exe --indicator-preview=pulse-matrix
+.\target\debug\sayflex-desktop.exe --indicator-preview=writing-slate
 .\target\debug\sayflex-desktop.exe --action-preview
 .\target\debug\sayflex-desktop.exe --translation-preview
 .\target\debug\sayflex-desktop.exe --translation-preview=long

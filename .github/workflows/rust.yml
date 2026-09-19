@@ -10,6 +10,9 @@ on:
       # change there can break this one.
       - "desktop-pet/**"
       - "rust-toolchain.toml"
+      - "README.md"
+      - "LICENSE"
+      - "THIRD_PARTY_NOTICES.md"
       - ".github/workflows/rust.yml"
   pull_request:
     paths:
@@ -18,6 +21,9 @@ on:
       # change there can break this one.
       - "desktop-pet/**"
       - "rust-toolchain.toml"
+      - "README.md"
+      - "LICENSE"
+      - "THIRD_PARTY_NOTICES.md"
       - ".github/workflows/rust.yml"
   workflow_dispatch:
 

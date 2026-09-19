@@ -3,6 +3,73 @@ $ErrorActionPreference = 'Stop'
 $module = Join-Path $PSScriptRoot '..\release-validation.psm1'
 Import-Module $module -Force
 
+Describe 'SayFlex public repository presentation' {
+    It 'presents the current product instead of the retired Keyboop release' {
+        $repositoryReadme = Join-Path $PSScriptRoot '..\..\..\README.md'
+        $content = Get-Content -LiteralPath $repositoryReadme -Raw
+
+        $content | Should Match '(?m)^# SayFlex$'
+        $content | Should Not Match '(?m)^# Keyboop for Windows$'
+        $content | Should Match '0\.8\.0'
+        $content | Should Match 'rust-app'
+    }
+
+    It 'keeps every repository-relative README link resolvable' {
+        $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+        $repositoryReadme = Join-Path $repositoryRoot 'README.md'
+        $content = Get-Content -LiteralPath $repositoryReadme -Raw
+        $missing = @(
+            [regex]::Matches($content, '\[[^\]]+\]\((?!https?://|#)([^)]+)\)') |
+                ForEach-Object {
+                    $relativePath = $_.Groups[1].Value.Split('#')[0]
+                    if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot $relativePath))) {
+                        $relativePath
+                    }
+                }
+        )
+
+        $missing | Should BeNullOrEmpty
+    }
+
+    It 'documents only released recording visualizer preview arguments' {
+        $readme = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\README.md') -Raw
+
+        $readme | Should Not Match '--indicator-preview=(orb|spectrum|ribbon)\b'
+        foreach ($style in @('mic', 'circle', 'flow-sphere', 'pulse-matrix', 'writing-slate')) {
+            $readme | Should Match "--indicator-preview=$([regex]::Escape($style))\b"
+        }
+    }
+
+    It 'resolves the notice output after Windows PowerShell initializes PSScriptRoot' {
+        $generator = Get-Content -LiteralPath (
+            Join-Path $PSScriptRoot '..\generate-third-party-notices.ps1'
+        ) -Raw
+
+        $generator | Should Not Match '\$OutputPath\s*=\s*\(Join-Path\s+\$PSScriptRoot'
+        $generator | Should Match "if \(\[string\]::IsNullOrWhiteSpace\(\`$OutputPath\)\)"
+        $generator | Should Match '\$OutputPath\s*=\s*Join-Path\s+\$rustRoot'
+    }
+
+    It 'generates identical UTF-8 notices in Windows PowerShell and PowerShell 7' {
+        $generator = Join-Path $PSScriptRoot '..\generate-third-party-notices.ps1'
+        $windowsPowerShellOutput = Join-Path $TestDrive 'notices-windows-powershell.md'
+        $powerShellOutput = Join-Path $TestDrive 'notices-powershell.md'
+
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $generator `
+            -OutputPath $windowsPowerShellOutput *> $null
+        $LASTEXITCODE | Should Be 0
+
+        & pwsh.exe -NoProfile -File $generator -OutputPath $powerShellOutput *> $null
+        $LASTEXITCODE | Should Be 0
+
+        (Get-FileHash -LiteralPath $windowsPowerShellOutput -Algorithm SHA256).Hash |
+            Should Be (Get-FileHash -LiteralPath $powerShellOutput -Algorithm SHA256).Hash
+        $content = Get-Content -LiteralPath $windowsPowerShellOutput -Raw -Encoding utf8
+        $content | Should Match 'Copyright © SixtyFPS'
+        $content | Should Not Match 'Copyright Â© SixtyFPS'
+    }
+}
+
 Describe 'SayFlex installed smoke contract' {
     It 'publishes one authoritative interactive check catalog' {
         Get-Command Get-SayFlexInteractiveSmokeCheckIds -ErrorAction SilentlyContinue |
