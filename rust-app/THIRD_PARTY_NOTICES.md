@@ -24,6 +24,14 @@ user choice and are verified by size and SHA-256 before activation.
 - whisper.cpp: <https://github.com/ggml-org/whisper.cpp>
 - whisper-rs: <https://github.com/tazz4843/whisper-rs>
 
+## NVIDIA CUDA runtime
+
+The universal Windows installer includes NVIDIA cuBLAS runtime files
+`cublas64_13.dll` and `cublasLt64_13.dll` for its optional CUDA speech
+worker. These files are proprietary NVIDIA software, are not covered by
+the SayFlex MIT license, and are redistributed under the NVIDIA CUDA
+Toolkit EULA: <https://docs.nvidia.com/cuda/eula/>.
+
 ## Translation models
 
 Optional translation packs and llama.cpp are downloaded only after an

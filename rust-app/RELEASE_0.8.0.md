@@ -37,6 +37,9 @@ work needed before broader Windows testing.
 - CPU, CUDA and Vulkan speech workers now carry the exact installed filename in
   their Windows version resources, and staging validation rejects mismatched
   executable identities before signing.
+- The generated notices now identify the proprietary NVIDIA cuBLAS files in the
+  universal installer and link their CUDA Toolkit EULA instead of presenting
+  the complete payload as MIT-only software.
 - The public repository landing page identifies the current SayFlex 0.8.0
   product, privacy boundary, optional model downloads and verification status.
 - Store-oriented MSIX packaging and exact payload validation are available for
