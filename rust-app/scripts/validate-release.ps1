@@ -168,6 +168,9 @@ foreach ($name in $required) {
     if ($info.ProductVersion -ne $expectedVersion) {
         $failures.Add("$name reports version $($info.ProductVersion), not $expectedVersion")
     }
+    if ($info.OriginalFilename -ne $name) {
+        $failures.Add("$name reports original filename '$($info.OriginalFilename)'")
+    }
 }
 
 if ($RequireSignature) {

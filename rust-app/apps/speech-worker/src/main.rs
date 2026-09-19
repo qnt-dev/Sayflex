@@ -1,4 +1,7 @@
 mod audio;
+#[cfg(test)]
+#[path = "../build_metadata.rs"]
+mod build_metadata;
 mod engine;
 mod history;
 mod history_actor;

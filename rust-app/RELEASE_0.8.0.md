@@ -34,6 +34,9 @@ work needed before broader Windows testing.
 - The locked TLS stack includes the patched `rustls` 0.23.45 release. Release
   checks now reject known dependency advisories and generate byte-identical
   third-party notices in Windows PowerShell and PowerShell 7.
+- CPU, CUDA and Vulkan speech workers now carry the exact installed filename in
+  their Windows version resources, and staging validation rejects mismatched
+  executable identities before signing.
 - The public repository landing page identifies the current SayFlex 0.8.0
   product, privacy boundary, optional model downloads and verification status.
 - Store-oriented MSIX packaging and exact payload validation are available for

@@ -134,6 +134,13 @@ Describe 'SayFlex installed smoke contract' {
 }
 
 Describe 'SayFlex installer artifact validation' {
+    It 'rejects a staged executable whose Windows identity names another file' {
+        $validator = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\validate-release.ps1') -Raw
+
+        $validator | Should Match '\$info\.OriginalFilename\s+-ne\s+\$name'
+        $validator | Should Match 'reports original filename'
+    }
+
     BeforeEach {
         $script:fixture = Join-Path $TestDrive 'SayFlex-0.7.0-win-x64-setup.exe'
         [System.IO.File]::WriteAllBytes($script:fixture, [byte[]](1, 2, 3, 4))
