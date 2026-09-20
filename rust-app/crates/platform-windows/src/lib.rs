@@ -17,6 +17,7 @@ mod overlay;
 mod popup_dismiss;
 #[cfg(windows)]
 mod process_exit;
+pub mod screen_capture;
 #[cfg(windows)]
 mod session_end;
 #[cfg(windows)]

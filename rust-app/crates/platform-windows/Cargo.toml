@@ -7,8 +7,11 @@ license.workspace = true
 
 [dependencies]
 rust-app-core = { version = "0.8.0", path = "../app-core" }
+rust-protocol = { version = "0.8.0", path = "../protocol" }
+thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+windows.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]

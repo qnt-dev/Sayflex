@@ -4727,7 +4727,10 @@ name = "rust-platform-windows"
 version = "0.8.0"
 dependencies = [
  "rust-app-core",
+ "rust-protocol",
  "tempfile",
+ "thiserror 2.0.19",
+ "windows",
  "windows-sys 0.61.2",
 ]
 
