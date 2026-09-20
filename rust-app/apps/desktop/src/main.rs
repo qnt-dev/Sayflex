@@ -56,12 +56,12 @@ use slint::{
     ComponentHandle, Image, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
 };
 use translation_view::{
-    TranslationPreviewRegistry, TranslationPreviewSlot, TranslationRetry,
-    adaptive_text_panel_height, apply_translation_preview_layout,
-    apply_translation_preview_pin_state, configure_slint_translation_resize,
-    create_translation_preview_slot, precreate_translation_preview,
-    refresh_cloaked_translation_backdrop, retire_translation_preview, set_translation_status,
-    update_translation_preview_content, wire_translation_preview,
+    TranslationPreviewRegistry, TranslationPreviewSlot, adaptive_text_panel_height,
+    apply_translation_preview_layout, apply_translation_preview_pin_state,
+    configure_slint_translation_resize, create_translation_preview_slot,
+    precreate_translation_preview, refresh_cloaked_translation_backdrop,
+    retire_translation_preview, set_translation_status, update_translation_preview_content,
+    wire_translation_preview,
 };
 use visualizer::{
     BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, IndicatorAnimation,
@@ -174,10 +174,6 @@ enum RuntimeEvent {
     ScrollTranslationPreview {
         window_handle: u64,
         delta: i32,
-    },
-    RetryTranslation {
-        window_handle: u64,
-        swap: bool,
     },
     SessionEnd(rust_platform_windows::SessionEndEvent),
     WorkerError {
@@ -881,7 +877,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         preview: Rc::clone(&translation_preview),
         presenter: translation_preview_presenter.clone(),
         attached: Rc::new(Cell::new(false)),
-        retry: Rc::new(RefCell::new(None)),
     };
     let translation_previews = Rc::new(RefCell::new(TranslationPreviewRegistry {
         current: translation_preview_slot.clone(),
@@ -1412,34 +1407,6 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 .slot_by_handle(window_handle)
             {
                 slot.preview.invoke_scroll_by(delta as f32);
-            }
-        }
-        RuntimeEvent::RetryTranslation {
-            window_handle,
-            swap,
-        } => {
-            let retry = runtime
-                .translation_previews
-                .borrow()
-                .slot_by_handle(window_handle)
-                .and_then(|slot| slot.retry.borrow().clone());
-            if let Some(retry) = retry {
-                let (text, source_language, target_language) = retry.request(swap);
-                begin_selection_translation(
-                    SelectionTranslationRequest {
-                        request_id: RequestId::new(),
-                        target: retry.target,
-                        text,
-                        delivery: TranslationDelivery::Preview,
-                        request_started_unix_ms: unix_ms(),
-                        source_language: Some(source_language),
-                        target_language: Some(target_language),
-                    },
-                    &runtime.settings,
-                    &runtime.translation_previews,
-                    &runtime.state,
-                    &runtime.workers,
-                );
             }
         }
         RuntimeEvent::SessionEnd(event) => {
@@ -2680,12 +2647,6 @@ reason=translation_disabled"
     }
 }
 
-#[derive(Clone, Copy)]
-struct TranslationPreviewLanguages {
-    resolved: Option<(TranslationLanguage, TranslationLanguage)>,
-    locale: UiLocale,
-}
-
 fn show_selection_translation_preview(
     request_id: RequestId,
     target: TargetSnapshot,
@@ -2693,7 +2654,6 @@ fn show_selection_translation_preview(
     translated_text: &str,
     translation_previews: &Rc<RefCell<TranslationPreviewRegistry>>,
     final_update: bool,
-    languages: TranslationPreviewLanguages,
 ) {
     let Some(slot) = translation_previews.borrow().slot_for_request(request_id) else {
         rust_app_core::diagnostics::log_line(&format!(
@@ -2722,22 +2682,9 @@ fn show_selection_translation_preview(
             ));
         }
         preview.set_live_glass(false);
-        preview.set_source_language_label(text(languages.locale, UiText::AutoUpper).into());
-        preview.set_target_language_label("".into());
         if let Some(handle) = slint_window_handle(preview.window()) {
             let _ = rust_platform_windows::disable_translation_live_backdrop(handle);
         }
-    }
-    if let Some((source_language, target_language)) = languages.resolved {
-        preview.set_source_language_label(source_language.code().to_uppercase().into());
-        preview.set_target_language_label(target_language.code().to_uppercase().into());
-        *slot.retry.borrow_mut() = Some(TranslationRetry {
-            target,
-            source_text: source_text.to_owned(),
-            translated_text: translated_text.to_owned(),
-            source_language,
-            target_language,
-        });
     }
     update_translation_preview_content(
         preview,
@@ -3809,10 +3756,6 @@ fn handle_translation_event(
                         &translated_text,
                         translation_previews,
                         false,
-                        TranslationPreviewLanguages {
-                            resolved: None,
-                            locale: active_locale(state.borrow().ui_locale),
-                        },
                     );
                 }
                 TranslationOrigin::Selection { .. } => {}
@@ -3899,10 +3842,6 @@ fn handle_translation_event(
                         &message,
                         translation_previews,
                         true,
-                        TranslationPreviewLanguages {
-                            resolved: None,
-                            locale,
-                        },
                     );
                 }
                 None => {}
@@ -4162,10 +4101,6 @@ fn route_translation_result(
                     &result.translated_text,
                     translation_previews,
                     true,
-                    TranslationPreviewLanguages {
-                        resolved: Some((result.source_language, result.target_language)),
-                        locale,
-                    },
                 );
                 completed
             }

@@ -2629,6 +2629,31 @@ mod tests {
     }
 
     #[test]
+    fn translation_preview_toolbar_contains_only_approved_controls() {
+        let source = include_str!("../ui/app.slint");
+        let preview = source
+            .split("export component TranslationPreview")
+            .nth(1)
+            .expect("translation preview component");
+
+        assert!(preview.contains("text: @tr(\"ORIG\")"));
+        assert!(preview.contains("text: @tr(\"DUAL\")"));
+        assert!(preview.contains("text: @tr(\"PIN\")"));
+        for forbidden in [
+            "source-language-label",
+            "target-language-label",
+            "retry-translation",
+            "text: \"⇄\"",
+            "text: \"↻\"",
+        ] {
+            assert!(
+                !preview.contains(forbidden),
+                "unapproved toolbar token: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn translator_shortcut_callback_invokes_translate_once_and_releases_focus() {
         use std::{cell::Cell, rc::Rc};
 

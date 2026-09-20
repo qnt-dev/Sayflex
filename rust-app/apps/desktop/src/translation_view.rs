@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rust_protocol::{RequestId, TargetSnapshot, TranslationLanguage};
+use rust_protocol::RequestId;
 use slint::{
     ComponentHandle, Image, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer,
     winit_030::WinitWindowAccessor,
@@ -34,34 +34,6 @@ pub(crate) struct TranslationPreviewSlot {
     pub(crate) preview: Rc<TranslationPreview>,
     pub(crate) presenter: OverlayPresenter,
     pub(crate) attached: Rc<Cell<bool>>,
-    pub(crate) retry: Rc<std::cell::RefCell<Option<TranslationRetry>>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct TranslationRetry {
-    pub(crate) target: TargetSnapshot,
-    pub(crate) source_text: String,
-    pub(crate) translated_text: String,
-    pub(crate) source_language: TranslationLanguage,
-    pub(crate) target_language: TranslationLanguage,
-}
-
-impl TranslationRetry {
-    pub(crate) fn request(&self, swap: bool) -> (String, TranslationLanguage, TranslationLanguage) {
-        if swap {
-            (
-                self.translated_text.clone(),
-                self.target_language,
-                self.source_language,
-            )
-        } else {
-            (
-                self.source_text.clone(),
-                self.source_language,
-                self.target_language,
-            )
-        }
-    }
 }
 
 pub(crate) struct TranslationPreviewRegistry {
@@ -196,19 +168,6 @@ pub(crate) fn is_sentence_abbreviation(token: &str) -> bool {
 
 pub(crate) fn wire_translation_preview(preview: &TranslationPreview, presenter: &OverlayPresenter) {
     let drag_active = Arc::new(AtomicBool::new(false));
-    {
-        let preview_weak = preview.as_weak();
-        preview.on_retry_translation(move |swap| {
-            if let Some(preview) = preview_weak.upgrade()
-                && let Some(window_handle) = slint_window_handle(preview.window())
-            {
-                dispatch_runtime_event(RuntimeEvent::RetryTranslation {
-                    window_handle,
-                    swap,
-                });
-            }
-        });
-    }
     {
         let preview_weak = preview.as_weak();
         preview.on_pin_state_changed(move |pinned| {
@@ -363,7 +322,6 @@ pub(crate) fn create_translation_preview_slot(
         preview,
         presenter,
         attached: Rc::new(Cell::new(false)),
-        retry: Rc::new(std::cell::RefCell::new(None)),
     })
 }
 
@@ -381,7 +339,6 @@ pub(crate) fn retire_translation_preview(slot: &TranslationPreviewSlot, reason: 
     }
     slot.preview.set_prepared(false);
     slot.preview.set_request_id("".into());
-    *slot.retry.borrow_mut() = None;
     slot.presenter.retire(slot.preview.window(), reason);
 }
 
@@ -847,38 +804,9 @@ mod adaptive_popup_tests {
     use slint::ComponentHandle;
 
     use super::{
-        TranslationPreview, TranslationRetry, adaptive_text_panel_height,
-        backdrop_prefers_dark_text, translation_pairs, translation_units,
+        TranslationPreview, adaptive_text_panel_height, backdrop_prefers_dark_text,
+        translation_pairs, translation_units,
     };
-    use rust_protocol::{TargetSnapshot, TranslationLanguage};
-
-    #[test]
-    fn retry_and_swap_carry_explicit_languages_and_the_matching_text() {
-        let retry = TranslationRetry {
-            target: TargetSnapshot::default(),
-            source_text: "hello".to_owned(),
-            translated_text: "привет".to_owned(),
-            source_language: TranslationLanguage::English,
-            target_language: TranslationLanguage::Russian,
-        };
-
-        assert_eq!(
-            retry.request(false),
-            (
-                "hello".to_owned(),
-                TranslationLanguage::English,
-                TranslationLanguage::Russian
-            )
-        );
-        assert_eq!(
-            retry.request(true),
-            (
-                "привет".to_owned(),
-                TranslationLanguage::Russian,
-                TranslationLanguage::English
-            )
-        );
-    }
 
     fn uniform_backdrop(value: u8) -> Vec<u8> {
         [value, value, value, u8::MAX].repeat(5_000)
