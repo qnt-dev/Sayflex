@@ -13,6 +13,7 @@ members = [
     "crates/protocol",
     "crates/speech-api",
     "crates/translation-engine",
+    "tools/ocr-benchmark",
 ]
 resolver = "3"
 

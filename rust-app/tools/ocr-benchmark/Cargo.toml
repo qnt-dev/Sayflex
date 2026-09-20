@@ -1,0 +1,29 @@
+[package]
+name = "sayflex-ocr-benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95"
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.42", features = ["derive"] }
+image = "0.25.6"
+oar-ocr = { version = "=0.9.2", default-features = false, features = ["download-binaries"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq = { version = "3.4.2", default-features = false, features = ["rustls", "platform-verifier"] }
+unicode-bidi = "0.3.18"
+windows = { workspace = true, features = [
+    "Foundation",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage",
+    "Storage_Streams",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_WinRT",
+] }

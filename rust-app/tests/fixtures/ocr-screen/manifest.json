@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "renderer": {
+    "script": "render_fixtures.py",
+    "engine": "Microsoft Edge headless",
+    "device_scale_factor": 1
+  },
+  "fixtures": [
+    {"file":"light-en.png","language":"en","category":"light","expected":"SayFlex keeps the source text.","font":"Segoe UI"},
+    {"file":"dark-ru.png","language":"ru","category":"dark","expected":"Перевод выделенной области","font":"Segoe UI"},
+    {"file":"light-uk.png","language":"uk","category":"light","expected":"Переклад виділеної області","font":"Segoe UI"},
+    {"file":"dark-es.png","language":"es","category":"dark","expected":"Traducción del área seleccionada","font":"Segoe UI"},
+    {"file":"light-pt-br.png","language":"pt-BR","category":"light","expected":"Tradução da área selecionada","font":"Segoe UI"},
+    {"file":"dark-de.png","language":"de","category":"dark","expected":"Übersetzung des ausgewählten Bereichs","font":"Segoe UI"},
+    {"file":"light-fr.png","language":"fr","category":"light","expected":"Traduction de la zone sélectionnée","font":"Segoe UI"},
+    {"file":"dark-it.png","language":"it","category":"dark","expected":"Traduzione dell'area selezionata","font":"Segoe UI"},
+    {"file":"light-zh-hans.png","language":"zh-Hans","category":"light","expected":"翻译所选屏幕区域","font":"Microsoft YaHei"},
+    {"file":"dark-zh-hant.png","language":"zh-Hant","category":"dark","expected":"翻譯選取的螢幕區域","font":"Microsoft JhengHei"},
+    {"file":"light-ja.png","language":"ja","category":"light","expected":"選択した画面領域を翻訳","font":"Yu Gothic UI"},
+    {"file":"dark-ko.png","language":"ko","category":"dark","expected":"선택한 화면 영역 번역","font":"Malgun Gothic"},
+    {"file":"light-hi.png","language":"hi","category":"light","expected":"चुने हुए स्क्रीन क्षेत्र का अनुवाद","font":"Nirmala UI"},
+    {"file":"dark-ar.png","language":"ar","category":"dark","expected":"ترجمة منطقة الشاشة المحددة","font":"Segoe UI"},
+    {"file":"small-mixed.png","language":"auto","category":"small","expected":"Status: готово — build 42","font":"Segoe UI"},
+    {"file":"two-columns.png","language":"en","category":"columns","expected":"Left one\nLeft two\n\nRight one\nRight two","font":"Segoe UI"},
+    {"file":"blank.png","language":"auto","category":"blank","expected":"","font":"Segoe UI"}
+  ]
+}
