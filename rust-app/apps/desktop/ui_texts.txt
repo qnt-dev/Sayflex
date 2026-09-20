@@ -322,3 +322,11 @@ HindiLanguage|Hindi
 ArabicLanguage|Arabic
 QuickTranslation|Quick translation
 TranslateCtrlEnter|Translate (Ctrl+Enter)
+ScreenCaptureUnavailable|Screen capture is unavailable. Try again.
+ScreenCaptureProtected|This content is protected and cannot be captured.
+ScreenSelectionEmpty|Select an area that contains text.
+ScreenOcrNoText|No readable text was found in the selected area.
+ScreenOcrModelUnavailable|The local screen-reading model is not installed. Install it in Models.
+ScreenOcrLanguageUnavailable|This language is not available for local screen reading.
+ScreenOcrWorkerFailed|Screen text recognition stopped unexpectedly. Try again.
+ScreenTranslationCancelled|Screen translation was cancelled.

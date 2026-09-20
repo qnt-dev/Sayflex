@@ -8,6 +8,10 @@ use image::RgbaImage;
 use rust_protocol::{OcrLanguagePolicy, OcrLine};
 use thiserror::Error;
 
+mod reconstruct;
+
+pub use reconstruct::{ReconstructedText, reconstruct_text};
+
 #[cfg(feature = "ppocr")]
 mod ppocr;
 

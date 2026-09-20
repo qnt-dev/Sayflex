@@ -1503,3 +1503,27 @@ msgstr "Адресу скопійовано"
 
 msgid "Close"
 msgstr "Закрити"
+
+msgid "Screen capture is unavailable. Try again."
+msgstr "Захоплення екрана недоступне. Спробуйте ще раз."
+
+msgid "This content is protected and cannot be captured."
+msgstr "Цей вміст захищено, тому його не можна захопити."
+
+msgid "Select an area that contains text."
+msgstr "Виділіть область, що містить текст."
+
+msgid "No readable text was found in the selected area."
+msgstr "У виділеній області не знайдено читабельного тексту."
+
+msgid "The local screen-reading model is not installed. Install it in Models."
+msgstr "Локальну модель розпізнавання тексту на екрані не встановлено. Установіть її в розділі «Моделі»."
+
+msgid "This language is not available for local screen reading."
+msgstr "Ця мова недоступна для локального розпізнавання тексту на екрані."
+
+msgid "Screen text recognition stopped unexpectedly. Try again."
+msgstr "Розпізнавання тексту на екрані несподівано зупинилося. Спробуйте ще раз."
+
+msgid "Screen translation was cancelled."
+msgstr "Переклад з екрана скасовано."

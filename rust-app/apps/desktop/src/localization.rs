@@ -107,6 +107,37 @@ pub(crate) fn render(locale: UiLocale, message: UiText, values: &[(&str, &str)])
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Consumed by the Task 8 capture/OCR state machine.
+pub(crate) enum ScreenTranslationOutcome {
+    CaptureUnavailable,
+    ProtectedContent,
+    EmptySelection,
+    NoText,
+    ModelUnavailable,
+    LanguageUnavailable,
+    WorkerFailed,
+    Cancelled,
+}
+
+#[allow(dead_code)] // Consumed by the Task 8 capture/OCR state machine.
+pub(crate) fn screen_translation_outcome_text(
+    locale: UiLocale,
+    outcome: ScreenTranslationOutcome,
+) -> &'static str {
+    let message = match outcome {
+        ScreenTranslationOutcome::CaptureUnavailable => UiText::ScreenCaptureUnavailable,
+        ScreenTranslationOutcome::ProtectedContent => UiText::ScreenCaptureProtected,
+        ScreenTranslationOutcome::EmptySelection => UiText::ScreenSelectionEmpty,
+        ScreenTranslationOutcome::NoText => UiText::ScreenOcrNoText,
+        ScreenTranslationOutcome::ModelUnavailable => UiText::ScreenOcrModelUnavailable,
+        ScreenTranslationOutcome::LanguageUnavailable => UiText::ScreenOcrLanguageUnavailable,
+        ScreenTranslationOutcome::WorkerFailed => UiText::ScreenOcrWorkerFailed,
+        ScreenTranslationOutcome::Cancelled => UiText::ScreenTranslationCancelled,
+    };
+    text(active_locale(locale), message)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -873,6 +904,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn screen_translation_outcomes_are_translated_in_every_shipped_locale() {
+        let messages = [
+            "Screen capture is unavailable. Try again.",
+            "This content is protected and cannot be captured.",
+            "Select an area that contains text.",
+            "No readable text was found in the selected area.",
+            "The local screen-reading model is not installed. Install it in Models.",
+            "This language is not available for local screen reading.",
+            "Screen text recognition stopped unexpectedly. Try again.",
+            "Screen translation was cancelled.",
+        ];
+        for (language, source) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            let entries = catalog(source);
+            for message in messages {
+                let translated = entries.get(message).unwrap_or_else(|| {
+                    panic!("{language}: missing screen translation outcome {message:?}")
+                });
+                assert_ne!(
+                    translated, message,
+                    "{language}: screen translation outcome leaked English"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_screen_translation_outcomes_select_specific_user_copy() {
+        use super::{ScreenTranslationOutcome, screen_translation_outcome_text};
+
+        assert_eq!(
+            screen_translation_outcome_text(
+                UiLocale::Russian,
+                ScreenTranslationOutcome::ProtectedContent,
+            ),
+            "Защищённое содержимое нельзя захватить."
+        );
+        assert_eq!(
+            screen_translation_outcome_text(UiLocale::Korean, ScreenTranslationOutcome::NoText),
+            "선택한 영역에서 읽을 수 있는 텍스트를 찾지 못했습니다."
+        );
     }
 
     #[test]

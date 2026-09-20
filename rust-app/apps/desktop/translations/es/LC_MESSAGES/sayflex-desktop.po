@@ -1503,3 +1503,27 @@ msgstr "Dirección copiada"
 
 msgid "Close"
 msgstr "Cerrar"
+
+msgid "Screen capture is unavailable. Try again."
+msgstr "La captura de pantalla no está disponible. Inténtalo de nuevo."
+
+msgid "This content is protected and cannot be captured."
+msgstr "Este contenido está protegido y no se puede capturar."
+
+msgid "Select an area that contains text."
+msgstr "Selecciona un área que contenga texto."
+
+msgid "No readable text was found in the selected area."
+msgstr "No se encontró texto legible en el área seleccionada."
+
+msgid "The local screen-reading model is not installed. Install it in Models."
+msgstr "El modelo local de reconocimiento de texto en pantalla no está instalado. Instálalo en Modelos."
+
+msgid "This language is not available for local screen reading."
+msgstr "Este idioma no está disponible para el reconocimiento local de texto en pantalla."
+
+msgid "Screen text recognition stopped unexpectedly. Try again."
+msgstr "El reconocimiento de texto en pantalla se detuvo inesperadamente. Inténtalo de nuevo."
+
+msgid "Screen translation was cancelled."
+msgstr "La traducción de pantalla se canceló."

@@ -1503,3 +1503,27 @@ msgstr "Adresse copiée"
 
 msgid "Close"
 msgstr "Fermer"
+
+msgid "Screen capture is unavailable. Try again."
+msgstr "La capture d’écran n’est pas disponible. Réessayez."
+
+msgid "This content is protected and cannot be captured."
+msgstr "Ce contenu est protégé et ne peut pas être capturé."
+
+msgid "Select an area that contains text."
+msgstr "Sélectionnez une zone contenant du texte."
+
+msgid "No readable text was found in the selected area."
+msgstr "Aucun texte lisible n’a été trouvé dans la zone sélectionnée."
+
+msgid "The local screen-reading model is not installed. Install it in Models."
+msgstr "Le modèle local de reconnaissance du texte à l’écran n’est pas installé. Installez-le dans Modèles."
+
+msgid "This language is not available for local screen reading."
+msgstr "Cette langue n’est pas disponible pour la reconnaissance locale du texte à l’écran."
+
+msgid "Screen text recognition stopped unexpectedly. Try again."
+msgstr "La reconnaissance du texte à l’écran s’est arrêtée de manière inattendue. Réessayez."
+
+msgid "Screen translation was cancelled."
+msgstr "La traduction de l’écran a été annulée."
