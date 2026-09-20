@@ -1,0 +1,24 @@
+[package]
+name = "sayflex-ocr-worker"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95"
+license.workspace = true
+
+[features]
+default = []
+screen-translation-dev = ["rust-ocr-engine/ppocr"]
+
+[dependencies]
+anyhow = "1.0.100"
+base64 = "0.22.1"
+image = "0.25.6"
+rust-app-core = { version = "0.8.0", path = "../../crates/app-core" }
+rust-model-manager = { version = "0.8.0", path = "../../crates/model-manager" }
+rust-ocr-engine = { version = "0.8.0", path = "../../crates/ocr-engine" }
+rust-platform-windows = { version = "0.8.0", path = "../../crates/platform-windows" }
+rust-protocol = { version = "0.8.0", path = "../../crates/protocol" }
+serde_json.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.23"

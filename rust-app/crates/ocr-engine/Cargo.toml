@@ -1,0 +1,18 @@
+[package]
+name = "rust-ocr-engine"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95"
+license.workspace = true
+
+[features]
+default = []
+ppocr = ["dep:oar-ocr", "dep:unicode-bidi"]
+
+[dependencies]
+base64 = "0.22.1"
+image = "0.25.6"
+oar-ocr = { version = "=0.9.2", optional = true, default-features = false }
+rust-protocol = { version = "0.8.0", path = "../protocol" }
+thiserror.workspace = true
+unicode-bidi = { version = "0.3.18", optional = true }

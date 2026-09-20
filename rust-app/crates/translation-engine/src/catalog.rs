@@ -65,6 +65,8 @@ impl TranslationPackDescriptor {
     pub fn as_bundle(&self) -> BundleDescriptor {
         BundleDescriptor {
             id: self.id.clone(),
+            license: Some(self.license.clone()),
+            attribution: None,
             artifacts: self.artifacts.clone(),
         }
     }

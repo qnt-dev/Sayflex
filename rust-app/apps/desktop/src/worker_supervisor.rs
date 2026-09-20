@@ -1,7 +1,7 @@
 //! Starting the worker processes and keeping them alive.
 //!
-//! Four executables, one job object, and the rules for what to do when one of
-//! them dies: whether the exit belongs to the process we are still talking to,
+//! The core executables plus feature-gated workers share one job object and the
+//! rules for what to do when one of them dies: whether the exit belongs to the process we are still talking to,
 //! whether it happened while Windows was ending the session, and whether it has
 //! already failed often enough that restarting it again would be a loop rather
 //! than a recovery.
@@ -30,6 +30,8 @@ use rust_protocol::{
     CompanionRendererCommand, InputHostCommand, SpeechWorkerCommand, SpeechWorkerEvent,
     TranslationWorkerCommand,
 };
+#[cfg(feature = "screen-translation-dev")]
+use rust_protocol::{OcrWorkerCommand, OcrWorkerEvent};
 use serde::de::DeserializeOwned;
 
 use crate::{
@@ -42,6 +44,9 @@ pub(crate) const INPUT_WORKER_EXE: &str = "SayFlex.InputHost.exe";
 pub(crate) const SPEECH_WORKER_EXE: &str = "SayFlex.Speech.exe";
 
 pub(crate) const TRANSLATION_WORKER_EXE: &str = "SayFlex.Translation.exe";
+
+#[cfg(feature = "screen-translation-dev")]
+pub(crate) const OCR_WORKER_EXE: &str = "SayFlex.Ocr.exe";
 
 pub(crate) const COMPANION_RENDERER_EXE: &str = "SayFlex.Companion.exe";
 
@@ -56,6 +61,9 @@ pub(crate) const DEV_INPUT_WORKER_EXE: &str = "sayflex-input-host.exe";
 pub(crate) const DEV_SPEECH_WORKER_EXE: &str = "sayflex-speech-worker.exe";
 
 pub(crate) const DEV_TRANSLATION_WORKER_EXE: &str = "sayflex-translation-worker.exe";
+
+#[cfg(feature = "screen-translation-dev")]
+pub(crate) const DEV_OCR_WORKER_EXE: &str = "sayflex-ocr-worker.exe";
 
 pub(crate) const DEV_COMPANION_RENDERER_EXE: &str = "sayflex-companion-renderer.exe";
 
@@ -81,6 +89,10 @@ pub(crate) struct InitialWorkers {
     pub(crate) speech_backends: SpeechBackendPlan,
     pub(crate) translation_child: WorkerProcess,
     pub(crate) translation: JsonWriter,
+    #[cfg(feature = "screen-translation-dev")]
+    pub(crate) ocr_child: WorkerProcess,
+    #[cfg(feature = "screen-translation-dev")]
+    pub(crate) ocr: JsonWriter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,10 +246,16 @@ pub(crate) struct Workers {
     pub(crate) input: JsonWriter,
     pub(crate) speech: JsonWriter,
     pub(crate) translation: JsonWriter,
+    #[cfg(feature = "screen-translation-dev")]
+    pub(crate) ocr: JsonWriter,
     pub(crate) input_child: RefCell<WorkerProcess>,
     pub(crate) speech_child: RefCell<WorkerProcess>,
     pub(crate) speech_backends: RefCell<SpeechBackendPlan>,
     pub(crate) translation_child: RefCell<WorkerProcess>,
+    #[cfg(feature = "screen-translation-dev")]
+    pub(crate) ocr_child: RefCell<WorkerProcess>,
+    #[cfg(feature = "screen-translation-dev")]
+    pub(crate) active_ocr_request: RefCell<Option<rust_protocol::RequestId>>,
     pub(crate) companion: RefCell<Option<JsonWriter>>,
     pub(crate) companion_child: RefCell<Option<WorkerProcess>>,
     pub(crate) lifecycle: Cell<WorkerLifecycle>,
@@ -260,6 +278,8 @@ impl Workers {
         let _ = self.input.send(&InputHostCommand::Shutdown);
         let _ = self.speech.send(&SpeechWorkerCommand::Shutdown);
         let _ = self.translation.send(&TranslationWorkerCommand::Shutdown);
+        #[cfg(feature = "screen-translation-dev")]
+        let _ = self.ocr.send(&OcrWorkerCommand::Shutdown);
         if let Some(companion) = self.companion.borrow().as_ref() {
             let _ = companion.send(&CompanionRendererCommand::Shutdown);
         }
@@ -295,6 +315,8 @@ impl Workers {
             WorkerKind::Input => self.input_child.borrow().instance_id == instance_id,
             WorkerKind::Speech => self.speech_child.borrow().instance_id == instance_id,
             WorkerKind::Translation => self.translation_child.borrow().instance_id == instance_id,
+            #[cfg(feature = "screen-translation-dev")]
+            WorkerKind::Ocr => self.ocr_child.borrow().instance_id == instance_id,
             WorkerKind::Companion => self
                 .companion_child
                 .borrow()
@@ -438,6 +460,41 @@ impl Workers {
         companion.send(command).map_err(|error| error.to_string())
     }
 
+    #[cfg(feature = "screen-translation-dev")]
+    #[allow(dead_code)]
+    pub(crate) fn send_ocr(&self, command: &OcrWorkerCommand) -> Result<(), String> {
+        let request_id = match command {
+            OcrWorkerCommand::Recognize { request_id, .. } => Some(*request_id),
+            OcrWorkerCommand::Cancel { .. } | OcrWorkerCommand::Shutdown => None,
+        };
+        if let Some(request_id) = request_id {
+            self.active_ocr_request.replace(Some(request_id));
+        }
+        if let Err(error) = self.ocr.send(command) {
+            if let Some(request_id) = request_id {
+                self.complete_ocr_request(request_id);
+            }
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "screen-translation-dev")]
+    pub(crate) fn complete_ocr_request(&self, request_id: rust_protocol::RequestId) -> bool {
+        let mut active = self.active_ocr_request.borrow_mut();
+        if *active == Some(request_id) {
+            active.take();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "screen-translation-dev")]
+    pub(crate) fn abandon_active_ocr_request(&self) -> Option<rust_protocol::RequestId> {
+        self.active_ocr_request.borrow_mut().take()
+    }
+
     pub(crate) fn recover(
         &self,
         kind: WorkerKind,
@@ -545,6 +602,13 @@ impl Workers {
                 self.translation.replace_with(writer);
                 replace_process(&self.translation_child, child);
             }
+            #[cfg(feature = "screen-translation-dev")]
+            WorkerKind::Ocr => {
+                let (child, writer) =
+                    spawn_ocr_worker(&self._job).map_err(|error| error.to_string())?;
+                self.ocr.replace_with(writer);
+                replace_process(&self.ocr_child, child);
+            }
             WorkerKind::Companion => {
                 let (child, writer) = spawn_worker(
                     &self._job,
@@ -614,6 +678,13 @@ impl Drop for Workers {
                 let _ = process.child.kill();
             }
         }
+        #[cfg(feature = "screen-translation-dev")]
+        {
+            let mut process = self.ocr_child.borrow_mut();
+            if process.child.try_wait().ok().flatten().is_none() {
+                let _ = process.child.kill();
+            }
+        }
         if let Some(process) = self.companion_child.get_mut().as_mut()
             && process.child.try_wait().ok().flatten().is_none()
         {
@@ -665,6 +736,20 @@ pub(crate) fn spawn_initial_workers(
     else {
         return Ok(None);
     };
+    #[cfg(feature = "screen-translation-dev")]
+    let Some((ocr_child, ocr)) = guarded_initial_spawn(
+        startup_gate,
+        || spawn_ocr_worker(&job),
+        rust_platform_windows::session_is_ending,
+        || {
+            rust_app_core::diagnostics::log_line(
+                "worker=SayFlex.Ocr initial_spawn=retry_after_session_end_cancelled",
+            );
+        },
+    )?
+    else {
+        return Ok(None);
+    };
     if !startup_gate.wait_until_worker_start_is_allowed() {
         return Ok(None);
     }
@@ -677,6 +762,10 @@ pub(crate) fn spawn_initial_workers(
         speech_backends,
         translation_child,
         translation,
+        #[cfg(feature = "screen-translation-dev")]
+        ocr_child,
+        #[cfg(feature = "screen-translation-dev")]
+        ocr,
     }))
 }
 
@@ -777,6 +866,21 @@ pub(crate) fn spawn_speech_worker(
             }),
             event => Some(RuntimeEvent::Speech { instance_id, event }),
         },
+    )
+}
+
+#[cfg(feature = "screen-translation-dev")]
+pub(crate) fn spawn_ocr_worker(
+    worker_job: &rust_platform_windows::WorkerJob,
+) -> Result<(WorkerProcess, JsonWriter), Box<dyn Error>> {
+    let path = worker_path(OCR_WORKER_EXE)?;
+    spawn_worker_at(
+        worker_job,
+        WorkerKind::Ocr,
+        OCR_WORKER_EXE,
+        path,
+        None,
+        |instance_id, event: OcrWorkerEvent| Some(RuntimeEvent::Ocr { instance_id, event }),
     )
 }
 
@@ -903,13 +1007,7 @@ pub(crate) fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
     if sibling.exists() {
         return Ok(sibling);
     }
-    let development = match executable {
-        INPUT_WORKER_EXE => Some(DEV_INPUT_WORKER_EXE),
-        TRANSLATION_WORKER_EXE => Some(DEV_TRANSLATION_WORKER_EXE),
-        COMPANION_RENDERER_EXE => Some(DEV_COMPANION_RENDERER_EXE),
-        _ => None,
-    }
-    .map(|name| parent.join(name));
+    let development = development_worker_name(executable).map(|name| parent.join(name));
     if let Some(development) = development.filter(|path| path.exists()) {
         return Ok(development);
     }
@@ -919,6 +1017,17 @@ pub(crate) fn worker_path(executable: &str) -> Result<PathBuf, Box<dyn Error>> {
         sibling.display()
     )
     .into())
+}
+
+pub(crate) fn development_worker_name(executable: &str) -> Option<&'static str> {
+    match executable {
+        INPUT_WORKER_EXE => Some(DEV_INPUT_WORKER_EXE),
+        TRANSLATION_WORKER_EXE => Some(DEV_TRANSLATION_WORKER_EXE),
+        COMPANION_RENDERER_EXE => Some(DEV_COMPANION_RENDERER_EXE),
+        #[cfg(feature = "screen-translation-dev")]
+        OCR_WORKER_EXE => Some(DEV_OCR_WORKER_EXE),
+        _ => None,
+    }
 }
 
 pub(crate) fn speech_worker_path(backend: SpeechBackend) -> Result<PathBuf, Box<dyn Error>> {
@@ -1283,5 +1392,18 @@ mod worker_lifecycle_tests {
 
         assert_eq!(decision, RestartPolicyDecision::Stale);
         assert_eq!(attempts.len(), 1);
+    }
+}
+
+#[cfg(all(test, feature = "screen-translation-dev"))]
+mod ocr_supervision_tests {
+    use super::{DEV_OCR_WORKER_EXE, OCR_WORKER_EXE, development_worker_name};
+
+    #[test]
+    fn installed_ocr_worker_has_an_explicit_development_sibling() {
+        assert_eq!(
+            development_worker_name(OCR_WORKER_EXE),
+            Some(DEV_OCR_WORKER_EXE)
+        );
     }
 }

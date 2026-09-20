@@ -25,6 +25,10 @@ pub struct BundleArtifact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleDescriptor {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
     pub artifacts: Vec<BundleArtifact>,
 }
 
@@ -377,6 +381,8 @@ mod tests {
     fn bundle() -> BundleDescriptor {
         BundleDescriptor {
             id: "pair-tiny".to_owned(),
+            license: None,
+            attribution: None,
             artifacts: vec![
                 BundleArtifact {
                     relative_path: "ru-en/model.bin".to_owned(),

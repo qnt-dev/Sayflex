@@ -38,3 +38,4 @@ tempfile.workspace = true
 # screen-capture APIs return blank for. Off by default: a shipped binary has no
 # use for a second renderer.
 inspect = ["slint/renderer-software"]
+screen-translation-dev = []

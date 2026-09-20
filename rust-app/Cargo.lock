@@ -5477,6 +5477,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-ocr-engine"
+version = "0.8.0"
+dependencies = [
+ "base64 0.22.1",
+ "image",
+ "oar-ocr",
+ "rust-protocol",
+ "thiserror 2.0.19",
+ "unicode-bidi",
+]
+
+[[package]]
 name = "rust-platform-windows"
 version = "0.8.0"
 dependencies = [
@@ -5783,6 +5795,22 @@ dependencies = [
  "unicode-bidi",
  "ureq",
  "windows",
+]
+
+[[package]]
+name = "sayflex-ocr-worker"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "image",
+ "rust-app-core",
+ "rust-model-manager",
+ "rust-ocr-engine",
+ "rust-platform-windows",
+ "rust-protocol",
+ "serde_json",
+ "winresource",
 ]
 
 [[package]]

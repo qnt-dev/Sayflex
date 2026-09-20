@@ -27,6 +27,8 @@ use rust_app_core::{
     hotkeys::format_hotkey,
     provider_drafts::ProviderDraftStore,
 };
+#[cfg(feature = "screen-translation-dev")]
+use rust_protocol::OcrWorkerEvent;
 use rust_protocol::{
     BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, DictationLanguage,
     HistoryEntry, HotkeyAction, HotkeyBindings, HotkeyConfiguration, HotkeyRejection,
@@ -170,6 +172,11 @@ enum RuntimeEvent {
         instance_id: u64,
     },
     Translation(TranslationWorkerEvent),
+    #[cfg(feature = "screen-translation-dev")]
+    Ocr {
+        instance_id: u64,
+        event: OcrWorkerEvent,
+    },
     Companion(CompanionRendererEvent),
     DismissTranslationPreview(u64),
     TranslationPreviewPinChanged {
@@ -202,6 +209,8 @@ enum WorkerKind {
     Input,
     Speech,
     Translation,
+    #[cfg(feature = "screen-translation-dev")]
+    Ocr,
     Companion,
 }
 
@@ -932,16 +941,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         speech_backends,
         translation_child,
         translation,
+        #[cfg(feature = "screen-translation-dev")]
+        ocr_child,
+        #[cfg(feature = "screen-translation-dev")]
+        ocr,
     } = initial_workers;
     let workers = Rc::new(Workers {
         _job: worker_job,
         input,
         speech,
         translation,
+        #[cfg(feature = "screen-translation-dev")]
+        ocr,
         input_child: RefCell::new(input_child),
         speech_child: RefCell::new(speech_child),
         speech_backends: RefCell::new(speech_backends),
         translation_child: RefCell::new(translation_child),
+        #[cfg(feature = "screen-translation-dev")]
+        ocr_child: RefCell::new(ocr_child),
+        #[cfg(feature = "screen-translation-dev")]
+        active_ocr_request: RefCell::new(None),
         companion: RefCell::new(None),
         companion_child: RefCell::new(None),
         lifecycle: Cell::new(WorkerLifecycle::Running),
@@ -1284,6 +1303,61 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 &runtime.workers,
             );
         }
+        #[cfg(feature = "screen-translation-dev")]
+        RuntimeEvent::Ocr { instance_id, event } => {
+            if !runtime
+                .workers
+                .is_current_instance(WorkerKind::Ocr, instance_id)
+            {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "worker kind=Ocr instance={instance_id} event=stale_ignored"
+                ));
+                return;
+            }
+            match event {
+                OcrWorkerEvent::Ready {
+                    protocol_version,
+                    engine,
+                } => {
+                    let matched = protocol_version == PROTOCOL_VERSION;
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "ocr_worker lifecycle=ready protocol_matched={matched} engine={engine}"
+                    ));
+                    if !matched {
+                        set_status_problem(
+                            &runtime.settings,
+                            state_text(&runtime.state, UiText::WorkerUnavailable),
+                        );
+                    }
+                }
+                OcrWorkerEvent::Recognized {
+                    request_id,
+                    lines,
+                    processing_duration_ms,
+                    ..
+                } => {
+                    runtime.workers.complete_ocr_request(request_id);
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "ocr_worker request={request_id} outcome=recognized lines={} duration_ms={processing_duration_ms}",
+                        lines.len()
+                    ));
+                }
+                OcrWorkerEvent::Failed {
+                    request_id, kind, ..
+                } => {
+                    runtime.workers.complete_ocr_request(request_id);
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "ocr_worker request={request_id} outcome=failed kind={kind:?}"
+                    ));
+                }
+                OcrWorkerEvent::Cancelled { request_id } => {
+                    runtime.workers.complete_ocr_request(request_id);
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "ocr_worker request={request_id} outcome=cancelled"
+                    ));
+                }
+            }
+        }
         RuntimeEvent::Companion(event) => match event {
             CompanionRendererEvent::Ready { protocol_version } => {
                 if protocol_version == PROTOCOL_VERSION {
@@ -1459,6 +1533,13 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 set_indicator_status(&runtime.settings, &message);
                 return;
             }
+            #[cfg(feature = "screen-translation-dev")]
+            if kind == WorkerKind::Ocr {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "ocr_worker instance={instance_id} event_stream=invalid message={message}"
+                ));
+                return;
+            }
             if runtime
                 .state
                 .borrow()
@@ -1482,6 +1563,8 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             let owner = match kind {
                 WorkerKind::Speech => Some(providers_view::Kind::Speech),
                 WorkerKind::Translation => Some(providers_view::Kind::Text),
+                #[cfg(feature = "screen-translation-dev")]
+                WorkerKind::Ocr => None,
                 _ => None,
             };
             if let Some(owner) = owner {
@@ -1607,6 +1690,27 @@ fn handle_worker_exit(
         return;
     }
 
+    #[cfg(feature = "screen-translation-dev")]
+    if kind == WorkerKind::Ocr {
+        if let Some(request_id) = runtime.workers.abandon_active_ocr_request() {
+            rust_app_core::diagnostics::log_line(&format!(
+                "ocr_worker request={request_id} outcome=failed kind=engine source=worker_exit replay=false"
+            ));
+        }
+        match runtime.workers.recover(kind, instance_id, exit) {
+            Ok(WorkerRecovery::Restarted) => {
+                rust_app_core::diagnostics::log_line(
+                    "ocr_worker recovery=restarted pending_request=not_replayed",
+                );
+            }
+            Ok(WorkerRecovery::Deferred | WorkerRecovery::Stopping | WorkerRecovery::Stale) => {}
+            Err(error) => rust_app_core::diagnostics::log_line(&format!(
+                "ocr_worker recovery=failed error={error}"
+            )),
+        }
+        return;
+    }
+
     if runtime
         .state
         .borrow()
@@ -1631,6 +1735,8 @@ fn handle_worker_exit(
                 state.translation_ready = false;
                 state.pending_translations.clear();
             }
+            #[cfg(feature = "screen-translation-dev")]
+            WorkerKind::Ocr => {}
             WorkerKind::Companion => {}
         }
         let active = state.indicator_session.take();
@@ -1686,6 +1792,8 @@ fn handle_worker_exit(
                             prepare_local_model: state.local_translation_enabled(),
                         })
                 }
+                #[cfg(feature = "screen-translation-dev")]
+                WorkerKind::Ocr => Ok(()),
                 WorkerKind::Companion => Ok(()),
             };
             if let Some(settings) = runtime.settings.upgrade() {
