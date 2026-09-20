@@ -25,8 +25,8 @@ msgstr "{count} mantido · tudo neste dispositivo"
 msgid "{count} kept on this device"
 msgstr "{count} mantido neste dispositivo"
 
-msgid "{count} of 6 shortcuts active"
-msgstr "{count} de 6 atalhos ativos"
+msgid "{count} of {total} shortcuts active"
+msgstr "{count} de {total} atalhos ativos"
 
 msgid "{field} is needed as well as the key."
 msgstr "{field} é necessário, assim como a chave."

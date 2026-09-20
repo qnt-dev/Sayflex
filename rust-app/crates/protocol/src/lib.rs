@@ -882,7 +882,7 @@ impl Default for HotkeyBindings {
                 spec: HotkeySpec::control_alt(u16::from(b'F')),
                 enabled: false,
             },
-            screen_translate: HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'G'))),
+            screen_translate: legacy_screen_translate_binding(),
             pause_resume: HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'P'))),
         }
     }
@@ -1451,6 +1451,10 @@ mod tests {
         assert_eq!(
             HotkeyBindings::default().screen_translate.spec,
             HotkeySpec::control_alt(u16::from(b'G'))
+        );
+        assert!(
+            !HotkeyBindings::default().screen_translate.enabled,
+            "an unadmitted OCR feature must be opt-in even in development builds"
         );
         assert_eq!(HotkeyAction::ALL.len(), 6);
         round_trip(InputHostEvent::ScreenCaptureRequested { request_id });

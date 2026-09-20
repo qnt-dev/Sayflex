@@ -58,10 +58,11 @@ use settings_document::{
     save_settings,
 };
 use settings_view::{
-    precreate_action_windows, prepend_history_row, set_indicator_status, set_runtime_status,
-    set_status_problem, show_layout_chooser, sync_action_settings, sync_history,
-    sync_hotkey_capture_status, sync_models, sync_output_mode, sync_translation_models,
-    wire_action_palette, wire_chooser, wire_settings, wire_translator, wire_tray,
+    effective_hotkey_bindings, precreate_action_windows, prepend_history_row, set_indicator_status,
+    set_runtime_status, set_status_problem, show_layout_chooser, sync_action_settings,
+    sync_history, sync_hotkey_capture_status, sync_models, sync_output_mode,
+    sync_translation_models, wire_action_palette, wire_chooser, wire_settings, wire_translator,
+    wire_tray,
 };
 use slint::winit_030::{
     WinitWindowAccessor,
@@ -2363,7 +2364,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             if protocol_version == PROTOCOL_VERSION {
                 state.borrow_mut().input_ready = true;
                 let operation_id = RequestId::new();
-                let bindings = state.borrow().hotkeys.clone();
+                let bindings = effective_hotkey_bindings(state.borrow().hotkeys.clone());
                 state.borrow_mut().pending_hotkeys = Some((operation_id, bindings.clone()));
                 if let Err(error) = workers.input.send(&InputHostCommand::SetHotkeys {
                     operation_id,

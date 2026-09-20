@@ -25,8 +25,8 @@ msgstr "{count} 개 유지 · 모두 이 장치에 있음"
 msgid "{count} kept on this device"
 msgstr "{count} 개가 이 장치에 유지됨"
 
-msgid "{count} of 6 shortcuts active"
-msgstr "바로가기 6개 중 {count}개 활성"
+msgid "{count} of {total} shortcuts active"
+msgstr "바로가기 {total}개 중 {count}개 활성"
 
 msgid "{field} is needed as well as the key."
 msgstr "{field}과 키가 필요합니다."

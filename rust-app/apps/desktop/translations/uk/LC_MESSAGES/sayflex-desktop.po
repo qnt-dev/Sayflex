@@ -25,8 +25,8 @@ msgstr "{count} збережено · усе на цьому пристрої"
 msgid "{count} kept on this device"
 msgstr "{count} збережено на цьому пристрої"
 
-msgid "{count} of 6 shortcuts active"
-msgstr "Активних сполучень: {count} із 6"
+msgid "{count} of {total} shortcuts active"
+msgstr "Активних сполучень: {count} із {total}"
 
 msgid "{field} is needed as well as the key."
 msgstr "Потрібен {field}, а також ключ."

@@ -25,8 +25,8 @@ msgstr "{count} conservé · tout sur cet appareil"
 msgid "{count} kept on this device"
 msgstr "{count} conservé sur cet appareil"
 
-msgid "{count} of 6 shortcuts active"
-msgstr "{count} sur 6 raccourcis actifs"
+msgid "{count} of {total} shortcuts active"
+msgstr "{count} sur {total} raccourcis actifs"
 
 msgid "{field} is needed as well as the key."
 msgstr "{field} est nécessaire ainsi que la clé."

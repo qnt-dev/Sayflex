@@ -549,8 +549,9 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         }
     };
 
-    HotkeyAction::ALL
-        .into_iter()
+    visible_hotkey_actions()
+        .iter()
+        .copied()
         .map(|action| {
             let binding = *state.hotkeys.binding(action);
             let rejection = state.hotkey_errors.get(&action).copied();
@@ -685,8 +686,10 @@ pub(crate) fn hotkey_rejection_global_message(
 
 fn hotkeys_summary(state: &AppState) -> String {
     let locale = active_locale(state.ui_locale);
-    let enabled = HotkeyAction::ALL
-        .into_iter()
+    let actions = visible_hotkey_actions();
+    let enabled = actions
+        .iter()
+        .copied()
         .filter(|action| state.hotkeys.binding(*action).enabled)
         .count();
     if state.input_paused {
@@ -701,21 +704,46 @@ fn hotkeys_summary(state: &AppState) -> String {
         render(
             locale,
             UiText::ActiveShortcuts,
-            &[("count", &enabled.to_string())],
+            &[
+                ("count", &enabled.to_string()),
+                ("total", &actions.len().to_string()),
+            ],
         )
     }
 }
 
-const fn hotkey_action_at(index: i32) -> Option<HotkeyAction> {
-    match index {
-        0 => Some(HotkeyAction::Dictate),
-        1 => Some(HotkeyAction::InsertLast),
-        2 => Some(HotkeyAction::CorrectLayout),
-        3 => Some(HotkeyAction::Translate),
-        4 => Some(HotkeyAction::ScreenTranslate),
-        5 => Some(HotkeyAction::PauseResume),
-        _ => None,
-    }
+#[cfg(feature = "screen-translation-dev")]
+const VISIBLE_HOTKEY_ACTIONS: &[HotkeyAction] = &HotkeyAction::ALL;
+
+#[cfg(not(feature = "screen-translation-dev"))]
+const VISIBLE_HOTKEY_ACTIONS: &[HotkeyAction] = &[
+    HotkeyAction::Dictate,
+    HotkeyAction::InsertLast,
+    HotkeyAction::CorrectLayout,
+    HotkeyAction::Translate,
+    HotkeyAction::PauseResume,
+];
+
+fn visible_hotkey_actions() -> &'static [HotkeyAction] {
+    VISIBLE_HOTKEY_ACTIONS
+}
+
+fn hotkey_action_at(index: i32) -> Option<HotkeyAction> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| visible_hotkey_actions().get(index))
+        .copied()
+}
+
+#[cfg(feature = "screen-translation-dev")]
+pub(crate) fn effective_hotkey_bindings(bindings: HotkeyBindings) -> HotkeyBindings {
+    bindings
+}
+
+#[cfg(not(feature = "screen-translation-dev"))]
+pub(crate) fn effective_hotkey_bindings(mut bindings: HotkeyBindings) -> HotkeyBindings {
+    bindings.screen_translate.enabled = false;
+    bindings
 }
 
 const fn hotkey_action_key(action: HotkeyAction) -> &'static str {
@@ -735,6 +763,7 @@ fn submit_hotkey_bindings(
     workers: &Rc<Workers>,
     bindings: HotkeyBindings,
 ) -> bool {
+    let bindings = effective_hotkey_bindings(bindings);
     let locale = active_locale(state.borrow().ui_locale);
     if let Err(error) = validate_hotkeys(&bindings) {
         set_status_problem(settings, hotkey_rejection_detail(locale, error.reason));
@@ -3336,7 +3365,10 @@ mod hotkey_capture_tests {
         AppState, SavedSettings, SpeechBackend, localization::UiLocale, settings_projection::tone,
     };
 
-    use super::{hotkey_action_at, hotkey_rows, hotkeys_summary, virtual_key_for_code};
+    use super::{
+        effective_hotkey_bindings, hotkey_action_at, hotkey_rows, hotkeys_summary,
+        virtual_key_for_code, visible_hotkey_actions,
+    };
 
     #[test]
     fn every_hotkey_row_has_a_stable_typed_action() {
@@ -3344,9 +3376,31 @@ mod hotkey_capture_tests {
         assert_eq!(hotkey_action_at(1), Some(HotkeyAction::InsertLast));
         assert_eq!(hotkey_action_at(2), Some(HotkeyAction::CorrectLayout));
         assert_eq!(hotkey_action_at(3), Some(HotkeyAction::Translate));
-        assert_eq!(hotkey_action_at(4), Some(HotkeyAction::ScreenTranslate));
-        assert_eq!(hotkey_action_at(5), Some(HotkeyAction::PauseResume));
-        assert_eq!(hotkey_action_at(6), None);
+        #[cfg(feature = "screen-translation-dev")]
+        {
+            assert_eq!(hotkey_action_at(4), Some(HotkeyAction::ScreenTranslate));
+            assert_eq!(hotkey_action_at(5), Some(HotkeyAction::PauseResume));
+            assert_eq!(hotkey_action_at(6), None);
+        }
+        #[cfg(not(feature = "screen-translation-dev"))]
+        {
+            assert_eq!(hotkey_action_at(4), Some(HotkeyAction::PauseResume));
+            assert_eq!(hotkey_action_at(5), None);
+            assert!(!visible_hotkey_actions().contains(&HotkeyAction::ScreenTranslate));
+        }
+    }
+
+    #[test]
+    fn public_build_cannot_register_the_unadmitted_screen_translation_hotkey() {
+        let mut bindings = rust_protocol::HotkeyBindings::default();
+        bindings.screen_translate.enabled = true;
+
+        let effective = effective_hotkey_bindings(bindings);
+
+        #[cfg(feature = "screen-translation-dev")]
+        assert!(effective.screen_translate.enabled);
+        #[cfg(not(feature = "screen-translation-dev"))]
+        assert!(!effective.screen_translate.enabled);
     }
 
     #[test]
@@ -3374,12 +3428,19 @@ mod hotkey_capture_tests {
         state.hotkeys.pause_resume.enabled = false;
 
         let rows = hotkey_rows(&state);
-        let row = &rows[5];
+        let pause_index = visible_hotkey_actions()
+            .iter()
+            .position(|action| *action == HotkeyAction::PauseResume)
+            .unwrap();
+        let row = &rows[pause_index];
         assert_eq!(row.tone, tone::REFUSED);
         assert_eq!(row.state, "Unavailable");
         assert_eq!(row.detail, "Shortcut already in use. Choose another.");
         assert!(row.locked_reason.is_empty());
-        assert_eq!(hotkeys_summary(&state), "4 of 6 shortcuts active");
+        assert_eq!(
+            hotkeys_summary(&state),
+            format!("3 of {} shortcuts active", visible_hotkey_actions().len())
+        );
     }
 
     #[test]
@@ -3404,7 +3465,10 @@ mod hotkey_capture_tests {
             "That shortcut is already in use. The previous shortcut still works."
         );
         assert!(row.enabled);
-        assert_eq!(hotkeys_summary(&state), "5 of 6 shortcuts active");
+        assert_eq!(
+            hotkeys_summary(&state),
+            format!("4 of {} shortcuts active", visible_hotkey_actions().len())
+        );
     }
 
     #[test]
@@ -3417,7 +3481,11 @@ mod hotkey_capture_tests {
         );
         state.ui_locale = UiLocale::Russian;
 
-        let row = &hotkey_rows(&state)[5];
+        let pause_index = visible_hotkey_actions()
+            .iter()
+            .position(|action| *action == HotkeyAction::PauseResume)
+            .unwrap();
+        let row = &hotkey_rows(&state)[pause_index];
         assert_eq!(row.name, "Пауза/возобновление");
         assert_eq!(row.detail, "Всегда доступно");
     }

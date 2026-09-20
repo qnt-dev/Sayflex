@@ -12,7 +12,7 @@ DecideFromText|Decide from the text
 AlwaysAsk|Always ask
 PausedShortcuts|Paused · {count} shortcuts configured
 ApplyingShortcuts|Waiting for Windows to accept the new shortcuts
-ActiveShortcuts|{count} of 6 shortcuts active
+ActiveShortcuts|{count} of {total} shortcuts active
 NoSpeechModel|No speech model is installed, so nothing can be dictated yet.
 SpeechEngine|SPEECH ENGINE
 SpeechModel|SPEECH MODEL
