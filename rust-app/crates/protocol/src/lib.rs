@@ -6,6 +6,7 @@ use uuid::Uuid;
 // Version 22 adds atomic, editable hotkey configuration and acknowledgements.
 // Version 23 adds worker-owned model removal, explicit local-engine residency
 // events, and per-action hotkey application failures.
+// Version 25 adds the screen-translation hotkey and local OCR worker protocol.
 // All packaged processes must agree on this schema before exchanging commands.
 /// The shape of every message in this file, as one number.
 ///
@@ -16,7 +17,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -674,6 +675,12 @@ pub enum InputHostEvent {
     InsertLastRequested {
         target: TargetSnapshot,
     },
+    ScreenCaptureRequested {
+        request_id: RequestId,
+    },
+    ScreenCaptureCancelled {
+        request_id: RequestId,
+    },
     SelectionCaptureStarted {
         request_id: RequestId,
         intent: TextActionIntent,
@@ -774,15 +781,17 @@ pub enum HotkeyAction {
     InsertLast,
     CorrectLayout,
     Translate,
+    ScreenTranslate,
     PauseResume,
 }
 
 impl HotkeyAction {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Dictate,
         Self::InsertLast,
         Self::CorrectLayout,
         Self::Translate,
+        Self::ScreenTranslate,
         Self::PauseResume,
     ];
 }
@@ -851,7 +860,16 @@ pub struct HotkeyBindings {
     pub insert_last: HotkeyBinding,
     pub correct_layout: HotkeyBinding,
     pub translate: HotkeyBinding,
+    #[serde(default = "legacy_screen_translate_binding")]
+    pub screen_translate: HotkeyBinding,
     pub pause_resume: HotkeyBinding,
+}
+
+fn legacy_screen_translate_binding() -> HotkeyBinding {
+    HotkeyBinding {
+        spec: HotkeySpec::control_alt(u16::from(b'G')),
+        enabled: false,
+    }
 }
 
 impl Default for HotkeyBindings {
@@ -864,6 +882,7 @@ impl Default for HotkeyBindings {
                 spec: HotkeySpec::control_alt(u16::from(b'F')),
                 enabled: false,
             },
+            screen_translate: HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'G'))),
             pause_resume: HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'P'))),
         }
     }
@@ -877,6 +896,7 @@ impl HotkeyBindings {
             HotkeyAction::InsertLast => &self.insert_last,
             HotkeyAction::CorrectLayout => &self.correct_layout,
             HotkeyAction::Translate => &self.translate,
+            HotkeyAction::ScreenTranslate => &self.screen_translate,
             HotkeyAction::PauseResume => &self.pause_resume,
         }
     }
@@ -888,6 +908,7 @@ impl HotkeyBindings {
             HotkeyAction::InsertLast => &mut self.insert_last,
             HotkeyAction::CorrectLayout => &mut self.correct_layout,
             HotkeyAction::Translate => &mut self.translate,
+            HotkeyAction::ScreenTranslate => &mut self.screen_translate,
             HotkeyAction::PauseResume => &mut self.pause_resume,
         }
     }
@@ -942,7 +963,91 @@ pub enum InputHostCommand {
     CancelSelection {
         request_id: RequestId,
     },
+    SetScreenCaptureMode {
+        request_id: RequestId,
+        active: bool,
+    },
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrLanguagePolicy {
+    Auto,
+    Prefer(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrPixelFormat {
+    Rgba8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OcrLine {
+    pub text: String,
+    pub bounds: PhysicalRect,
+    pub confidence_milli: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrFailureKind {
+    ModelUnavailable,
+    LanguageUnavailable,
+    NoText,
+    InvalidImage,
+    Engine,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum OcrWorkerCommand {
+    Recognize {
+        request_id: RequestId,
+        width: u32,
+        height: u32,
+        stride: u32,
+        pixel_format: OcrPixelFormat,
+        language_policy: OcrLanguagePolicy,
+        rgba_base64: String,
+    },
+    Cancel {
+        request_id: RequestId,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum OcrWorkerEvent {
+    Ready {
+        protocol_version: u32,
+        engine: String,
+    },
+    Recognized {
+        request_id: RequestId,
+        lines: Vec<OcrLine>,
+        language: Option<String>,
+        processing_duration_ms: u64,
+    },
+    Failed {
+        request_id: RequestId,
+        kind: OcrFailureKind,
+        message: String,
+    },
+    Cancelled {
+        request_id: RequestId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1323,12 +1428,61 @@ pub enum CompanionRendererEvent {
 mod tests {
     use super::{
         CompanionRendererCommand, DictationCommand, DictationLanguage, HotkeyAction,
-        HotkeyConfiguration, InputHostCommand, InputHostEvent, InsertionDelivery, InsertionMethod,
-        RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerEvent, TargetSnapshot,
-        TextActionIntent, Transcript, TranscriptionLatency, TranslationAttemptReport,
-        TranslationFailureKind, TranslationFailureReport, TranslationLanguage, TranslationResult,
-        TranslationTier, TranslationWorkerEvent,
+        HotkeyBindings, HotkeyConfiguration, HotkeySpec, InputHostCommand, InputHostEvent,
+        InsertionDelivery, InsertionMethod, OcrLanguagePolicy, OcrPixelFormat, OcrWorkerCommand,
+        OcrWorkerEvent, RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerEvent,
+        TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency,
+        TranslationAttemptReport, TranslationFailureKind, TranslationFailureReport,
+        TranslationLanguage, TranslationResult, TranslationTier, TranslationWorkerEvent,
     };
+
+    fn round_trip<T>(value: T)
+    where
+        T: std::fmt::Debug + PartialEq + serde::Serialize + for<'de> serde::Deserialize<'de>,
+    {
+        let json = serde_json::to_string(&value).unwrap();
+        assert_eq!(serde_json::from_str::<T>(&json).unwrap(), value);
+    }
+
+    #[test]
+    fn screen_translation_protocol_round_trips_with_default_hotkey() {
+        let request_id = RequestId::new();
+
+        assert_eq!(
+            HotkeyBindings::default().screen_translate.spec,
+            HotkeySpec::control_alt(u16::from(b'G'))
+        );
+        assert_eq!(HotkeyAction::ALL.len(), 6);
+        round_trip(InputHostEvent::ScreenCaptureRequested { request_id });
+        round_trip(InputHostCommand::SetScreenCaptureMode {
+            request_id,
+            active: true,
+        });
+        round_trip(OcrWorkerCommand::Recognize {
+            request_id,
+            width: 2,
+            height: 1,
+            stride: 8,
+            pixel_format: OcrPixelFormat::Rgba8,
+            language_policy: OcrLanguagePolicy::Auto,
+            rgba_base64: "AAAAAAAAAAA=".into(),
+        });
+        round_trip(OcrWorkerEvent::Cancelled { request_id });
+    }
+
+    #[test]
+    fn legacy_hotkeys_add_screen_translation_without_stealing_a_chord() {
+        let mut legacy = serde_json::to_value(HotkeyBindings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("screen_translate");
+
+        let migrated: HotkeyBindings = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(
+            migrated.screen_translate.spec,
+            HotkeySpec::control_alt(u16::from(b'G'))
+        );
+        assert!(!migrated.screen_translate.enabled);
+    }
 
     #[test]
     fn command_json_preserves_session_identity() {
@@ -1748,8 +1902,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 24,
-            "every fingerprint below was written for protocol 24: if a shape \
+            PROTOCOL_VERSION, 25,
+            "every fingerprint below was written for protocol 25: if a shape \
              changes, this number changes with it"
         );
     }
@@ -2160,6 +2314,8 @@ mod complete_wire_schema_tests {
                 target: target(),
             },
             InputHostEvent::InsertLastRequested { target: target() },
+            InputHostEvent::ScreenCaptureRequested { request_id },
+            InputHostEvent::ScreenCaptureCancelled { request_id },
             InputHostEvent::SelectionCaptureStarted {
                 request_id,
                 intent: TextActionIntent::Translate,
@@ -2248,7 +2404,59 @@ mod complete_wire_schema_tests {
                 text: "text".to_owned(),
             },
             InputHostCommand::CancelSelection { request_id },
+            InputHostCommand::SetScreenCaptureMode {
+                request_id,
+                active: true,
+            },
             InputHostCommand::Shutdown,
+        ]
+    }
+
+    fn ocr_commands() -> Vec<OcrWorkerCommand> {
+        let request_id = RequestId::new();
+        vec![
+            OcrWorkerCommand::Recognize {
+                request_id,
+                width: 2,
+                height: 1,
+                stride: 8,
+                pixel_format: OcrPixelFormat::Rgba8,
+                language_policy: OcrLanguagePolicy::Prefer(vec!["en".to_owned()]),
+                rgba_base64: "AAAAAAAAAAA=".to_owned(),
+            },
+            OcrWorkerCommand::Cancel { request_id },
+            OcrWorkerCommand::Shutdown,
+        ]
+    }
+
+    fn ocr_events() -> Vec<OcrWorkerEvent> {
+        let request_id = RequestId::new();
+        vec![
+            OcrWorkerEvent::Ready {
+                protocol_version: 1,
+                engine: "engine".to_owned(),
+            },
+            OcrWorkerEvent::Recognized {
+                request_id,
+                lines: vec![OcrLine {
+                    text: "text".to_owned(),
+                    bounds: PhysicalRect {
+                        x: 1,
+                        y: 2,
+                        width: 3,
+                        height: 4,
+                    },
+                    confidence_milli: 900,
+                }],
+                language: Some("en".to_owned()),
+                processing_duration_ms: 5,
+            },
+            OcrWorkerEvent::Failed {
+                request_id,
+                kind: OcrFailureKind::Engine,
+                message: "message".to_owned(),
+            },
+            OcrWorkerEvent::Cancelled { request_id },
         ]
     }
 
@@ -2560,19 +2768,28 @@ mod complete_wire_schema_tests {
     index_fn!(input_event_index, InputHostEvent,
         InputHostEvent::Ready { .. } => 0, InputHostEvent::DictationBegin { .. } => 1,
         InputHostEvent::DictationEnd { .. } => 2, InputHostEvent::InsertLastRequested { .. } => 3,
-        InputHostEvent::SelectionCaptureStarted { .. } => 4, InputHostEvent::SelectionCaptured { .. } => 5,
-        InputHostEvent::SelectionInputReleased { .. } => 6, InputHostEvent::SelectionInputReleaseFailed { .. } => 7,
-        InputHostEvent::SelectionCaptureFailed { .. } => 8, InputHostEvent::InsertionCompleted { .. } => 9,
-        InputHostEvent::Recovered { .. } => 10, InputHostEvent::SelectionReplaced { .. } => 11,
-        InputHostEvent::TextCopied { .. } => 12, InputHostEvent::HotkeysApplied { .. } => 13,
-        InputHostEvent::HotkeysRejected { .. } => 14, InputHostEvent::PauseChanged { .. } => 15,
-        InputHostEvent::Failed { .. } => 16
+        InputHostEvent::ScreenCaptureRequested { .. } => 4, InputHostEvent::ScreenCaptureCancelled { .. } => 5,
+        InputHostEvent::SelectionCaptureStarted { .. } => 6, InputHostEvent::SelectionCaptured { .. } => 7,
+        InputHostEvent::SelectionInputReleased { .. } => 8, InputHostEvent::SelectionInputReleaseFailed { .. } => 9,
+        InputHostEvent::SelectionCaptureFailed { .. } => 10, InputHostEvent::InsertionCompleted { .. } => 11,
+        InputHostEvent::Recovered { .. } => 12, InputHostEvent::SelectionReplaced { .. } => 13,
+        InputHostEvent::TextCopied { .. } => 14, InputHostEvent::HotkeysApplied { .. } => 15,
+        InputHostEvent::HotkeysRejected { .. } => 16, InputHostEvent::PauseChanged { .. } => 17,
+        InputHostEvent::Failed { .. } => 18
     );
     index_fn!(input_command_index, InputHostCommand,
         InputHostCommand::SetHotkeys { .. } => 0, InputHostCommand::InsertTranscript { .. } => 1,
         InputHostCommand::CopyTranscript { .. } => 2, InputHostCommand::CopyText { .. } => 3,
         InputHostCommand::ReplaceSelection { .. } => 4, InputHostCommand::CancelSelection { .. } => 5,
-        InputHostCommand::Shutdown => 6
+        InputHostCommand::SetScreenCaptureMode { .. } => 6, InputHostCommand::Shutdown => 7
+    );
+    index_fn!(ocr_command_index, OcrWorkerCommand,
+        OcrWorkerCommand::Recognize { .. } => 0, OcrWorkerCommand::Cancel { .. } => 1,
+        OcrWorkerCommand::Shutdown => 2
+    );
+    index_fn!(ocr_event_index, OcrWorkerEvent,
+        OcrWorkerEvent::Ready { .. } => 0, OcrWorkerEvent::Recognized { .. } => 1,
+        OcrWorkerEvent::Failed { .. } => 2, OcrWorkerEvent::Cancelled { .. } => 3
     );
     index_fn!(translation_command_index, TranslationWorkerCommand,
         TranslationWorkerCommand::Initialize { .. } => 0, TranslationWorkerCommand::EnsureModel { .. } => 1,
@@ -2683,6 +2900,8 @@ mod complete_wire_schema_tests {
     fn every_process_direction_and_variant_has_a_versioned_wire_shape() {
         let input_events = input_events();
         let input_commands = input_commands();
+        let ocr_commands = ocr_commands();
+        let ocr_events = ocr_events();
         let translation_commands = translation_commands();
         let translation_events = translation_events();
         let speech_commands = speech_commands();
@@ -2690,8 +2909,10 @@ mod complete_wire_schema_tests {
         let companion_commands = companion_commands();
         let companion_events = companion_events();
 
-        assert_complete(&input_events, input_event_index, 17);
-        assert_complete(&input_commands, input_command_index, 7);
+        assert_complete(&input_events, input_event_index, 19);
+        assert_complete(&input_commands, input_command_index, 8);
+        assert_complete(&ocr_commands, ocr_command_index, 3);
+        assert_complete(&ocr_events, ocr_event_index, 4);
         assert_complete(&translation_commands, translation_command_index, 14);
         assert_complete(&translation_events, translation_event_index, 15);
         assert_complete(&speech_commands, speech_command_index, 18);
@@ -2702,6 +2923,8 @@ mod complete_wire_schema_tests {
         let mut schema = Vec::new();
         append("input.event", &input_events, &mut schema);
         append("input.command", &input_commands, &mut schema);
+        append("ocr.command", &ocr_commands, &mut schema);
+        append("ocr.event", &ocr_events, &mut schema);
         append("translation.command", &translation_commands, &mut schema);
         append("translation.event", &translation_events, &mut schema);
         append("speech.command", &speech_commands, &mut schema);
@@ -2712,7 +2935,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x7bdb_eb57_d51f_dc41,
+            0x743c_7f96_f2af_c3d3,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

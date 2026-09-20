@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     io,
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Sender},
     },
@@ -20,9 +20,9 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
-            RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_F, VK_K, VK_LCONTROL, VK_LMENU,
-            VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
-            VK_SPACE, VK_V,
+            RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_F, VK_G, VK_K, VK_LCONTROL,
+            VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
+            VK_SHIFT, VK_SPACE, VK_V,
         },
         WindowsAndMessaging::{
             CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
@@ -41,6 +41,7 @@ const INPUT_SPACE: u32 = 1 << 4;
 const INPUT_K: u32 = 1 << 5;
 const INPUT_V: u32 = 1 << 6;
 const INPUT_F: u32 = 1 << 7;
+const INPUT_G: u32 = 1 << 8;
 const INJECTION_UNSAFE: u32 = INPUT_CONTROL
     | INPUT_ALT
     | INPUT_SHIFT
@@ -48,7 +49,8 @@ const INJECTION_UNSAFE: u32 = INPUT_CONTROL
     | INPUT_SPACE
     | INPUT_K
     | INPUT_V
-    | INPUT_F;
+    | INPUT_F
+    | INPUT_G;
 const INPUT_RELEASE_STABILITY: Duration = Duration::from_millis(30);
 const ASYNC_RECONCILIATION_DELAY: Duration = Duration::from_millis(75);
 const COMMAND_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,11 +63,16 @@ static LAST_HOOK_EVENT_US: AtomicU64 = AtomicU64::new(0);
 static SELECTION_BUSY: AtomicBool = AtomicBool::new(false);
 static REGISTERED_COMMANDS: AtomicU32 = AtomicU32::new(0);
 static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
+static SCREEN_CAPTURE_MODE: Mutex<ScreenCaptureMode> = Mutex::new(ScreenCaptureMode {
+    request_id: None,
+    escape_down: false,
+});
 
 pub const HOTKEY_ID_CORRECT_LAYOUT: i32 = 0x5141;
 pub const HOTKEY_ID_INSERT_LAST: i32 = 0x5142;
 pub const HOTKEY_ID_TRANSLATE: i32 = 0x5143;
 pub const HOTKEY_ID_PAUSE_RESUME: i32 = 0x5144;
+pub const HOTKEY_ID_SCREEN_TRANSLATE: i32 = 0x5145;
 const HOTKEY_ID_ALTERNATE_OFFSET: i32 = 0x0100;
 
 #[cfg(debug_assertions)]
@@ -96,7 +103,15 @@ enum HookAction {
     DictationEnded { gesture_id: u64, reason: EndReason },
     InsertLastRequested,
     SelectionRequested { intent: TextActionIntent },
+    ScreenCaptureRequested,
+    ScreenCaptureCancelled { request_id: RequestId },
     PauseToggled,
+}
+
+#[derive(Debug)]
+struct ScreenCaptureMode {
+    request_id: Option<RequestId>,
+    escape_down: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -137,6 +152,7 @@ struct HotkeyState {
     selection_k_down: bool,
     insert_v_down: bool,
     adaptive_t_down: bool,
+    screen_g_down: bool,
     bindings: HotkeyBindings,
 }
 
@@ -211,6 +227,20 @@ pub unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LP
         return unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) };
     }
 
+    if origin == EventOrigin::Physical
+        && let Some(decision) = screen_capture_key_event(input.vkCode as u16, key_down, key_up)
+    {
+        if let Some(action) = decision.action {
+            let _ = dispatch_hook_action(action);
+        }
+        trace_actionable_event(input, key_down, key_up, origin, decision);
+        return if decision.suppress {
+            1
+        } else {
+            unsafe { CallNextHookEx(std::ptr::null_mut(), code, message, data) }
+        };
+    }
+
     let now = monotonic_us();
     let previous_hook_event = LAST_HOOK_EVENT_US.swap(now, Ordering::AcqRel);
     let needs_reconciliation =
@@ -260,6 +290,50 @@ fn classify_event(flags: u32, extra_info: usize) -> EventOrigin {
     } else {
         EventOrigin::Physical
     }
+}
+
+pub fn set_screen_capture_mode(request_id: RequestId, active: bool) {
+    let mut mode = SCREEN_CAPTURE_MODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if active {
+        mode.request_id = Some(request_id);
+        mode.escape_down = false;
+    } else if mode.request_id == Some(request_id) {
+        mode.request_id = None;
+    }
+}
+
+fn screen_capture_key_event(
+    virtual_key: u16,
+    key_down: bool,
+    key_up: bool,
+) -> Option<HookDecision> {
+    if virtual_key != VK_ESCAPE {
+        return None;
+    }
+    let mut mode = SCREEN_CAPTURE_MODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let action = if key_down && !mode.escape_down {
+        let request_id = mode.request_id.take()?;
+        mode.escape_down = true;
+        Some(HookAction::ScreenCaptureCancelled { request_id })
+    } else if mode.escape_down {
+        if key_up {
+            mode.escape_down = false;
+        }
+        None
+    } else {
+        return None;
+    };
+    Some(HookDecision {
+        suppress: true,
+        action,
+        state_before: GestureStateName::Idle,
+        state_after: GestureStateName::Idle,
+        repeated: key_down && action.is_none(),
+    })
 }
 
 fn dispatch_hook_action(action: HookAction) -> bool {
@@ -527,6 +601,7 @@ const fn hotkey_id(action: HotkeyAction, alternate: bool) -> i32 {
         HotkeyAction::CorrectLayout => HOTKEY_ID_CORRECT_LAYOUT,
         HotkeyAction::InsertLast => HOTKEY_ID_INSERT_LAST,
         HotkeyAction::Translate => HOTKEY_ID_TRANSLATE,
+        HotkeyAction::ScreenTranslate => HOTKEY_ID_SCREEN_TRANSLATE,
         HotkeyAction::PauseResume => HOTKEY_ID_PAUSE_RESUME,
         HotkeyAction::Dictate => unreachable!(),
     };
@@ -542,16 +617,18 @@ const fn registered_mask(action: HotkeyAction) -> u32 {
         HotkeyAction::CorrectLayout => INPUT_K,
         HotkeyAction::InsertLast => INPUT_V,
         HotkeyAction::Translate => INPUT_F,
+        HotkeyAction::ScreenTranslate => INPUT_G,
         HotkeyAction::PauseResume => 0,
         HotkeyAction::Dictate => unreachable!(),
     }
 }
 
-const fn registered_actions() -> [HotkeyAction; 4] {
+const fn registered_actions() -> [HotkeyAction; 5] {
     [
         HotkeyAction::CorrectLayout,
         HotkeyAction::InsertLast,
         HotkeyAction::Translate,
+        HotkeyAction::ScreenTranslate,
         HotkeyAction::PauseResume,
     ]
 }
@@ -618,6 +695,7 @@ const fn hook_action_for(action: HotkeyAction) -> HookAction {
         HotkeyAction::Translate => HookAction::SelectionRequested {
             intent: TextActionIntent::Translate,
         },
+        HotkeyAction::ScreenTranslate => HookAction::ScreenCaptureRequested,
         HotkeyAction::PauseResume => HookAction::PauseToggled,
         HotkeyAction::Dictate => unreachable!(),
     }
@@ -711,6 +789,23 @@ fn dispatch_actions(actions: mpsc::Receiver<HookAction>, events: Sender<InputHos
                     crate::diagnostic_line(&format!(
                         "selection_capture result=thread_start_failed error={error}"
                     ));
+                }
+            }
+            HookAction::ScreenCaptureRequested => {
+                let request_id = RequestId::new();
+                if events
+                    .send(InputHostEvent::ScreenCaptureRequested { request_id })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            HookAction::ScreenCaptureCancelled { request_id } => {
+                if events
+                    .send(InputHostEvent::ScreenCaptureCancelled { request_id })
+                    .is_err()
+                {
+                    break;
                 }
             }
             HookAction::PauseToggled => {
@@ -1265,6 +1360,27 @@ impl HotkeyState {
                 });
             }
         }
+        if self.bindings.screen_translate.enabled
+            && self.bindings.screen_translate.spec == HotkeySpec::control_alt(VK_G)
+            && registered_commands & INPUT_G == 0
+            && virtual_key == VK_G
+        {
+            if self.screen_g_down {
+                suppress = true;
+                if key_up {
+                    self.screen_g_down = false;
+                }
+            } else if key_down
+                && !repeated
+                && self.keys.command_modifiers()
+                && !self.keys.shift()
+                && !self.keys.windows()
+            {
+                self.screen_g_down = true;
+                suppress = true;
+                action = Some(HookAction::ScreenCaptureRequested);
+            }
+        }
 
         HookDecision {
             suppress,
@@ -1586,6 +1702,8 @@ const fn action_gesture_id(action: HookAction) -> Option<u64> {
         | HookAction::DictationEnded { gesture_id, .. } => Some(gesture_id),
         HookAction::InsertLastRequested
         | HookAction::SelectionRequested { .. }
+        | HookAction::ScreenCaptureRequested
+        | HookAction::ScreenCaptureCancelled { .. }
         | HookAction::PauseToggled => None,
     }
 }
@@ -1599,20 +1717,21 @@ mod tests {
         time::Duration,
     };
 
-    use rust_protocol::{HotkeyAction, HotkeyBindings, HotkeySpec, TextActionIntent};
+    use rust_protocol::{HotkeyAction, HotkeyBindings, HotkeySpec, RequestId, TextActionIntent};
 
     use super::{
         EndReason, EventOrigin, GestureState, HOTKEY_ID_CORRECT_LAYOUT, HOTKEY_ID_INSERT_LAST,
         HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_F, INPUT_K,
         INPUT_V, PhysicalKeys, RegisteredHotkeys, RegistrationBackend, classify_event,
-        monotonic_us, registered_hotkey_action, selection_chord_mask, wait_for_mask_clear_using,
+        monotonic_us, registered_hotkey_action, screen_capture_key_event, selection_chord_mask,
+        set_screen_capture_mode, wait_for_mask_clear_using,
     };
 
     use crate::inject::SYNTHETIC_MARKER;
     use windows_sys::Win32::UI::{
         Input::KeyboardAndMouse::{
-            VK_F, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_SPACE,
-            VK_V,
+            VK_ESCAPE, VK_F, VK_K, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL,
+            VK_RMENU, VK_SPACE, VK_V,
         },
         WindowsAndMessaging::LLKHF_INJECTED,
     };
@@ -1621,6 +1740,36 @@ mod tests {
     struct FakeRegistrationBackend {
         active: Rc<RefCell<HashMap<i32, HotkeySpec>>>,
         fail_spec: Rc<Cell<Option<HotkeySpec>>>,
+    }
+
+    #[test]
+    fn screen_capture_escape_is_consumed_once_and_mode_is_released() {
+        let request_id = RequestId::new();
+        set_screen_capture_mode(request_id, true);
+
+        let down = screen_capture_key_event(VK_ESCAPE, true, false).unwrap();
+        assert!(down.suppress);
+        assert_eq!(
+            down.action,
+            Some(HookAction::ScreenCaptureCancelled { request_id })
+        );
+
+        let repeated = screen_capture_key_event(VK_ESCAPE, true, false).unwrap();
+        assert!(repeated.suppress);
+        assert!(repeated.action.is_none());
+
+        let up = screen_capture_key_event(VK_ESCAPE, false, true).unwrap();
+        assert!(up.suppress);
+        assert!(up.action.is_none());
+        assert!(screen_capture_key_event(VK_ESCAPE, true, false).is_none());
+    }
+
+    #[test]
+    fn screen_translation_hotkey_has_a_typed_action() {
+        assert_eq!(
+            super::hook_action_for(HotkeyAction::ScreenTranslate),
+            HookAction::ScreenCaptureRequested
+        );
     }
 
     impl RegistrationBackend for FakeRegistrationBackend {
@@ -1645,7 +1794,7 @@ mod tests {
             RegisteredHotkeys::with_backend(Box::new(backend), HotkeyBindings::default()).unwrap();
         let mut replacement = HotkeyBindings::default();
         replacement.correct_layout.spec = HotkeySpec::control_alt(u16::from(b'H'));
-        replacement.translate.spec = HotkeySpec::control_alt(u16::from(b'G'));
+        replacement.translate.spec = HotkeySpec::control_alt(u16::from(b'J'));
         replacement.translate.enabled = true;
         observer.fail_spec.set(Some(replacement.translate.spec));
 

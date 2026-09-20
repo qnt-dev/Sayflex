@@ -25,8 +25,8 @@ msgstr "{count} conservati · tutti su questo dispositivo"
 msgid "{count} kept on this device"
 msgstr "{count} conservati su questo dispositivo"
 
-msgid "{count} of 5 shortcuts active"
-msgstr "{count} di 5 collegamenti rapidi attivi"
+msgid "{count} of 6 shortcuts active"
+msgstr "{count} di 6 collegamenti rapidi attivi"
 
 msgid "{field} is needed as well as the key."
 msgstr "Oltre alla chiave è necessario {field}."
@@ -758,6 +758,12 @@ msgstr "Attivato"
 
 msgid "On selected text"
 msgstr "Attivato sul testo selezionato"
+
+msgid "Screen translation"
+msgstr "Traduzione dello schermo"
+
+msgid "Select an area of the screen"
+msgstr "Seleziona un’area dello schermo"
 
 msgid "On this device"
 msgstr "Su questo dispositivo"

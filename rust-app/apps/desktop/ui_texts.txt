@@ -12,7 +12,7 @@ DecideFromText|Decide from the text
 AlwaysAsk|Always ask
 PausedShortcuts|Paused · {count} shortcuts configured
 ApplyingShortcuts|Waiting for Windows to accept the new shortcuts
-ActiveShortcuts|{count} of 5 shortcuts active
+ActiveShortcuts|{count} of 6 shortcuts active
 NoSpeechModel|No speech model is installed, so nothing can be dictated yet.
 SpeechEngine|SPEECH ENGINE
 SpeechModel|SPEECH MODEL
@@ -128,6 +128,8 @@ ChooseTranslationModel|Choose a translation model in Settings.
 NoOverlay|no overlay
 WhateverYouSpoke|Whatever you spoke, written as spoken
 OnSelectedText|On selected text
+ScreenTranslation|Screen translation
+SelectScreenArea|Select an area of the screen
 OriginalSelectionActive|Original selection remains active
 SwitchOff|Switched off
 InputServiceNotReady|Input service is not ready yet.

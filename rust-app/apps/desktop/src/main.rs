@@ -1753,6 +1753,16 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 set_indicator_status(settings, state_text(state, UiText::InputProtocolMismatch));
             }
         }
+        InputHostEvent::ScreenCaptureRequested { request_id } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=requested"
+            ));
+        }
+        InputHostEvent::ScreenCaptureCancelled { request_id } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=cancelled"
+            ));
+        }
         InputHostEvent::HotkeysApplied {
             operation_id,
             configuration,

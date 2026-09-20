@@ -592,6 +592,10 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                         text(locale, UiText::SwitchOff)
                     },
                 ),
+                HotkeyAction::ScreenTranslate => (
+                    text(locale, UiText::ScreenTranslation),
+                    text(locale, UiText::SelectScreenArea),
+                ),
                 HotkeyAction::PauseResume => (
                     text(locale, UiText::PauseResumeAction),
                     text(locale, UiText::AlwaysAvailable),
@@ -708,7 +712,8 @@ const fn hotkey_action_at(index: i32) -> Option<HotkeyAction> {
         1 => Some(HotkeyAction::InsertLast),
         2 => Some(HotkeyAction::CorrectLayout),
         3 => Some(HotkeyAction::Translate),
-        4 => Some(HotkeyAction::PauseResume),
+        4 => Some(HotkeyAction::ScreenTranslate),
+        5 => Some(HotkeyAction::PauseResume),
         _ => None,
     }
 }
@@ -719,6 +724,7 @@ const fn hotkey_action_key(action: HotkeyAction) -> &'static str {
         HotkeyAction::InsertLast => "insert_last",
         HotkeyAction::CorrectLayout => "correct_layout",
         HotkeyAction::Translate => "translate",
+        HotkeyAction::ScreenTranslate => "screen_translate",
         HotkeyAction::PauseResume => "pause_resume",
     }
 }
@@ -2560,6 +2566,7 @@ pub(crate) fn wire_settings(
                         HotkeyAction::InsertLast => text(locale, UiText::InsertLatestDictation),
                         HotkeyAction::CorrectLayout => text(locale, UiText::CorrectLayout),
                         HotkeyAction::Translate => text(locale, UiText::ActOnSelectionAction),
+                        HotkeyAction::ScreenTranslate => text(locale, UiText::ScreenTranslation),
                         HotkeyAction::PauseResume => text(locale, UiText::PauseResumeAction),
                     }
                     .into(),
@@ -3337,8 +3344,9 @@ mod hotkey_capture_tests {
         assert_eq!(hotkey_action_at(1), Some(HotkeyAction::InsertLast));
         assert_eq!(hotkey_action_at(2), Some(HotkeyAction::CorrectLayout));
         assert_eq!(hotkey_action_at(3), Some(HotkeyAction::Translate));
-        assert_eq!(hotkey_action_at(4), Some(HotkeyAction::PauseResume));
-        assert_eq!(hotkey_action_at(5), None);
+        assert_eq!(hotkey_action_at(4), Some(HotkeyAction::ScreenTranslate));
+        assert_eq!(hotkey_action_at(5), Some(HotkeyAction::PauseResume));
+        assert_eq!(hotkey_action_at(6), None);
     }
 
     #[test]
@@ -3366,12 +3374,12 @@ mod hotkey_capture_tests {
         state.hotkeys.pause_resume.enabled = false;
 
         let rows = hotkey_rows(&state);
-        let row = &rows[4];
+        let row = &rows[5];
         assert_eq!(row.tone, tone::REFUSED);
         assert_eq!(row.state, "Unavailable");
         assert_eq!(row.detail, "Shortcut already in use. Choose another.");
         assert!(row.locked_reason.is_empty());
-        assert_eq!(hotkeys_summary(&state), "3 of 5 shortcuts active");
+        assert_eq!(hotkeys_summary(&state), "4 of 6 shortcuts active");
     }
 
     #[test]
@@ -3396,7 +3404,7 @@ mod hotkey_capture_tests {
             "That shortcut is already in use. The previous shortcut still works."
         );
         assert!(row.enabled);
-        assert_eq!(hotkeys_summary(&state), "4 of 5 shortcuts active");
+        assert_eq!(hotkeys_summary(&state), "5 of 6 shortcuts active");
     }
 
     #[test]
@@ -3409,7 +3417,7 @@ mod hotkey_capture_tests {
         );
         state.ui_locale = UiLocale::Russian;
 
-        let row = &hotkey_rows(&state)[4];
+        let row = &hotkey_rows(&state)[5];
         assert_eq!(row.name, "Пауза/возобновление");
         assert_eq!(row.detail, "Всегда доступно");
     }

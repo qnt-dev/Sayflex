@@ -481,6 +481,9 @@ fn read_commands(
                 insertion.replace_selection(request_id, target, text);
             }
             InputHostCommand::CancelSelection { .. } => {}
+            InputHostCommand::SetScreenCaptureMode { request_id, active } => {
+                hotkeys::set_screen_capture_mode(request_id, active);
+            }
             InputHostCommand::Shutdown => {
                 insertion.shutdown();
                 break;

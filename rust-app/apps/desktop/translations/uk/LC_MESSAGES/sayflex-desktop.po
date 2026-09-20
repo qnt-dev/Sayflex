@@ -25,8 +25,8 @@ msgstr "{count} збережено · усе на цьому пристрої"
 msgid "{count} kept on this device"
 msgstr "{count} збережено на цьому пристрої"
 
-msgid "{count} of 5 shortcuts active"
-msgstr "{count} із 5 ярликів активний"
+msgid "{count} of 6 shortcuts active"
+msgstr "Активних сполучень: {count} із 6"
 
 msgid "{field} is needed as well as the key."
 msgstr "Потрібен {field}, а також ключ."
@@ -758,6 +758,12 @@ msgstr "Увімкнено"
 
 msgid "On selected text"
 msgstr "На вибраному тексті"
+
+msgid "Screen translation"
+msgstr "Переклад з екрана"
+
+msgid "Select an area of the screen"
+msgstr "Виберіть ділянку екрана"
 
 msgid "On this device"
 msgstr "На цьому пристрої"
