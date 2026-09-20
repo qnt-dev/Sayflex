@@ -7,6 +7,7 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
+base64 = { version = "0.22.1", optional = true }
 pet_orb = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_orb" }
 pet_particles = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_particles" }
 pet_render = { version = "0.1.0", path = "../../../desktop-pet/crates/pet_render" }
@@ -14,6 +15,7 @@ rust-app-core = { version = "0.8.0", path = "../../crates/app-core" }
 rust-model-manager = { version = "0.8.0", path = "../../crates/model-manager" }
 rust-platform-windows = { version = "0.8.0", path = "../../crates/platform-windows" }
 rust-protocol = { version = "0.8.0", path = "../../crates/protocol" }
+rust-ocr-engine = { version = "0.8.0", path = "../../crates/ocr-engine", optional = true }
 qrcode = { version = "0.14.1", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
@@ -38,4 +40,4 @@ tempfile.workspace = true
 # screen-capture APIs return blank for. Off by default: a shipped binary has no
 # use for a second renderer.
 inspect = ["slint/renderer-software"]
-screen-translation-dev = []
+screen-translation-dev = ["dep:base64", "dep:rust-ocr-engine"]

@@ -2,7 +2,9 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 use rust_platform_windows::{
     region_selection::{MonitorRegion, PointerEvent, RegionSelectionMonitor},
-    screen_capture::{DesktopCapture, DesktopCaptureBackend, WindowsDesktopCaptureBackend},
+    screen_capture::{
+        CaptureError, DesktopCapture, DesktopCaptureBackend, WindowsDesktopCaptureBackend,
+    },
 };
 use rust_protocol::{InputHostCommand, PhysicalRect, RequestId};
 use slint::winit_030::WinitWindowAccessor;
@@ -19,6 +21,121 @@ use crate::{
 
 const SELECTION_WATCHDOG_SECONDS: u64 = 15;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "screen-translation-dev"), allow(dead_code))]
+pub(crate) enum ScreenTranslationStage {
+    Selecting,
+    Recognizing,
+    Translating,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveScreenTranslation {
+    request_id: RequestId,
+    anchor: Option<PhysicalRect>,
+    stage: ScreenTranslationStage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreenTranslationCancellation {
+    Ocr(RequestId),
+    Translation(RequestId),
+}
+
+/// Owns only request identity and geometry. Captured pixels deliberately never
+/// enter this state machine, so replacing, completing, pinning, or dismissing a
+/// request cannot retain a screenshot by accident.
+#[derive(Debug, Default)]
+pub(crate) struct ScreenTranslationFlow {
+    active: Option<ActiveScreenTranslation>,
+}
+
+#[cfg_attr(not(feature = "screen-translation-dev"), allow(dead_code))]
+impl ScreenTranslationFlow {
+    pub(crate) fn begin(&mut self, request_id: RequestId) -> Option<ScreenTranslationCancellation> {
+        let cancellation = self.cancel_active_work();
+        self.active = Some(ActiveScreenTranslation {
+            request_id,
+            anchor: None,
+            stage: ScreenTranslationStage::Selecting,
+        });
+        cancellation
+    }
+
+    pub(crate) fn selected(&mut self, request_id: RequestId, anchor: PhysicalRect) -> bool {
+        let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.request_id == request_id)
+        else {
+            return false;
+        };
+        active.anchor = Some(anchor);
+        active.stage = ScreenTranslationStage::Recognizing;
+        true
+    }
+
+    pub(crate) fn recognized(&mut self, request_id: RequestId) -> Option<PhysicalRect> {
+        let active = self.active.as_mut().filter(|active| {
+            active.request_id == request_id && active.stage == ScreenTranslationStage::Recognizing
+        })?;
+        active.stage = ScreenTranslationStage::Translating;
+        active.anchor
+    }
+
+    pub(crate) fn complete(&mut self, request_id: RequestId) -> Option<PhysicalRect> {
+        let active = self
+            .active
+            .as_mut()
+            .filter(|active| active.request_id == request_id)?;
+        active.stage = ScreenTranslationStage::Complete;
+        active.anchor
+    }
+
+    pub(crate) fn anchor(&self, request_id: RequestId) -> Option<PhysicalRect> {
+        self.active
+            .filter(|active| active.request_id == request_id)
+            .and_then(|active| active.anchor)
+    }
+
+    pub(crate) fn close(&mut self, request_id: RequestId) -> Option<ScreenTranslationCancellation> {
+        if self
+            .active
+            .is_none_or(|active| active.request_id != request_id)
+        {
+            return None;
+        }
+        let cancellation = self.cancel_active_work();
+        self.active = None;
+        cancellation
+    }
+
+    pub(crate) fn pin_completed(&mut self, request_id: RequestId) -> bool {
+        if self.active.is_some_and(|active| {
+            active.request_id == request_id && active.stage == ScreenTranslationStage::Complete
+        }) {
+            self.active = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn cancel_active_work(&self) -> Option<ScreenTranslationCancellation> {
+        let active = self.active?;
+        match active.stage {
+            ScreenTranslationStage::Recognizing => {
+                Some(ScreenTranslationCancellation::Ocr(active.request_id))
+            }
+            ScreenTranslationStage::Translating => Some(
+                ScreenTranslationCancellation::Translation(active.request_id),
+            ),
+            ScreenTranslationStage::Selecting | ScreenTranslationStage::Complete => None,
+        }
+    }
+}
+
 pub(crate) enum SelectionTerminal {
     Selected {
         request_id: RequestId,
@@ -30,12 +147,29 @@ pub(crate) enum SelectionTerminal {
     },
     Failed {
         request_id: RequestId,
-        error: String,
+        error: SelectionFailure,
     },
 }
 
+#[derive(Debug)]
+pub(crate) enum SelectionFailure {
+    Capture(CaptureError),
+    EmptySelection,
+    Runtime(String),
+}
+
+impl std::fmt::Display for SelectionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capture(error) => error.fmt(formatter),
+            Self::EmptySelection => formatter.write_str("the selected screen region is empty"),
+            Self::Runtime(error) => formatter.write_str(error),
+        }
+    }
+}
+
 pub(crate) trait SelectionEnvironment {
-    fn capture(&mut self) -> Result<DesktopCapture, String>;
+    fn capture(&mut self) -> Result<DesktopCapture, CaptureError>;
     fn set_capture_mode(&mut self, request_id: RequestId, active: bool) -> Result<(), String>;
     fn show_surfaces(&mut self, capture: &DesktopCapture) -> Result<(), String>;
     fn update_selection(&mut self, selection: Option<PhysicalRect>);
@@ -68,17 +202,25 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
         if self.active.is_some() {
             return Some(SelectionTerminal::Failed {
                 request_id,
-                error: "another screen selection is already active".into(),
+                error: SelectionFailure::Runtime(
+                    "another screen selection is already active".into(),
+                ),
             });
         }
         let capture = match self.environment.capture() {
             Ok(capture) => capture,
             Err(error) => {
-                return Some(SelectionTerminal::Failed { request_id, error });
+                return Some(SelectionTerminal::Failed {
+                    request_id,
+                    error: SelectionFailure::Capture(error),
+                });
             }
         };
         if let Err(error) = self.environment.set_capture_mode(request_id, true) {
-            return Some(SelectionTerminal::Failed { request_id, error });
+            return Some(SelectionTerminal::Failed {
+                request_id,
+                error: SelectionFailure::Runtime(error),
+            });
         }
         self.active = Some(ActiveSelection {
             request_id,
@@ -90,7 +232,7 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
             self.environment.show_surfaces(&active.capture)
         };
         if let Err(error) = show_result {
-            return self.terminate(SelectionOutcome::Failed(error));
+            return self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(error)));
         }
         self.environment.arm_watchdog(request_id);
         None
@@ -118,7 +260,9 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
                 let (origin_x, origin_y) = active.drag_origin?;
                 match selection_rect(origin_x, origin_y, x, y) {
                     Some(rect) => self.terminate(SelectionOutcome::Selected(rect)),
-                    None => self.terminate(SelectionOutcome::Cancelled),
+                    None => {
+                        self.terminate(SelectionOutcome::Failed(SelectionFailure::EmptySelection))
+                    }
                 }
             }
             PointerEvent::RightDown { .. } => None,
@@ -133,15 +277,17 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
 
     pub(crate) fn desktop_disconnected(&mut self) -> Option<SelectionTerminal> {
         self.active.as_ref()?;
-        self.terminate(SelectionOutcome::Failed(
+        self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(
             "the desktop layout changed during selection".into(),
-        ))
+        )))
     }
 
     pub(crate) fn watchdog_expired(&mut self, request_id: RequestId) -> Option<SelectionTerminal> {
         (self.active.as_ref()?.request_id == request_id).then(|| {
-            self.terminate(SelectionOutcome::Failed(format!(
-                "screen selection exceeded the {SELECTION_WATCHDOG_SECONDS}-second safety limit"
+            self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(
+                format!(
+                    "screen selection exceeded the {SELECTION_WATCHDOG_SECONDS}-second safety limit"
+                ),
             )))
         })?
     }
@@ -157,7 +303,9 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
         Some(match (outcome, release_error) {
             (_, Some(error)) => SelectionTerminal::Failed {
                 request_id: active.request_id,
-                error: format!("could not release screen-selection keyboard capture: {error}"),
+                error: SelectionFailure::Runtime(format!(
+                    "could not release screen-selection keyboard capture: {error}"
+                )),
             },
             (SelectionOutcome::Selected(rect), None) => SelectionTerminal::Selected {
                 request_id: active.request_id,
@@ -188,7 +336,7 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
 enum SelectionOutcome {
     Selected(PhysicalRect),
     Cancelled,
-    Failed(String),
+    Failed(SelectionFailure),
 }
 
 fn selection_rect(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Option<PhysicalRect> {
@@ -238,10 +386,8 @@ impl DesktopSelectionEnvironment {
 }
 
 impl SelectionEnvironment for DesktopSelectionEnvironment {
-    fn capture(&mut self) -> Result<DesktopCapture, String> {
-        self.capture_backend
-            .capture()
-            .map_err(|error| error.to_string())
+    fn capture(&mut self) -> Result<DesktopCapture, CaptureError> {
+        self.capture_backend.capture()
     }
 
     fn set_capture_mode(&mut self, request_id: RequestId, active: bool) -> Result<(), String> {
@@ -518,7 +664,10 @@ mod tests {
     };
     use rust_protocol::{PhysicalRect, RequestId};
 
-    use super::{ScreenSelectionCoordinator, SelectionEnvironment, SelectionTerminal};
+    use super::{
+        ScreenSelectionCoordinator, ScreenTranslationCancellation, ScreenTranslationFlow,
+        SelectionEnvironment, SelectionTerminal,
+    };
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {
         PhysicalRect {
@@ -576,11 +725,9 @@ mod tests {
     }
 
     impl SelectionEnvironment for FakeEnvironment {
-        fn capture(&mut self) -> Result<DesktopCapture, String> {
+        fn capture(&mut self) -> Result<DesktopCapture, CaptureError> {
             self.events.push("capture".into());
-            self.capture_result
-                .clone()
-                .map_err(|error| error.to_string())
+            self.capture_result.clone()
         }
 
         fn set_capture_mode(&mut self, _request_id: RequestId, active: bool) -> Result<(), String> {
@@ -744,5 +891,78 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn newest_screen_request_supersedes_work_and_ignores_stale_ocr() {
+        let first = RequestId::new();
+        let second = RequestId::new();
+        let mut flow = ScreenTranslationFlow::default();
+
+        assert_eq!(flow.begin(first), None);
+        assert!(flow.selected(first, rect(10, 20, 300, 120)));
+        assert_eq!(
+            flow.begin(second),
+            Some(ScreenTranslationCancellation::Ocr(first))
+        );
+        assert!(flow.selected(second, rect(800, 40, 240, 90)));
+        assert_eq!(flow.recognized(first), None);
+        assert_eq!(flow.recognized(second), Some(rect(800, 40, 240, 90)));
+    }
+
+    #[test]
+    fn closing_processing_card_cancels_the_owning_worker() {
+        let ocr = RequestId::new();
+        let translation = RequestId::new();
+        let mut flow = ScreenTranslationFlow::default();
+
+        flow.begin(ocr);
+        flow.selected(ocr, rect(0, 0, 100, 80));
+        assert_eq!(
+            flow.close(ocr),
+            Some(ScreenTranslationCancellation::Ocr(ocr))
+        );
+
+        flow.begin(translation);
+        flow.selected(translation, rect(0, 0, 100, 80));
+        flow.recognized(translation);
+        assert_eq!(
+            flow.close(translation),
+            Some(ScreenTranslationCancellation::Translation(translation))
+        );
+    }
+
+    #[test]
+    fn only_completed_content_can_be_pinned_and_flow_owns_no_pixels() {
+        let request_id = RequestId::new();
+        let mut flow = ScreenTranslationFlow::default();
+        flow.begin(request_id);
+        flow.selected(request_id, rect(2, 3, 50, 60));
+        assert!(!flow.pin_completed(request_id));
+        flow.recognized(request_id);
+        flow.complete(request_id);
+        assert!(flow.pin_completed(request_id));
+        assert_eq!(flow.anchor(request_id), None);
+        let debug = format!("{flow:?}");
+        for pixel_canary in ["rgba", "base64", "pixels", "SECRET_SCREEN_CANARY"] {
+            assert!(
+                !debug
+                    .to_ascii_lowercase()
+                    .contains(&pixel_canary.to_ascii_lowercase())
+            );
+        }
+    }
+
+    #[test]
+    fn structured_failure_keeps_anchor_until_user_dismisses_it() {
+        let request_id = RequestId::new();
+        let anchor = rect(-300, 50, 200, 40);
+        let mut flow = ScreenTranslationFlow::default();
+        flow.begin(request_id);
+        flow.selected(request_id, anchor);
+        assert_eq!(flow.complete(request_id), Some(anchor));
+        assert_eq!(flow.anchor(request_id), Some(anchor));
+        assert_eq!(flow.close(request_id), None);
+        assert_eq!(flow.anchor(request_id), None);
     }
 }

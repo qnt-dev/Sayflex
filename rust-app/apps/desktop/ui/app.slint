@@ -530,10 +530,19 @@ export component TranslationPreview inherits Window {
     in-out property <bool> prepared: false;
     in-out property <string> source-text;
     in-out property <string> translated-text;
+    out property <bool> source-available: root.source-text != "";
     in-out property <[TranslationPair]> dual-pairs;
     // 0 = translated result, 1 = original companion card, 2 = interleaved.
     in-out property <int> view-mode: 0;
     in-out property <bool> pinned: false;
+    in-out property <bool> pin-enabled: true;
+    // Physical screen-region anchor retained only as geometry. No captured
+    // pixels are ever stored in the preview component.
+    in-out property <bool> screen-anchor-active: false;
+    in-out property <int> screen-anchor-x: 0;
+    in-out property <int> screen-anchor-y: 0;
+    in-out property <int> screen-anchor-width: 0;
+    in-out property <int> screen-anchor-height: 0;
     in-out property <bool> live-glass: false;
     in-out property <bool> dark-text: false;
     in-out property <int> blur-radius: 3;
@@ -723,13 +732,16 @@ export component TranslationPreview inherits Window {
                 : orig-touch.has-hover
                     ? Theme.red-soft
                     : root.dark-text ? #ffffff42 : #0c0f1450;
+            opacity: root.source-available ? 1 : 0.28;
             accessible-role: button;
             accessible-label: @tr("Show original text");
-            accessible-enabled: true;
+            accessible-enabled: root.source-available;
             accessible-action-default => {
-                root.view-mode = root.view-mode == 1 ? 0 : 1;
-                root.reset-scroll();
-                root.view-mode-changed(root.view-mode);
+                if (root.source-available) {
+                    root.view-mode = root.view-mode == 1 ? 0 : 1;
+                    root.reset-scroll();
+                    root.view-mode-changed(root.view-mode);
+                }
             }
 
             Text {
@@ -742,6 +754,7 @@ export component TranslationPreview inherits Window {
                 vertical-alignment: center;
             }
             orig-touch := TouchArea {
+                enabled: root.source-available;
                 clicked => {
                     root.view-mode = root.view-mode == 1 ? 0 : 1;
                     root.reset-scroll();
@@ -765,13 +778,16 @@ export component TranslationPreview inherits Window {
                 : dual-touch.has-hover
                     ? Theme.red-soft
                     : root.dark-text ? #ffffff42 : #0c0f1450;
+            opacity: root.source-available ? 1 : 0.28;
             accessible-role: button;
             accessible-label: @tr("Show interleaved original and translation");
-            accessible-enabled: true;
+            accessible-enabled: root.source-available;
             accessible-action-default => {
-                root.view-mode = root.view-mode == 2 ? 0 : 2;
-                root.reset-scroll();
-                root.view-mode-changed(root.view-mode);
+                if (root.source-available) {
+                    root.view-mode = root.view-mode == 2 ? 0 : 2;
+                    root.reset-scroll();
+                    root.view-mode-changed(root.view-mode);
+                }
             }
 
             Text {
@@ -784,6 +800,7 @@ export component TranslationPreview inherits Window {
                 vertical-alignment: center;
             }
             dual-touch := TouchArea {
+                enabled: root.source-available;
                 clicked => {
                     root.view-mode = root.view-mode == 2 ? 0 : 2;
                     root.reset-scroll();
@@ -911,22 +928,27 @@ export component TranslationPreview inherits Window {
                     : root.dark-text ? #ffffff42 : #0c0f1450;
             accessible-role: button;
             accessible-label: root.pinned ? @tr("Unpin translation") : @tr("Pin translation");
-            accessible-enabled: true;
+            accessible-enabled: root.pin-enabled;
             accessible-action-default => {
-                root.pinned = !root.pinned;
-                root.pin-state-changed(root.pinned);
+                if (root.pin-enabled) {
+                    root.pinned = !root.pinned;
+                    root.pin-state-changed(root.pinned);
+                }
             }
 
             Text {
                 text: @tr("PIN");
                 color: root.pinned ? #0b0e13 : root.dark-text ? #111820 : #dedad3;
-                opacity: root.pinned ? 1 : (pin-touch.has-hover ? 0.92 : 0.62);
+                opacity: root.pin-enabled
+                    ? (root.pinned ? 1 : (pin-touch.has-hover ? 0.92 : 0.62))
+                    : 0.28;
                 font-size: 10px;
                 font-weight: 650;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
             pin-touch := TouchArea {
+                enabled: root.pin-enabled;
                 clicked => {
                     root.pinned = !root.pinned;
                     root.pin-state-changed(root.pinned);

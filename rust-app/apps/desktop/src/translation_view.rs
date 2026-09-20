@@ -24,7 +24,7 @@ use slint::{
 
 use crate::{
     MAX_TRANSLATION_BLUR_RADIUS, RuntimeEvent, TranslationPair, TranslationPreview,
-    TranslatorWindow, dispatch_runtime_event, native_window_handle,
+    TranslationPreviewAnchor, TranslatorWindow, dispatch_runtime_event, native_window_handle,
     overlay_presenter::{OverlayContract, OverlayPresenter},
     present_translation_preview, slint_window_handle,
 };
@@ -327,6 +327,8 @@ pub(crate) fn create_translation_preview_slot(
 
 pub(crate) fn retire_translation_preview(slot: &TranslationPreviewSlot, reason: &str) {
     slot.preview.set_pinned(false);
+    slot.preview.set_pin_enabled(true);
+    clear_translation_preview_content(&slot.preview);
     if let Err(error) = configure_slint_translation_resize(&slot.preview, false) {
         rust_app_core::diagnostics::log_line(&format!(
             "translation_preview resize_state=failed pinned=false reason={reason} error={error}"
@@ -340,6 +342,21 @@ pub(crate) fn retire_translation_preview(slot: &TranslationPreviewSlot, reason: 
     slot.preview.set_prepared(false);
     slot.preview.set_request_id("".into());
     slot.presenter.retire(slot.preview.window(), reason);
+}
+
+fn clear_translation_preview_content(preview: &TranslationPreview) {
+    preview.set_source_text("".into());
+    preview.set_translated_text("".into());
+    preview.set_dual_pairs(slint::ModelRc::new(slint::VecModel::from(Vec::<
+        TranslationPair,
+    >::new())));
+    preview.set_glass_backdrop(Image::default());
+    preview.set_screen_anchor_active(false);
+    preview.set_screen_anchor_x(0);
+    preview.set_screen_anchor_y(0);
+    preview.set_screen_anchor_width(0);
+    preview.set_screen_anchor_height(0);
+    preview.set_view_mode(0);
 }
 
 pub(crate) fn apply_translation_preview_pin_state(
@@ -756,7 +773,18 @@ pub(crate) fn precreate_translation_preview(slot: &TranslationPreviewSlot) {
                 attached.set(true);
                 if !preview.get_request_id().is_empty()
                     && !preview.get_prepared()
-                    && let Err(error) = present_translation_preview(&preview, &presenter, None)
+                    && let Err(error) = present_translation_preview(
+                        &preview,
+                        &presenter,
+                        preview.get_screen_anchor_active().then(|| {
+                            TranslationPreviewAnchor::ScreenRegion(rust_protocol::PhysicalRect {
+                                x: preview.get_screen_anchor_x(),
+                                y: preview.get_screen_anchor_y(),
+                                width: preview.get_screen_anchor_width().max(0) as u32,
+                                height: preview.get_screen_anchor_height().max(0) as u32,
+                            })
+                        }),
+                    )
                 {
                     rust_app_core::diagnostics::log_line(&format!(
                         "translation_preview_overlay transition=failed stage=deferred_present error={error}"
@@ -772,7 +800,12 @@ pub(crate) fn precreate_translation_preview(slot: &TranslationPreviewSlot) {
 
 #[cfg(test)]
 mod adaptive_popup_tests {
-    use super::{translation_preview_card_width, translation_window_height};
+    use slint::Model;
+
+    use super::{
+        clear_translation_preview_content, translation_preview_card_width,
+        translation_window_height,
+    };
 
     #[test]
     fn the_card_is_as_wide_as_there_is_to_read() {
@@ -911,7 +944,8 @@ mod adaptive_popup_tests {
     }
 
     #[test]
-    fn wrapped_preview_uses_intrinsic_text_height_and_exposes_scroll_range() {
+    fn screen_translation_preview_scrolls_and_retirement_clears_sensitive_content() {
+        i_slint_backend_testing::init_no_event_loop();
         let preview = TranslationPreview::new().unwrap();
         preview
             .window()
@@ -952,5 +986,23 @@ mod adaptive_popup_tests {
             preview.invoke_scroll_by(120.0);
         }
         assert_eq!(preview.get_result_scroll_offset(), 0.0);
+
+        let canary = "SECRET_SCREEN_OCR_CANARY";
+        preview.set_source_text(canary.into());
+        preview.set_translated_text("секрет".into());
+        preview.set_screen_anchor_active(true);
+        preview.set_screen_anchor_x(-900);
+        preview.set_screen_anchor_y(200);
+        preview.set_view_mode(1);
+
+        clear_translation_preview_content(&preview);
+
+        assert!(preview.get_source_text().is_empty());
+        assert!(preview.get_translated_text().is_empty());
+        assert_eq!(preview.get_dual_pairs().row_count(), 0);
+        assert!(!preview.get_screen_anchor_active());
+        assert_eq!(preview.get_screen_anchor_x(), 0);
+        assert_eq!(preview.get_screen_anchor_y(), 0);
+        assert_eq!(preview.get_view_mode(), 0);
     }
 }

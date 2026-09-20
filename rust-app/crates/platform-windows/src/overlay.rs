@@ -783,6 +783,68 @@ pub fn configure_translation_window_for_target(
     place_near(hwnd, anchor)
 }
 
+/// Places a screen-translation card beside the physical rectangle selected by
+/// the user. Prefer below the selection, flip above when below would leave the
+/// work area, and always remain on the monitor that owns the selection.
+pub fn configure_translation_window_for_region(
+    window_handle: u64,
+    region: (i32, i32, i32, i32),
+) -> Result<(), String> {
+    configure_action_window(window_handle)?;
+    let hwnd = window_handle as usize as HWND;
+    apply_translation_window_contract(hwnd);
+    let region = RECT {
+        left: region.0,
+        top: region.1,
+        right: region.2,
+        bottom: region.3,
+    };
+    if region.right <= region.left || region.bottom <= region.top {
+        return configure_translation_window(window_handle);
+    }
+    let anchor = POINT {
+        x: region.left.saturating_add((region.right - region.left) / 2),
+        y: region.top.saturating_add((region.bottom - region.top) / 2),
+    };
+    unsafe {
+        let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
+            return Ok(());
+        }
+        let mut monitor_info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        let mut window_rect = RECT::default();
+        if GetMonitorInfoW(monitor, &mut monitor_info) == 0
+            || GetWindowRect(hwnd, &mut window_rect) == 0
+        {
+            return Ok(());
+        }
+        let (x, y) = offer_position_for_region(
+            region,
+            window_rect.right - window_rect.left,
+            window_rect.bottom - window_rect.top,
+            monitor_info.rcWork,
+        );
+        if SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            return Err("SetWindowPos failed for screen-translation window".to_owned());
+        }
+    }
+    Ok(())
+}
+
 fn selection_anchor(rect: Option<(i32, i32, i32, i32)>) -> Option<POINT> {
     let (left, top, right, bottom) = rect?;
     (right > left && bottom > top).then_some(POINT { x: left, y: bottom })
@@ -908,6 +970,27 @@ fn offer_position(anchor: POINT, width: i32, height: i32, work: RECT) -> (i32, i
     let top = work.top + MARGIN;
     let x = (anchor.x + GAP_X).clamp(left, (work.right - width - MARGIN).max(left));
     let y = (anchor.y + GAP_Y).clamp(top, (work.bottom - height - MARGIN).max(top));
+    (x, y)
+}
+
+fn offer_position_for_region(region: RECT, width: i32, height: i32, work: RECT) -> (i32, i32) {
+    const GAP: i32 = 12;
+    const MARGIN: i32 = 8;
+
+    let left = work.left + MARGIN;
+    let top = work.top + MARGIN;
+    let max_x = (work.right - width - MARGIN).max(left);
+    let max_y = (work.bottom - height - MARGIN).max(top);
+    let x = region.left.clamp(left, max_x);
+    let below = region.bottom.saturating_add(GAP);
+    let above = region.top.saturating_sub(GAP).saturating_sub(height);
+    let y = if below <= max_y {
+        below.max(top)
+    } else if above >= top {
+        above.min(max_y)
+    } else {
+        below.clamp(top, max_y)
+    };
     (x, y)
 }
 
@@ -1444,7 +1527,7 @@ mod backdrop_tests {
 
 #[cfg(test)]
 mod placement_tests {
-    use super::{POINT, RECT, offer_position, selection_anchor};
+    use super::{POINT, RECT, offer_position, offer_position_for_region, selection_anchor};
 
     /// A second monitor to the right of the first, as Windows lays them out.
     fn second_screen() -> RECT {
@@ -1508,6 +1591,45 @@ mod placement_tests {
         assert!(
             (first.left..first.right).contains(&x),
             "the window stayed on the monitor its anchor was on"
+        );
+    }
+
+    #[test]
+    fn screen_region_prefers_below_and_flips_above_near_the_bottom() {
+        let middle = RECT {
+            left: 4200,
+            top: 400,
+            right: 4700,
+            bottom: 520,
+        };
+        assert_eq!(
+            offer_position_for_region(middle, 400, 200, second_screen()),
+            (4200, 532)
+        );
+
+        let bottom = RECT {
+            left: 4200,
+            top: 2020,
+            right: 4700,
+            bottom: 2100,
+        };
+        assert_eq!(
+            offer_position_for_region(bottom, 400, 200, second_screen()),
+            (4200, 1808)
+        );
+    }
+
+    #[test]
+    fn screen_region_card_is_clamped_inside_its_monitor() {
+        let edge = RECT {
+            left: 7600,
+            top: 5,
+            right: 7675,
+            bottom: 30,
+        };
+        assert_eq!(
+            offer_position_for_region(edge, 400, 200, second_screen()),
+            (7272, 42)
         );
     }
 }

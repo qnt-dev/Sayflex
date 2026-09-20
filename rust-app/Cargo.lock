@@ -5746,6 +5746,7 @@ dependencies = [
 name = "sayflex-desktop"
 version = "0.8.0"
 dependencies = [
+ "base64 0.22.1",
  "i-slint-backend-testing",
  "pet_orb",
  "pet_particles",
@@ -5754,6 +5755,7 @@ dependencies = [
  "rqrr",
  "rust-app-core",
  "rust-model-manager",
+ "rust-ocr-engine",
  "rust-platform-windows",
  "rust-protocol",
  "serde",

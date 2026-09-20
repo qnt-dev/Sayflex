@@ -158,17 +158,19 @@ impl InferenceAdapter for PpOcrAdapter {
         let rgb = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
         let (family, language, result) = match language_policy {
             OcrLanguagePolicy::Prefer(languages) => {
-                let (language, family) = languages
-                    .iter()
-                    .find_map(|language| {
-                        ModelFamily::for_language(language).map(|family| (language, family))
-                    })
-                    .ok_or(OcrError::LanguageUnavailable)?;
-                (
-                    family,
-                    Some(language.clone()),
-                    self.predict_family(family, &rgb, cancellation)?,
-                )
+                let mut best: Option<(f32, ModelFamily, String, OAROCRResult)> = None;
+                for (language, family) in preferred_model_families(languages) {
+                    let candidate = self.predict_family(family, &rgb, cancellation)?;
+                    let score = candidate.average_confidence().unwrap_or(-1.0);
+                    if best
+                        .as_ref()
+                        .is_none_or(|(best_score, _, _, _)| score > *best_score)
+                    {
+                        best = Some((score, family, language, candidate));
+                    }
+                }
+                let (_, family, language, result) = best.ok_or(OcrError::LanguageUnavailable)?;
+                (family, Some(language), result)
             }
             OcrLanguagePolicy::Auto => {
                 let mut best: Option<(f32, ModelFamily, OAROCRResult)> = None;
@@ -206,6 +208,23 @@ impl InferenceAdapter for PpOcrAdapter {
             language,
         })
     }
+}
+
+fn preferred_model_families(languages: &[String]) -> Vec<(String, ModelFamily)> {
+    let mut families = Vec::with_capacity(languages.len());
+    for language in languages {
+        let Some(family) = ModelFamily::for_language(language) else {
+            continue;
+        };
+        if families
+            .iter()
+            .any(|(_, existing_family)| *existing_family == family)
+        {
+            continue;
+        }
+        families.push((language.clone(), family));
+    }
+    families
 }
 
 fn bounds_for(
@@ -266,7 +285,7 @@ fn postprocess_text(family: ModelFamily, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelFamily, postprocess_text};
+    use super::{ModelFamily, postprocess_text, preferred_model_families};
 
     #[test]
     fn unsupported_language_has_no_model_family() {
@@ -278,6 +297,17 @@ mod tests {
         assert_eq!(
             postprocess_text(ModelFamily::Arabic, "ةيمويلا كماهم"),
             "مهامك اليومية"
+        );
+    }
+
+    #[test]
+    fn preferred_languages_keep_both_directions_without_duplicate_models() {
+        assert_eq!(
+            preferred_model_families(&["en".into(), "ru".into(), "uk".into()]),
+            vec![
+                ("en".into(), ModelFamily::English),
+                ("ru".into(), ModelFamily::EasternSlavic),
+            ]
         );
     }
 }
