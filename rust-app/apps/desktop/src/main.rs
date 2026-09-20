@@ -37,6 +37,10 @@ use rust_protocol::{
     TranslationProviderEntry, TranslationProviderStatus, TranslationResult, TranslationTier,
     TranslationWorkerCommand, TranslationWorkerEvent,
 };
+use screen_translation::{
+    DesktopScreenSelectionCoordinator, DesktopSelectionEnvironment, ScreenSelectionCoordinator,
+    SelectionTerminal,
+};
 use serde::{Deserialize, Serialize};
 use settings_document::{
     SavedSettings, apply_first_run_choice, data_root, load_settings, save_first_run_settings,
@@ -80,6 +84,7 @@ mod overlay_presenter;
 mod preview_modes;
 mod providers_view;
 mod pulse_matrix;
+mod screen_translation;
 mod settings_document;
 mod settings_preview;
 mod settings_projection;
@@ -175,6 +180,10 @@ enum RuntimeEvent {
         window_handle: u64,
         delta: i32,
     },
+    ScreenSelectionPointer(rust_platform_windows::region_selection::PointerEvent),
+    ScreenSelectionWatchdog {
+        request_id: RequestId,
+    },
     SessionEnd(rust_platform_windows::SessionEndEvent),
     WorkerError {
         kind: WorkerKind,
@@ -215,6 +224,7 @@ struct RuntimeUi {
     state: Rc<RefCell<AppState>>,
     workers: Rc<Workers>,
     indicator_animation: Rc<RefCell<IndicatorAnimation>>,
+    screen_selection: Rc<RefCell<DesktopScreenSelectionCoordinator>>,
 }
 
 /// The recording HUD deliberately owns two native windows. A Winit/DWM
@@ -1065,6 +1075,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     wire_translation_preview(&translation_preview, &translation_preview_presenter);
     wire_translator(&translator, &state, &workers);
+    let screen_selection = Rc::new(RefCell::new(ScreenSelectionCoordinator::new(
+        DesktopSelectionEnvironment::new(Rc::clone(&workers)),
+    )));
     install_runtime_handler(RuntimeUi {
         settings: settings.as_weak(),
         recording_overlays: recording_overlays.clone(),
@@ -1077,6 +1090,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         state: Rc::clone(&state),
         workers: Rc::clone(&workers),
         indicator_animation: Rc::clone(&indicator_animation),
+        screen_selection,
     });
     session_event_router.attach_runtime();
     let _popup_dismiss_monitor = match rust_platform_windows::PopupDismissMonitor::start(
@@ -1205,6 +1219,21 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
     match event {
         RuntimeEvent::Input(event) => {
             handle_input_event(event, runtime);
+        }
+        RuntimeEvent::ScreenSelectionPointer(event) => {
+            let terminal = runtime.screen_selection.borrow_mut().handle_pointer(event);
+            if let Some(terminal) = terminal {
+                handle_screen_selection_terminal(terminal);
+            }
+        }
+        RuntimeEvent::ScreenSelectionWatchdog { request_id } => {
+            let terminal = runtime
+                .screen_selection
+                .borrow_mut()
+                .watchdog_expired(request_id);
+            if let Some(terminal) = terminal {
+                handle_screen_selection_terminal(terminal);
+            }
         }
         RuntimeEvent::Speech { instance_id, event } => {
             if !runtime
@@ -1715,6 +1744,38 @@ fn handle_worker_exit(
     }
 }
 
+fn handle_screen_selection_terminal(terminal: SelectionTerminal) {
+    match terminal {
+        SelectionTerminal::Selected {
+            request_id,
+            rect,
+            capture,
+        } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=selected x={} y={} width={} height={} capture_bytes={}",
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                capture.owned_frame_bytes()
+            ));
+            // Task 8 routes this immutable capture and physical rectangle into
+            // the OCR worker. Until that route exists, dropping it here still
+            // preserves the privacy invariant: pixels are never persisted.
+        }
+        SelectionTerminal::Cancelled { request_id } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=cancelled"
+            ));
+        }
+        SelectionTerminal::Failed { request_id, error } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=failed error={error}"
+            ));
+        }
+    }
+}
+
 fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
     let settings = &runtime.settings;
     let recording_overlays = &runtime.recording_overlays;
@@ -1757,11 +1818,20 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             rust_app_core::diagnostics::log_line(&format!(
                 "screen_translation request={request_id} stage=requested"
             ));
+            let terminal = runtime.screen_selection.borrow_mut().begin(request_id);
+            if let Some(terminal) = terminal {
+                handle_screen_selection_terminal(terminal);
+            }
         }
         InputHostEvent::ScreenCaptureCancelled { request_id } => {
-            rust_app_core::diagnostics::log_line(&format!(
-                "screen_translation request={request_id} stage=cancelled"
-            ));
+            let terminal = runtime.screen_selection.borrow_mut().cancel(request_id);
+            if let Some(terminal) = terminal {
+                handle_screen_selection_terminal(terminal);
+            } else {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "screen_translation request={request_id} stage=stale_cancel_ignored"
+                ));
+            }
         }
         InputHostEvent::HotkeysApplied {
             operation_id,

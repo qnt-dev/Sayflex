@@ -17,6 +17,8 @@ mod overlay;
 mod popup_dismiss;
 #[cfg(windows)]
 mod process_exit;
+#[cfg(windows)]
+pub mod region_selection;
 pub mod screen_capture;
 #[cfg(windows)]
 mod session_end;
@@ -599,6 +601,45 @@ pub fn user_locale_name() -> String {
         return "en".to_owned();
     }
     String::from_utf16_lossy(&buffer[..length as usize - 1])
+}
+
+#[cfg(not(windows))]
+pub mod region_selection {
+    use rust_protocol::PhysicalRect;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum PointerEvent {
+        Down { x: i32, y: i32 },
+        Move { x: i32, y: i32 },
+        Up { x: i32, y: i32 },
+        RightDown { x: i32, y: i32 },
+        RightUp { x: i32, y: i32 },
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct MonitorRegion {
+        pub bounds: PhysicalRect,
+        pub dpi_scale_milli: u32,
+    }
+
+    pub struct RegionSelectionMonitor;
+
+    impl RegionSelectionMonitor {
+        pub fn start(_callback: impl Fn(PointerEvent) + Send + 'static) -> Result<Self, String> {
+            Err("screen-region pointer tracking is only available on Windows".into())
+        }
+    }
+
+    pub fn attached_monitor_regions() -> Result<Vec<MonitorRegion>, String> {
+        Err("monitor enumeration is only available on Windows".into())
+    }
+
+    pub fn place_region_selection_window(
+        _window_handle: u64,
+        _bounds: PhysicalRect,
+    ) -> Result<(), String> {
+        Err("screen-region overlays are only available on Windows".into())
+    }
 }
 
 #[cfg(not(windows))]

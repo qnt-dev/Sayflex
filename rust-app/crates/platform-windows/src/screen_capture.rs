@@ -228,6 +228,10 @@ impl DesktopCapture {
         self.bounds
     }
 
+    pub fn output_bounds(&self) -> impl ExactSizeIterator<Item = PhysicalRect> + '_ {
+        self.outputs.iter().map(|output| output.bounds)
+    }
+
     #[must_use]
     pub fn owned_frame_bytes(&self) -> usize {
         self.outputs

@@ -1033,6 +1033,58 @@ export component TranslationPreview inherits Window {
     }
 }
 
+export component ScreenRegionOverlay inherits Window {
+    title: "SayFlex";
+    preferred-width: 1px;
+    preferred-height: 1px;
+    min-width: 1px;
+    min-height: 1px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+
+    in property <image> frozen-image;
+    in property <bool> selection-active: false;
+    in property <float> selection-x: 0;
+    in property <float> selection-y: 0;
+    in property <float> selection-width: 0;
+    in property <float> selection-height: 0;
+    in property <float> dim-opacity: 0.58;
+
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.frozen-image;
+        image-fit: fill;
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(12, 13, 16, root.dim-opacity);
+    }
+
+    if root.selection-active: selected-region := Rectangle {
+        x: root.selection-x * 1px;
+        y: root.selection-y * 1px;
+        width: root.selection-width * 1px;
+        height: root.selection-height * 1px;
+        clip: true;
+        border-width: 2px;
+        border-color: Theme.signal;
+        background: transparent;
+
+        Image {
+            x: -root.selection-x * 1px;
+            y: -root.selection-y * 1px;
+            width: root.width;
+            height: root.height;
+            source: root.frozen-image;
+            image-fit: fill;
+        }
+    }
+}
+
 export component TranslatorWindow inherits Window {
     title: @tr("Translator");
     icon: @image-url("../assets/tray-icon.svg");
