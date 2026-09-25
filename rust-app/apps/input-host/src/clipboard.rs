@@ -905,6 +905,25 @@ struct ClipboardSnapshot {
     formats: Vec<ClipboardFormatSnapshot>,
 }
 
+fn collect_preservable_formats<T>(
+    advertised_formats: impl IntoIterator<Item = u32>,
+    mut preserve: impl FnMut(u32) -> Option<T>,
+) -> Result<Vec<T>, ClipboardError> {
+    let mut advertised_count = 0usize;
+    let mut preserved = Vec::new();
+    for format in advertised_formats {
+        advertised_count += 1;
+        if let Some(value) = preserve(format) {
+            preserved.push(value);
+        }
+    }
+
+    if advertised_count > 0 && preserved.is_empty() {
+        return Err(ClipboardError::InvalidData);
+    }
+    Ok(preserved)
+}
+
 impl ClipboardSnapshot {
     fn capture_consistent() -> Result<(Self, u32), ClipboardError> {
         for _ in 0..4 {
@@ -920,30 +939,44 @@ impl ClipboardSnapshot {
 
     fn capture() -> Result<Self, ClipboardError> {
         with_open_clipboard(|| {
-            let mut formats = Vec::new();
+            let mut advertised_formats = Vec::new();
             let mut previous = 0;
             loop {
                 let format = unsafe { EnumClipboardFormats(previous) };
                 if format == 0 {
                     break;
                 }
+                advertised_formats.push(format);
+                previous = format;
+            }
+
+            let formats = collect_preservable_formats(advertised_formats, |format| {
                 let clipboard_handle = unsafe { GetClipboardData(format) };
                 if clipboard_handle.is_null() {
-                    return Err(ClipboardError::InvalidData);
+                    crate::diagnostic_line(&format!(
+                        "clipboard_snapshot format={format} result=skipped reason=unavailable"
+                    ));
+                    return None;
                 }
-                let clipboard_format =
-                    u16::try_from(format).map_err(|_| ClipboardError::InvalidData)?;
+                let Ok(clipboard_format) = u16::try_from(format) else {
+                    crate::diagnostic_line(&format!(
+                        "clipboard_snapshot format={format} result=skipped reason=invalid_identifier"
+                    ));
+                    return None;
+                };
                 let duplicated =
                     unsafe { OleDuplicateData(clipboard_handle, clipboard_format, GMEM_MOVEABLE) };
                 if duplicated.is_null() {
-                    return Err(ClipboardError::Allocation);
+                    crate::diagnostic_line(&format!(
+                        "clipboard_snapshot format={format} result=skipped reason=not_duplicable"
+                    ));
+                    return None;
                 }
-                formats.push(ClipboardFormatSnapshot {
+                Some(ClipboardFormatSnapshot {
                     format,
                     handle: duplicated,
-                });
-                previous = format;
-            }
+                })
+            })?;
             Ok(Self { formats })
         })
     }
@@ -1014,9 +1047,26 @@ fn with_open_clipboard_owner<T>(
 mod tests {
     use super::{
         ClipboardError, ClipboardFormatSnapshot, ClipboardSnapshot, GMEM_MOVEABLE, GlobalAlloc,
-        clipboard_sequence_still_owned, is_retryable_capture_error, is_transient_read_error,
-        request_is_from_target,
+        clipboard_sequence_still_owned, collect_preservable_formats, is_retryable_capture_error,
+        is_transient_read_error, request_is_from_target,
     };
+
+    #[test]
+    fn an_unreadable_private_format_does_not_discard_readable_clipboard_data() {
+        let formats = collect_preservable_formats([13, 49_858, 17], |format| {
+            (format != 49_858).then_some(format)
+        })
+        .expect("standard clipboard formats remain preservable");
+
+        assert_eq!(formats, vec![13, 17]);
+    }
+
+    #[test]
+    fn a_nonempty_clipboard_with_no_readable_formats_is_rejected() {
+        let result = collect_preservable_formats([49_858], |_| None::<u32>);
+
+        assert_eq!(result, Err(ClipboardError::InvalidData));
+    }
 
     #[test]
     fn restore_is_rejected_when_sequence_changes_while_clipboard_open_retries() {
