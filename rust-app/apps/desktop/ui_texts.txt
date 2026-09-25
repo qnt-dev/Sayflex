@@ -22,6 +22,12 @@ WhisperTurboDescription|Recommended default and the model used by the current Wi
 WhisperLargeDescription|Maximum-quality profile for users who accept a larger download and slower inference.
 QwenFastDescription|Modern multilingual 4B model accelerated locally through Vulkan.
 QwenQualityDescription|Higher-quality multilingual 9B model for modern discrete GPUs.
+FirefoxRuEnDescription|Russian and English · CPU-only · no GPU memory.
+FastLanguagePackagesSection|FAST LANGUAGE PACKAGES
+ContextualTranslationModelsSection|CONTEXTUAL TRANSLATION MODELS
+RussianEnglishModelName|Russian ↔ English
+CompactTranslationModelHint|Small language package: fast, CPU-only, and no GPU memory.
+ContextualTranslationModelHint|Contextual model: broader language coverage, with higher RAM and possible GPU use.
 Translation|TRANSLATION
 History|HISTORY
 None|none
@@ -240,7 +246,7 @@ HoldShortcut|Hold {shortcut} to dictate.
 CompanionProtocolMismatch|Companion Orb protocol mismatch. Reinstall the complete application.
 TranslationProtocolMismatch|Translation worker protocol mismatch. Reinstall the complete application.
 BackendFailureFallback|{code} on the selected backend; checking {backend} automatically.
-NoTranslationModelInstalled|No model installed. Choose Fast or Quality in Settings.
+NoTranslationModelInstalled|No model installed. Choose a language package or contextual model in Settings.
 SpeechTranslationDisabled|Speech translation was turned off because no enabled provider supports it.
 NoTranscriptionProviderReady|No transcription provider is ready. Enable a local model or configure a speech service in Settings.
 CompanionOrbStatus|Companion Orb: {message}
@@ -330,3 +336,5 @@ ScreenOcrModelUnavailable|The local screen-reading model is not installed. Insta
 ScreenOcrLanguageUnavailable|This language is not available for local screen reading.
 ScreenOcrWorkerFailed|Screen text recognition stopped unexpectedly. Try again.
 ScreenTranslationCancelled|Screen translation was cancelled.
+CompactModelDownloadOffer|Download {model} ({size}) to translate this language pair.
+DownloadModel|Download model

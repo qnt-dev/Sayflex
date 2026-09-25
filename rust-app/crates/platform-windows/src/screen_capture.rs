@@ -132,6 +132,12 @@ impl RgbaFrame {
             .get(offset..offset + BYTES_PER_PIXEL as usize)
             .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
     }
+
+    fn has_visible_rgb(&self) -> bool {
+        self.pixels
+            .chunks_exact(BYTES_PER_PIXEL as usize)
+            .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +146,7 @@ pub struct CapturedOutput {
     pub rotation: Rotation,
     pub dpi_scale_milli: u32,
     frame: RgbaFrame,
+    protected_content_masked: bool,
 }
 
 impl CapturedOutput {
@@ -149,6 +156,17 @@ impl CapturedOutput {
         dpi_scale_milli: u32,
         stride: u32,
         pixels: Vec<u8>,
+    ) -> Result<Self, CaptureError> {
+        Self::try_new_with_protection(bounds, rotation, dpi_scale_milli, stride, pixels, false)
+    }
+
+    pub(crate) fn try_new_with_protection(
+        bounds: PhysicalRect,
+        rotation: Rotation,
+        dpi_scale_milli: u32,
+        stride: u32,
+        pixels: Vec<u8>,
+        protected_content_masked: bool,
     ) -> Result<Self, CaptureError> {
         validate_rect(bounds)?;
         let (source_width, source_height) = rotation.source_dimensions(bounds.width, bounds.height);
@@ -167,6 +185,7 @@ impl CapturedOutput {
             rotation,
             dpi_scale_milli,
             frame,
+            protected_content_masked,
         })
     }
 
@@ -187,6 +206,15 @@ pub struct DesktopCapture {
     generation: u64,
     outputs: Vec<CapturedOutput>,
     bounds: PhysicalRect,
+    backend: CaptureBackendKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureBackendKind {
+    #[default]
+    Unknown,
+    Primary,
+    Fallback,
 }
 
 impl DesktopCapture {
@@ -215,6 +243,7 @@ impl DesktopCapture {
             generation,
             outputs,
             bounds,
+            backend: CaptureBackendKind::Unknown,
         })
     }
 
@@ -228,6 +257,16 @@ impl DesktopCapture {
         self.bounds
     }
 
+    #[must_use]
+    pub const fn backend(&self) -> CaptureBackendKind {
+        self.backend
+    }
+
+    fn with_backend(mut self, backend: CaptureBackendKind) -> Self {
+        self.backend = backend;
+        self
+    }
+
     pub fn output_bounds(&self) -> impl ExactSizeIterator<Item = PhysicalRect> + '_ {
         self.outputs.iter().map(|output| output.bounds)
     }
@@ -238,6 +277,12 @@ impl DesktopCapture {
             .iter()
             .map(CapturedOutput::owned_frame_bytes)
             .sum()
+    }
+
+    fn has_visible_rgb(&self) -> bool {
+        self.outputs
+            .iter()
+            .any(|output| output.frame.has_visible_rgb())
     }
 
     pub fn crop(&self, requested: PhysicalRect) -> Result<RgbaFrame, CaptureError> {
@@ -256,10 +301,12 @@ impl DesktopCapture {
             *alpha = u8::MAX;
         }
 
+        let mut overlaps_protected_content = false;
         for output in &self.outputs {
             let Some(copy_rect) = intersection(clipped, output.bounds)? else {
                 continue;
             };
+            overlaps_protected_content |= output.protected_content_masked;
             for desktop_y in copy_rect.y..rect_bottom(copy_rect)? {
                 for desktop_x in copy_rect.x..rect_right(copy_rect)? {
                     let output_x = (i64::from(desktop_x) - i64::from(output.bounds.x)) as u32;
@@ -273,7 +320,11 @@ impl DesktopCapture {
                 }
             }
         }
-        RgbaFrame::try_new(clipped, stride, pixels)
+        let frame = RgbaFrame::try_new(clipped, stride, pixels)?;
+        if overlaps_protected_content && !frame.has_visible_rgb() {
+            return Err(CaptureError::ProtectedContent);
+        }
+        Ok(frame)
     }
 }
 
@@ -286,8 +337,16 @@ pub fn capture_with_fallback(
     fallback: &dyn DesktopCaptureBackend,
 ) -> Result<DesktopCapture, CaptureError> {
     match primary.capture() {
-        Ok(capture) => Ok(capture),
-        Err(CaptureError::TemporaryUnavailable(_)) => fallback.capture(),
+        // Some display-driver paths return S_OK from Desktop Duplication but
+        // expose a zero-filled texture. Treat that as an unavailable primary
+        // rather than presenting a black selection overlay.
+        Ok(capture) if !capture.has_visible_rgb() => fallback
+            .capture()
+            .map(|capture| capture.with_backend(CaptureBackendKind::Fallback)),
+        Ok(capture) => Ok(capture.with_backend(CaptureBackendKind::Primary)),
+        Err(CaptureError::TemporaryUnavailable(_)) => fallback
+            .capture()
+            .map(|capture| capture.with_backend(CaptureBackendKind::Fallback)),
         Err(error) => Err(error),
     }
 }
@@ -393,4 +452,56 @@ fn ensure_within_byte_cap(requested: u64) -> Result<(), CaptureError> {
 #[cfg(windows)]
 fn next_capture_generation() -> u64 {
     CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod protected_content_tests {
+    use super::{CaptureError, CapturedOutput, DesktopCapture, Rotation};
+    use rust_protocol::PhysicalRect;
+
+    fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {
+        PhysicalRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn output(bounds: PhysicalRect, rgba: [u8; 4], protected: bool) -> CapturedOutput {
+        let stride = bounds.width * 4;
+        CapturedOutput::try_new_with_protection(
+            bounds,
+            Rotation::Identity,
+            1_000,
+            stride,
+            rgba.into_iter()
+                .cycle()
+                .take(stride as usize * bounds.height as usize)
+                .collect(),
+            protected,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn protected_content_on_one_monitor_does_not_block_another_monitor() {
+        let capture = DesktopCapture::try_new(
+            1,
+            vec![
+                output(rect(0, 0, 2, 2), [0, 0, 0, 255], true),
+                output(rect(2, 0, 2, 2), [40, 50, 60, 255], false),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            capture.crop(rect(2, 0, 2, 2)).unwrap().pixel(0, 0),
+            Some([40, 50, 60, 255])
+        );
+        assert_eq!(
+            capture.crop(rect(0, 0, 2, 2)),
+            Err(CaptureError::ProtectedContent)
+        );
+    }
 }

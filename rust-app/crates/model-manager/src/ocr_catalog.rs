@@ -112,5 +112,8 @@ fn artifact(relative_path: &str, remote_path: &str, bytes: u64, sha256: &str) ->
         url: format!("{RAPID_OCR_ROOT}/{remote_path}"),
         bytes,
         sha256: sha256.to_owned(),
+        compression: None,
+        expanded_bytes: None,
+        expanded_sha256: None,
     }
 }

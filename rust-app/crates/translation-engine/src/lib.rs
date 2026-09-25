@@ -1,8 +1,9 @@
 mod catalog;
 mod engine;
+mod firefox;
 
 pub use catalog::{
-    TranslationBackendDescriptor, TranslationCatalog, TranslationCatalogError,
-    TranslationPackDescriptor,
+    FirefoxDirectionDescriptor, TranslationBackendDescriptor, TranslationCatalog,
+    TranslationCatalogError, TranslationPackDescriptor,
 };
 pub use engine::{TranslationCancelled, TranslationEngine, TranslationOutput, detect_language};

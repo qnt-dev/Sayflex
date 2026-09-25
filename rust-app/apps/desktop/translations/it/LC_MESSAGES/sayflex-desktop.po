@@ -681,8 +681,8 @@ msgstr "Nessun motore vocale compatibile disponibile: {error}"
 msgid "No key stored"
 msgstr "Nessuna chiave memorizzata"
 
-msgid "No model installed. Choose Fast or Quality in Settings."
-msgstr "Nessun modello installato. Scegli Veloce o Qualità nelle impostazioni."
+msgid "No model installed. Choose a language package or contextual model in Settings."
+msgstr "Nessun modello installato. Scegli un pacchetto linguistico o un modello contestuale nelle impostazioni."
 
 msgid "no overlay"
 msgstr "senza visualizzazione"
@@ -1527,3 +1527,49 @@ msgstr "Il riconoscimento del testo sullo schermo si è interrotto in modo impre
 
 msgid "Screen translation was cancelled."
 msgstr "La traduzione dello schermo è stata annullata."
+msgid "Resources"
+msgstr "Risorse"
+
+msgid "Live resource use by function."
+msgstr "Utilizzo attuale delle risorse per funzione."
+
+msgid "Unload"
+msgstr "Scarica"
+
+msgid "Free all memory"
+msgstr "Libera tutta la memoria"
+
+msgid "Not loaded"
+msgstr "Non caricato"
+
+msgid "Working"
+msgstr "In uso"
+
+msgid "Releasing…"
+msgstr "Scaricamento…"
+
+msgid "Unloading only frees working memory. The selected models remain installed. The next time you use a function, SayFlex loads its model automatically and the function continues normally."
+msgstr "Lo scaricamento libera soltanto la memoria di lavoro. I modelli selezionati restano installati. Al successivo utilizzo di una funzione, SayFlex caricherà automaticamente il relativo modello e la funzione continuerà a funzionare normalmente."
+msgid "Russian and English · CPU-only · no GPU memory."
+msgstr "Russo e inglese · solo CPU · senza memoria GPU."
+
+msgid "FAST LANGUAGE PACKAGES"
+msgstr "PACCHETTI LINGUISTICI RAPIDI"
+
+msgid "CONTEXTUAL TRANSLATION MODELS"
+msgstr "MODELLI DI TRADUZIONE CONTESTUALE"
+
+msgid "Russian ↔ English"
+msgstr "Russo ↔ inglese"
+
+msgid "Small language package: fast, CPU-only, and no GPU memory."
+msgstr "Pacchetto linguistico piccolo: rapido, solo CPU e senza memoria GPU."
+
+msgid "Contextual model: broader language coverage, with higher RAM and possible GPU use."
+msgstr "Modello contestuale: più lingue, con maggiore uso di RAM e possibile uso della GPU."
+
+msgid "Download {model} ({size}) to translate this language pair."
+msgstr "Scarica {model} ({size}) per tradurre questa coppia di lingue."
+
+msgid "Download model"
+msgstr "Scarica modello"

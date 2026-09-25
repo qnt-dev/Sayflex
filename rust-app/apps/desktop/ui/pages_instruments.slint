@@ -12,6 +12,7 @@ import { Sheet } from "sheet.slint";
 import { Fact, ListHead, StageHeading, FactList, Note, GroupLabel, SideNote, PageLede, ClaimLine, FormRow } from "parts.slint";
 import { RowAction, Toggle, ChoiceTile, MenuButton, MenuOption } from "controls.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
+import { ResourceRow } from "rows.slint";
 
 // ── Overview ─────────────────────────────────────────────
 export component OverviewPage inherits VerticalLayout {
@@ -28,7 +29,7 @@ export component OverviewPage inherits VerticalLayout {
     spacing: 0px;
 
     ListHead {
-        index: "01 / 09";
+        index: "01 / 10";
         title: @tr("Overview");
         claim: root.claim;
         claim-signal: root.audio-leaves-device;
@@ -116,7 +117,7 @@ export component DictationPage inherits HorizontalLayout {
         spacing: 0px;
 
         StageHeading {
-            index: "02 / 09";
+            index: "02 / 10";
             title: @tr("Dictation");
             subtitle: root.subtitle;
         }
@@ -365,7 +366,7 @@ export component VisualsPage inherits HorizontalLayout {
         spacing: 0px;
 
         StageHeading {
-            index: "06 / 09";
+            index: "06 / 10";
             title: @tr("Visuals");
             subtitle: root.subtitle;
         }
@@ -549,6 +550,129 @@ export component VisualsPage inherits HorizontalLayout {
     }
 }
 
+// ── Resources ───────────────────────────────────────────
+component ResourceMetric inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+
+    width: 62px;
+    alignment: center;
+    spacing: 5px;
+    Text {
+        text: root.label;
+        color: Sheet.muted;
+        font-size: Sheet.label-size;
+        font-family: "Consolas";
+        letter-spacing: 0.8px;
+    }
+    Text {
+        text: root.value;
+        color: Sheet.ink;
+        font-size: Sheet.detail-size;
+        font-family: "Consolas";
+    }
+}
+
+export component ResourcesPage inherits VerticalLayout {
+    in property <[ResourceRow]> rows;
+    in property <bool> can-unload-all: false;
+    callback unload(string);
+    callback unload-all();
+
+    spacing: 0px;
+
+    ListHead {
+        index: "09 / 10";
+        title: @tr("Resources");
+        lede: @tr("Live resource use by function.");
+    }
+
+    Rectangle { height: 12px; }
+
+    for row in root.rows : Rectangle {
+        height: 82px;
+        background: row.tone == "working" ? Sheet.signal-soft : transparent;
+
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Sheet.hairline-faint;
+        }
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 4px;
+            spacing: 14px;
+
+            Rectangle {
+                width: 9px;
+                height: 9px;
+                y: (parent.height - self.height) / 2;
+                background: row.tone == "working" || row.tone == "releasing"
+                    ? Sheet.signal : (row.can-unload ? Sheet.ink : transparent);
+                border-width: row.can-unload ? 0px : 1px;
+                border-color: Sheet.hairline;
+            }
+
+            VerticalLayout {
+                width: 148px;
+                alignment: center;
+                spacing: 5px;
+                Text {
+                    text: row.id == "speech" ? @tr("Dictation")
+                        : row.id == "translation" ? @tr("Translation")
+                        : @tr("Screen translation");
+                    color: Sheet.ink;
+                    font-size: Sheet.body-size;
+                    font-weight: 650;
+                }
+                Text {
+                    text: row.state == "ready" ? @tr("Ready")
+                        : row.state == "working" ? @tr("Working")
+                        : row.state == "releasing" ? @tr("Releasing…")
+                        : @tr("Not loaded");
+                    color: row.tone == "working" || row.tone == "releasing"
+                        ? Sheet.signal-text : Sheet.muted;
+                    font-size: Sheet.detail-size;
+                }
+            }
+
+            ResourceMetric { label: "CPU"; value: row.cpu; }
+            ResourceMetric { label: "RAM"; value: row.ram; }
+            ResourceMetric { label: "GPU"; value: row.gpu; }
+            ResourceMetric { label: "VRAM"; value: row.vram; }
+
+            Rectangle { horizontal-stretch: 1; }
+            RowAction {
+                label: @tr("Unload");
+                enabled: row.can-unload;
+                clicked => { root.unload(row.id); }
+            }
+        }
+    }
+
+    Rectangle { height: 18px; }
+
+    HorizontalLayout {
+        Rectangle { horizontal-stretch: 1; }
+        RowAction {
+            label: @tr("Free all memory");
+            primary: true;
+            enabled: root.can-unload-all;
+            clicked => { root.unload-all(); }
+        }
+    }
+
+    Rectangle { height: 14px; }
+
+    Note {
+        text: @tr("Unloading only frees working memory. The selected models remain installed. The next time you use a function, SayFlex loads its model automatically and the function continues normally.");
+        action: "";
+    }
+
+    Rectangle { vertical-stretch: 1; }
+}
+
 // ── About ───────────────────────────────────────────────
 //
 // Product identity comes first. The renderer is credited in the compact
@@ -562,7 +686,7 @@ export component AboutPage inherits VerticalLayout {
     spacing: 0px;
 
     ListHead {
-        index: "09 / 09";
+        index: "10 / 10";
         title: @tr("About");
         lede: @tr("Version, interface language, and software notices.");
     }

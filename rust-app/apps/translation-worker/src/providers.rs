@@ -187,6 +187,7 @@ impl ProvidersSnapshot {
                         kind: TranslationFailureKind::NoProviderAvailable,
                         provider_id: None,
                         retry_after_ms: None,
+                        required_catalog_id: None,
                         detail: "No network client could be created, and the local engine is switched off in the translation order."
                             .to_owned(),
                         attempts: Vec::new(),
@@ -245,6 +246,7 @@ fn failure_report(attempts: &[Attempt]) -> TranslationFailureReport {
         }),
         provider_id: last.map(|attempt| attempt.provider_id.clone()),
         retry_after_ms: last.and_then(|attempt| attempt.retry_after_ms),
+        required_catalog_id: None,
         detail: last.map_or_else(
             || "Every translation provider is switched off or unavailable.".to_owned(),
             |attempt| attempt.detail.clone(),

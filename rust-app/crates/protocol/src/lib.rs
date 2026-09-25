@@ -7,6 +7,7 @@ use uuid::Uuid;
 // Version 23 adds worker-owned model removal, explicit local-engine residency
 // events, and per-action hotkey application failures.
 // Version 25 adds the screen-translation hotkey and local OCR worker protocol.
+// Version 26 adds explicit in-memory model release commands for Resources.
 // All packaged processes must agree on this schema before exchanging commands.
 /// The shape of every message in this file, as one number.
 ///
@@ -17,7 +18,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 29;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -396,6 +397,7 @@ impl TranslationLanguagePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TranslationTier {
+    Compact,
     Tiny,
     Teacher,
 }
@@ -451,6 +453,11 @@ pub struct TranslationFailureReport {
     pub provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
+    /// Exact local package required to continue, when the failure is
+    /// `LocalModelMissing`. The desktop can offer/install that package without
+    /// parsing technical prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_catalog_id: Option<String>,
     /// Redacted technical context. The desktop renders localized copy from the
     /// typed fields and keeps this secondary.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -860,16 +867,13 @@ pub struct HotkeyBindings {
     pub insert_last: HotkeyBinding,
     pub correct_layout: HotkeyBinding,
     pub translate: HotkeyBinding,
-    #[serde(default = "legacy_screen_translate_binding")]
+    #[serde(default = "default_screen_translate_binding")]
     pub screen_translate: HotkeyBinding,
     pub pause_resume: HotkeyBinding,
 }
 
-fn legacy_screen_translate_binding() -> HotkeyBinding {
-    HotkeyBinding {
-        spec: HotkeySpec::control_alt(u16::from(b'G')),
-        enabled: false,
-    }
+fn default_screen_translate_binding() -> HotkeyBinding {
+    HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'G')))
 }
 
 impl Default for HotkeyBindings {
@@ -882,7 +886,7 @@ impl Default for HotkeyBindings {
                 spec: HotkeySpec::control_alt(u16::from(b'F')),
                 enabled: false,
             },
-            screen_translate: legacy_screen_translate_binding(),
+            screen_translate: default_screen_translate_binding(),
             pause_resume: HotkeyBinding::enabled(HotkeySpec::control_alt(u16::from(b'P'))),
         }
     }
@@ -1054,6 +1058,10 @@ pub enum OcrWorkerEvent {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum TranslationWorkerCommand {
     Initialize {
+        /// Stable catalog identity. Older settings may omit it and provide only
+        /// `selected_tier`, which remains a migration hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_catalog_id: Option<String>,
         selected_tier: Option<TranslationTier>,
         keep_warm: bool,
         history_enabled: bool,
@@ -1062,17 +1070,17 @@ pub enum TranslationWorkerCommand {
         prepare_local_model: bool,
     },
     EnsureModel {
-        tier: TranslationTier,
+        catalog_id: String,
     },
     /// Removes one catalog-owned local pack after its engine is no longer in
     /// use. The worker, not the desktop, owns the filesystem operation.
     RemoveModel {
-        tier: TranslationTier,
+        catalog_id: String,
     },
     /// Stops a pack or runtime installation in flight, keeping partial files.
     CancelModelInstall,
-    SelectTier {
-        tier: TranslationTier,
+    SelectModel {
+        catalog_id: String,
         keep_warm: bool,
     },
     Translate {
@@ -1085,6 +1093,9 @@ pub enum TranslationWorkerCommand {
     Cancel {
         request_id: RequestId,
     },
+    /// Releases the resident local engine without deleting its selected model.
+    /// The desktop may request the same model again on the next translation.
+    UnloadLocalModel,
     /// Replaces the ordered translation list.
     SetTranslationProviders {
         providers: Vec<TranslationProviderEntry>,
@@ -1117,6 +1128,7 @@ pub struct TranslationHistoryEntry {
 pub enum TranslationWorkerEvent {
     Ready {
         protocol_version: u32,
+        selected_catalog_id: Option<String>,
         selected_tier: Option<TranslationTier>,
         models: Vec<TranslationModelSummary>,
     },
@@ -1136,6 +1148,7 @@ pub enum TranslationWorkerEvent {
         load_duration_ms: u64,
     },
     ModelSelected {
+        catalog_id: String,
         tier: TranslationTier,
     },
     /// What is resident in the local translation engine after the worker has
@@ -1224,6 +1237,9 @@ pub enum SpeechWorkerCommand {
     Cancel {
         session_id: SessionId,
     },
+    /// Releases the resident local engine without deleting its selected model.
+    /// The worker prepares it again when the next local dictation begins.
+    UnloadLocalModel,
     EnsureModel {
         catalog_id: String,
     },
@@ -1430,10 +1446,11 @@ mod tests {
         CompanionRendererCommand, DictationCommand, DictationLanguage, HotkeyAction,
         HotkeyBindings, HotkeyConfiguration, HotkeySpec, InputHostCommand, InputHostEvent,
         InsertionDelivery, InsertionMethod, OcrLanguagePolicy, OcrPixelFormat, OcrWorkerCommand,
-        OcrWorkerEvent, RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerEvent,
-        TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency,
+        OcrWorkerEvent, RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerCommand,
+        SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency,
         TranslationAttemptReport, TranslationFailureKind, TranslationFailureReport,
-        TranslationLanguage, TranslationResult, TranslationTier, TranslationWorkerEvent,
+        TranslationLanguage, TranslationResult, TranslationTier, TranslationWorkerCommand,
+        TranslationWorkerEvent,
     };
 
     fn round_trip<T>(value: T)
@@ -1452,10 +1469,7 @@ mod tests {
             HotkeyBindings::default().screen_translate.spec,
             HotkeySpec::control_alt(u16::from(b'G'))
         );
-        assert!(
-            !HotkeyBindings::default().screen_translate.enabled,
-            "an unadmitted OCR feature must be opt-in even in development builds"
-        );
+        assert!(HotkeyBindings::default().screen_translate.enabled);
         assert_eq!(HotkeyAction::ALL.len(), 6);
         round_trip(InputHostEvent::ScreenCaptureRequested { request_id });
         round_trip(InputHostCommand::SetScreenCaptureMode {
@@ -1475,7 +1489,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_hotkeys_add_screen_translation_without_stealing_a_chord() {
+    fn resident_local_models_can_be_released_without_removing_their_files() {
+        round_trip(SpeechWorkerCommand::UnloadLocalModel);
+        round_trip(TranslationWorkerCommand::UnloadLocalModel);
+    }
+
+    #[test]
+    fn compact_translation_tier_has_a_stable_wire_identity() {
+        assert_eq!(
+            serde_json::to_string(&TranslationTier::Compact).unwrap(),
+            "\"compact\""
+        );
+        round_trip(TranslationTier::Compact);
+    }
+
+    #[test]
+    fn legacy_hotkeys_enable_the_admitted_screen_translation_chord() {
         let mut legacy = serde_json::to_value(HotkeyBindings::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("screen_translate");
 
@@ -1485,7 +1514,7 @@ mod tests {
             migrated.screen_translate.spec,
             HotkeySpec::control_alt(u16::from(b'G'))
         );
-        assert!(!migrated.screen_translate.enabled);
+        assert!(migrated.screen_translate.enabled);
     }
 
     #[test]
@@ -1738,6 +1767,7 @@ mod tests {
                 kind: TranslationFailureKind::UnsupportedRequest,
                 provider_id: Some("deepl".to_owned()),
                 retry_after_ms: None,
+                required_catalog_id: Some("firefox-de-en-v3".to_owned()),
                 detail: "language pair is unavailable".to_owned(),
                 attempts: vec![quota],
             },
@@ -1906,8 +1936,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 25,
-            "every fingerprint below was written for protocol 25: if a shape \
+            PROTOCOL_VERSION, 29,
+            "every fingerprint below was written for protocol 29: if a shape \
              changes, this number changes with it"
         );
     }
@@ -1952,6 +1982,7 @@ mod wire_schema_tests {
         let shapes = fingerprint(&[
             TranslationWorkerEvent::Ready {
                 protocol_version: 0,
+                selected_catalog_id: Some(String::new()),
                 selected_tier: Some(TranslationTier::Tiny),
                 models: Vec::new(),
             },
@@ -1971,6 +2002,7 @@ mod wire_schema_tests {
                 load_duration_ms: 0,
             },
             TranslationWorkerEvent::ModelSelected {
+                catalog_id: String::new(),
                 tier: TranslationTier::Tiny,
             },
             TranslationWorkerEvent::Partial {
@@ -2003,6 +2035,7 @@ mod wire_schema_tests {
                     kind: TranslationFailureKind::UnsupportedRequest,
                     provider_id: Some(String::new()),
                     retry_after_ms: Some(0),
+                    required_catalog_id: Some(String::new()),
                     detail: "detail".to_owned(),
                     attempts: vec![TranslationAttemptReport {
                         provider_id: String::new(),
@@ -2040,14 +2073,14 @@ retryable:bool)",
 total_bytes:number)",
                 "model_installed(catalog_id:string,path:string,tier:string)",
                 "model_ready(catalog_id:string,load_duration_ms:number,tier:string)",
-                "model_selected(tier:string)",
+                "model_selected(catalog_id:string,tier:string)",
                 "partial(chunk_count:number,chunk_index:number,first_token_duration_ms:number,\
 request_id:string,tokenize_duration_ms:number,translated_text:string)",
-                "ready(models[],protocol_version:number,selected_tier:string)",
+                "ready(models[],protocol_version:number,selected_catalog_id:string,selected_tier:string)",
                 "request_failed(failure.attempts[].detail:string,failure.attempts[].kind:string,\
  failure.attempts[].provider_id:string,failure.attempts[].retry_after_ms:number,\
  failure.detail:string,failure.kind:string,failure.provider_id:string,\
- failure.retry_after_ms:number,request_id:string)",
+ failure.required_catalog_id:string,failure.retry_after_ms:number,request_id:string)",
                 "translation_providers(statuses[])",
             ]
         );
@@ -2468,20 +2501,21 @@ mod complete_wire_schema_tests {
         let request_id = RequestId::new();
         vec![
             TranslationWorkerCommand::Initialize {
+                selected_catalog_id: Some("qwen35-4b-q4".to_owned()),
                 selected_tier: Some(TranslationTier::Tiny),
                 keep_warm: true,
                 history_enabled: true,
                 prepare_local_model: true,
             },
             TranslationWorkerCommand::EnsureModel {
-                tier: TranslationTier::Tiny,
+                catalog_id: "qwen35-4b-q4".to_owned(),
             },
             TranslationWorkerCommand::RemoveModel {
-                tier: TranslationTier::Tiny,
+                catalog_id: "qwen35-4b-q4".to_owned(),
             },
             TranslationWorkerCommand::CancelModelInstall,
-            TranslationWorkerCommand::SelectTier {
-                tier: TranslationTier::Tiny,
+            TranslationWorkerCommand::SelectModel {
+                catalog_id: "qwen35-4b-q4".to_owned(),
                 keep_warm: true,
             },
             TranslationWorkerCommand::Translate {
@@ -2504,6 +2538,7 @@ mod complete_wire_schema_tests {
             TranslationWorkerCommand::GetHistory { limit: 1 },
             TranslationWorkerCommand::SetHistoryEnabled { enabled: true },
             TranslationWorkerCommand::ClearHistory,
+            TranslationWorkerCommand::UnloadLocalModel,
             TranslationWorkerCommand::Shutdown,
         ]
     }
@@ -2513,6 +2548,7 @@ mod complete_wire_schema_tests {
         vec![
             TranslationWorkerEvent::Ready {
                 protocol_version: 1,
+                selected_catalog_id: Some("qwen35-4b-q4".to_owned()),
                 selected_tier: Some(TranslationTier::Tiny),
                 models: vec![translation_model()],
             },
@@ -2532,6 +2568,7 @@ mod complete_wire_schema_tests {
                 load_duration_ms: 1,
             },
             TranslationWorkerEvent::ModelSelected {
+                catalog_id: "model".to_owned(),
                 tier: TranslationTier::Tiny,
             },
             TranslationWorkerEvent::LocalModelState {
@@ -2578,6 +2615,7 @@ mod complete_wire_schema_tests {
                     kind: TranslationFailureKind::UnsupportedRequest,
                     provider_id: Some("provider".to_owned()),
                     retry_after_ms: Some(1_000),
+                    required_catalog_id: Some("model".to_owned()),
                     detail: "detail".to_owned(),
                     attempts: vec![TranslationAttemptReport {
                         provider_id: "provider".to_owned(),
@@ -2644,6 +2682,7 @@ mod complete_wire_schema_tests {
             SpeechWorkerCommand::GetHistory { limit: 1 },
             SpeechWorkerCommand::SetHistoryEnabled { enabled: true },
             SpeechWorkerCommand::ClearHistory,
+            SpeechWorkerCommand::UnloadLocalModel,
             SpeechWorkerCommand::Shutdown,
         ]
     }
@@ -2798,11 +2837,12 @@ mod complete_wire_schema_tests {
     index_fn!(translation_command_index, TranslationWorkerCommand,
         TranslationWorkerCommand::Initialize { .. } => 0, TranslationWorkerCommand::EnsureModel { .. } => 1,
         TranslationWorkerCommand::RemoveModel { .. } => 2, TranslationWorkerCommand::CancelModelInstall => 3,
-        TranslationWorkerCommand::SelectTier { .. } => 4, TranslationWorkerCommand::Translate { .. } => 5,
+        TranslationWorkerCommand::SelectModel { .. } => 4, TranslationWorkerCommand::Translate { .. } => 5,
         TranslationWorkerCommand::Cancel { .. } => 6, TranslationWorkerCommand::SetTranslationProviders { .. } => 7,
         TranslationWorkerCommand::SetTranslationProviderCredential { .. } => 8, TranslationWorkerCommand::GetTranslationProviders => 9,
         TranslationWorkerCommand::GetHistory { .. } => 10, TranslationWorkerCommand::SetHistoryEnabled { .. } => 11,
-        TranslationWorkerCommand::ClearHistory => 12, TranslationWorkerCommand::Shutdown => 13
+        TranslationWorkerCommand::ClearHistory => 12, TranslationWorkerCommand::UnloadLocalModel => 13,
+        TranslationWorkerCommand::Shutdown => 14
     );
     index_fn!(translation_event_index, TranslationWorkerEvent,
         TranslationWorkerEvent::Ready { .. } => 0, TranslationWorkerEvent::ModelDownloadProgress { .. } => 1,
@@ -2823,7 +2863,8 @@ mod complete_wire_schema_tests {
         SpeechWorkerCommand::GetTranscriptionProviders => 10, SpeechWorkerCommand::SetOutputMode { .. } => 11,
         SpeechWorkerCommand::SetDictationLanguage { .. } => 12, SpeechWorkerCommand::SetFastReleasePreviews { .. } => 13,
         SpeechWorkerCommand::GetHistory { .. } => 14, SpeechWorkerCommand::SetHistoryEnabled { .. } => 15,
-        SpeechWorkerCommand::ClearHistory => 16, SpeechWorkerCommand::Shutdown => 17
+        SpeechWorkerCommand::ClearHistory => 16, SpeechWorkerCommand::UnloadLocalModel => 17,
+        SpeechWorkerCommand::Shutdown => 18
     );
     index_fn!(speech_event_index, SpeechWorkerEvent,
         SpeechWorkerEvent::Ready { .. } => 0, SpeechWorkerEvent::ModelDownloadProgress { .. } => 1,
@@ -2917,9 +2958,9 @@ mod complete_wire_schema_tests {
         assert_complete(&input_commands, input_command_index, 8);
         assert_complete(&ocr_commands, ocr_command_index, 3);
         assert_complete(&ocr_events, ocr_event_index, 4);
-        assert_complete(&translation_commands, translation_command_index, 14);
+        assert_complete(&translation_commands, translation_command_index, 15);
         assert_complete(&translation_events, translation_event_index, 15);
-        assert_complete(&speech_commands, speech_command_index, 18);
+        assert_complete(&speech_commands, speech_command_index, 19);
         assert_complete(&speech_events, speech_event_index, 17);
         assert_complete(&companion_commands, companion_command_index, 8);
         assert_complete(&companion_events, companion_event_index, 3);
@@ -2939,7 +2980,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x743c_7f96_f2af_c3d3,
+            0xe391_1501_394b_1786,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

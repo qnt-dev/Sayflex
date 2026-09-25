@@ -2,9 +2,7 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 use rust_platform_windows::{
     region_selection::{MonitorRegion, PointerEvent, RegionSelectionMonitor},
-    screen_capture::{
-        CaptureError, DesktopCapture, DesktopCaptureBackend, WindowsDesktopCaptureBackend,
-    },
+    screen_capture::{CaptureError, DesktopCapture},
 };
 use rust_protocol::{InputHostCommand, PhysicalRect, RequestId};
 use slint::winit_030::WinitWindowAccessor;
@@ -22,7 +20,7 @@ use crate::{
 const SELECTION_WATCHDOG_SECONDS: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "screen-translation-dev"), allow(dead_code))]
+#[cfg_attr(not(feature = "screen-translation"), allow(dead_code))]
 pub(crate) enum ScreenTranslationStage {
     Selecting,
     Recognizing,
@@ -43,6 +41,12 @@ pub(crate) enum ScreenTranslationCancellation {
     Translation(RequestId),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreenTranslationBegin {
+    Started(Option<ScreenTranslationCancellation>),
+    AlreadySelecting { active_request_id: RequestId },
+}
+
 /// Owns only request identity and geometry. Captured pixels deliberately never
 /// enter this state machine, so replacing, completing, pinning, or dismissing a
 /// request cannot retain a screenshot by accident.
@@ -51,16 +55,24 @@ pub(crate) struct ScreenTranslationFlow {
     active: Option<ActiveScreenTranslation>,
 }
 
-#[cfg_attr(not(feature = "screen-translation-dev"), allow(dead_code))]
+#[cfg_attr(not(feature = "screen-translation"), allow(dead_code))]
 impl ScreenTranslationFlow {
-    pub(crate) fn begin(&mut self, request_id: RequestId) -> Option<ScreenTranslationCancellation> {
+    pub(crate) fn begin(&mut self, request_id: RequestId) -> ScreenTranslationBegin {
+        if let Some(active) = self
+            .active
+            .filter(|active| active.stage == ScreenTranslationStage::Selecting)
+        {
+            return ScreenTranslationBegin::AlreadySelecting {
+                active_request_id: active.request_id,
+            };
+        }
         let cancellation = self.cancel_active_work();
         self.active = Some(ActiveScreenTranslation {
             request_id,
             anchor: None,
             stage: ScreenTranslationStage::Selecting,
         });
-        cancellation
+        ScreenTranslationBegin::Started(cancellation)
     }
 
     pub(crate) fn selected(&mut self, request_id: RequestId, anchor: PhysicalRect) -> bool {
@@ -97,6 +109,18 @@ impl ScreenTranslationFlow {
         self.active
             .filter(|active| active.request_id == request_id)
             .and_then(|active| active.anchor)
+    }
+
+    pub(crate) fn is_recognizing(&self, request_id: RequestId) -> bool {
+        self.active.is_some_and(|active| {
+            active.request_id == request_id && active.stage == ScreenTranslationStage::Recognizing
+        })
+    }
+
+    pub(crate) fn is_selecting(&self, request_id: RequestId) -> bool {
+        self.active.is_some_and(|active| {
+            active.request_id == request_id && active.stage == ScreenTranslationStage::Selecting
+        })
     }
 
     pub(crate) fn close(&mut self, request_id: RequestId) -> Option<ScreenTranslationCancellation> {
@@ -169,6 +193,7 @@ impl std::fmt::Display for SelectionFailure {
 }
 
 pub(crate) trait SelectionEnvironment {
+    #[cfg(test)]
     fn capture(&mut self) -> Result<DesktopCapture, CaptureError>;
     fn set_capture_mode(&mut self, request_id: RequestId, active: bool) -> Result<(), String>;
     fn show_surfaces(&mut self, capture: &DesktopCapture) -> Result<(), String>;
@@ -183,6 +208,7 @@ struct ActiveSelection {
     request_id: RequestId,
     capture: DesktopCapture,
     drag_origin: Option<(i32, i32)>,
+    capture_mode_active: bool,
 }
 
 pub(crate) struct ScreenSelectionCoordinator<E: SelectionEnvironment> {
@@ -198,6 +224,7 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn begin(&mut self, request_id: RequestId) -> Option<SelectionTerminal> {
         if self.active.is_some() {
             return Some(SelectionTerminal::Failed {
@@ -216,16 +243,27 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
                 });
             }
         };
-        if let Err(error) = self.environment.set_capture_mode(request_id, true) {
+        self.begin_with_capture(request_id, capture)
+    }
+
+    pub(crate) fn begin_with_capture(
+        &mut self,
+        request_id: RequestId,
+        capture: DesktopCapture,
+    ) -> Option<SelectionTerminal> {
+        if self.active.is_some() {
             return Some(SelectionTerminal::Failed {
                 request_id,
-                error: SelectionFailure::Runtime(error),
+                error: SelectionFailure::Runtime(
+                    "another screen selection is already active".into(),
+                ),
             });
         }
         self.active = Some(ActiveSelection {
             request_id,
             capture,
             drag_origin: None,
+            capture_mode_active: false,
         });
         let show_result = {
             let active = self.active.as_ref().expect("selection was just installed");
@@ -234,6 +272,13 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
         if let Err(error) = show_result {
             return self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(error)));
         }
+        if let Err(error) = self.environment.set_capture_mode(request_id, true) {
+            return self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(error)));
+        }
+        self.active
+            .as_mut()
+            .expect("selection was just installed")
+            .capture_mode_active = true;
         self.environment.arm_watchdog(request_id);
         None
     }
@@ -296,10 +341,14 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
         let active = self.active.take()?;
         self.environment.disarm_watchdog();
         self.environment.teardown_surfaces();
-        let release_error = self
-            .environment
-            .set_capture_mode(active.request_id, false)
-            .err();
+        let release_error = active
+            .capture_mode_active
+            .then(|| {
+                self.environment
+                    .set_capture_mode(active.request_id, false)
+                    .err()
+            })
+            .flatten();
         Some(match (outcome, release_error) {
             (_, Some(error)) => SelectionTerminal::Failed {
                 request_id: active.request_id,
@@ -360,24 +409,26 @@ pub(crate) type DesktopScreenSelectionCoordinator =
 
 pub(crate) struct DesktopSelectionEnvironment {
     workers: Rc<Workers>,
-    capture_backend: WindowsDesktopCaptureBackend,
-    surfaces: Result<ScreenSelectionSurfaces, String>,
+    surfaces: Option<ScreenSelectionSurfaces>,
     pointer_monitor: Option<RegionSelectionMonitor>,
     watchdog: Timer,
 }
 
 impl DesktopSelectionEnvironment {
     pub(crate) fn new(workers: Rc<Workers>) -> Self {
-        let surfaces = rust_platform_windows::region_selection::attached_monitor_regions()
-            .and_then(ScreenSelectionSurfaces::new);
-        if let Err(error) = &surfaces {
-            rust_app_core::diagnostics::log_line(&format!(
-                "screen_translation stage=surface_precreate result=failed error={error}"
-            ));
-        }
+        let surfaces = match rust_platform_windows::region_selection::attached_monitor_regions()
+            .and_then(ScreenSelectionSurfaces::new)
+        {
+            Ok(surfaces) => Some(surfaces),
+            Err(error) => {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "screen_translation stage=surface_precreate result=failed error={error}"
+                ));
+                None
+            }
+        };
         Self {
             workers,
-            capture_backend: WindowsDesktopCaptureBackend::default(),
             surfaces,
             pointer_monitor: None,
             watchdog: Timer::default(),
@@ -386,8 +437,11 @@ impl DesktopSelectionEnvironment {
 }
 
 impl SelectionEnvironment for DesktopSelectionEnvironment {
+    #[cfg(test)]
     fn capture(&mut self) -> Result<DesktopCapture, CaptureError> {
-        self.capture_backend.capture()
+        use rust_platform_windows::screen_capture::DesktopCaptureBackend as _;
+
+        rust_platform_windows::screen_capture::WindowsDesktopCaptureBackend::default().capture()
     }
 
     fn set_capture_mode(&mut self, request_id: RequestId, active: bool) -> Result<(), String> {
@@ -398,24 +452,41 @@ impl SelectionEnvironment for DesktopSelectionEnvironment {
     }
 
     fn show_surfaces(&mut self, capture: &DesktopCapture) -> Result<(), String> {
+        let current_regions = rust_platform_windows::region_selection::attached_monitor_regions()?;
+        let needs_rebuild = self
+            .surfaces
+            .as_ref()
+            .is_none_or(|surfaces| !surfaces.regions_match(&current_regions));
+        if needs_rebuild {
+            if let Some(surfaces) = self.surfaces.take() {
+                surfaces.retire();
+            }
+            self.surfaces = Some(ScreenSelectionSurfaces::new(current_regions.clone())?);
+            rust_app_core::diagnostics::log_line(
+                "screen_translation stage=surface_precreate result=recreated_for_desktop_layout",
+            );
+        }
+        let surfaces = self
+            .surfaces
+            .as_ref()
+            .ok_or_else(|| "screen-selection surfaces are unavailable".to_owned())?;
+        surfaces.verify_regions(&current_regions)?;
+        surfaces.present(capture)?;
         self.pointer_monitor = Some(RegionSelectionMonitor::start(|event| {
             dispatch_runtime_event(RuntimeEvent::ScreenSelectionPointer(event));
         })?);
-        let current_regions = rust_platform_windows::region_selection::attached_monitor_regions()?;
-        let surfaces = self.surfaces.as_ref().map_err(Clone::clone)?;
-        surfaces.verify_regions(&current_regions)?;
-        surfaces.present(capture)
+        Ok(())
     }
 
     fn update_selection(&mut self, selection: Option<PhysicalRect>) {
-        if let Ok(surfaces) = &self.surfaces {
+        if let Some(surfaces) = &self.surfaces {
             surfaces.update_selection(selection);
         }
     }
 
     fn teardown_surfaces(&mut self) {
         self.pointer_monitor.take();
-        if let Ok(surfaces) = &self.surfaces {
+        if let Some(surfaces) = &self.surfaces {
             surfaces.retire();
         }
     }
@@ -441,7 +512,7 @@ impl SelectionEnvironment for DesktopSelectionEnvironment {
         };
         self.surfaces
             .as_ref()
-            .is_ok_and(|surfaces| surfaces.regions_match(&current))
+            .is_some_and(|surfaces| surfaces.regions_match(&current))
     }
 }
 
@@ -510,10 +581,12 @@ impl ScreenSelectionSurfaces {
     }
 
     fn regions_match(&self, current: &[MonitorRegion]) -> bool {
-        self.surfaces
+        let prepared = self
+            .surfaces
             .iter()
             .map(|surface| surface.region)
-            .eq(current.iter().copied())
+            .collect::<Vec<_>>();
+        !surface_regions_need_rebuild(&prepared, current)
     }
 
     fn present(&self, capture: &DesktopCapture) -> Result<(), String> {
@@ -542,6 +615,10 @@ impl ScreenSelectionSurfaces {
             surface.overlay.window().set_size(PhysicalSize::new(1, 1));
         }
     }
+}
+
+fn surface_regions_need_rebuild(prepared: &[MonitorRegion], current: &[MonitorRegion]) -> bool {
+    prepared != current
 }
 
 impl ScreenSelectionSurface {
@@ -658,15 +735,16 @@ fn intersect(first: PhysicalRect, second: PhysicalRect) -> Option<PhysicalRect> 
 
 #[cfg(test)]
 mod tests {
-    use rust_platform_windows::region_selection::PointerEvent;
+    use rust_platform_windows::region_selection::{MonitorRegion, PointerEvent};
     use rust_platform_windows::screen_capture::{
         CaptureError, CapturedOutput, DesktopCapture, Rotation,
     };
     use rust_protocol::{PhysicalRect, RequestId};
 
     use super::{
-        ScreenSelectionCoordinator, ScreenTranslationCancellation, ScreenTranslationFlow,
-        SelectionEnvironment, SelectionTerminal,
+        ScreenSelectionCoordinator, ScreenTranslationBegin, ScreenTranslationCancellation,
+        ScreenTranslationFlow, SelectionEnvironment, SelectionTerminal,
+        surface_regions_need_rebuild,
     };
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {
@@ -702,6 +780,34 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn monitor_geometry_or_dpi_change_requires_fresh_selection_surfaces() {
+        let prepared = [MonitorRegion {
+            bounds: rect(0, 0, 1_920, 1_080),
+            dpi_scale_milli: 1_000,
+        }];
+        assert!(!surface_regions_need_rebuild(&prepared, &prepared));
+
+        let resized = [MonitorRegion {
+            bounds: rect(0, 0, 2_560, 1_440),
+            dpi_scale_milli: 1_000,
+        }];
+        assert!(surface_regions_need_rebuild(&prepared, &resized));
+
+        let scaled = [MonitorRegion {
+            bounds: prepared[0].bounds,
+            dpi_scale_milli: 1_250,
+        }];
+        assert!(surface_regions_need_rebuild(&prepared, &scaled));
+    }
+
+    #[test]
+    fn selection_overlay_dims_without_turning_dark_content_black() {
+        let source = include_str!("../ui/app.slint");
+
+        assert!(source.contains("in property <float> dim-opacity: 0.28;"));
     }
 
     struct FakeEnvironment {
@@ -801,14 +907,33 @@ mod tests {
             events,
             [
                 "capture",
-                "esc:on",
                 "show:-1920",
                 "show:0",
+                "esc:on",
                 "teardown",
                 "esc:off",
                 "selected:-10,10,30,20",
             ]
         );
+    }
+
+    #[test]
+    fn a_background_capture_can_enter_selection_without_recapturing_on_the_ui_thread() {
+        let request_id = RequestId::new();
+        let mut environment = FakeEnvironment::successful();
+        environment.capture_result = Err(CaptureError::NoOutputs);
+        let mut coordinator = ScreenSelectionCoordinator::new(environment);
+
+        assert!(
+            coordinator
+                .begin_with_capture(request_id, capture())
+                .is_none()
+        );
+        assert_eq!(
+            coordinator.environment().events,
+            ["show:-1920", "show:0", "esc:on"]
+        );
+        assert!(coordinator.cancel(request_id).is_some());
     }
 
     #[test]
@@ -857,16 +982,20 @@ mod tests {
             };
 
             assert!(terminal.is_some(), "{case} must terminate");
-            assert_eq!(
-                coordinator
-                    .environment()
-                    .events
-                    .iter()
-                    .filter(|event| event.as_str() == "esc:off")
-                    .count(),
-                1,
-                "{case}"
-            );
+            let captures = coordinator
+                .environment()
+                .events
+                .iter()
+                .filter(|event| event.as_str() == "esc:on")
+                .count();
+            let releases = coordinator
+                .environment()
+                .events
+                .iter()
+                .filter(|event| event.as_str() == "esc:off")
+                .count();
+            assert_eq!(captures, if case == "presenter" { 0 } else { 1 }, "{case}");
+            assert_eq!(releases, captures, "{case}");
             assert_eq!(coordinator.environment().visible_surfaces, 0, "{case}");
             assert!(!coordinator.is_active(), "{case}");
         }
@@ -899,15 +1028,32 @@ mod tests {
         let second = RequestId::new();
         let mut flow = ScreenTranslationFlow::default();
 
-        assert_eq!(flow.begin(first), None);
+        assert_eq!(flow.begin(first), ScreenTranslationBegin::Started(None));
         assert!(flow.selected(first, rect(10, 20, 300, 120)));
         assert_eq!(
             flow.begin(second),
-            Some(ScreenTranslationCancellation::Ocr(first))
+            ScreenTranslationBegin::Started(Some(ScreenTranslationCancellation::Ocr(first)))
         );
         assert!(flow.selected(second, rect(800, 40, 240, 90)));
         assert_eq!(flow.recognized(first), None);
         assert_eq!(flow.recognized(second), Some(rect(800, 40, 240, 90)));
+    }
+
+    #[test]
+    fn repeated_hotkey_during_selection_keeps_the_visible_selection_alive() {
+        let first = RequestId::new();
+        let repeated = RequestId::new();
+        let mut flow = ScreenTranslationFlow::default();
+
+        assert_eq!(flow.begin(first), ScreenTranslationBegin::Started(None));
+        assert_eq!(
+            flow.begin(repeated),
+            ScreenTranslationBegin::AlreadySelecting {
+                active_request_id: first,
+            }
+        );
+        assert!(flow.is_selecting(first));
+        assert!(!flow.is_selecting(repeated));
     }
 
     #[test]

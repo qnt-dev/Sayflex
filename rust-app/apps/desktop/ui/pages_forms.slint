@@ -15,6 +15,7 @@ export component TranslationPage inherits VerticalLayout {
     in property <bool> enabled: false;
     in property <bool> ready: false;
     in property <string> model-name;
+    in property <string> model-detail;
     in property <string> engine-state;
     in property <string> delivery;
     in property <string> delivery-value;
@@ -43,7 +44,7 @@ export component TranslationPage inherits VerticalLayout {
     spacing: 0px;
 
     ListHead {
-        index: "03 / 09";
+        index: "03 / 10";
         title: @tr("Translation");
         lede: @tr("Detects the selected text, then follows the Text provider order. Network providers send that text to their service; the local model keeps it here.");
         claim: root.ready ? @tr("Ready") : @tr("Not ready");
@@ -69,7 +70,7 @@ export component TranslationPage inherits VerticalLayout {
 
     FormRow {
         label: @tr("Model");
-        hint: @tr("Chosen on the Models page");
+        hint: root.model-detail == "" ? @tr("Chosen on the Models page") : root.model-detail;
         Text {
             text: root.model-name == "" ? @tr("None installed") : root.model-name;
             color: root.model-name == "" ? Sheet.signal-text : Sheet.ink;
@@ -255,7 +256,7 @@ export component HotkeysPage inherits VerticalLayout {
     spacing: 0px;
 
     ListHead {
-        index: "08 / 09";
+        index: "08 / 10";
         title: @tr("Hotkeys");
         lede: @tr("Choose Change, press a new key combination, then Save. It takes effect only after Windows accepts it.");
         claim: root.summary;

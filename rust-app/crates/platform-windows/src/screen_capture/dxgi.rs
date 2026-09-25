@@ -1,4 +1,8 @@
-use std::slice;
+use std::{
+    fmt, slice,
+    sync::{Mutex, MutexGuard, PoisonError},
+    time::{Duration, Instant},
+};
 
 use windows::{
     Win32::{
@@ -36,38 +40,189 @@ use super::{
 };
 
 const FRAME_TIMEOUT_MILLIS: u32 = 250;
+const CACHED_FRAME_WAIT_MILLIS: u32 = 16;
+const BOOTSTRAP_FRAME_DEADLINE: Duration = Duration::from_millis(100);
 
-#[derive(Debug, Default)]
-pub struct DxgiDesktopCaptureBackend;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootstrapFrameDisposition {
+    Use,
+    Retry,
+    TimedOut,
+}
+
+fn classify_bootstrap_frame(
+    last_present_time: i64,
+    elapsed: Duration,
+) -> BootstrapFrameDisposition {
+    if last_present_time != 0 {
+        BootstrapFrameDisposition::Use
+    } else if elapsed < BOOTSTRAP_FRAME_DEADLINE {
+        BootstrapFrameDisposition::Retry
+    } else {
+        BootstrapFrameDisposition::TimedOut
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureTopologyEntry {
+    bounds: PhysicalRect,
+    dpi_scale_milli: u32,
+}
+
+fn topology_requires_rebuild(
+    cached: &[CaptureTopologyEntry],
+    current: &[CaptureTopologyEntry],
+) -> bool {
+    cached != current
+}
+
+pub struct DxgiDesktopCaptureBackend {
+    session: Mutex<Option<DxgiCaptureSession>>,
+}
+
+impl fmt::Debug for DxgiDesktopCaptureBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DxgiDesktopCaptureBackend")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for DxgiDesktopCaptureBackend {
+    fn default() -> Self {
+        Self {
+            session: Mutex::new(None),
+        }
+    }
+}
 
 impl DesktopCaptureBackend for DxgiDesktopCaptureBackend {
     fn capture(&self) -> Result<DesktopCapture, CaptureError> {
-        capture_attached_outputs()
+        let topology = current_topology()?;
+        let mut session = lock(&self.session);
+        if session
+            .as_ref()
+            .is_none_or(|session| topology_requires_rebuild(&session.topology, &topology))
+        {
+            *session = Some(DxgiCaptureSession::create()?);
+        }
+        let result = session
+            .as_mut()
+            .expect("DXGI session was just created")
+            .capture();
+        if !matches!(result, Err(CaptureError::AccessLost)) {
+            return result;
+        }
+
+        // Desktop Duplication objects are invalid after a mode switch, UAC
+        // transition, driver reset, or output reconfiguration. Rebuild once in
+        // place so the next request does not inherit the lost session.
+        *session = Some(DxgiCaptureSession::create()?);
+        session
+            .as_mut()
+            .expect("DXGI session was just recreated")
+            .capture()
     }
 }
 
-fn capture_attached_outputs() -> Result<DesktopCapture, CaptureError> {
-    // SAFETY: DXGI returns reference-counted COM interfaces. Each is owned by
-    // its Rust wrapper and released automatically after the copied CPU frame is
-    // detached into Vec<u8> storage.
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(map_dxgi_error)?;
-    let mut outputs = Vec::new();
-    let mut adapter_index = 0;
-    loop {
-        let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
-            Ok(adapter) => adapter,
-            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
-            Err(error) => return Err(map_dxgi_error(error)),
-        };
-        capture_adapter_outputs(&adapter, &mut outputs)?;
-        adapter_index += 1;
-    }
-    DesktopCapture::try_new(next_capture_generation(), outputs)
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn capture_adapter_outputs(
+fn current_topology() -> Result<Vec<CaptureTopologyEntry>, CaptureError> {
+    let mut topology = crate::region_selection::attached_monitor_regions()
+        .map_err(CaptureError::BackendFailure)?
+        .into_iter()
+        .map(|region| CaptureTopologyEntry {
+            bounds: region.bounds,
+            dpi_scale_milli: region.dpi_scale_milli,
+        })
+        .collect::<Vec<_>>();
+    topology.sort_by_key(|entry| {
+        (
+            entry.bounds.x,
+            entry.bounds.y,
+            entry.bounds.width,
+            entry.bounds.height,
+            entry.dpi_scale_milli,
+        )
+    });
+    Ok(topology)
+}
+
+struct DxgiCaptureSession {
+    topology: Vec<CaptureTopologyEntry>,
+    outputs: Vec<DxgiOutputCapture>,
+}
+
+impl DxgiCaptureSession {
+    fn create() -> Result<Self, CaptureError> {
+        // SAFETY: DXGI returns reference-counted COM interfaces. Each is owned by
+        // its Rust wrapper and released automatically after the copied CPU frame is
+        // detached into Vec<u8> storage.
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(map_dxgi_error)?;
+        let mut outputs = Vec::new();
+        let mut adapter_index = 0;
+        loop {
+            let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+                Ok(adapter) => adapter,
+                Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(error) => return Err(map_dxgi_error(error)),
+            };
+            append_adapter_outputs(&adapter, &mut outputs)?;
+            adapter_index += 1;
+        }
+        if outputs.is_empty() {
+            return Err(CaptureError::NoOutputs);
+        }
+        outputs.sort_by_key(|output| {
+            (
+                output.bounds.x,
+                output.bounds.y,
+                output.bounds.width,
+                output.bounds.height,
+            )
+        });
+        let topology = outputs
+            .iter()
+            .map(|output| CaptureTopologyEntry {
+                bounds: output.bounds,
+                dpi_scale_milli: output.dpi_scale_milli,
+            })
+            .collect();
+        Ok(Self { topology, outputs })
+    }
+
+    fn capture(&mut self) -> Result<DesktopCapture, CaptureError> {
+        let mut captures = Vec::with_capacity(self.outputs.len());
+        for output in &mut self.outputs {
+            let captured = capture_output(
+                &output.device,
+                &output.context,
+                &output.duplication,
+                output.bounds,
+                output.dpi_scale_milli,
+                output.last_frame.as_ref(),
+            )?;
+            output.last_frame = Some(captured.clone());
+            captures.push(captured);
+        }
+        DesktopCapture::try_new(next_capture_generation(), captures)
+    }
+}
+
+struct DxgiOutputCapture {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    duplication: IDXGIOutputDuplication,
+    bounds: PhysicalRect,
+    dpi_scale_milli: u32,
+    last_frame: Option<CapturedOutput>,
+}
+
+fn append_adapter_outputs(
     adapter: &IDXGIAdapter1,
-    captures: &mut Vec<CapturedOutput>,
+    captures: &mut Vec<DxgiOutputCapture>,
 ) -> Result<(), CaptureError> {
     let (device, context) = create_device(adapter)?;
     let mut output_index = 0;
@@ -84,13 +239,27 @@ fn capture_adapter_outputs(
         }
         let output: IDXGIOutput1 = output.cast().map_err(map_dxgi_error)?;
         let duplication = unsafe { output.DuplicateOutput(&device) }.map_err(map_dxgi_error)?;
-        captures.push(capture_output(
-            &device,
-            &context,
-            &duplication,
-            description.DesktopCoordinates,
-            description.Monitor,
-        )?);
+        let desktop_width = u32::try_from(
+            description.DesktopCoordinates.right - description.DesktopCoordinates.left,
+        )
+        .map_err(|_| CaptureError::InvalidGeometry)?;
+        let desktop_height = u32::try_from(
+            description.DesktopCoordinates.bottom - description.DesktopCoordinates.top,
+        )
+        .map_err(|_| CaptureError::InvalidGeometry)?;
+        captures.push(DxgiOutputCapture {
+            device: device.clone(),
+            context: context.clone(),
+            duplication,
+            bounds: PhysicalRect {
+                x: description.DesktopCoordinates.left,
+                y: description.DesktopCoordinates.top,
+                width: desktop_width,
+                height: desktop_height,
+            },
+            dpi_scale_milli: dpi_scale_milli(description.Monitor),
+            last_frame: None,
+        });
     }
     Ok(())
 }
@@ -126,19 +295,61 @@ fn capture_output(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     duplication: &IDXGIOutputDuplication,
-    desktop_coordinates: windows::Win32::Foundation::RECT,
-    monitor: windows::Win32::Graphics::Gdi::HMONITOR,
+    bounds: PhysicalRect,
+    dpi_scale_milli: u32,
+    last_frame: Option<&CapturedOutput>,
 ) -> Result<CapturedOutput, CaptureError> {
-    let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
-    let mut desktop_resource: Option<IDXGIResource> = None;
-    unsafe {
-        duplication.AcquireNextFrame(FRAME_TIMEOUT_MILLIS, &mut frame_info, &mut desktop_resource)
-    }
-    .map_err(map_dxgi_error)?;
-    let mut lease = AcquiredFrame::new(duplication);
-    if frame_info.ProtectedContentMaskedOut.as_bool() {
-        return Err(CaptureError::ProtectedContent);
-    }
+    let bootstrap_started = Instant::now();
+    let (frame_info, desktop_resource, mut lease) = loop {
+        let elapsed = bootstrap_started.elapsed();
+        let remaining = BOOTSTRAP_FRAME_DEADLINE.saturating_sub(elapsed);
+        let timeout_millis = u32::try_from(remaining.as_millis())
+            .unwrap_or(FRAME_TIMEOUT_MILLIS)
+            .clamp(1, FRAME_TIMEOUT_MILLIS);
+        let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+        let mut desktop_resource: Option<IDXGIResource> = None;
+        let acquire_result = unsafe {
+            duplication.AcquireNextFrame(
+                if last_frame.is_some() {
+                    CACHED_FRAME_WAIT_MILLIS
+                } else {
+                    timeout_millis
+                },
+                &mut frame_info,
+                &mut desktop_resource,
+            )
+        };
+        if let Err(error) = acquire_result {
+            if error.code() == DXGI_ERROR_WAIT_TIMEOUT
+                && let Some(last_frame) = last_frame
+            {
+                return Ok(last_frame.clone());
+            }
+            return Err(map_dxgi_error(error));
+        }
+        let mut lease = AcquiredFrame::new(duplication);
+        if frame_info.LastPresentTime == 0
+            && let Some(last_frame) = last_frame
+        {
+            lease.release()?;
+            return Ok(last_frame.clone());
+        }
+        match classify_bootstrap_frame(frame_info.LastPresentTime, bootstrap_started.elapsed()) {
+            BootstrapFrameDisposition::Use => {
+                break (frame_info, desktop_resource, lease);
+            }
+            BootstrapFrameDisposition::Retry => {
+                lease.release()?;
+            }
+            BootstrapFrameDisposition::TimedOut => {
+                lease.release()?;
+                return Err(CaptureError::TemporaryUnavailable(
+                    "DXGI did not produce a presented desktop frame within 100 ms".into(),
+                ));
+            }
+        }
+    };
+    let protected_content_masked = frame_info.ProtectedContentMaskedOut.as_bool();
     let desktop_resource = desktop_resource.ok_or_else(|| {
         CaptureError::BackendFailure("DXGI returned a frame without a resource".into())
     })?;
@@ -153,21 +364,11 @@ fn capture_output(
     }
     let duplication_desc = unsafe { duplication.GetDesc() };
     let rotation = map_rotation(duplication_desc.Rotation)?;
-    let desktop_width = u32::try_from(desktop_coordinates.right - desktop_coordinates.left)
-        .map_err(|_| CaptureError::InvalidGeometry)?;
-    let desktop_height = u32::try_from(desktop_coordinates.bottom - desktop_coordinates.top)
-        .map_err(|_| CaptureError::InvalidGeometry)?;
-    let bounds = PhysicalRect {
-        x: desktop_coordinates.left,
-        y: desktop_coordinates.top,
-        width: desktop_width,
-        height: desktop_height,
-    };
-    let expected_source_dimensions = rotation.source_dimensions(desktop_width, desktop_height);
+    let expected_source_dimensions = rotation.source_dimensions(bounds.width, bounds.height);
     if (texture_desc.Width, texture_desc.Height) != expected_source_dimensions {
         return Err(CaptureError::BackendFailure(format!(
             "DXGI frame dimensions {}x{} do not match output {}x{} with {rotation:?}",
-            texture_desc.Width, texture_desc.Height, desktop_width, desktop_height
+            texture_desc.Width, texture_desc.Height, bounds.width, bounds.height
         )));
     }
 
@@ -249,12 +450,13 @@ fn capture_output(
     drop(mapped_guard);
     lease.release()?;
 
-    CapturedOutput::try_new(
+    CapturedOutput::try_new_with_protection(
         bounds,
         rotation,
-        dpi_scale_milli(monitor),
+        dpi_scale_milli,
         tight_stride,
         rgba,
+        protected_content_masked,
     )
 }
 
@@ -341,5 +543,66 @@ impl<'a> MappedTexture<'a> {
 impl Drop for MappedTexture<'_> {
     fn drop(&mut self) {
         unsafe { self.context.Unmap(self.texture, 0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use rust_protocol::PhysicalRect;
+
+    use super::{
+        BootstrapFrameDisposition, CaptureTopologyEntry, classify_bootstrap_frame,
+        topology_requires_rebuild,
+    };
+
+    #[test]
+    fn a_fresh_duplication_retries_the_zero_timestamp_frame_but_accepts_the_next_present() {
+        assert_eq!(
+            classify_bootstrap_frame(0, Duration::from_millis(5)),
+            BootstrapFrameDisposition::Retry
+        );
+        assert_eq!(
+            classify_bootstrap_frame(3_463_825_522_915, Duration::from_millis(10)),
+            BootstrapFrameDisposition::Use
+        );
+    }
+
+    #[test]
+    fn a_driver_that_never_presents_is_bounded_instead_of_spinning_forever() {
+        assert_eq!(
+            classify_bootstrap_frame(0, Duration::from_millis(100)),
+            BootstrapFrameDisposition::TimedOut
+        );
+    }
+
+    #[test]
+    fn cached_capture_resources_survive_unchanged_desktops_but_not_layout_or_dpi_changes() {
+        let original = [CaptureTopologyEntry {
+            bounds: PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 1_920,
+                height: 1_080,
+            },
+            dpi_scale_milli: 1_000,
+        }];
+        assert!(!topology_requires_rebuild(&original, &original));
+
+        let scaled = [CaptureTopologyEntry {
+            dpi_scale_milli: 1_250,
+            ..original[0]
+        }];
+        assert!(topology_requires_rebuild(&original, &scaled));
+
+        let moved = [CaptureTopologyEntry {
+            bounds: PhysicalRect {
+                x: -1_920,
+                ..original[0].bounds
+            },
+            ..original[0]
+        }];
+        assert!(topology_requires_rebuild(&original, &moved));
     }
 }

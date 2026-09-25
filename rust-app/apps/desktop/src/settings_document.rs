@@ -189,6 +189,7 @@ pub(crate) struct SavedSettings {
     pub(crate) writing_slate_surface: WritingSlateSurface,
     pub(crate) companion_home_position: Option<(i32, i32)>,
     pub(crate) selected_translation_tier: Option<TranslationTier>,
+    pub(crate) selected_translation_model_id: Option<String>,
     pub(crate) translation_enabled: bool,
     pub(crate) layout_enabled: bool,
     pub(crate) translation_keep_warm: bool,
@@ -223,6 +224,7 @@ impl Default for SavedSettings {
             writing_slate_surface: WritingSlateSurface::default(),
             companion_home_position: None,
             selected_translation_tier: None,
+            selected_translation_model_id: None,
             translation_enabled: false,
             layout_enabled: true,
             translation_keep_warm: true,
@@ -327,6 +329,11 @@ impl<'de> Deserialize<'de> for SavedSettings {
         );
         read(
             &document,
+            "selected_translation_model_id",
+            &mut settings.selected_translation_model_id,
+        );
+        read(
+            &document,
             "translation_enabled",
             &mut settings.translation_enabled,
         );
@@ -400,6 +407,7 @@ impl SavedSettings {
             writing_slate_surface: state.writing_slate_surface,
             companion_home_position: state.companion_home_position,
             selected_translation_tier: state.selected_translation_tier,
+            selected_translation_model_id: state.selected_translation_model_id.clone(),
             translation_enabled: state.translation_enabled,
             layout_enabled: state.layout_enabled,
             translation_keep_warm: state.translation_keep_warm,
@@ -543,8 +551,29 @@ mod settings_document_tests {
             settings.selected_translation_tier,
             Some(TranslationTier::Tiny)
         );
+        assert_eq!(settings.selected_translation_model_id, None);
         assert!(settings.translation_enabled);
         assert!(!settings.history_enabled);
+    }
+
+    #[test]
+    fn a_translation_catalog_id_round_trips_without_replacing_the_legacy_tier() {
+        let mut settings = SavedSettings {
+            selected_translation_model_id: Some("firefox-de-en-v3".to_owned()),
+            selected_translation_tier: Some(TranslationTier::Compact),
+            ..SavedSettings::default()
+        };
+        let encoded = serde_json::to_vec(&settings).unwrap();
+        settings = parse_settings(&encoded);
+
+        assert_eq!(
+            settings.selected_translation_model_id.as_deref(),
+            Some("firefox-de-en-v3")
+        );
+        assert_eq!(
+            settings.selected_translation_tier,
+            Some(TranslationTier::Compact)
+        );
     }
 
     #[test]

@@ -162,11 +162,20 @@ fn render_pulse_matrix_buffer(
         let ring_radius =
             radius * (1.055 + ring as f32 * 0.038) + travel * (0.65 + level * 1.25) * raster_scale;
         let alpha = (0.54 - ring as f32 * 0.073 + level * 0.035) * fade;
+        let line_width = if ring == 0 { 1.25 } else { 0.9 } * raster_scale;
+        // Two coincident hairlines preserve the approved geometry while
+        // guaranteeing contrast on both bright and dark desktop content.
         canvas.draw_ring(
             ring_radius,
-            if ring == 0 { 1.25 } else { 0.9 } * raster_scale,
-            colors.ring,
-            alpha,
+            line_width + 0.75 * raster_scale,
+            colors.ring_shadow,
+            alpha * 0.94,
+        );
+        canvas.draw_ring(
+            ring_radius,
+            (line_width * 0.48).max(0.48 * raster_scale),
+            colors.ring_highlight,
+            alpha * 0.82,
         );
     }
 
@@ -239,7 +248,8 @@ fn render_pulse_matrix_buffer(
 
 #[derive(Clone, Copy)]
 struct PulseMatrixColors {
-    ring: [u8; 3],
+    ring_shadow: [u8; 3],
+    ring_highlight: [u8; 3],
     center: [u8; 3],
     shell: [u8; 3],
     highlight: [u8; 3],
@@ -252,7 +262,8 @@ struct PulseMatrixColors {
 fn palette_colors(palette: PulseMatrixPalette) -> PulseMatrixColors {
     match palette {
         PulseMatrixPalette::Cyan => PulseMatrixColors {
-            ring: [5, 51, 58],
+            ring_shadow: [0, 34, 40],
+            ring_highlight: [177, 244, 246],
             center: [2, 6, 8],
             shell: [28, 174, 183],
             highlight: [48, 205, 215],
@@ -262,7 +273,8 @@ fn palette_colors(palette: PulseMatrixPalette) -> PulseMatrixColors {
             dot: [242, 247, 247],
         },
         PulseMatrixPalette::GraphiteSilver => PulseMatrixColors {
-            ring: [62, 70, 74],
+            ring_shadow: [31, 37, 41],
+            ring_highlight: [232, 236, 238],
             center: [247, 248, 248],
             shell: [150, 158, 162],
             highlight: [226, 230, 231],
@@ -272,7 +284,8 @@ fn palette_colors(palette: PulseMatrixPalette) -> PulseMatrixColors {
             dot: [7, 9, 10],
         },
         PulseMatrixPalette::RedAmber => PulseMatrixColors {
-            ring: [91, 20, 8],
+            ring_shadow: [76, 9, 8],
+            ring_highlight: [255, 151, 58],
             center: [8, 2, 2],
             shell: [207, 55, 18],
             highlight: [255, 116, 40],
@@ -409,6 +422,40 @@ fn fractional(value: f32) -> f32 {
 mod tests {
     use super::{PULSE_MATRIX_IMAGE_SIZE, PulseMatrixPalette, render_pulse_matrix_buffer};
 
+    fn luma(red: f32, green: f32, blue: f32) -> f32 {
+        red * 0.2126 + green * 0.7152 + blue * 0.0722
+    }
+
+    fn ring_contrast_samples(palette: PulseMatrixPalette, background: u8) -> usize {
+        let frame = render_pulse_matrix_buffer(1.25, 0.72, palette, 1.0);
+        let center = PULSE_MATRIX_IMAGE_SIZE as f32 / 2.0;
+        let background = f32::from(background) / 255.0;
+        let background_luma = luma(background, background, background);
+        frame
+            .as_bytes()
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(index, pixel)| {
+                let x = (*index as u32 % PULSE_MATRIX_IMAGE_SIZE) as f32 + 0.5;
+                let y = (*index as u32 / PULSE_MATRIX_IMAGE_SIZE) as f32 + 0.5;
+                let distance = ((x - center).powi(2) + (y - center).powi(2)).sqrt();
+                if !(48.0..=60.5).contains(&distance) || pixel[3] == 0 {
+                    return false;
+                }
+                let alpha = f32::from(pixel[3]) / 255.0;
+                let composite =
+                    |channel: u8| f32::from(channel) / 255.0 + background * (1.0 - alpha);
+                (luma(
+                    composite(pixel[0]),
+                    composite(pixel[1]),
+                    composite(pixel[2]),
+                ) - background_luma)
+                    .abs()
+                    >= 0.12
+            })
+            .count()
+    }
+
     #[test]
     fn every_pulse_matrix_palette_has_a_stable_saved_value() {
         for (index, palette, serialized) in [
@@ -421,6 +468,26 @@ mod tests {
             assert_eq!(serde_json::to_string(&palette).unwrap(), serialized);
         }
         assert_eq!(PulseMatrixPalette::from_index(3), None);
+    }
+
+    #[test]
+    fn every_ring_palette_remains_visible_on_dark_and_light_backgrounds() {
+        for palette in [
+            PulseMatrixPalette::Cyan,
+            PulseMatrixPalette::GraphiteSilver,
+            PulseMatrixPalette::RedAmber,
+        ] {
+            let on_dark = ring_contrast_samples(palette, 18);
+            let on_light = ring_contrast_samples(palette, 238);
+            assert!(
+                on_dark >= 20,
+                "{palette:?} rings vanish on dark backgrounds: {on_dark} samples"
+            );
+            assert!(
+                on_light >= 20,
+                "{palette:?} rings vanish on light backgrounds: {on_light} samples"
+            );
+        }
     }
 
     #[test]

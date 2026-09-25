@@ -7,11 +7,11 @@
 
 import { Sheet } from "sheet.slint";
 import { Fact } from "parts.slint";
-import { ModelRow, ProviderRow, HistoryRow, HotkeyRow } from "rows.slint";
+import { ModelRow, ProviderRow, HistoryRow, HotkeyRow, ResourceRow } from "rows.slint";
 import { RowAction, ScrollRail } from "controls.slint";
 import { ModelsPage, ProvidersPage, HistoryPage } from "pages_lists.slint";
 import { TranslationPage, HotkeysPage } from "pages_forms.slint";
-import { OverviewPage, DictationPage, VisualsPage, AboutPage } from "pages_instruments.slint";
+import { OverviewPage, DictationPage, VisualsPage, ResourcesPage, AboutPage } from "pages_instruments.slint";
 import { SlateLine } from "recording_visual.slint";
 
 component NavItem inherits Rectangle {
@@ -99,7 +99,8 @@ component SettingsNavigation inherits VerticalLayout {
     NavItem { label: @tr("Visuals"); active: root.active-page == 5; clicked => { root.select-page(5); } }
     NavItem { label: @tr("History"); active: root.active-page == 6; clicked => { root.select-page(6); } }
     NavItem { label: @tr("Hotkeys"); active: root.active-page == 7; clicked => { root.select-page(7); } }
-    NavItem { label: @tr("About"); active: root.active-page == 8; clicked => { root.select-page(8); } }
+    NavItem { label: @tr("Resources"); active: root.active-page == 8; clicked => { root.select-page(8); } }
+    NavItem { label: @tr("About"); active: root.active-page == 9; clicked => { root.select-page(9); } }
 
     Rectangle { vertical-stretch: 1; }
 }
@@ -185,6 +186,7 @@ export component SettingsWindow inherits Window {
     in-out property <bool> translation-enabled: false;
     in property <bool> translation-ready: false;
     in property <string> translation-model-name: "";
+    in property <string> translation-model-detail: "";
     in-out property <string> translation-delivery: "preview";
     in property <string> translation-delivery-label: @tr("Show a preview");
     in-out property <string> text-action-mode: "adaptive";
@@ -227,6 +229,10 @@ export component SettingsWindow inherits Window {
     in-out property <string> hotkey-capture-label: "";
     in-out property <string> hotkey-capture-value: "";
     in-out property <bool> hotkey-capture-valid: false;
+
+    // ── Resources ──
+    in property <[ResourceRow]> resource-rows;
+    in property <bool> resources-can-unload: false;
 
     // ── Visuals ──
     in-out property <int> selected-visualizer: 3;
@@ -292,6 +298,8 @@ export component SettingsWindow inherits Window {
     callback cancel-hotkey-capture();
     callback save-hotkey-capture();
     callback set-ui-locale(string);
+    callback unload-resource(string);
+    callback unload-all-resources();
     callback move-provider(int, int);
     callback toggle-provider(int);
     callback use-provider-only(int);
@@ -455,6 +463,7 @@ export component SettingsWindow inherits Window {
                     enabled: root.translation-enabled;
                     ready: root.translation-ready;
                     model-name: root.translation-model-name;
+                    model-detail: root.translation-model-detail;
                     delivery: root.translation-delivery-label;
                     delivery-value: root.translation-delivery;
                     text-action: root.text-action-mode-label;
@@ -583,7 +592,14 @@ export component SettingsWindow inherits Window {
                     set-mode(menu, value) => { root.set-text-action-mode(value); }
                 }
 
-                if root.active-page == 8 : AboutPage {
+                if root.active-page == 8 : ResourcesPage {
+                    rows: root.resource-rows;
+                    can-unload-all: root.resources-can-unload;
+                    unload(id) => { root.unload-resource(id); }
+                    unload-all => { root.unload-all-resources(); }
+                }
+
+                if root.active-page == 9 : AboutPage {
                     version: root.app-version;
                     ui-locale <=> root.ui-locale;
                     ui-locale-label: root.ui-locale-label;

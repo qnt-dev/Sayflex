@@ -35,10 +35,11 @@ use slint::{
 use crate::{
     ActionPalette, AppState, AppTray, Fact, HISTORY_LIMIT, HistoryRow, HotkeyRow,
     MAX_TRANSLATION_BLUR_RADIUS, ModelRow, PendingCredential, PendingSelection, PendingTranslation,
-    RecordingOverlays, SelectionChooser, SelectionTranslationRequest, SettingsWindow,
-    TextActionMode, TranslationDelivery, TranslationOrigin, TranslatorWindow,
-    begin_selection_translation, configure_standard_app_window,
-    dispatch_or_defer_selection_replacement, flow_sphere,
+    QueuedModelMatch, QueuedModelTranslation, RecordingOverlays, RuntimeEvent, SelectionChooser,
+    SelectionTranslationRequest, SettingsWindow, TextActionMode, TranslationDelivery,
+    TranslationOrigin, TranslatorWindow, begin_selection_translation,
+    configure_standard_app_window, discard_matching_queued_model_translation,
+    dispatch_or_defer_selection_replacement, dispatch_runtime_event, flow_sphere,
     localization::{UiLocale, UiText, active_locale, render, text},
     native_window_handle,
     overlay_presenter::OverlayPresenter,
@@ -52,7 +53,8 @@ use crate::{
     settings_document::save_settings,
     settings_projection::{
         departure_badge_localized, departures, history_row_localized, privacy_claim_localized,
-        speech_model_row_localized, tone, translation_model_row_localized,
+        speech_model_row_localized, tone, translation_model_hint_localized,
+        translation_model_row_localized, translation_model_title_localized,
     },
     slint_window_handle,
     speech_backend::SpeechBackendPreference,
@@ -208,7 +210,7 @@ pub(crate) fn sync_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<Ref
     rows.extend(state.translation_models.iter().map(|model| {
         translation_model_row_localized(
             model,
-            state.selected_translation_tier == Some(model.tier),
+            state.selected_translation_model_id.as_deref() == Some(model.catalog_id.as_str()),
             state.downloads.get(&model.catalog_id).copied(),
             state.translation_loaded_model_id.as_deref() == Some(model.catalog_id.as_str()),
             state.removing_models.contains(&model.catalog_id),
@@ -220,12 +222,19 @@ pub(crate) fn sync_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<Ref
     // refreshed together: a note saying a model is downloading, next to a list
     // showing it installed, is the window disagreeing with itself.
     sync_overview(&settings, &state);
+    let selected_translation_model = state.translation_models.iter().find(|model| {
+        state.selected_translation_model_id.as_deref() == Some(model.catalog_id.as_str())
+            && model.installed
+    });
     settings.set_translation_model_name(
-        state
-            .translation_models
-            .iter()
-            .find(|model| state.selected_translation_tier == Some(model.tier) && model.installed)
-            .map(|model| model.display_name.clone())
+        selected_translation_model
+            .map(|model| translation_model_title_localized(model, locale).into_owned())
+            .unwrap_or_default()
+            .into(),
+    );
+    settings.set_translation_model_detail(
+        selected_translation_model
+            .map(|model| translation_model_hint_localized(model.tier, locale))
             .unwrap_or_default()
             .into(),
     );
@@ -712,10 +721,10 @@ fn hotkeys_summary(state: &AppState) -> String {
     }
 }
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 const VISIBLE_HOTKEY_ACTIONS: &[HotkeyAction] = &HotkeyAction::ALL;
 
-#[cfg(not(feature = "screen-translation-dev"))]
+#[cfg(not(feature = "screen-translation"))]
 const VISIBLE_HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction::Dictate,
     HotkeyAction::InsertLast,
@@ -735,12 +744,12 @@ fn hotkey_action_at(index: i32) -> Option<HotkeyAction> {
         .copied()
 }
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 pub(crate) fn effective_hotkey_bindings(bindings: HotkeyBindings) -> HotkeyBindings {
     bindings
 }
 
-#[cfg(not(feature = "screen-translation-dev"))]
+#[cfg(not(feature = "screen-translation"))]
 pub(crate) fn effective_hotkey_bindings(mut bindings: HotkeyBindings) -> HotkeyBindings {
     bindings.screen_translate.enabled = false;
     bindings
@@ -1243,6 +1252,7 @@ fn can_refresh_idle_status(state: &AppState) -> bool {
         && state.pending_selection_captures.is_empty()
         && state.selection_release_gates.is_empty()
         && state.pending_translations.is_empty()
+        && state.queued_model_translation.is_none()
         && state.queued_selection_translation.is_none()
         && state.downloads.is_empty()
         && state.pending_credentials.is_empty()
@@ -1463,12 +1473,14 @@ fn choose_translation_model(
         state.translation_ready = false;
     }
     let command = if model.installed {
-        TranslationWorkerCommand::SelectTier {
-            tier: model.tier,
+        TranslationWorkerCommand::SelectModel {
+            catalog_id: model.catalog_id.clone(),
             keep_warm: state.borrow().translation_keep_warm,
         }
     } else {
-        TranslationWorkerCommand::EnsureModel { tier: model.tier }
+        TranslationWorkerCommand::EnsureModel {
+            catalog_id: model.catalog_id.clone(),
+        }
     };
     if let Err(error) = workers.translation.send(&command) {
         set_indicator_status(
@@ -1620,7 +1632,8 @@ fn remove_local_model(
         if !model.installed {
             return;
         }
-        if state.borrow().selected_translation_tier == Some(model.tier)
+        if state.borrow().selected_translation_model_id.as_deref()
+            == Some(model.catalog_id.as_str())
             && state.borrow().local_translation_enabled()
         {
             let chain = translation_chain_with_local_disabled(&state.borrow());
@@ -1649,7 +1662,9 @@ fn remove_local_model(
         }
         if let Err(error) = workers
             .translation
-            .send(&TranslationWorkerCommand::RemoveModel { tier: model.tier })
+            .send(&TranslationWorkerCommand::RemoveModel {
+                catalog_id: model.catalog_id,
+            })
         {
             set_status_problem(
                 settings,
@@ -2794,14 +2809,14 @@ pub(crate) fn wire_settings(
             let selected = {
                 let mut state = state.borrow_mut();
                 state.translation_keep_warm = warm;
-                state.selected_translation_tier
+                state.selected_translation_model_id.clone()
             };
-            if let Some(tier) = selected {
+            if let Some(catalog_id) = selected {
                 state.borrow_mut().translation_ready = false;
                 let _ = workers
                     .translation
-                    .send(&TranslationWorkerCommand::SelectTier {
-                        tier,
+                    .send(&TranslationWorkerCommand::SelectModel {
+                        catalog_id,
                         keep_warm: state.borrow().translation_keep_warm,
                     });
             }
@@ -3076,6 +3091,21 @@ pub(crate) fn wire_translator(
     workers: &Rc<Workers>,
 ) {
     install_translator_keyboard_shortcut(translator);
+    translator.on_download_model(|| {
+        dispatch_runtime_event(RuntimeEvent::ConfirmQueuedModelInstall);
+    });
+    {
+        let translator_weak = translator.as_weak();
+        let state = Rc::clone(state);
+        translator.on_close_requested(move || {
+            discard_matching_queued_model_translation(&state, QueuedModelMatch::Translator);
+            if let Some(translator) = translator_weak.upgrade() {
+                translator.set_model_offer_visible(false);
+                translator.set_model_offer_action("".into());
+                let _ = translator.hide();
+            }
+        });
+    }
     {
         let translator_weak = translator.as_weak();
         let state = Rc::clone(state);
@@ -3084,6 +3114,9 @@ pub(crate) fn wire_translator(
             let Some(translator) = translator_weak.upgrade() else {
                 return;
             };
+            discard_matching_queued_model_translation(&state, QueuedModelMatch::Translator);
+            translator.set_model_offer_visible(false);
+            translator.set_model_offer_action("".into());
             let source_text = translator.get_source_text().trim().to_owned();
             let locale = active_locale(state.borrow().ui_locale);
             if source_text.is_empty() {
@@ -3094,12 +3127,22 @@ pub(crate) fn wire_translator(
                 translator.set_status_text(message.into());
                 return;
             }
-            let (selected_tier, path_ready, waits_for_local) = {
+            let (
+                selected_tier,
+                selected_catalog_id,
+                path_ready,
+                waits_for_local,
+                reload_on_next_use,
+                keep_warm,
+            ) = {
                 let state = state.borrow();
                 (
                     state.selected_translation_tier,
-                    state.translation_path_ready(),
+                    state.selected_translation_model_id.clone(),
+                    state.translation_path_can_start(),
                     state.translation_waits_for_local(),
+                    state.translation_reload_on_next_use,
+                    state.translation_keep_warm,
                 )
             };
             if !(path_ready || selected_tier.is_some() && waits_for_local) {
@@ -3111,7 +3154,57 @@ pub(crate) fn wire_translator(
                 return;
             }
             if !path_ready {
+                let Some(catalog_id) = selected_catalog_id else {
+                    let message = text(locale, UiText::NoTranslationProviderReady);
+                    translator.set_presentation_state(4);
+                    translator.set_notice_headline(message.into());
+                    translator.set_notice_detail("".into());
+                    translator.set_status_text(message.into());
+                    return;
+                };
+                let request_id = RequestId::new();
+                let language_policy = TranslationLanguagePolicy {
+                    primary: state.borrow().translation_primary_language,
+                    secondary: state.borrow().translation_secondary_language,
+                };
+                state.borrow_mut().queued_model_translation = Some(QueuedModelTranslation {
+                    catalog_id: catalog_id.clone(),
+                    request_id,
+                    pending: PendingTranslation {
+                        origin: TranslationOrigin::Translator,
+                        source_text,
+                        source_language: None,
+                        target_language: None,
+                        language_policy,
+                        started: Instant::now(),
+                        request_started_unix_ms: unix_ms(),
+                        first_partial_shown: false,
+                        stable_paragraphs: None,
+                    },
+                });
+                if reload_on_next_use
+                    && let Err(error) =
+                        workers
+                            .translation
+                            .send(&TranslationWorkerCommand::SelectModel {
+                                catalog_id,
+                                keep_warm,
+                            })
+                {
+                    state.borrow_mut().queued_model_translation = None;
+                    let message = render(
+                        locale,
+                        UiText::CouldNotStartTranslation,
+                        &[("error", &error.to_string())],
+                    );
+                    translator.set_presentation_state(4);
+                    translator.set_notice_headline(message.clone().into());
+                    translator.set_notice_detail("".into());
+                    translator.set_status_text(message.into());
+                    return;
+                }
                 let message = text(locale, UiText::LocalTranslationLoading);
+                translator.set_processing(true);
                 translator.set_presentation_state(1);
                 translator.set_notice_headline("".into());
                 translator.set_notice_detail("".into());
@@ -3119,14 +3212,22 @@ pub(crate) fn wire_translator(
                 return;
             }
             let request_id = RequestId::new();
+            let language_policy = TranslationLanguagePolicy {
+                primary: state.borrow().translation_primary_language,
+                secondary: state.borrow().translation_secondary_language,
+            };
             state.borrow_mut().pending_translations.insert(
                 request_id,
                 PendingTranslation {
                     origin: TranslationOrigin::Translator,
                     source_text: source_text.clone(),
+                    source_language: None,
+                    target_language: None,
+                    language_policy,
                     started: Instant::now(),
                     request_started_unix_ms: unix_ms(),
                     first_partial_shown: false,
+                    stable_paragraphs: None,
                 },
             );
             translator.set_processing(true);
@@ -3142,10 +3243,7 @@ pub(crate) fn wire_translator(
                     text: source_text,
                     source_language: None,
                     target_language: None,
-                    language_policy: TranslationLanguagePolicy {
-                        primary: state.borrow().translation_primary_language,
-                        secondary: state.borrow().translation_secondary_language,
-                    },
+                    language_policy,
                 })
             {
                 state.borrow_mut().pending_translations.remove(&request_id);
@@ -3376,31 +3474,20 @@ mod hotkey_capture_tests {
         assert_eq!(hotkey_action_at(1), Some(HotkeyAction::InsertLast));
         assert_eq!(hotkey_action_at(2), Some(HotkeyAction::CorrectLayout));
         assert_eq!(hotkey_action_at(3), Some(HotkeyAction::Translate));
-        #[cfg(feature = "screen-translation-dev")]
-        {
-            assert_eq!(hotkey_action_at(4), Some(HotkeyAction::ScreenTranslate));
-            assert_eq!(hotkey_action_at(5), Some(HotkeyAction::PauseResume));
-            assert_eq!(hotkey_action_at(6), None);
-        }
-        #[cfg(not(feature = "screen-translation-dev"))]
-        {
-            assert_eq!(hotkey_action_at(4), Some(HotkeyAction::PauseResume));
-            assert_eq!(hotkey_action_at(5), None);
-            assert!(!visible_hotkey_actions().contains(&HotkeyAction::ScreenTranslate));
-        }
+        assert_eq!(hotkey_action_at(4), Some(HotkeyAction::ScreenTranslate));
+        assert_eq!(hotkey_action_at(5), Some(HotkeyAction::PauseResume));
+        assert_eq!(hotkey_action_at(6), None);
+        assert!(visible_hotkey_actions().contains(&HotkeyAction::ScreenTranslate));
     }
 
     #[test]
-    fn public_build_cannot_register_the_unadmitted_screen_translation_hotkey() {
+    fn ordinary_build_can_register_the_screen_translation_hotkey() {
         let mut bindings = rust_protocol::HotkeyBindings::default();
         bindings.screen_translate.enabled = true;
 
         let effective = effective_hotkey_bindings(bindings);
 
-        #[cfg(feature = "screen-translation-dev")]
         assert!(effective.screen_translate.enabled);
-        #[cfg(not(feature = "screen-translation-dev"))]
-        assert!(!effective.screen_translate.enabled);
     }
 
     #[test]
@@ -3439,7 +3526,7 @@ mod hotkey_capture_tests {
         assert!(row.locked_reason.is_empty());
         assert_eq!(
             hotkeys_summary(&state),
-            format!("3 of {} shortcuts active", visible_hotkey_actions().len())
+            format!("4 of {} shortcuts active", visible_hotkey_actions().len())
         );
     }
 
@@ -3467,7 +3554,7 @@ mod hotkey_capture_tests {
         assert!(row.enabled);
         assert_eq!(
             hotkeys_summary(&state),
-            format!("4 of {} shortcuts active", visible_hotkey_actions().len())
+            format!("5 of {} shortcuts active", visible_hotkey_actions().len())
         );
     }
 

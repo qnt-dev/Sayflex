@@ -1,7 +1,25 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use image::{DynamicImage, RgbaImage};
-use oar_ocr::oarocr::{OAROCR, OAROCRBuilder, OAROCRResult};
+use oar_ocr::oarocr::{EdgeProcessor, TextCroppingProcessor};
+use oar_ocr_core::{
+    core::traits::{
+        adapter::{AdapterBuilder, ModelAdapter},
+        task::ImageTaskInput,
+    },
+    domain::{
+        adapters::{
+            TextDetectionAdapter, TextDetectionAdapterBuilder, TextRecognitionAdapter,
+            TextRecognitionAdapterBuilder,
+        },
+        tasks::{TextDetectionConfig, TextRecognitionOutput},
+    },
+    processors::{BoundingBox, LimitType, sort_quad_boxes},
+};
 use rust_protocol::{OcrLanguagePolicy, OcrLine, PhysicalRect};
 
 use crate::{CancellationToken, InferenceAdapter, OcrDocument, OcrError};
@@ -95,16 +113,37 @@ impl ModelFamily {
 }
 
 pub struct PpOcrAdapter {
-    pipelines: HashMap<ModelFamily, OAROCR>,
+    detector: TextDetectionAdapter,
+    recognizers: Mutex<HashMap<ModelFamily, TextRecognitionAdapter>>,
+    paths: PpOcrModelPaths,
 }
 
 impl std::fmt::Debug for PpOcrAdapter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PpOcrAdapter")
-            .field("pipeline_count", &self.pipelines.len())
+            .field(
+                "loaded_recognizer_count",
+                &self
+                    .recognizers
+                    .lock()
+                    .map(|recognizers| recognizers.len())
+                    .unwrap_or_default(),
+            )
             .finish()
     }
+}
+
+#[derive(Debug)]
+struct CroppedLine {
+    bounds: BoundingBox,
+    image: Arc<image::RgbImage>,
+}
+
+#[derive(Debug)]
+struct FamilyRecognition {
+    lines: Vec<OcrLine>,
+    average_confidence: f32,
 }
 
 impl PpOcrAdapter {
@@ -113,38 +152,148 @@ impl PpOcrAdapter {
         if !detector.is_file() {
             return Err(OcrError::ModelUnavailable);
         }
-        let mut pipelines = HashMap::new();
         for family in ModelFamily::ALL {
             let recognizer = paths.recognizer(family);
             let dictionary = paths.dictionary(family);
             if !recognizer.is_file() || !dictionary.is_file() {
                 return Err(OcrError::ModelUnavailable);
             }
-            let pipeline = OAROCRBuilder::new(&detector, &recognizer, &dictionary)
-                .build()
-                .map_err(|_| OcrError::Engine)?;
-            pipelines.insert(family, pipeline);
         }
-        Ok(Self { pipelines })
+        let detector_config = TextDetectionConfig {
+            unclip_ratio: 2.0,
+            limit_side_len: Some(960),
+            limit_type: Some(LimitType::Max),
+            max_side_len: Some(4000),
+            ..TextDetectionConfig::default()
+        };
+        let detector = TextDetectionAdapterBuilder::new()
+            .with_config(detector_config)
+            .build(detector)
+            .map_err(|_| OcrError::Engine)?;
+        Ok(Self {
+            detector,
+            recognizers: Mutex::new(HashMap::new()),
+            paths: paths.clone(),
+        })
     }
 
-    fn predict_family(
+    fn detect_lines(
         &self,
-        family: ModelFamily,
         image: &image::RgbImage,
         cancellation: &CancellationToken,
-    ) -> Result<OAROCRResult, OcrError> {
+    ) -> Result<Vec<CroppedLine>, OcrError> {
         if cancellation.is_cancelled() {
             return Err(OcrError::Cancelled);
         }
-        self.pipelines
-            .get(&family)
-            .ok_or(OcrError::ModelUnavailable)?
-            .predict(vec![image.clone()])
-            .map_err(|_| OcrError::Engine)?
+        let image = Arc::new(image.clone());
+        let detection = self
+            .detector
+            .execute(
+                ImageTaskInput::from_arc_images(vec![Arc::clone(&image)]),
+                None,
+            )
+            .map_err(|_| OcrError::Engine)?;
+        let boxes = sort_quad_boxes(
+            &detection
+                .detections
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|detection| detection.bbox)
+                .collect::<Vec<_>>(),
+        );
+        let crops = TextCroppingProcessor::new(true)
+            .process((image, boxes.clone()))
+            .map_err(|_| OcrError::Engine)?;
+        Ok(boxes
             .into_iter()
-            .next()
-            .ok_or(OcrError::Engine)
+            .zip(crops)
+            .filter_map(|(bounds, image)| image.map(|image| CroppedLine { bounds, image }))
+            .collect())
+    }
+
+    fn recognize_family(
+        &self,
+        family: ModelFamily,
+        crops: &[CroppedLine],
+        image_width: u32,
+        image_height: u32,
+        cancellation: &CancellationToken,
+    ) -> Result<FamilyRecognition, OcrError> {
+        if cancellation.is_cancelled() {
+            return Err(OcrError::Cancelled);
+        }
+        if crops.is_empty() {
+            return Ok(FamilyRecognition {
+                lines: Vec::new(),
+                average_confidence: -1.0,
+            });
+        }
+        let mut recognizers = self.recognizers.lock().map_err(|_| OcrError::Engine)?;
+        if let std::collections::hash_map::Entry::Vacant(entry) = recognizers.entry(family) {
+            let dictionary = std::fs::read_to_string(self.paths.dictionary(family))
+                .map_err(|_| OcrError::ModelUnavailable)?;
+            let recognizer = TextRecognitionAdapterBuilder::new()
+                .character_dict(dictionary.lines().map(str::to_owned).collect())
+                .build(self.paths.recognizer(family))
+                .map_err(|_| OcrError::Engine)?;
+            entry.insert(recognizer);
+        }
+        let recognition: TextRecognitionOutput = recognizers
+            .get(&family)
+            .ok_or(OcrError::Engine)?
+            .execute(
+                ImageTaskInput::from_arc_images(
+                    crops.iter().map(|crop| Arc::clone(&crop.image)).collect(),
+                ),
+                None,
+            )
+            .map_err(|_| OcrError::Engine)?;
+        drop(recognizers);
+        if cancellation.is_cancelled() {
+            return Err(OcrError::Cancelled);
+        }
+        let lines = crops
+            .iter()
+            .zip(recognition.texts.iter())
+            .zip(recognition.scores.iter())
+            .filter_map(|((crop, text), confidence)| {
+                let text = postprocess_text(family, text);
+                (!text.is_empty()).then(|| OcrLine {
+                    text,
+                    bounds: bounds_for(&crop.bounds, image_width, image_height),
+                    confidence_milli: confidence_milli(Some(*confidence)),
+                })
+            })
+            .collect::<Vec<_>>();
+        let average_confidence = if lines.is_empty() {
+            -1.0
+        } else {
+            lines
+                .iter()
+                .map(|line| f32::from(line.confidence_milli) / 1000.0)
+                .sum::<f32>()
+                / lines.len() as f32
+        };
+        Ok(FamilyRecognition {
+            lines,
+            average_confidence,
+        })
+    }
+}
+
+fn better_family(
+    best: Option<FamilyRecognition>,
+    candidate: FamilyRecognition,
+) -> Option<FamilyRecognition> {
+    if best
+        .as_ref()
+        .is_none_or(|best| candidate.average_confidence > best.average_confidence)
+    {
+        Some(candidate)
+    } else {
+        best
     }
 }
 
@@ -156,55 +305,47 @@ impl InferenceAdapter for PpOcrAdapter {
         cancellation: &CancellationToken,
     ) -> Result<OcrDocument, OcrError> {
         let rgb = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
-        let (family, language, result) = match language_policy {
+        let crops = self.detect_lines(&rgb, cancellation)?;
+        let (language, result) = match language_policy {
             OcrLanguagePolicy::Prefer(languages) => {
-                let mut best: Option<(f32, ModelFamily, String, OAROCRResult)> = None;
+                let mut best: Option<(String, FamilyRecognition)> = None;
                 for (language, family) in preferred_model_families(languages) {
-                    let candidate = self.predict_family(family, &rgb, cancellation)?;
-                    let score = candidate.average_confidence().unwrap_or(-1.0);
-                    if best
-                        .as_ref()
-                        .is_none_or(|(best_score, _, _, _)| score > *best_score)
-                    {
-                        best = Some((score, family, language, candidate));
+                    let candidate = self.recognize_family(
+                        family,
+                        &crops,
+                        image.width(),
+                        image.height(),
+                        cancellation,
+                    )?;
+                    if best.as_ref().is_none_or(|(_, best)| {
+                        candidate.average_confidence > best.average_confidence
+                    }) {
+                        best = Some((language, candidate));
                     }
                 }
-                let (_, family, language, result) = best.ok_or(OcrError::LanguageUnavailable)?;
-                (family, Some(language), result)
+                let (language, result) = best.ok_or(OcrError::LanguageUnavailable)?;
+                (Some(language), result)
             }
             OcrLanguagePolicy::Auto => {
-                let mut best: Option<(f32, ModelFamily, OAROCRResult)> = None;
+                let mut best: Option<FamilyRecognition> = None;
                 for family in ModelFamily::ALL {
-                    let candidate = self.predict_family(family, &rgb, cancellation)?;
-                    let score = candidate.average_confidence().unwrap_or(-1.0);
-                    if best
-                        .as_ref()
-                        .is_none_or(|(best_score, _, _)| score > *best_score)
-                    {
-                        best = Some((score, family, candidate));
-                    }
+                    let candidate = self.recognize_family(
+                        family,
+                        &crops,
+                        image.width(),
+                        image.height(),
+                        cancellation,
+                    )?;
+                    best = better_family(best, candidate);
                 }
-                let (_, family, result) = best.ok_or(OcrError::Engine)?;
-                (family, None, result)
+                (None, best.ok_or(OcrError::Engine)?)
             }
         };
         if cancellation.is_cancelled() {
             return Err(OcrError::Cancelled);
         }
         Ok(OcrDocument {
-            lines: result
-                .text_regions
-                .iter()
-                .filter_map(|region| {
-                    let text = region.text.as_deref()?;
-                    let text = postprocess_text(family, text);
-                    (!text.is_empty()).then(|| OcrLine {
-                        text,
-                        bounds: bounds_for(region, image.width(), image.height()),
-                        confidence_milli: confidence_milli(region.confidence),
-                    })
-                })
-                .collect(),
+            lines: result.lines,
             language,
         })
     }
@@ -227,12 +368,8 @@ fn preferred_model_families(languages: &[String]) -> Vec<(String, ModelFamily)> 
     families
 }
 
-fn bounds_for(
-    region: &oar_ocr::oarocr::TextRegion,
-    image_width: u32,
-    image_height: u32,
-) -> PhysicalRect {
-    let points = &region.bounding_box.points;
+fn bounds_for(bounds: &BoundingBox, image_width: u32, image_height: u32) -> PhysicalRect {
+    let points = &bounds.points;
     let min_x = points
         .iter()
         .map(|point| point.x)

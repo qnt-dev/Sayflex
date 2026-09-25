@@ -18,7 +18,7 @@ use rust_protocol::{TranslationLanguage, TranslationLanguagePolicy, TranslationT
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{TranslationBackendDescriptor, TranslationPackDescriptor};
+use crate::{TranslationBackendDescriptor, TranslationPackDescriptor, firefox::FirefoxRuntime};
 
 const MAX_INPUT_CHARACTERS: usize = 32_000;
 const MAX_SOURCE_TOKENS_PER_REQUEST: usize = 1_200;
@@ -40,7 +40,21 @@ pub struct TranslationEngine {
     pack: TranslationPackDescriptor,
     model_root: PathBuf,
     runtime_root: PathBuf,
-    runtime: Option<LlamaRuntime>,
+    runtime: Option<ResidentRuntime>,
+}
+
+enum ResidentRuntime {
+    Llama(LlamaRuntime),
+    Firefox(FirefoxRuntime),
+}
+
+impl ResidentRuntime {
+    fn is_ready(&mut self) -> bool {
+        match self {
+            Self::Llama(runtime) => runtime.is_running(),
+            Self::Firefox(_) => true,
+        }
+    }
 }
 
 pub struct TranslationOutput {
@@ -65,6 +79,12 @@ pub struct TranslationProgress {
 #[error("translation was cancelled")]
 pub struct TranslationCancelled;
 
+#[derive(Debug, thiserror::Error)]
+#[error("local translation was not completed before the output token limit")]
+struct TranslationIncomplete;
+
+const MAX_INCOMPLETE_SPLIT_DEPTH: u8 = 2;
+
 impl TranslationEngine {
     pub fn new(
         pack: TranslationPackDescriptor,
@@ -84,28 +104,35 @@ impl TranslationEngine {
         self.pack.tier
     }
 
+    #[must_use]
+    pub fn catalog_id(&self) -> &str {
+        &self.pack.id
+    }
+
     pub fn warm(&mut self) -> Result<()> {
-        self.ensure_runtime()?;
-        // Prime both prompt directions and GPU execution graphs. This happens only
-        // when the user opts into the warm/fast mode, never in the input hook.
-        for (text, source, target) in [
-            (
-                "Hello",
-                TranslationLanguage::English,
-                TranslationLanguage::Russian,
-            ),
-            (
-                "Привет",
-                TranslationLanguage::Russian,
-                TranslationLanguage::English,
-            ),
-        ] {
-            self.runtime
-                .as_mut()
-                .context("translation runtime failed to initialize")?
-                .translate_unit(text, source, target)?;
+        match self.ensure_runtime()? {
+            ResidentRuntime::Firefox(runtime) => runtime.warm(),
+            ResidentRuntime::Llama(runtime) => {
+                // Prime both prompt directions and GPU execution graphs. This
+                // happens only when the user opts into warm mode, never in the
+                // input hook.
+                for (text, source, target) in [
+                    (
+                        "Hello",
+                        TranslationLanguage::English,
+                        TranslationLanguage::Russian,
+                    ),
+                    (
+                        "Привет",
+                        TranslationLanguage::Russian,
+                        TranslationLanguage::English,
+                    ),
+                ] {
+                    runtime.translate_unit(text, source, target)?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     pub fn translate(
@@ -151,40 +178,22 @@ impl TranslationEngine {
         // instruction operates on one unambiguous representation.
         let model_input = normalize_line_endings(text);
 
-        self.ensure_runtime()?;
-        let first_attempt = translate_planned(
-            self.runtime
-                .as_mut()
-                .context("translation runtime failed to initialize")?,
-            &model_input,
-            source,
-            target,
-            &should_continue,
-            &mut on_partial,
-        );
-        let translated = match first_attempt {
-            Ok(translated) => translated,
-            Err(first_error) => {
-                if first_error.downcast_ref::<TranslationCancelled>().is_some() {
-                    return Err(first_error);
-                }
-                // A crashed backend is restarted once in-process. The caller still
-                // receives a normal error if the deterministic retry also fails.
-                self.runtime = None;
-                self.ensure_runtime()
-                    .context("translation backend restart failed")?;
-                translate_planned(
-                    self.runtime
-                        .as_mut()
-                        .context("translation runtime failed to restart")?,
-                    &model_input,
-                    source,
-                    target,
-                    &should_continue,
-                    &mut on_partial,
-                )
-                .with_context(|| format!("translation retry failed after: {first_error:#}"))?
-            }
+        let translated = if self.pack.backend.requires_llama_runtime() {
+            self.translate_llama(
+                &model_input,
+                source,
+                target,
+                &should_continue,
+                &mut on_partial,
+            )?
+        } else {
+            self.translate_firefox(
+                &model_input,
+                source,
+                target,
+                &should_continue,
+                &mut on_partial,
+            )?
         };
         let normalized = normalize_single_word_repetition(text, &translated.text);
         Ok(TranslationOutput {
@@ -198,29 +207,113 @@ impl TranslationEngine {
         })
     }
 
-    fn ensure_runtime(&mut self) -> Result<&mut LlamaRuntime> {
-        if self.runtime.as_mut().is_some_and(LlamaRuntime::is_running) {
+    fn translate_llama(
+        &mut self,
+        text: &str,
+        source: TranslationLanguage,
+        target: TranslationLanguage,
+        should_continue: &impl Fn() -> bool,
+        on_partial: &mut impl FnMut(&str, TranslationProgress) -> bool,
+    ) -> Result<PlannedTranslation> {
+        self.ensure_runtime()?;
+        let first_attempt = match self.runtime.as_mut() {
+            Some(ResidentRuntime::Llama(runtime)) => {
+                translate_planned(runtime, text, source, target, should_continue, on_partial)
+            }
+            _ => bail!("translation runtime kind does not match its catalog backend"),
+        };
+        match first_attempt {
+            Ok(translated) => Ok(translated),
+            Err(first_error) => {
+                if first_error.downcast_ref::<TranslationCancelled>().is_some()
+                    || first_error
+                        .downcast_ref::<TranslationIncomplete>()
+                        .is_some()
+                {
+                    return Err(first_error);
+                }
+                // A crashed llama.cpp backend is restarted once in-process. The
+                // in-process compact backend has no child process to restart.
+                self.runtime = None;
+                self.ensure_runtime()
+                    .context("translation backend restart failed")?;
+                let Some(ResidentRuntime::Llama(runtime)) = self.runtime.as_mut() else {
+                    bail!("translation runtime kind changed during restart");
+                };
+                translate_planned(runtime, text, source, target, should_continue, on_partial)
+                    .with_context(|| format!("translation retry failed after: {first_error:#}"))
+            }
+        }
+    }
+
+    fn translate_firefox(
+        &mut self,
+        text: &str,
+        source: TranslationLanguage,
+        target: TranslationLanguage,
+        should_continue: &impl Fn() -> bool,
+        on_partial: &mut impl FnMut(&str, TranslationProgress) -> bool,
+    ) -> Result<PlannedTranslation> {
+        let runtime = self.ensure_runtime()?;
+        let ResidentRuntime::Firefox(runtime) = runtime else {
+            bail!("translation runtime kind does not match its catalog backend");
+        };
+        let translated = runtime.translate_streaming(
+            text,
+            source,
+            target,
+            should_continue,
+            |partial, elapsed_ms, paragraph_index, paragraph_count| {
+                on_partial(
+                    partial,
+                    TranslationProgress {
+                        first_token_duration_ms: elapsed_ms,
+                        tokenize_duration_ms: 0,
+                        chunk_index: paragraph_index,
+                        chunk_count: paragraph_count,
+                    },
+                )
+            },
+        )?;
+        Ok(PlannedTranslation {
+            text: translated.text,
+            first_token_duration_ms: translated.first_result_duration_ms,
+            backend_request_count: translated.translated_paragraphs,
+            tokenize_duration_ms: 0,
+            chunk_count: translated.translated_paragraphs,
+        })
+    }
+
+    fn ensure_runtime(&mut self) -> Result<&mut ResidentRuntime> {
+        if self.runtime.as_mut().is_some_and(ResidentRuntime::is_ready) {
             return self
                 .runtime
                 .as_mut()
                 .ok_or_else(|| anyhow!("translation runtime disappeared"));
         }
         self.runtime = None;
-        let TranslationBackendDescriptor::LlamaCpp {
-            model_file,
-            context_size,
-            max_output_tokens,
-        } = &self.pack.backend;
-        let model_path = self.model_root.join(model_file);
-        if !model_path.is_file() {
-            bail!("translation model is missing: {}", model_path.display());
-        }
-        self.runtime = Some(LlamaRuntime::start(
-            &self.runtime_root,
-            &model_path,
-            *context_size,
-            *max_output_tokens,
-        )?);
+        let runtime = match &self.pack.backend {
+            TranslationBackendDescriptor::LlamaCpp {
+                model_file,
+                context_size,
+                max_output_tokens,
+            } => {
+                let model_path = self.model_root.join(model_file);
+                if !model_path.is_file() {
+                    bail!("translation model is missing: {}", model_path.display());
+                }
+                ResidentRuntime::Llama(LlamaRuntime::start(
+                    &self.runtime_root,
+                    &model_path,
+                    *context_size,
+                    *max_output_tokens,
+                )?)
+            }
+            TranslationBackendDescriptor::Firefox { .. } => ResidentRuntime::Firefox(
+                FirefoxRuntime::load(&self.pack.backend, &self.model_root)?,
+            ),
+        };
+        self.runtime = Some(runtime);
         self.runtime
             .as_mut()
             .ok_or_else(|| anyhow!("translation runtime disappeared"))
@@ -505,12 +598,13 @@ impl LlamaRuntime {
         let response: ChatResponse = response
             .json()
             .context("local translation runtime returned invalid JSON")?;
-        let content = response
+        let choice = response
             .choices
             .into_iter()
             .next()
-            .map(|choice| choice.message.content)
             .ok_or_else(|| anyhow!("local translation runtime returned no result"))?;
+        validate_finish_reason(choice.finish_reason.as_deref())?;
+        let content = choice.message.content;
         let content = strip_reasoning(&content);
         if content.is_empty() {
             bail!("local translation runtime returned an empty result");
@@ -597,6 +691,7 @@ impl LlamaRuntime {
             let mut content = String::new();
             let mut pending = Vec::new();
             let mut done = false;
+            let mut saw_finish_reason = false;
             while !done {
                 let chunk = tokio::select! {
                     chunk = response.chunk() => chunk
@@ -613,7 +708,13 @@ impl LlamaRuntime {
                     let line = pending.drain(..=end).collect::<Vec<_>>();
                     let line = std::str::from_utf8(&line[..line.len().saturating_sub(1)])
                         .context("local translation stream returned invalid UTF-8")?;
-                    if process_stream_line(line, &mut content, started, &mut on_partial)? {
+                    if process_stream_line(
+                        line,
+                        &mut content,
+                        started,
+                        &mut saw_finish_reason,
+                        &mut on_partial,
+                    )? {
                         done = true;
                         break;
                     }
@@ -622,7 +723,16 @@ impl LlamaRuntime {
             if !done && !pending.is_empty() {
                 let line = std::str::from_utf8(&pending)
                     .context("local translation stream returned invalid trailing UTF-8")?;
-                let _ = process_stream_line(line, &mut content, started, &mut on_partial)?;
+                done = process_stream_line(
+                    line,
+                    &mut content,
+                    started,
+                    &mut saw_finish_reason,
+                    &mut on_partial,
+                )?;
+            }
+            if !done {
+                bail!("local translation stream ended before its completion marker");
             }
             Ok::<String, anyhow::Error>(content)
         })?;
@@ -674,6 +784,8 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -704,6 +816,8 @@ struct ChatStreamResponse {
 #[derive(Deserialize)]
 struct ChatStreamChoice {
     delta: ChatStreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -725,6 +839,7 @@ fn process_stream_line(
     line: &str,
     content: &mut String,
     started: Instant,
+    saw_finish_reason: &mut bool,
     on_partial: &mut impl FnMut(&str, u64) -> bool,
 ) -> Result<bool> {
     let line = line.trim();
@@ -736,6 +851,9 @@ fn process_stream_line(
     };
     let payload = payload.trim();
     if payload == "[DONE]" {
+        if !*saw_finish_reason {
+            bail!("local translation stream ended without a finish reason");
+        }
         return Ok(true);
     }
     let chunk: ChatStreamResponse =
@@ -744,6 +862,10 @@ fn process_stream_line(
         bail!("local translation stream failed: {error}");
     }
     for choice in chunk.choices {
+        if let Some(reason) = choice.finish_reason.as_deref() {
+            validate_finish_reason(Some(reason))?;
+            *saw_finish_reason = true;
+        }
         let Some(delta) = choice.delta.content else {
             continue;
         };
@@ -758,6 +880,15 @@ fn process_stream_line(
         }
     }
     Ok(false)
+}
+
+fn validate_finish_reason(finish_reason: Option<&str>) -> Result<()> {
+    match finish_reason {
+        Some("stop") => Ok(()),
+        Some("length") => Err(TranslationIncomplete.into()),
+        Some(other) => bail!("local translation stopped for unsupported reason: {other}"),
+        None => bail!("local translation response did not include a finish reason"),
+    }
 }
 
 fn preferred_vulkan_device(executable: &Path, runtime_root: &Path) -> Option<String> {
@@ -893,33 +1024,46 @@ fn translate_planned(
             continue;
         }
 
-        backend_request_count = backend_request_count.saturating_add(1);
         let completed_prefix = output.clone();
-        let streamed = runtime.translate_unit_streaming(
+        let recovered = translate_with_truncation_recovery(
             body,
-            source,
-            target,
-            should_continue,
-            |partial, _unit_elapsed_ms| {
-                let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-                first_token_duration_ms.get_or_insert(elapsed_ms);
-                let mut visible = String::with_capacity(completed_prefix.len() + partial.len());
-                visible.push_str(&completed_prefix);
-                visible.push_str(partial);
-                on_partial(
-                    &visible,
-                    TranslationProgress {
-                        first_token_duration_ms: elapsed_ms,
-                        tokenize_duration_ms,
-                        chunk_index,
-                        chunk_count,
-                    },
-                )
+            MAX_INCOMPLETE_SPLIT_DEPTH,
+            &mut |piece, recovered_prefix| {
+                runtime
+                    .translate_unit_streaming(
+                        piece,
+                        source,
+                        target,
+                        should_continue,
+                        |partial, _unit_elapsed_ms| {
+                            let elapsed_ms =
+                                started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+                            first_token_duration_ms.get_or_insert(elapsed_ms);
+                            let mut visible = String::with_capacity(
+                                completed_prefix.len() + recovered_prefix.len() + partial.len(),
+                            );
+                            visible.push_str(&completed_prefix);
+                            visible.push_str(recovered_prefix);
+                            visible.push_str(partial);
+                            on_partial(
+                                &visible,
+                                TranslationProgress {
+                                    first_token_duration_ms: elapsed_ms,
+                                    tokenize_duration_ms,
+                                    chunk_index,
+                                    chunk_count,
+                                },
+                            )
+                        },
+                    )
+                    .map(|streamed| streamed.content)
             },
         )?;
+        backend_request_count =
+            backend_request_count.saturating_add(recovered.backend_request_count);
         first_token_duration_ms
             .get_or_insert_with(|| started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
-        output.push_str(streamed.content.trim());
+        output.push_str(recovered.content.trim());
         output.push_str(trailing);
     }
     if output.trim().is_empty() {
@@ -931,6 +1075,79 @@ fn translate_planned(
         backend_request_count,
         tokenize_duration_ms,
         chunk_count,
+    })
+}
+
+struct RecoveredTranslation {
+    content: String,
+    backend_request_count: u32,
+}
+
+fn translate_with_truncation_recovery(
+    text: &str,
+    remaining_split_depth: u8,
+    translate: &mut impl FnMut(&str, &str) -> Result<String>,
+) -> Result<RecoveredTranslation> {
+    fn translate_piece(
+        text: &str,
+        remaining_split_depth: u8,
+        completed: &mut String,
+        backend_request_count: &mut u32,
+        translate: &mut impl FnMut(&str, &str) -> Result<String>,
+    ) -> Result<()> {
+        let leading_bytes = text.len() - text.trim_start().len();
+        let trailing_bytes = text.len() - text.trim_end().len();
+        let body_end = text.len().saturating_sub(trailing_bytes);
+        let leading = &text[..leading_bytes];
+        let body = &text[leading_bytes..body_end];
+        let trailing = &text[body_end..];
+        completed.push_str(leading);
+        if body.is_empty() {
+            completed.push_str(trailing);
+            return Ok(());
+        }
+
+        *backend_request_count = backend_request_count.saturating_add(1);
+        let visible_prefix = completed.clone();
+        match translate(body, &visible_prefix) {
+            Ok(content) => completed.push_str(content.trim()),
+            Err(error)
+                if error.downcast_ref::<TranslationIncomplete>().is_some()
+                    && remaining_split_depth > 0 =>
+            {
+                let characters = body.chars().count();
+                let pieces = split_at_natural_boundaries(body, characters.div_ceil(2));
+                if pieces.len() <= 1 {
+                    return Err(error);
+                }
+                for piece in pieces {
+                    translate_piece(
+                        &piece,
+                        remaining_split_depth - 1,
+                        completed,
+                        backend_request_count,
+                        translate,
+                    )?;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        completed.push_str(trailing);
+        Ok(())
+    }
+
+    let mut content = String::with_capacity(text.len());
+    let mut backend_request_count = 0;
+    translate_piece(
+        text,
+        remaining_split_depth,
+        &mut content,
+        &mut backend_request_count,
+        translate,
+    )?;
+    Ok(RecoveredTranslation {
+        content,
+        backend_request_count,
     })
 }
 
@@ -1105,8 +1322,8 @@ mod tests {
 
     use super::{
         detect_language, normalize_line_endings, normalize_single_word_repetition,
-        split_at_natural_boundaries, strip_reasoning, translation_instruction,
-        translation_user_message,
+        split_at_natural_boundaries, strip_reasoning, translate_with_truncation_recovery,
+        translation_instruction, translation_user_message, validate_finish_reason,
     };
 
     #[test]
@@ -1123,6 +1340,35 @@ mod tests {
             detect_language("Версия Rust 1.88"),
             TranslationLanguage::Russian
         );
+    }
+
+    #[test]
+    fn output_limit_is_not_accepted_as_a_complete_translation() {
+        assert!(validate_finish_reason(Some("stop")).is_ok());
+        assert!(validate_finish_reason(Some("length")).is_err());
+        assert!(validate_finish_reason(None).is_err());
+    }
+
+    #[test]
+    fn an_output_limited_unit_is_retried_as_smaller_natural_fragments() {
+        let mut attempts = Vec::new();
+        let recovered = translate_with_truncation_recovery(
+            "alpha beta gamma delta",
+            2,
+            &mut |piece, _completed| {
+                attempts.push(piece.to_owned());
+                if piece.chars().count() > 11 {
+                    Err(super::TranslationIncomplete.into())
+                } else {
+                    Ok(format!("<{piece}>"))
+                }
+            },
+        )
+        .expect("bounded split recovery");
+
+        assert_eq!(recovered.content, "<alpha beta> <gamma delta>");
+        assert_eq!(recovered.backend_request_count, 3);
+        assert_eq!(attempts[0], "alpha beta gamma delta");
     }
 
     #[test]

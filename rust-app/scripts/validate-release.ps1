@@ -33,7 +33,9 @@ $required = @(
     'SayFlex.Speech.Cuda.exe',
     'SayFlex.Speech.Vulkan.exe',
     'SayFlex.Translation.exe',
+    'SayFlex.Ocr.exe',
     'SayFlex.Companion.exe',
+    'ocr-models\screen-ocr-ppocrv5-mobile-v3.9.2\bundle.verified.json',
     'build-manifest.json',
     'speech-backends.json',
     'runtimes\cuda\cublas64_13.dll',
@@ -83,6 +85,63 @@ $files = foreach ($name in $required) {
 $files | Format-Table -AutoSize
 
 $failures = New-Object System.Collections.Generic.List[string]
+
+# Compact translation choices are downloaded language packages, not another
+# bundled execution stack. Validate every curated English pair embedded into
+# the translation worker, then make sure publishing did not accidentally copy
+# its models or a Python|WASM|MKL runtime into the application payload.
+$translationCatalogPath = Join-Path $rustRoot 'crates\translation-engine\models\catalog.json'
+$translationCatalog = Get-Content -LiteralPath $translationCatalogPath -Raw | ConvertFrom-Json
+$compactPacks = @($translationCatalog.packs | Where-Object tier -eq 'compact')
+$expectedCompactIds = @(
+    'firefox-ru-en-v3.1', 'firefox-uk-en-v3', 'firefox-es-en-v3',
+    'firefox-pt-en-v3', 'firefox-de-en-v3', 'firefox-fr-en-v3',
+    'firefox-it-en-v3', 'firefox-zh-hans-en-v3', 'firefox-zh-hant-en-v3',
+    'firefox-ja-en-v3', 'firefox-ko-en-v3', 'firefox-hi-en-v3',
+    'firefox-ar-en-v3'
+)
+$actualCompactIds = @($compactPacks.id | Sort-Object)
+if (
+    $translationCatalog.schema_version -ne 4 -or
+    $compactPacks.Count -ne $expectedCompactIds.Count -or
+    ($actualCompactIds -join ',') -ne (@($expectedCompactIds | Sort-Object) -join ',')
+) {
+    $failures.Add('the compact Firefox translation catalog is incomplete or ambiguous')
+} else {
+    foreach ($compactPack in $compactPacks) {
+        $compactArtifacts = @($compactPack.artifacts)
+        $verifiedExpanded = @($compactArtifacts | Where-Object {
+            $_.compression -eq 'zstd' -and
+            $_.bytes -gt 0 -and
+            $_.sha256 -match '^[0-9a-f]{64}$' -and
+            $_.expanded_bytes -gt 0 -and
+            $_.expanded_sha256 -match '^[0-9a-f]{64}$'
+        })
+        if (
+            $compactPack.license -ne 'MPL-2.0' -or
+            @($compactPack.languages) -notcontains 'english' -or
+            @($compactPack.backend.directions).Count -ne 2 -or
+            $compactArtifacts.Count -lt 6 -or
+            $verifiedExpanded.Count -ne $compactArtifacts.Count
+        ) {
+            $failures.Add(
+                "compact Firefox pack $($compactPack.id) has incomplete metadata or verification"
+            )
+        }
+    }
+}
+$unexpectedCompactPayload = @(
+    Get-ChildItem -LiteralPath $appRoot -File -Recurse |
+        Where-Object {
+            $_.FullName -match '(?i)translation-models[\\/]firefox-' -or
+            $_.Name -match '(?i)^(python\d*\.dll|.*\.wasm|mkl.*\.dll)$'
+        }
+)
+if ($unexpectedCompactPayload.Count -gt 0) {
+    $failures.Add(
+        "the staged release bundles compact-model or extra runtime files: $($unexpectedCompactPayload.Name -join ', ')"
+    )
+}
 
 function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
     $out = [System.IO.Path]::GetTempFileName()
@@ -262,6 +321,7 @@ foreach ($worker in @(
     'SayFlex.Speech.Cuda.exe',
     'SayFlex.Speech.Vulkan.exe',
     'SayFlex.Translation.exe',
+    'SayFlex.Ocr.exe',
     'SayFlex.InputHost.exe',
     'SayFlex.Companion.exe'
 )) {

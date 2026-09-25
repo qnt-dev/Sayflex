@@ -34,10 +34,13 @@ rqrr = { version = "0.11.0", default-features = false }
 tempfile.workspace = true
 
 [features]
+default = ["screen-translation"]
 # Compiles Slint's CPU renderer in as well, so a build can be told
 # SLINT_BACKEND=winit-software and have its window read back as pixels. That is
 # the only way to see this interface on a machine whose composited surface the
 # screen-capture APIs return blank for. Off by default: a shipped binary has no
 # use for a second renderer.
 inspect = ["slint/renderer-software"]
-screen-translation-dev = ["dep:base64", "dep:rust-ocr-engine"]
+screen-translation = ["dep:base64", "dep:rust-ocr-engine"]
+# Temporary compatibility alias for existing developer commands.
+screen-translation-dev = ["screen-translation"]

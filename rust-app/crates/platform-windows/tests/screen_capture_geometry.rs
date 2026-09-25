@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use rust_platform_windows::screen_capture::{
-    CaptureError, CapturedOutput, DesktopCapture, DesktopCaptureBackend, RgbaFrame, Rotation,
-    capture_with_fallback,
+    CaptureBackendKind, CaptureError, CapturedOutput, DesktopCapture, DesktopCaptureBackend,
+    RgbaFrame, Rotation, capture_with_fallback,
 };
 use rust_protocol::PhysicalRect;
 
@@ -183,7 +183,7 @@ fn every_supported_rotation_maps_desktop_pixels_to_the_source_surface() {
 fn live_dxgi_capture_returns_an_owned_crop() {
     use rust_platform_windows::screen_capture::DxgiDesktopCaptureBackend;
 
-    let capture = DxgiDesktopCaptureBackend.capture().unwrap();
+    let capture = DxgiDesktopCaptureBackend::default().capture().unwrap();
     let bounds = capture.bounds();
     let crop = capture
         .crop(rect(
@@ -226,6 +226,19 @@ fn one_pixel_capture() -> DesktopCapture {
     .unwrap()
 }
 
+fn black_capture() -> DesktopCapture {
+    DesktopCapture::try_new(
+        1,
+        vec![solid_output(
+            rect(0, 0, 1, 1),
+            Rotation::Identity,
+            1_000,
+            [0, 0, 0, 255],
+        )],
+    )
+    .unwrap()
+}
+
 #[test]
 fn fallback_runs_only_after_a_temporary_dxgi_failure() {
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -242,6 +255,31 @@ fn fallback_runs_only_after_a_temporary_dxgi_failure() {
 
     let capture = capture_with_fallback(&dxgi, &gdi).unwrap();
 
+    assert_eq!(capture.backend(), CaptureBackendKind::Fallback);
+    assert_eq!(
+        capture.crop(rect(0, 0, 1, 1)).unwrap().pixel(0, 0),
+        Some([1, 2, 3, 255])
+    );
+    assert_eq!(*calls.lock().unwrap(), vec!["dxgi", "gdi"]);
+}
+
+#[test]
+fn fallback_runs_when_dxgi_reports_success_with_an_all_black_frame() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dxgi = FakeBackend {
+        name: "dxgi",
+        calls: Arc::clone(&calls),
+        result: Ok(black_capture()),
+    };
+    let gdi = FakeBackend {
+        name: "gdi",
+        calls: Arc::clone(&calls),
+        result: Ok(one_pixel_capture()),
+    };
+
+    let capture = capture_with_fallback(&dxgi, &gdi).unwrap();
+
+    assert_eq!(capture.backend(), CaptureBackendKind::Fallback);
     assert_eq!(
         capture.crop(rect(0, 0, 1, 1)).unwrap().pixel(0, 0),
         Some([1, 2, 3, 255])

@@ -93,3 +93,16 @@ export struct HotkeyRow {
     mode-value: string,
     mode-key: string,
 }
+
+// One independently unloadable runtime. Values are formatted in Rust from
+// Windows counters so this row never guesses what a process consumes.
+export struct ResourceRow {
+    id: string,
+    state: string,
+    tone: string,
+    cpu: string,
+    ram: string,
+    gpu: string,
+    vram: string,
+    can-unload: bool,
+}

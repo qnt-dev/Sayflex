@@ -45,6 +45,9 @@ enum InferenceCommand {
         selected: bool,
     },
     SetLanguage(DictationLanguage),
+    /// Recreates a model that was released from memory by the Resources page.
+    /// It is queued before preview/finalize work for the new session.
+    PrepareIfNeeded,
     Preview {
         recording: RecordedAudio,
         output_mode: SpeechOutputMode,
@@ -61,6 +64,7 @@ enum InferenceCommand {
     Unload {
         only_catalog_id: Option<String>,
         acknowledged: Option<SyncSender<Option<String>>>,
+        retain_reload_target: bool,
     },
     Shutdown,
 }
@@ -125,8 +129,26 @@ impl InferenceHandle {
         if let Err(error) = self.commands.send(InferenceCommand::Unload {
             only_catalog_id: None,
             acknowledged: None,
+            retain_reload_target: false,
         }) {
             eprintln!("could not queue speech model unload: {error}");
+        }
+    }
+
+    pub fn unload_model_for_memory(&self) {
+        self.reset_segmented_session();
+        if let Err(error) = self.commands.send(InferenceCommand::Unload {
+            only_catalog_id: None,
+            acknowledged: None,
+            retain_reload_target: true,
+        }) {
+            eprintln!("could not queue speech model memory release: {error}");
+        }
+    }
+
+    pub fn prepare_if_needed(&self) {
+        if let Err(error) = self.commands.send(InferenceCommand::PrepareIfNeeded) {
+            eprintln!("could not queue speech model reload: {error}");
         }
     }
 
@@ -140,6 +162,7 @@ impl InferenceHandle {
             .send(InferenceCommand::Unload {
                 only_catalog_id: Some(catalog_id.to_owned()),
                 acknowledged: Some(acknowledged),
+                retain_reload_target: false,
             })
             .map_err(|error| format!("could not queue speech model unload: {error}"))?;
         answer
@@ -279,6 +302,7 @@ fn inference_loop(
 ) {
     let mut engine = WhisperEngine::new();
     let mut loaded_catalog_id: Option<String> = None;
+    let mut reload_target: Option<(String, PathBuf)> = None;
     let mut stable_prefix: Option<PreviewResult> = None;
     for command in commands {
         match command {
@@ -288,6 +312,7 @@ fn inference_loop(
                 selected,
             } => {
                 stable_prefix = None;
+                reload_target = Some((catalog_id.clone(), path.clone()));
                 match engine.prepare(&path) {
                     Ok(prepared) => {
                         let _ = events.send(SpeechWorkerEvent::ModelReady {
@@ -305,6 +330,39 @@ fn inference_loop(
                         if selected {
                             let _ = events.send(SpeechWorkerEvent::ModelSelected { catalog_id });
                         }
+                    }
+                    Err(error) => {
+                        let _ = events.send(SpeechWorkerEvent::Failed {
+                            session_id: None,
+                            code: "model_prepare".to_owned(),
+                            message: format!("{error:#}"),
+                            retryable: true,
+                        });
+                    }
+                }
+            }
+            InferenceCommand::PrepareIfNeeded => {
+                if loaded_catalog_id.is_some() {
+                    continue;
+                }
+                let Some((catalog_id, path)) = reload_target.clone() else {
+                    continue;
+                };
+                stable_prefix = None;
+                match engine.prepare(&path) {
+                    Ok(prepared) => {
+                        let _ = events.send(SpeechWorkerEvent::ModelReady {
+                            catalog_id: catalog_id.clone(),
+                            path: path.display().to_string(),
+                            backend: prepared.backend.to_owned(),
+                            load_duration_ms: prepared.load_duration_ms,
+                            warmup_duration_ms: prepared.warmup_duration_ms,
+                        });
+                        loaded_catalog_id = Some(catalog_id.clone());
+                        let _ = events.send(SpeechWorkerEvent::LocalModelState {
+                            catalog_id: Some(catalog_id),
+                            loaded: true,
+                        });
                     }
                     Err(error) => {
                         let _ = events.send(SpeechWorkerEvent::Failed {
@@ -443,6 +501,7 @@ fn inference_loop(
             InferenceCommand::Unload {
                 only_catalog_id,
                 acknowledged,
+                retain_reload_target,
             } => {
                 let matches = loaded_catalog_id.is_none()
                     || only_catalog_id
@@ -452,6 +511,7 @@ fn inference_loop(
                     stable_prefix = None;
                     engine = WhisperEngine::new();
                     let unloaded = loaded_catalog_id.take();
+                    reload_target = retained_reload_target(reload_target, retain_reload_target);
                     let _ = events.send(SpeechWorkerEvent::LocalModelState {
                         catalog_id: unloaded.clone(),
                         loaded: false,
@@ -467,6 +527,13 @@ fn inference_loop(
             InferenceCommand::Shutdown => break,
         }
     }
+}
+
+fn retained_reload_target(
+    target: Option<(String, PathBuf)>,
+    retain: bool,
+) -> Option<(String, PathBuf)> {
+    retain.then_some(target).flatten()
 }
 
 fn advance_stable_prefix(
@@ -675,7 +742,7 @@ mod tests {
 
     use super::{
         InferenceHandle, advance_stable_prefix, context_prompt, has_trailing_silence,
-        join_transcript_text, quiet_tail_after,
+        join_transcript_text, quiet_tail_after, retained_reload_target,
     };
     use crate::{
         audio::RecordedAudio,
@@ -714,6 +781,23 @@ mod tests {
             }
         );
         inference.shutdown();
+    }
+
+    #[test]
+    fn manual_memory_release_keeps_the_model_needed_by_the_next_dictation() {
+        let target = (
+            "speech-model".to_owned(),
+            std::path::PathBuf::from("model.bin"),
+        );
+
+        assert_eq!(
+            retained_reload_target(Some(target.clone()), true),
+            Some(target)
+        );
+        assert_eq!(
+            retained_reload_target(Some(("other".into(), "other.bin".into())), false),
+            None
+        );
     }
 
     #[test]

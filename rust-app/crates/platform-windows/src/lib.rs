@@ -18,6 +18,8 @@ mod popup_dismiss;
 #[cfg(windows)]
 mod process_exit;
 #[cfg(windows)]
+mod process_resources;
+#[cfg(windows)]
 pub mod region_selection;
 pub mod screen_capture;
 #[cfg(windows)]
@@ -49,6 +51,11 @@ pub use popup_dismiss::{
 };
 #[cfg(windows)]
 pub use process_exit::watch_process_exit;
+#[cfg(windows)]
+pub use process_resources::{
+    ProcessNode, ProcessResourceSampler, ProcessResourceUsage, aggregate_resource_usage,
+    cpu_percent_between, descendant_process_ids,
+};
 #[cfg(windows)]
 pub use session_end::{SessionEndEvent, SessionEndMonitor, session_is_ending};
 #[cfg(windows)]
@@ -494,6 +501,86 @@ mod tests {
         unsafe {
             let _ = SetErrorMode(original);
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod process_resource_contract_tests {
+    use std::time::Duration;
+
+    use super::{
+        ProcessNode, ProcessResourceSampler, ProcessResourceUsage, aggregate_resource_usage,
+        cpu_percent_between, descendant_process_ids,
+    };
+
+    #[test]
+    fn a_feature_row_aggregates_its_worker_and_descendant_runtime() {
+        let usage = aggregate_resource_usage(&[
+            ProcessResourceUsage {
+                cpu_percent: Some(12.5),
+                ram_bytes: 300,
+                gpu_percent: Some(35.0),
+                vram_bytes: Some(700),
+            },
+            ProcessResourceUsage {
+                cpu_percent: Some(7.5),
+                ram_bytes: 500,
+                gpu_percent: Some(80.0),
+                vram_bytes: Some(900),
+            },
+        ]);
+
+        assert_eq!(usage.cpu_percent, Some(20.0));
+        assert_eq!(usage.ram_bytes, 800);
+        assert_eq!(usage.gpu_percent, Some(100.0));
+        assert_eq!(usage.vram_bytes, Some(1_600));
+    }
+
+    #[test]
+    fn a_translation_group_includes_the_nested_llama_runtime_only() {
+        let processes = [
+            ProcessNode {
+                pid: 10,
+                parent_pid: 1,
+            },
+            ProcessNode {
+                pid: 11,
+                parent_pid: 10,
+            },
+            ProcessNode {
+                pid: 12,
+                parent_pid: 11,
+            },
+            ProcessNode {
+                pid: 20,
+                parent_pid: 1,
+            },
+        ];
+
+        assert_eq!(descendant_process_ids(10, &processes), vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn cpu_time_is_normalized_by_wall_time_and_logical_processors() {
+        assert_eq!(
+            cpu_percent_between(1_000_000, 3_000_000, Duration::from_secs(1), 4),
+            Some(5.0)
+        );
+        assert_eq!(
+            cpu_percent_between(3_000_000, 2_000_000, Duration::from_secs(1), 4),
+            None
+        );
+    }
+
+    #[test]
+    fn live_sampler_reports_the_current_process_working_set() {
+        let mut sampler = ProcessResourceSampler::new();
+        let groups = sampler
+            .sample_groups(&[std::process::id()])
+            .expect("sample current process");
+
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].ram_bytes > 0);
     }
 }
 

@@ -557,7 +557,7 @@ pub fn capture_selection(
     send_shortcut_copy: impl FnOnce() -> Result<(), ClipboardError>,
 ) -> Result<ClipboardCapture, ClipboardError> {
     let _apartment = ClipboardApartment::initialize()?;
-    let mut snapshot = ClipboardSnapshot::capture()?;
+    let snapshot = ClipboardSnapshot::capture()?;
     if !target_still_focused() {
         return Err(ClipboardError::TargetChanged);
     }
@@ -571,7 +571,7 @@ pub fn capture_selection(
     // normal keyboard command.
     if unsafe { GetClipboardSequenceNumber() } != original_sequence {
         match finish_copy_attempt(
-            &mut snapshot,
+            &snapshot,
             &target_still_focused,
             original_sequence,
             ClipboardCaptureMethod::WindowMessage,
@@ -594,7 +594,7 @@ pub fn capture_selection(
     let shortcut_sequence = unsafe { GetClipboardSequenceNumber() };
     send_shortcut_copy()?;
     finish_copy_attempt(
-        &mut snapshot,
+        &snapshot,
         &target_still_focused,
         shortcut_sequence,
         ClipboardCaptureMethod::Shortcut,
@@ -604,7 +604,7 @@ pub fn capture_selection(
 }
 
 fn finish_copy_attempt(
-    snapshot: &mut ClipboardSnapshot,
+    snapshot: &ClipboardSnapshot,
     target_still_focused: &impl Fn() -> bool,
     original_sequence: u32,
     method: ClipboardCaptureMethod,
@@ -647,7 +647,7 @@ fn finish_copy_attempt(
             } else if target_still_focused()
                 && unsafe { GetClipboardSequenceNumber() } == copied_sequence
             {
-                snapshot.restore()?;
+                let _ = snapshot.restore_if_current(copied_sequence)?;
             }
             Err(error)
         }
@@ -732,13 +732,14 @@ fn is_retryable_capture_error(error: &ClipboardError) -> bool {
 }
 
 fn restore_if_current(
-    snapshot: &mut ClipboardSnapshot,
+    snapshot: &ClipboardSnapshot,
     expected_sequence: u32,
-) -> Result<(), ClipboardError> {
-    if unsafe { GetClipboardSequenceNumber() } == expected_sequence {
-        snapshot.restore()?;
-    }
-    Ok(())
+) -> Result<bool, ClipboardError> {
+    snapshot.restore_if_current(expected_sequence)
+}
+
+fn clipboard_sequence_still_owned(expected_sequence: u32, current_sequence: u32) -> bool {
+    expected_sequence == current_sequence
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -785,29 +786,26 @@ pub fn dispatch_paste(
     if !target_still_focused() {
         return Err(ClipboardError::TargetChanged);
     }
-    let (mut snapshot, original_sequence) = ClipboardSnapshot::capture_consistent()?;
+    let (snapshot, original_sequence) = ClipboardSnapshot::capture_consistent()?;
     let target_window_handle = crate::inject::foreground_window_handle();
     let replacement_sequence = match host.publish(payload, target_process_id, target_window_handle)
     {
         Ok(sequence) => sequence,
         Err(error) => {
             if host.owns_clipboard() {
-                snapshot.restore()?;
+                let expected_sequence = unsafe { GetClipboardSequenceNumber() };
+                let _ = snapshot.restore_if_current(expected_sequence)?;
             }
             return Err(error);
         }
     };
 
     if !target_still_focused() {
-        if host.owns_clipboard() {
-            snapshot.restore()?;
-        }
+        let _ = snapshot.restore_if_current(replacement_sequence)?;
         return Err(ClipboardError::TargetChanged);
     }
     if let Err(error) = send_paste() {
-        if host.owns_clipboard() {
-            snapshot.restore()?;
-        }
+        let _ = snapshot.restore_if_current(replacement_sequence)?;
         return Err(error);
     }
 
@@ -818,41 +816,40 @@ pub fn dispatch_paste(
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
-            if host.owns_clipboard() {
-                snapshot.restore()?;
-            }
+            let _ = snapshot.restore_if_current(replacement_sequence)?;
             return Err(error);
         }
     };
     let disposition = match outcome {
-        ClipboardReadOutcome::TargetVerified if host.owns_clipboard() => {
-            snapshot.restore()?;
-            ClipboardPasteDisposition::VerifiedAndRestored
-        }
-        ClipboardReadOutcome::TargetVerified => ClipboardPasteDisposition::VerifiedAndSuperseded,
-        ClipboardReadOutcome::TargetRead if host.owns_clipboard() => {
-            snapshot.restore()?;
-            ClipboardPasteDisposition::PayloadReadAndRestored
+        ClipboardReadOutcome::TargetVerified => {
+            if snapshot.restore_if_current(replacement_sequence)? {
+                ClipboardPasteDisposition::VerifiedAndRestored
+            } else {
+                ClipboardPasteDisposition::VerifiedAndSuperseded
+            }
         }
         ClipboardReadOutcome::TargetRead => {
-            // A newer clipboard owner is user/external state. Never overwrite
-            // it merely to reconstruct our earlier snapshot.
-            ClipboardPasteDisposition::PayloadReadAndSuperseded
-        }
-        ClipboardReadOutcome::DispatchedUnverified if host.owns_clipboard() => {
-            snapshot.restore()?;
-            ClipboardPasteDisposition::DispatchedUnverifiedAndRestored
-        }
-        ClipboardReadOutcome::DispatchedUnverified => return Err(ClipboardError::Superseded),
-        ClipboardReadOutcome::TargetChanged => {
-            if host.owns_clipboard() {
-                snapshot.restore()?;
+            if snapshot.restore_if_current(replacement_sequence)? {
+                ClipboardPasteDisposition::PayloadReadAndRestored
+            } else {
+                // A newer clipboard owner is user/external state. Never overwrite
+                // it merely to reconstruct our earlier snapshot.
+                ClipboardPasteDisposition::PayloadReadAndSuperseded
             }
+        }
+        ClipboardReadOutcome::DispatchedUnverified => {
+            if snapshot.restore_if_current(replacement_sequence)? {
+                ClipboardPasteDisposition::DispatchedUnverifiedAndRestored
+            } else {
+                return Err(ClipboardError::Superseded);
+            }
+        }
+        ClipboardReadOutcome::TargetChanged => {
+            let _ = snapshot.restore_if_current(replacement_sequence)?;
             return Err(ClipboardError::TargetChanged);
         }
         ClipboardReadOutcome::TimedOut => {
-            if host.owns_clipboard() {
-                snapshot.restore()?;
+            if snapshot.restore_if_current(replacement_sequence)? {
                 return Err(ClipboardError::NotDelivered);
             }
             return Err(ClipboardError::Superseded);
@@ -951,19 +948,41 @@ impl ClipboardSnapshot {
         })
     }
 
-    fn restore(&mut self) -> Result<(), ClipboardError> {
+    fn prepare_restore(&self) -> Result<Vec<ClipboardFormatSnapshot>, ClipboardError> {
+        self.formats
+            .iter()
+            .map(|format| {
+                let duplicated =
+                    unsafe { OleDuplicateData(format.handle, format.format as u16, GMEM_MOVEABLE) };
+                if duplicated.is_null() {
+                    return Err(ClipboardError::Allocation);
+                }
+                Ok(ClipboardFormatSnapshot {
+                    format: format.format,
+                    handle: duplicated,
+                })
+            })
+            .collect()
+    }
+
+    fn restore_if_current(&self, expected_sequence: u32) -> Result<bool, ClipboardError> {
+        let mut formats = self.prepare_restore()?;
         with_open_clipboard(|| {
+            let current_sequence = unsafe { GetClipboardSequenceNumber() };
+            if !clipboard_sequence_still_owned(expected_sequence, current_sequence) {
+                return Ok(false);
+            }
             if unsafe { EmptyClipboard() } == 0 {
                 return Err(ClipboardError::Busy);
             }
-            for format in &mut self.formats {
+            for format in &mut formats {
                 let accepted = unsafe { SetClipboardData(format.format, format.handle) };
                 if accepted.is_null() {
                     return Err(ClipboardError::Allocation);
                 }
                 format.release_to_clipboard();
             }
-            Ok(())
+            Ok(true)
         })
     }
 }
@@ -994,8 +1013,21 @@ fn with_open_clipboard_owner<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardError, is_retryable_capture_error, is_transient_read_error, request_is_from_target,
+        ClipboardError, ClipboardFormatSnapshot, ClipboardSnapshot, GMEM_MOVEABLE, GlobalAlloc,
+        clipboard_sequence_still_owned, is_retryable_capture_error, is_transient_read_error,
+        request_is_from_target,
     };
+
+    #[test]
+    fn restore_is_rejected_when_sequence_changes_while_clipboard_open_retries() {
+        let sequence_before_open = 41;
+        let sequence_after_retry = 42;
+
+        assert!(!clipboard_sequence_still_owned(
+            sequence_before_open,
+            sequence_after_retry
+        ));
+    }
 
     #[test]
     fn delayed_rendering_errors_are_retryable() {
@@ -1021,5 +1053,25 @@ mod tests {
         assert!(request_is_from_target(42, 42, 0, 100));
         assert!(request_is_from_target(7, 42, 100, 100));
         assert!(!request_is_from_target(7, 42, 200, 100));
+    }
+
+    #[test]
+    fn a_snapshot_can_prepare_two_independent_restores() {
+        let original = unsafe { GlobalAlloc(GMEM_MOVEABLE, 32) };
+        assert!(!original.is_null());
+        let snapshot = ClipboardSnapshot {
+            formats: vec![ClipboardFormatSnapshot {
+                format: 13,
+                handle: original,
+            }],
+        };
+
+        let first = snapshot.prepare_restore().expect("first restore copy");
+        let second = snapshot.prepare_restore().expect("second restore copy");
+
+        assert_eq!(snapshot.formats[0].handle, original);
+        assert_ne!(first[0].handle, original);
+        assert_ne!(second[0].handle, original);
+        assert_ne!(first[0].handle, second[0].handle);
     }
 }

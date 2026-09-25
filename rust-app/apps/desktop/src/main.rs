@@ -13,7 +13,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 use base64::Engine as _;
 
 use preview_modes::{
@@ -30,27 +30,31 @@ use rust_app_core::{
     hotkeys::format_hotkey,
     provider_drafts::ProviderDraftStore,
 };
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 use rust_ocr_engine::reconstruct_text;
+#[cfg(feature = "screen-translation")]
+use rust_platform_windows::screen_capture::DesktopCaptureBackend as _;
 use rust_protocol::{
     BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, DictationLanguage,
     HistoryEntry, HotkeyAction, HotkeyBindings, HotkeyConfiguration, HotkeyRejection,
     InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION, PhysicalRect, RequestId,
     SessionId, SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot,
     TextActionIntent, Transcript, TranscriptionProviderEntry, TranscriptionProviderStatus,
-    TranslationHistoryEntry, TranslationLanguage, TranslationLanguagePolicy,
-    TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
-    TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
+    TranslationFailureKind, TranslationFailureReport, TranslationHistoryEntry, TranslationLanguage,
+    TranslationLanguagePolicy, TranslationModelSummary, TranslationProviderEntry,
+    TranslationProviderStatus, TranslationResult, TranslationTier, TranslationWorkerCommand,
+    TranslationWorkerEvent,
 };
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 use rust_protocol::{
     OcrFailureKind, OcrLanguagePolicy, OcrPixelFormat, OcrWorkerCommand, OcrWorkerEvent,
 };
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 use screen_translation::SelectionFailure;
 use screen_translation::{
     DesktopScreenSelectionCoordinator, DesktopSelectionEnvironment, ScreenSelectionCoordinator,
-    ScreenTranslationCancellation, ScreenTranslationFlow, SelectionTerminal,
+    ScreenTranslationBegin, ScreenTranslationCancellation, ScreenTranslationFlow,
+    SelectionTerminal,
 };
 use serde::{Deserialize, Serialize};
 use settings_document::{
@@ -72,12 +76,12 @@ use slint::{
     ComponentHandle, Image, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
 };
 use translation_view::{
-    TranslationPreviewRegistry, TranslationPreviewSlot, adaptive_text_panel_height,
-    apply_translation_preview_layout, apply_translation_preview_pin_state,
-    configure_slint_translation_resize, create_translation_preview_slot,
-    precreate_translation_preview, refresh_cloaked_translation_backdrop,
-    retire_translation_preview, set_translation_status, update_translation_preview_content,
-    wire_translation_preview,
+    StableParagraphStream, TranslationPreviewRegistry, TranslationPreviewSlot,
+    adaptive_text_panel_height, apply_translation_preview_layout,
+    apply_translation_preview_pin_state, configure_slint_translation_resize,
+    create_translation_preview_slot, precreate_translation_preview,
+    refresh_cloaked_translation_backdrop, retire_translation_preview, set_translation_status,
+    update_translation_preview_content, wire_translation_preview,
 };
 use visualizer::{
     BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, IndicatorAnimation,
@@ -96,6 +100,7 @@ mod overlay_presenter;
 mod preview_modes;
 mod providers_view;
 mod pulse_matrix;
+mod resource_view;
 mod screen_translation;
 mod settings_document;
 mod settings_preview;
@@ -108,7 +113,7 @@ mod translator_status;
 mod visualizer;
 mod worker_supervisor;
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 use localization::{ScreenTranslationOutcome, screen_translation_outcome_text};
 use localization::{UiLocale, UiText, active_locale, render, text};
 use overlay_presenter::{OverlayContract, OverlayPresenter};
@@ -203,7 +208,7 @@ enum RuntimeEvent {
         instance_id: u64,
     },
     Translation(TranslationWorkerEvent),
-    #[cfg(feature = "screen-translation-dev")]
+    #[cfg(feature = "screen-translation")]
     Ocr {
         instance_id: u64,
         event: OcrWorkerEvent,
@@ -218,9 +223,29 @@ enum RuntimeEvent {
         window_handle: u64,
         delta: i32,
     },
+    ConfirmQueuedModelInstall,
     ScreenSelectionPointer(rust_platform_windows::region_selection::PointerEvent),
     ScreenSelectionWatchdog {
         request_id: RequestId,
+    },
+    #[cfg(feature = "screen-translation")]
+    ScreenCapturePrepared {
+        request_id: RequestId,
+        result: Result<
+            rust_platform_windows::screen_capture::DesktopCapture,
+            rust_platform_windows::screen_capture::CaptureError,
+        >,
+    },
+    #[cfg(feature = "screen-translation")]
+    ScreenOcrPrepared {
+        request_id: RequestId,
+        rect: PhysicalRect,
+        result: Result<OcrWorkerCommand, rust_platform_windows::screen_capture::CaptureError>,
+    },
+    #[cfg(feature = "screen-translation")]
+    OcrWatchdog {
+        request_id: RequestId,
+        instance_id: u64,
     },
     SessionEnd(rust_platform_windows::SessionEndEvent),
     WorkerError {
@@ -240,7 +265,7 @@ enum WorkerKind {
     Input,
     Speech,
     Translation,
-    #[cfg(feature = "screen-translation-dev")]
+    #[cfg(feature = "screen-translation")]
     Ocr,
     Companion,
 }
@@ -266,6 +291,9 @@ struct RuntimeUi {
     indicator_animation: Rc<RefCell<IndicatorAnimation>>,
     screen_selection: Rc<RefCell<DesktopScreenSelectionCoordinator>>,
     screen_translation: Rc<RefCell<ScreenTranslationFlow>>,
+    #[cfg(feature = "screen-translation")]
+    screen_capture_backend:
+        Arc<rust_platform_windows::screen_capture::WindowsDesktopCaptureBackend>,
 }
 
 /// The recording HUD deliberately owns two native windows. A Winit/DWM
@@ -377,7 +405,7 @@ struct PendingTextAction {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "screen-translation-dev"), allow(dead_code))]
+#[cfg_attr(not(feature = "screen-translation"), allow(dead_code))]
 enum TranslationOrigin {
     Selection {
         target: TargetSnapshot,
@@ -392,9 +420,204 @@ enum TranslationOrigin {
 struct PendingTranslation {
     origin: TranslationOrigin,
     source_text: String,
+    source_language: Option<TranslationLanguage>,
+    target_language: Option<TranslationLanguage>,
+    language_policy: TranslationLanguagePolicy,
     started: Instant,
     request_started_unix_ms: u64,
     first_partial_shown: bool,
+    stable_paragraphs: Option<StableParagraphStream>,
+}
+
+struct QueuedModelTranslation {
+    catalog_id: String,
+    request_id: RequestId,
+    pending: PendingTranslation,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum QueuedModelMatch {
+    Request(RequestId),
+    Translator,
+}
+
+fn take_matching_queued_model_translation(
+    queued: &mut Option<QueuedModelTranslation>,
+    expected: QueuedModelMatch,
+) -> Option<QueuedModelTranslation> {
+    let matches = queued.as_ref().is_some_and(|candidate| match expected {
+        QueuedModelMatch::Request(request_id) => candidate.request_id == request_id,
+        QueuedModelMatch::Translator => {
+            matches!(candidate.pending.origin, TranslationOrigin::Translator)
+        }
+    });
+    matches.then(|| queued.take()).flatten()
+}
+
+pub(crate) fn discard_matching_queued_model_translation(
+    state: &Rc<RefCell<AppState>>,
+    expected: QueuedModelMatch,
+) -> Option<RequestId> {
+    let mut app = state.borrow_mut();
+    let queued =
+        take_matching_queued_model_translation(&mut app.queued_model_translation, expected)?;
+    app.selection_release_gates.remove(&queued.request_id);
+    Some(queued.request_id)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompactInstallOffer {
+    catalog_id: String,
+    display_name: String,
+    size_bytes: u64,
+}
+
+fn required_compact_install(
+    failure: &TranslationFailureReport,
+    models: &[TranslationModelSummary],
+    install_already_queued: bool,
+) -> Option<CompactInstallOffer> {
+    if install_already_queued || failure.kind != TranslationFailureKind::LocalModelMissing {
+        return None;
+    }
+    let catalog_id = failure.required_catalog_id.as_deref()?;
+    models
+        .iter()
+        .find(|model| {
+            model.catalog_id == catalog_id
+                && model.tier == TranslationTier::Compact
+                && !model.installed
+        })
+        .map(|model| CompactInstallOffer {
+            catalog_id: model.catalog_id.clone(),
+            display_name: model.display_name.clone(),
+            size_bytes: model.size_bytes,
+        })
+}
+
+fn pending_translation_command(
+    request_id: RequestId,
+    pending: &PendingTranslation,
+) -> TranslationWorkerCommand {
+    TranslationWorkerCommand::Translate {
+        request_id,
+        text: pending.source_text.clone(),
+        source_language: pending.source_language,
+        target_language: pending.target_language,
+        language_policy: pending.language_policy,
+    }
+}
+
+fn confirm_queued_model_install(runtime: &RuntimeUi) {
+    let Some((catalog_id, request_id, origin, source_text)) = runtime
+        .state
+        .borrow()
+        .queued_model_translation
+        .as_ref()
+        .map(|queued| {
+            (
+                queued.catalog_id.clone(),
+                queued.request_id,
+                queued.pending.origin,
+                queued.pending.source_text.clone(),
+            )
+        })
+    else {
+        return;
+    };
+
+    if let Err(error) = runtime
+        .workers
+        .translation
+        .send(&TranslationWorkerCommand::EnsureModel {
+            catalog_id: catalog_id.clone(),
+        })
+    {
+        runtime.state.borrow_mut().queued_model_translation = None;
+        runtime
+            .state
+            .borrow_mut()
+            .selection_release_gates
+            .remove(&request_id);
+        let message = state_message(
+            &runtime.state,
+            UiText::CouldNotStartTranslation,
+            &[("error", &error.to_string())],
+        );
+        match origin {
+            TranslationOrigin::Translator => {
+                if let Some(translator) = runtime.translator.upgrade() {
+                    translator.set_model_offer_visible(false);
+                    translator.set_processing(false);
+                    translator.set_presentation_state(4);
+                    translator.set_notice_headline(message.clone().into());
+                    translator.set_notice_detail("".into());
+                    translator.set_status_text(message.clone().into());
+                }
+            }
+            TranslationOrigin::Selection { target, .. } => {
+                show_selection_translation_preview(
+                    request_id,
+                    target,
+                    &source_text,
+                    &message,
+                    &runtime.translation_previews,
+                    true,
+                );
+            }
+            TranslationOrigin::ScreenRegion { anchor } => {
+                show_screen_translation_preview(
+                    request_id,
+                    anchor,
+                    &source_text,
+                    &message,
+                    &runtime.translation_previews,
+                    true,
+                );
+            }
+        }
+        set_status_problem(&runtime.settings, &message);
+        return;
+    }
+
+    let loading = state_text(&runtime.state, UiText::LocalTranslationLoading);
+    match origin {
+        TranslationOrigin::Translator => {
+            if let Some(translator) = runtime.translator.upgrade() {
+                translator.set_model_offer_visible(false);
+                translator.set_model_offer_action("".into());
+                translator.set_processing(true);
+                translator.set_presentation_state(1);
+                translator.set_notice_headline("".into());
+                translator.set_notice_detail("".into());
+                translator.set_status_text(loading.into());
+            }
+        }
+        TranslationOrigin::Selection {
+            target,
+            delivery: TranslationDelivery::Preview,
+        } => show_selection_translation_preview(
+            request_id,
+            target,
+            &source_text,
+            loading,
+            &runtime.translation_previews,
+            false,
+        ),
+        TranslationOrigin::Selection { .. } => {}
+        TranslationOrigin::ScreenRegion { anchor } => show_screen_translation_preview(
+            request_id,
+            anchor,
+            &source_text,
+            loading,
+            &runtime.translation_previews,
+            false,
+        ),
+    }
+    set_indicator_status(&runtime.settings, loading);
+    rust_app_core::diagnostics::log_line(&format!(
+        "translation_pipeline request={request_id} stage=installing_required_pack catalog_id={catalog_id} consent=explicit"
+    ));
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -418,7 +641,7 @@ struct SelectionTranslationRequest {
     target_language: Option<TranslationLanguage>,
 }
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 struct ScreenTranslationRequest {
     request_id: RequestId,
     anchor: PhysicalRect,
@@ -473,6 +696,10 @@ struct AppState {
     /// Whisper model that route will never reach.
     speech_worker_ready: bool,
     speech_ready: bool,
+    /// A user-requested memory release keeps the installed selection. The
+    /// next local dictation may therefore start the worker's lazy reload.
+    speech_reload_on_next_use: bool,
+    speech_unloading: bool,
     indicator_session: Option<SessionId>,
     active_visualizer_style: Option<VisualizerStyle>,
     release_started: HashMap<SessionId, Instant>,
@@ -480,11 +707,14 @@ struct AppState {
     pending_selection: Option<PendingSelection>,
     translation_models: Vec<TranslationModelSummary>,
     selected_translation_tier: Option<TranslationTier>,
+    selected_translation_model_id: Option<String>,
     translation_loaded_model_id: Option<String>,
     /// The translation process has completed its protocol handshake. Cloud
     /// text providers depend on this, not on whether a local model is warm.
     translation_worker_ready: bool,
     translation_ready: bool,
+    translation_reload_on_next_use: bool,
+    translation_unloading: bool,
     translation_enabled: bool,
     layout_enabled: bool,
     translation_keep_warm: bool,
@@ -499,8 +729,12 @@ struct AppState {
     pending_selection_captures: HashMap<RequestId, u64>,
     selection_release_gates: HashMap<RequestId, SelectionReleaseGate>,
     pending_translations: HashMap<RequestId, PendingTranslation>,
+    /// A user request that discovered its exact compact language pack was not
+    /// installed. The installer owns the model operation; this keeps the one
+    /// original request so it can resume without making the user click twice.
+    queued_model_translation: Option<QueuedModelTranslation>,
     queued_selection_translation: Option<SelectionTranslationRequest>,
-    #[cfg(feature = "screen-translation-dev")]
+    #[cfg(feature = "screen-translation")]
     queued_screen_translation: Option<ScreenTranslationRequest>,
     translation_history: Vec<TranslationHistoryEntry>,
     /// Installs in flight, by catalog id. The workers report progress for
@@ -590,6 +824,8 @@ impl AppState {
             input_paused: false,
             speech_worker_ready: false,
             speech_ready: false,
+            speech_reload_on_next_use: false,
+            speech_unloading: false,
             indicator_session: None,
             active_visualizer_style: None,
             release_started: HashMap::new(),
@@ -597,9 +833,12 @@ impl AppState {
             pending_selection: None,
             translation_models: Vec::new(),
             selected_translation_tier: saved_settings.selected_translation_tier,
+            selected_translation_model_id: saved_settings.selected_translation_model_id.clone(),
             translation_loaded_model_id: None,
             translation_worker_ready: false,
             translation_ready: false,
+            translation_reload_on_next_use: false,
+            translation_unloading: false,
             translation_enabled: saved_settings.translation_enabled,
             layout_enabled: saved_settings.layout_enabled,
             translation_keep_warm: saved_settings.translation_keep_warm,
@@ -612,8 +851,9 @@ impl AppState {
             pending_selection_captures: HashMap::new(),
             selection_release_gates: HashMap::new(),
             pending_translations: HashMap::new(),
+            queued_model_translation: None,
             queued_selection_translation: None,
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             queued_screen_translation: None,
             translation_history: Vec::new(),
             downloads: HashMap::new(),
@@ -690,6 +930,20 @@ impl AppState {
         }
     }
 
+    fn speech_path_can_start(&self) -> bool {
+        if self.speech_path_ready() {
+            return true;
+        }
+        let local_route = match self.first_transcription_provider() {
+            Some(status) => status.id == "local",
+            None => self.transcription_providers.is_empty(),
+        };
+        local_route
+            && self.speech_worker_ready
+            && self.speech_reload_on_next_use
+            && !self.speech_unloading
+    }
+
     fn speech_waits_for_local(&self) -> bool {
         match self.first_transcription_provider() {
             Some(status) => status.id == "local" && !self.speech_ready,
@@ -711,6 +965,25 @@ impl AppState {
             Some(_) => self.translation_worker_ready,
             None => self.translation_providers.is_empty() && self.translation_ready,
         }
+    }
+
+    fn translation_path_can_start(&self) -> bool {
+        if self.translation_path_ready() {
+            return true;
+        }
+        let local_route = match self
+            .translation_providers
+            .iter()
+            .filter(|status| status.enabled && status.available)
+            .min_by_key(|status| status.position)
+        {
+            Some(status) => status.id == "local",
+            None => self.translation_providers.is_empty(),
+        };
+        local_route
+            && self.translation_worker_ready
+            && self.translation_reload_on_next_use
+            && !self.translation_unloading
     }
 
     fn translation_waits_for_local(&self) -> bool {
@@ -991,25 +1264,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         speech_backends,
         translation_child,
         translation,
-        #[cfg(feature = "screen-translation-dev")]
-        ocr_child,
-        #[cfg(feature = "screen-translation-dev")]
-        ocr,
     } = initial_workers;
     let workers = Rc::new(Workers {
         _job: worker_job,
         input,
         speech,
         translation,
-        #[cfg(feature = "screen-translation-dev")]
-        ocr,
+        #[cfg(feature = "screen-translation")]
+        ocr: RefCell::new(None),
         input_child: RefCell::new(input_child),
         speech_child: RefCell::new(speech_child),
         speech_backends: RefCell::new(speech_backends),
         translation_child: RefCell::new(translation_child),
-        #[cfg(feature = "screen-translation-dev")]
-        ocr_child: RefCell::new(ocr_child),
-        #[cfg(feature = "screen-translation-dev")]
+        #[cfg(feature = "screen-translation")]
+        ocr_child: RefCell::new(None),
+        #[cfg(feature = "screen-translation")]
         active_ocr_request: RefCell::new(None),
         companion: RefCell::new(None),
         companion_child: RefCell::new(None),
@@ -1074,6 +1343,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     workers
         .translation
         .send(&TranslationWorkerCommand::Initialize {
+            selected_catalog_id: saved_settings.selected_translation_model_id.clone(),
             selected_tier: saved_settings.selected_translation_tier,
             keep_warm: saved_settings.translation_keep_warm,
             history_enabled: saved_settings.history_enabled,
@@ -1130,6 +1400,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &recording_overlays,
         &indicator_animation,
     );
+    let resource_timer = resource_view::wire_resources(&settings, &state, &workers);
     wire_tray(&tray, &settings, &translator, &state, &workers);
     wire_chooser(&chooser, &chooser_presenter, &state, &workers);
     wire_action_palette(
@@ -1148,6 +1419,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         DesktopSelectionEnvironment::new(Rc::clone(&workers)),
     )));
     let screen_translation = Rc::new(RefCell::new(ScreenTranslationFlow::default()));
+    #[cfg(feature = "screen-translation")]
+    let screen_capture_backend =
+        Arc::new(rust_platform_windows::screen_capture::WindowsDesktopCaptureBackend::default());
     install_runtime_handler(RuntimeUi {
         settings: settings.as_weak(),
         recording_overlays: recording_overlays.clone(),
@@ -1162,6 +1436,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         indicator_animation: Rc::clone(&indicator_animation),
         screen_selection,
         screen_translation,
+        #[cfg(feature = "screen-translation")]
+        screen_capture_backend,
     });
     session_event_router.attach_runtime();
     let _popup_dismiss_monitor = match rust_platform_windows::PopupDismissMonitor::start(
@@ -1204,6 +1480,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     tray.show()?;
     slint::run_event_loop()?;
     animation_timer.stop();
+    resource_timer.stop();
     UI_EVENT_HANDLER.with(|handler| {
         handler.borrow_mut().take();
     });
@@ -1306,6 +1583,78 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 handle_screen_selection_terminal(terminal, runtime);
             }
         }
+        #[cfg(feature = "screen-translation")]
+        RuntimeEvent::ScreenCapturePrepared { request_id, result } => {
+            if !runtime.screen_translation.borrow().is_selecting(request_id) {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "screen_translation request={request_id} stage=capture result=stale_ignored"
+                ));
+                return;
+            }
+            let present_started = Instant::now();
+            let terminal = match result {
+                Ok(capture) => runtime
+                    .screen_selection
+                    .borrow_mut()
+                    .begin_with_capture(request_id, capture),
+                Err(error) => Some(SelectionTerminal::Failed {
+                    request_id,
+                    error: SelectionFailure::Capture(error),
+                }),
+            };
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=overlay_present duration_ms={}",
+                present_started.elapsed().as_millis()
+            ));
+            if let Some(terminal) = terminal {
+                handle_screen_selection_terminal(terminal, runtime);
+            }
+        }
+        #[cfg(feature = "screen-translation")]
+        RuntimeEvent::ScreenOcrPrepared {
+            request_id,
+            rect,
+            result,
+        } => handle_prepared_screen_ocr(request_id, rect, result, runtime),
+        #[cfg(feature = "screen-translation")]
+        RuntimeEvent::OcrWatchdog {
+            request_id,
+            instance_id,
+        } => match runtime
+            .workers
+            .terminate_stalled_ocr(request_id, instance_id)
+        {
+            Ok(true) => {
+                if let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) {
+                    show_screen_translation_outcome(
+                        request_id,
+                        Some(anchor),
+                        ScreenTranslationOutcome::WorkerFailed,
+                        runtime,
+                    );
+                }
+                rust_app_core::diagnostics::log_line(&format!(
+                    "ocr_worker request={request_id} outcome=failed kind=timeout action=terminated"
+                ));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                if runtime.workers.complete_ocr_request(request_id)
+                    && let Some(anchor) =
+                        runtime.screen_translation.borrow_mut().complete(request_id)
+                {
+                    show_screen_translation_outcome(
+                        request_id,
+                        Some(anchor),
+                        ScreenTranslationOutcome::WorkerFailed,
+                        runtime,
+                    );
+                }
+                rust_app_core::diagnostics::log_line(&format!(
+                    "ocr_worker request={request_id} outcome=failed kind=timeout action=terminate_failed error={error}"
+                ));
+            }
+        },
         RuntimeEvent::Speech { instance_id, event } => {
             if !runtime
                 .workers
@@ -1356,7 +1705,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 &runtime.screen_translation,
             );
         }
-        #[cfg(feature = "screen-translation-dev")]
+        #[cfg(feature = "screen-translation")]
         RuntimeEvent::Ocr { instance_id, event } => {
             if !runtime
                 .workers
@@ -1440,6 +1789,17 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                             runtime.screen_translation.borrow_mut().close(request_id)
                     {
                         apply_screen_translation_cancellation(cancellation, runtime);
+                    }
+                    if let Some(request_id) = request_id
+                        && discard_matching_queued_model_translation(
+                            &runtime.state,
+                            QueuedModelMatch::Request(request_id),
+                        )
+                        .is_some()
+                    {
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "translation_pipeline request={request_id} stage=required_pack_consent outcome=dismissed"
+                        ));
                     }
                     runtime.translation_previews.borrow_mut().current_request = None;
                 } else {
@@ -1554,6 +1914,9 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 slot.preview.invoke_scroll_by(delta as f32);
             }
         }
+        RuntimeEvent::ConfirmQueuedModelInstall => {
+            confirm_queued_model_install(runtime);
+        }
         RuntimeEvent::SessionEnd(event) => {
             handle_session_end(event, runtime);
         }
@@ -1575,7 +1938,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 set_indicator_status(&runtime.settings, &message);
                 return;
             }
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             if kind == WorkerKind::Ocr {
                 rust_app_core::diagnostics::log_line(&format!(
                     "ocr_worker instance={instance_id} event_stream=invalid message={message}"
@@ -1605,7 +1968,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             let owner = match kind {
                 WorkerKind::Speech => Some(providers_view::Kind::Speech),
                 WorkerKind::Translation => Some(providers_view::Kind::Text),
-                #[cfg(feature = "screen-translation-dev")]
+                #[cfg(feature = "screen-translation")]
                 WorkerKind::Ocr => None,
                 _ => None,
             };
@@ -1732,7 +2095,7 @@ fn handle_worker_exit(
         return;
     }
 
-    #[cfg(feature = "screen-translation-dev")]
+    #[cfg(feature = "screen-translation")]
     if kind == WorkerKind::Ocr {
         if let Some(request_id) = runtime.workers.abandon_active_ocr_request() {
             if let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) {
@@ -1799,7 +2162,7 @@ fn handle_worker_exit(
                 state.translation_ready = false;
                 state.pending_translations.clear();
             }
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             WorkerKind::Ocr => {}
             WorkerKind::Companion => {}
         }
@@ -1861,13 +2224,14 @@ fn handle_worker_exit(
                         .workers
                         .translation
                         .send(&TranslationWorkerCommand::Initialize {
+                            selected_catalog_id: state.selected_translation_model_id.clone(),
                             selected_tier: state.selected_translation_tier,
                             keep_warm: state.translation_keep_warm,
                             history_enabled: state.history_enabled,
                             prepare_local_model: state.local_translation_enabled(),
                         })
                 }
-                #[cfg(feature = "screen-translation-dev")]
+                #[cfg(feature = "screen-translation")]
                 WorkerKind::Ocr => Ok(()),
                 WorkerKind::Companion => Ok(()),
             };
@@ -1933,14 +2297,14 @@ fn apply_screen_translation_cancellation(
 ) {
     match cancellation {
         ScreenTranslationCancellation::Ocr(request_id) => {
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             {
                 let _ = runtime
                     .workers
                     .send_ocr(&OcrWorkerCommand::Cancel { request_id });
                 runtime.workers.complete_ocr_request(request_id);
             }
-            #[cfg(not(feature = "screen-translation-dev"))]
+            #[cfg(not(feature = "screen-translation"))]
             let _ = request_id;
         }
         ScreenTranslationCancellation::Translation(request_id) => {
@@ -1950,7 +2314,7 @@ fn apply_screen_translation_cancellation(
                 .send(&TranslationWorkerCommand::Cancel { request_id });
             let mut state = runtime.state.borrow_mut();
             state.pending_translations.remove(&request_id);
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             if state
                 .queued_screen_translation
                 .as_ref()
@@ -1962,7 +2326,7 @@ fn apply_screen_translation_cancellation(
     }
 }
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 fn screen_outcome_for_capture_error(
     error: &rust_platform_windows::screen_capture::CaptureError,
 ) -> ScreenTranslationOutcome {
@@ -1989,9 +2353,9 @@ fn handle_screen_selection_terminal(terminal: SelectionTerminal, runtime: &Runti
                 "screen_translation request={request_id} stage=selected x={} y={} width={} height={}",
                 rect.x, rect.y, rect.width, rect.height
             ));
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             dispatch_screen_capture_to_ocr(request_id, rect, capture, runtime);
-            #[cfg(not(feature = "screen-translation-dev"))]
+            #[cfg(not(feature = "screen-translation"))]
             {
                 let _ = capture;
                 runtime.screen_translation.borrow_mut().complete(request_id);
@@ -2007,7 +2371,7 @@ fn handle_screen_selection_terminal(terminal: SelectionTerminal, runtime: &Runti
         }
         SelectionTerminal::Failed { request_id, error } => {
             runtime.screen_translation.borrow_mut().complete(request_id);
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             {
                 let outcome = match &error {
                     SelectionFailure::Capture(error) => screen_outcome_for_capture_error(error),
@@ -2023,7 +2387,7 @@ fn handle_screen_selection_terminal(terminal: SelectionTerminal, runtime: &Runti
     }
 }
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 fn dispatch_screen_capture_to_ocr(
     request_id: RequestId,
     rect: PhysicalRect,
@@ -2040,15 +2404,6 @@ fn dispatch_screen_capture_to_ocr(
         ));
         return;
     }
-    let frame = match capture.crop(rect) {
-        Ok(frame) => frame,
-        Err(error) => {
-            runtime.screen_translation.borrow_mut().complete(request_id);
-            let outcome = screen_outcome_for_capture_error(&error);
-            show_screen_translation_outcome(request_id, Some(rect), outcome, runtime);
-            return;
-        }
-    };
     runtime
         .translation_previews
         .borrow_mut()
@@ -2068,14 +2423,69 @@ fn dispatch_screen_capture_to_ocr(
             state.translation_secondary_language.code().to_owned(),
         ])
     };
-    let command = OcrWorkerCommand::Recognize {
-        request_id,
-        width: frame.rect.width,
-        height: frame.rect.height,
-        stride: frame.stride,
-        pixel_format: OcrPixelFormat::Rgba8,
-        language_policy,
-        rgba_base64: base64::engine::general_purpose::STANDARD.encode(&frame.pixels),
+    let spawn = std::thread::Builder::new()
+        .name(format!("screen-ocr-prepare-{request_id}"))
+        .spawn(move || {
+            let prepare_started = Instant::now();
+            let result = capture.crop(rect).map(|frame| OcrWorkerCommand::Recognize {
+                request_id,
+                width: frame.rect.width,
+                height: frame.rect.height,
+                stride: frame.stride,
+                pixel_format: OcrPixelFormat::Rgba8,
+                language_policy,
+                rgba_base64: base64::engine::general_purpose::STANDARD.encode(&frame.pixels),
+            });
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=ocr_prepare duration_ms={} result={}",
+                prepare_started.elapsed().as_millis(),
+                if result.is_ok() { "ready" } else { "failed" }
+            ));
+            dispatch_runtime_event(RuntimeEvent::ScreenOcrPrepared {
+                request_id,
+                rect,
+                result,
+            });
+        });
+    if let Err(error) = spawn {
+        runtime.screen_translation.borrow_mut().complete(request_id);
+        show_screen_translation_outcome(
+            request_id,
+            Some(rect),
+            ScreenTranslationOutcome::WorkerFailed,
+            runtime,
+        );
+        rust_app_core::diagnostics::log_line(&format!(
+            "screen_translation request={request_id} stage=ocr_prepare result=thread_failed error={error}"
+        ));
+    }
+}
+
+#[cfg(feature = "screen-translation")]
+fn handle_prepared_screen_ocr(
+    request_id: RequestId,
+    rect: PhysicalRect,
+    result: Result<OcrWorkerCommand, rust_platform_windows::screen_capture::CaptureError>,
+    runtime: &RuntimeUi,
+) {
+    if !runtime
+        .screen_translation
+        .borrow()
+        .is_recognizing(request_id)
+    {
+        rust_app_core::diagnostics::log_line(&format!(
+            "screen_translation request={request_id} stage=ocr_prepare result=stale_ignored"
+        ));
+        return;
+    }
+    let command = match result {
+        Ok(command) => command,
+        Err(error) => {
+            runtime.screen_translation.borrow_mut().complete(request_id);
+            let outcome = screen_outcome_for_capture_error(&error);
+            show_screen_translation_outcome(request_id, Some(rect), outcome, runtime);
+            return;
+        }
     };
     if runtime.workers.send_ocr(&command).is_err() {
         runtime.screen_translation.borrow_mut().complete(request_id);
@@ -2085,19 +2495,36 @@ fn dispatch_screen_capture_to_ocr(
             ScreenTranslationOutcome::WorkerFailed,
             runtime,
         );
-    } else {
-        rust_app_core::diagnostics::log_line(&format!(
-            "screen_translation request={request_id} stage=ocr_dispatched width={} height={}",
-            rect.width, rect.height
-        ));
+        return;
     }
+    let Some(instance_id) = runtime.workers.current_ocr_instance_id() else {
+        runtime.workers.complete_ocr_request(request_id);
+        runtime.screen_translation.borrow_mut().complete(request_id);
+        show_screen_translation_outcome(
+            request_id,
+            Some(rect),
+            ScreenTranslationOutcome::WorkerFailed,
+            runtime,
+        );
+        return;
+    };
+    Timer::single_shot(std::time::Duration::from_secs(30), move || {
+        dispatch_runtime_event(RuntimeEvent::OcrWatchdog {
+            request_id,
+            instance_id,
+        });
+    });
+    rust_app_core::diagnostics::log_line(&format!(
+        "screen_translation request={request_id} stage=ocr_dispatched width={} height={}",
+        rect.width, rect.height
+    ));
     // `JsonWriter::send` serializes synchronously. The owned frame, crop, and
     // command drop here; only the transient pipe payload may remain until the
     // writer flushes it. Pixels never reach history, clipboard, diagnostics,
     // or a temporary file.
 }
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 fn handle_ocr_event(event: OcrWorkerEvent, runtime: &RuntimeUi) {
     match event {
         OcrWorkerEvent::Ready {
@@ -2202,7 +2629,7 @@ fn handle_ocr_event(event: OcrWorkerEvent, runtime: &RuntimeUi) {
     }
 }
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 fn show_screen_translation_outcome(
     request_id: RequestId,
     anchor: Option<PhysicalRect>,
@@ -2232,7 +2659,7 @@ fn show_screen_translation_outcome(
     set_status_problem(&runtime.settings, message);
 }
 
-#[cfg(feature = "screen-translation-dev")]
+#[cfg(feature = "screen-translation")]
 fn begin_screen_translation(
     request: ScreenTranslationRequest,
     settings: &slint::Weak<SettingsWindow>,
@@ -2249,13 +2676,24 @@ fn begin_screen_translation(
         source_language,
         target_language,
     } = request;
-    let (enabled, selected_tier, path_ready, waits_for_local) = {
+    let (
+        enabled,
+        selected_tier,
+        selected_catalog_id,
+        path_ready,
+        waits_for_local,
+        reload_on_next_use,
+        keep_warm,
+    ) = {
         let state = state.borrow();
         (
             state.translation_enabled,
             state.selected_translation_tier,
-            state.translation_path_ready(),
+            state.selected_translation_model_id.clone(),
+            state.translation_path_can_start(),
             state.translation_waits_for_local(),
+            state.translation_reload_on_next_use,
+            state.translation_keep_warm,
         )
     };
     if !enabled {
@@ -2291,6 +2729,32 @@ fn begin_screen_translation(
             source_language,
             target_language,
         });
+        if reload_on_next_use
+            && let Some(catalog_id) = selected_catalog_id
+            && let Err(error) = workers
+                .translation
+                .send(&TranslationWorkerCommand::SelectModel {
+                    catalog_id,
+                    keep_warm,
+                })
+        {
+            state.borrow_mut().queued_screen_translation = None;
+            screen_translation.borrow_mut().complete(request_id);
+            let message = state_message(
+                state,
+                UiText::CouldNotStartTranslation,
+                &[("error", &error.to_string())],
+            );
+            show_screen_translation_preview(
+                request_id,
+                anchor,
+                &text,
+                &message,
+                translation_previews,
+                true,
+            );
+            return;
+        }
         show_screen_translation_preview(
             request_id,
             anchor,
@@ -2302,16 +2766,6 @@ fn begin_screen_translation(
         return;
     }
 
-    state.borrow_mut().pending_translations.insert(
-        request_id,
-        PendingTranslation {
-            origin: TranslationOrigin::ScreenRegion { anchor },
-            source_text: text.clone(),
-            started: Instant::now(),
-            request_started_unix_ms,
-            first_partial_shown: false,
-        },
-    );
     let policy = {
         let state = state.borrow();
         TranslationLanguagePolicy {
@@ -2319,6 +2773,21 @@ fn begin_screen_translation(
             secondary: state.translation_secondary_language,
         }
     };
+    state.borrow_mut().pending_translations.insert(
+        request_id,
+        PendingTranslation {
+            origin: TranslationOrigin::ScreenRegion { anchor },
+            source_text: text.clone(),
+            source_language,
+            target_language,
+            language_policy: policy,
+            started: Instant::now(),
+            request_started_unix_ms,
+            first_partial_shown: false,
+            stable_paragraphs: Some(StableParagraphStream::default()),
+        },
+    );
+    show_screen_translation_preview(request_id, anchor, &text, "", translation_previews, false);
     let command = TranslationWorkerCommand::Translate {
         request_id,
         text,
@@ -2385,10 +2854,21 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 set_indicator_status(settings, state_text(state, UiText::InputProtocolMismatch));
             }
         }
+        #[cfg(feature = "screen-translation")]
         InputHostEvent::ScreenCaptureRequested { request_id } => {
             rust_app_core::diagnostics::log_line(&format!(
                 "screen_translation request={request_id} stage=requested"
             ));
+            let begin = runtime.screen_translation.borrow_mut().begin(request_id);
+            let ScreenTranslationBegin::Started(cancellation) = begin else {
+                let ScreenTranslationBegin::AlreadySelecting { active_request_id } = begin else {
+                    unreachable!()
+                };
+                rust_app_core::diagnostics::log_line(&format!(
+                    "screen_translation request={request_id} stage=requested result=already_selecting_ignored active_request={active_request_id}"
+                ));
+                return;
+            };
             let old_request = runtime.translation_previews.borrow().current_request;
             if old_request.is_some_and(|old_request| {
                 runtime
@@ -2401,19 +2881,61 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 retire_translation_preview(&slot, "new_screen_translation");
                 runtime.translation_previews.borrow_mut().current_request = None;
             }
-            if let Some(cancellation) = runtime.screen_translation.borrow_mut().begin(request_id) {
+            if let Some(cancellation) = cancellation {
                 apply_screen_translation_cancellation(cancellation, runtime);
             }
-            let terminal = runtime.screen_selection.borrow_mut().begin(request_id);
-            if let Some(terminal) = terminal {
-                handle_screen_selection_terminal(terminal, runtime);
+            let capture_backend = Arc::clone(&runtime.screen_capture_backend);
+            let spawn = std::thread::Builder::new()
+                .name(format!("screen-capture-{request_id}"))
+                .spawn(move || {
+                    let capture_started = Instant::now();
+                    let result = capture_backend.capture();
+                    match &result {
+                        Ok(capture) => rust_app_core::diagnostics::log_line(&format!(
+                            "screen_translation request={request_id} stage=capture duration_ms={} backend={} outputs={}",
+                            capture_started.elapsed().as_millis(),
+                            match capture.backend() {
+                                rust_platform_windows::screen_capture::CaptureBackendKind::Primary => "dxgi",
+                                rust_platform_windows::screen_capture::CaptureBackendKind::Fallback => "gdi",
+                                rust_platform_windows::screen_capture::CaptureBackendKind::Unknown => "unknown",
+                            },
+                            capture.output_bounds().len()
+                        )),
+                        Err(error) => rust_app_core::diagnostics::log_line(&format!(
+                            "screen_translation request={request_id} stage=capture duration_ms={} result=failed error={error}",
+                            capture_started.elapsed().as_millis()
+                        )),
+                    }
+                    dispatch_runtime_event(RuntimeEvent::ScreenCapturePrepared {
+                        request_id,
+                        result,
+                    });
+                });
+            if let Err(error) = spawn {
+                runtime.screen_translation.borrow_mut().complete(request_id);
+                show_screen_translation_outcome(
+                    request_id,
+                    None,
+                    ScreenTranslationOutcome::CaptureUnavailable,
+                    runtime,
+                );
+                rust_app_core::diagnostics::log_line(&format!(
+                    "screen_translation request={request_id} stage=capture result=thread_failed error={error}"
+                ));
             }
+        }
+        #[cfg(not(feature = "screen-translation"))]
+        InputHostEvent::ScreenCaptureRequested { request_id } => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=requested result=feature_unavailable"
+            ));
         }
         InputHostEvent::ScreenCaptureCancelled { request_id } => {
             let terminal = runtime.screen_selection.borrow_mut().cancel(request_id);
             if let Some(terminal) = terminal {
                 handle_screen_selection_terminal(terminal, runtime);
             } else {
+                runtime.screen_translation.borrow_mut().close(request_id);
                 rust_app_core::diagnostics::log_line(&format!(
                     "screen_translation request={request_id} stage=stale_cancel_ignored"
                 ));
@@ -2503,7 +3025,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             let (path_ready, worker_ready, waits_for_local) = {
                 let state = state.borrow();
                 (
-                    state.speech_path_ready(),
+                    state.speech_path_can_start(),
                     state.speech_worker_ready,
                     state.speech_waits_for_local(),
                 )
@@ -3213,13 +3735,24 @@ fn begin_selection_translation(
         source_language,
         target_language,
     } = request;
-    let (enabled, selected_tier, path_ready, waits_for_local) = {
+    let (
+        enabled,
+        selected_tier,
+        selected_catalog_id,
+        path_ready,
+        waits_for_local,
+        reload_on_next_use,
+        keep_warm,
+    ) = {
         let state = state.borrow();
         (
             state.translation_enabled,
             state.selected_translation_tier,
-            state.translation_path_ready(),
+            state.selected_translation_model_id.clone(),
+            state.translation_path_can_start(),
             state.translation_waits_for_local(),
+            state.translation_reload_on_next_use,
+            state.translation_keep_warm,
         )
     };
     if !enabled {
@@ -3255,6 +3788,30 @@ reason=translation_disabled"
             source_language,
             target_language,
         });
+        if reload_on_next_use
+            && let Some(catalog_id) = selected_catalog_id
+            && let Err(error) = workers
+                .translation
+                .send(&TranslationWorkerCommand::SelectModel {
+                    catalog_id,
+                    keep_warm,
+                })
+        {
+            state.borrow_mut().queued_selection_translation = None;
+            state
+                .borrow_mut()
+                .selection_release_gates
+                .remove(&request_id);
+            set_status_problem(
+                settings,
+                &state_message(
+                    state,
+                    UiText::CouldNotStartTranslation,
+                    &[("error", &error.to_string())],
+                ),
+            );
+            return;
+        }
         set_indicator_status(settings, state_text(state, UiText::LocalTranslationLoading));
         rust_app_core::diagnostics::log_line(&format!(
             "translation_pipeline request={request_id} stage=queued reason=model_loading"
@@ -3268,14 +3825,22 @@ reason=translation_disabled"
             .reserve_current(request_id);
     }
 
+    let language_policy = TranslationLanguagePolicy {
+        primary: state.borrow().translation_primary_language,
+        secondary: state.borrow().translation_secondary_language,
+    };
     state.borrow_mut().pending_translations.insert(
         request_id,
         PendingTranslation {
             origin: TranslationOrigin::Selection { target, delivery },
             source_text: text.clone(),
+            source_language,
+            target_language,
+            language_policy,
             started: Instant::now(),
             request_started_unix_ms,
             first_partial_shown: false,
+            stable_paragraphs: None,
         },
     );
     if let Err(error) = workers
@@ -3285,10 +3850,7 @@ reason=translation_disabled"
             text,
             source_language,
             target_language,
-            language_policy: TranslationLanguagePolicy {
-                primary: state.borrow().translation_primary_language,
-                secondary: state.borrow().translation_secondary_language,
-            },
+            language_policy,
         })
     {
         let mut app = state.borrow_mut();
@@ -3373,7 +3935,10 @@ fn show_translation_preview_at(
     let translation_preview_presenter = &slot.presenter;
     let request_id_text = request_id.to_string();
     let first_show = preview.get_request_id().as_str() != request_id_text;
+    preview.set_model_offer_visible(false);
+    preview.set_model_offer_action("".into());
     preview.set_pin_enabled(final_update);
+    preview.set_processing(!final_update);
     if first_show {
         preview.set_request_id(request_id_text.into());
         match anchor {
@@ -3661,6 +4226,10 @@ fn handle_speech_event(
                 let mut app = state.borrow_mut();
                 app.speech_loaded_model_id = loaded.then_some(catalog_id).flatten();
                 app.speech_ready = loaded && app.local_speech_enabled();
+                app.speech_unloading = false;
+                if loaded {
+                    app.speech_reload_on_next_use = false;
+                }
             }
             sync_models(settings, state);
             sync_action_settings(settings, state);
@@ -3677,6 +4246,8 @@ fn handle_speech_event(
                 if app.speech_loaded_model_id.as_deref() == Some(catalog_id.as_str()) {
                     app.speech_loaded_model_id = None;
                     app.speech_ready = false;
+                    app.speech_reload_on_next_use = false;
+                    app.speech_unloading = false;
                 }
             }
             sync_models(settings, state);
@@ -3772,6 +4343,8 @@ fn handle_speech_event(
                 }
                 if catalog_id == state.selected_model_id {
                     state.speech_ready = true;
+                    state.speech_reload_on_next_use = false;
+                    state.speech_unloading = false;
                 }
             }
             sync_models(settings, state);
@@ -4092,6 +4665,12 @@ delivery={} target_pid={}",
             message,
             retryable,
         } => {
+            if session_id.is_none() && code == "model_busy" && state.borrow().speech_unloading {
+                let mut state = state.borrow_mut();
+                state.speech_unloading = false;
+                state.speech_reload_on_next_use = false;
+                state.speech_ready = state.speech_loaded_model_id.is_some();
+            }
             if matches!(
                 code.as_str(),
                 "model_remove" | "model_busy" | "model_in_use"
@@ -4206,6 +4785,7 @@ fn handle_translation_event(
     match event {
         TranslationWorkerEvent::Ready {
             protocol_version,
+            selected_catalog_id,
             selected_tier,
             models,
         } => {
@@ -4219,21 +4799,26 @@ fn handle_translation_event(
             }
             let installed_models = models.iter().filter(|model| model.installed).count();
             rust_app_core::diagnostics::log_line(&format!(
-                "translation_worker state=ready selected_tier={selected_tier:?} installed_models={installed_models}"
+                "translation_worker state=ready selected_catalog_id={selected_catalog_id:?} selected_tier={selected_tier:?} installed_models={installed_models}"
             ));
             let recovered_selection = {
                 let mut state = state.borrow_mut();
-                let previous = state.selected_translation_tier;
+                let previous = (
+                    state.selected_translation_model_id.clone(),
+                    state.selected_translation_tier,
+                );
                 state.translation_worker_ready = true;
                 state.translation_models = models;
+                state.selected_translation_model_id = selected_catalog_id.clone();
                 state.selected_translation_tier = selected_tier;
                 state.translation_ready = false;
-                previous != selected_tier && selected_tier.is_some()
+                previous != (selected_catalog_id.clone(), selected_tier)
+                    && selected_catalog_id.is_some()
             };
             if recovered_selection {
                 let _ = save_settings(&state.borrow());
                 rust_app_core::diagnostics::log_line(&format!(
-                    "translation_model selection=recovered tier={selected_tier:?}"
+                    "translation_model selection=recovered catalog_id={selected_catalog_id:?} tier={selected_tier:?}"
                 ));
             }
             sync_translation_models(settings, state);
@@ -4296,12 +4881,13 @@ fn handle_translation_event(
             finish_download(state, &catalog_id);
             {
                 let mut state = state.borrow_mut();
+                state.selected_translation_model_id = Some(catalog_id.clone());
                 state.selected_translation_tier = Some(tier);
                 for model in &mut state.translation_models {
                     if model.catalog_id == catalog_id {
                         model.installed = true;
                     }
-                    model.selected = model.tier == tier;
+                    model.selected = model.catalog_id == catalog_id;
                 }
             }
             let _ = save_settings(&state.borrow());
@@ -4313,6 +4899,10 @@ fn handle_translation_event(
                 let mut app = state.borrow_mut();
                 app.translation_loaded_model_id = loaded.then_some(catalog_id).flatten();
                 app.translation_ready = loaded && app.local_translation_enabled();
+                app.translation_unloading = false;
+                if loaded {
+                    app.translation_reload_on_next_use = false;
+                }
             }
             sync_translation_models(settings, state);
             sync_action_settings(settings, state);
@@ -4330,6 +4920,8 @@ fn handle_translation_event(
                 if app.translation_loaded_model_id.as_deref() == Some(catalog_id.as_str()) {
                     app.translation_loaded_model_id = None;
                     app.translation_ready = false;
+                    app.translation_reload_on_next_use = false;
+                    app.translation_unloading = false;
                 }
             }
             sync_translation_models(settings, state);
@@ -4355,7 +4947,7 @@ fn handle_translation_event(
                     let mut state = state.borrow_mut();
                     state.translation_ready = false;
                     for model in &mut state.translation_models {
-                        model.selected = model.tier == tier;
+                        model.selected = model.catalog_id == catalog_id;
                         if model.catalog_id == catalog_id {
                             model.installed = true;
                         }
@@ -4375,19 +4967,32 @@ fn handle_translation_event(
             rust_app_core::diagnostics::log_line(&format!(
                 "translation_model state=ready catalog_id={catalog_id} tier={tier:?} load_ms={load_duration_ms}"
             ));
-            let queued_selection_translation = {
+            let (queued_selection_translation, queued_model_translation) = {
                 let mut state = state.borrow_mut();
+                state.selected_translation_model_id = Some(catalog_id.clone());
                 state.selected_translation_tier = Some(tier);
                 state.translation_ready = true;
+                state.translation_reload_on_next_use = false;
+                state.translation_unloading = false;
                 for model in &mut state.translation_models {
-                    model.selected = model.tier == tier;
+                    model.selected = model.catalog_id == catalog_id;
                     if model.catalog_id == catalog_id {
                         model.installed = true;
                     }
                 }
-                state.queued_selection_translation.take()
+                let queued_selection = state.queued_selection_translation.take();
+                let queued_model = if state
+                    .queued_model_translation
+                    .as_ref()
+                    .is_some_and(|queued| queued.catalog_id == catalog_id)
+                {
+                    state.queued_model_translation.take()
+                } else {
+                    None
+                };
+                (queued_selection, queued_model)
             };
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             let queued_screen_translation = state.borrow_mut().queued_screen_translation.take();
             let _ = save_settings(&state.borrow());
             sync_translation_models(settings, state);
@@ -4413,7 +5018,77 @@ fn handle_translation_event(
                     workers,
                 );
             }
-            #[cfg(feature = "screen-translation-dev")]
+            if let Some(queued) = queued_model_translation {
+                let command = pending_translation_command(queued.request_id, &queued.pending);
+                let origin = queued.pending.origin;
+                state
+                    .borrow_mut()
+                    .pending_translations
+                    .insert(queued.request_id, queued.pending);
+                if let Err(error) = workers.translation.send(&command) {
+                    let failed = state
+                        .borrow_mut()
+                        .pending_translations
+                        .remove(&queued.request_id);
+                    state
+                        .borrow_mut()
+                        .selection_release_gates
+                        .remove(&queued.request_id);
+                    let message = state_message(
+                        state,
+                        UiText::CouldNotStartTranslation,
+                        &[("error", &error.to_string())],
+                    );
+                    match failed
+                        .as_ref()
+                        .map(|pending| pending.origin)
+                        .unwrap_or(origin)
+                    {
+                        TranslationOrigin::Translator => {
+                            if let Some(translator) = translator.upgrade() {
+                                translator.set_processing(false);
+                                translator.set_presentation_state(4);
+                                translator.set_notice_headline(message.clone().into());
+                                translator.set_notice_detail("".into());
+                                translator.set_status_text(message.clone().into());
+                            }
+                        }
+                        TranslationOrigin::Selection { target, .. } => {
+                            show_selection_translation_preview(
+                                queued.request_id,
+                                target,
+                                failed
+                                    .as_ref()
+                                    .map_or("", |pending| pending.source_text.as_str()),
+                                &message,
+                                translation_previews,
+                                true,
+                            );
+                        }
+                        TranslationOrigin::ScreenRegion { anchor } => {
+                            screen_translation.borrow_mut().complete(queued.request_id);
+                            show_screen_translation_preview(
+                                queued.request_id,
+                                anchor,
+                                failed
+                                    .as_ref()
+                                    .map_or("", |pending| pending.source_text.as_str()),
+                                &message,
+                                translation_previews,
+                                true,
+                            );
+                        }
+                    }
+                    set_status_problem(settings, &message);
+                } else {
+                    set_indicator_status(settings, state_text(state, UiText::TranslatingNow));
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "translation_pipeline request={} stage=redispatched_after_pack_install catalog_id={catalog_id}",
+                        queued.request_id
+                    ));
+                }
+            }
+            #[cfg(feature = "screen-translation")]
             if let Some(request) = queued_screen_translation {
                 begin_screen_translation(
                     request,
@@ -4425,12 +5100,13 @@ fn handle_translation_event(
                 );
             }
         }
-        TranslationWorkerEvent::ModelSelected { tier } => {
+        TranslationWorkerEvent::ModelSelected { catalog_id, tier } => {
             {
                 let mut state = state.borrow_mut();
+                state.selected_translation_model_id = Some(catalog_id.clone());
                 state.selected_translation_tier = Some(tier);
                 for model in &mut state.translation_models {
-                    model.selected = model.tier == tier;
+                    model.selected = model.catalog_id == catalog_id;
                 }
             }
             let _ = save_settings(&state.borrow());
@@ -4459,6 +5135,10 @@ fn handle_translation_event(
                             pending.request_started_unix_ms,
                             first_partial,
                             pending.source_text.clone(),
+                            pending
+                                .stable_paragraphs
+                                .as_mut()
+                                .and_then(|stream| stream.observe(&translated_text, chunk_index)),
                         )
                     })
             };
@@ -4468,6 +5148,7 @@ fn handle_translation_event(
                 request_started_unix_ms,
                 first_partial,
                 source_text,
+                stable_screen_text,
             )) = pending
             else {
                 return;
@@ -4509,14 +5190,16 @@ fn handle_translation_event(
                 }
                 TranslationOrigin::Selection { .. } => {}
                 TranslationOrigin::ScreenRegion { anchor } => {
-                    show_screen_translation_preview(
-                        request_id,
-                        anchor,
-                        &source_text,
-                        &translated_text,
-                        translation_previews,
-                        false,
-                    );
+                    if let Some(stable_text) = stable_screen_text {
+                        show_screen_translation_preview(
+                            request_id,
+                            anchor,
+                            &source_text,
+                            &stable_text,
+                            translation_previews,
+                            false,
+                        );
+                    }
                 }
             }
 
@@ -4565,11 +5248,95 @@ fn handle_translation_event(
             request_id,
             failure,
         } => {
-            let pending = {
+            let (mut pending, install_offer) = {
                 let mut app = state.borrow_mut();
-                app.selection_release_gates.remove(&request_id);
-                app.pending_translations.remove(&request_id)
+                let pending = app.pending_translations.remove(&request_id);
+                let install_offer = pending.as_ref().and_then(|_| {
+                    required_compact_install(
+                        &failure,
+                        &app.translation_models,
+                        app.queued_model_translation.is_some(),
+                    )
+                });
+                (pending, install_offer)
             };
+            if let (Some(offer), Some(pending_translation)) = (install_offer, pending.take()) {
+                let origin = pending_translation.origin;
+                let source_text = pending_translation.source_text.clone();
+                let size = settings_projection::human_size(offer.size_bytes);
+                let offer_message = state_message(
+                    state,
+                    UiText::CompactModelDownloadOffer,
+                    &[("model", &offer.display_name), ("size", &size)],
+                );
+                let offer_action = state_text(state, UiText::DownloadModel);
+                state.borrow_mut().queued_model_translation = Some(QueuedModelTranslation {
+                    catalog_id: offer.catalog_id.clone(),
+                    request_id,
+                    pending: pending_translation,
+                });
+                match origin {
+                    TranslationOrigin::Translator => {
+                        if let Some(translator) = translator.upgrade() {
+                            translator.set_processing(false);
+                            translator.set_presentation_state(3);
+                            translator.set_notice_headline(offer_message.clone().into());
+                            translator.set_notice_detail("".into());
+                            translator.set_status_text(offer_message.clone().into());
+                            translator.set_model_offer_action(offer_action.into());
+                            translator.set_model_offer_visible(true);
+                        }
+                    }
+                    TranslationOrigin::Selection {
+                        target,
+                        delivery: TranslationDelivery::Preview,
+                    } => {
+                        show_selection_translation_preview(
+                            request_id,
+                            target,
+                            &source_text,
+                            &offer_message,
+                            translation_previews,
+                            true,
+                        );
+                        if let Some(slot) =
+                            translation_previews.borrow().slot_for_request(request_id)
+                        {
+                            slot.preview.set_pin_enabled(false);
+                            slot.preview.set_model_offer_action(offer_action.into());
+                            slot.preview.set_model_offer_visible(true);
+                        }
+                    }
+                    TranslationOrigin::Selection { .. } => {}
+                    TranslationOrigin::ScreenRegion { anchor } => {
+                        show_screen_translation_preview(
+                            request_id,
+                            anchor,
+                            &source_text,
+                            &offer_message,
+                            translation_previews,
+                            true,
+                        );
+                        if let Some(slot) =
+                            translation_previews.borrow().slot_for_request(request_id)
+                        {
+                            slot.preview.set_pin_enabled(false);
+                            slot.preview.set_model_offer_action(offer_action.into());
+                            slot.preview.set_model_offer_visible(true);
+                        }
+                    }
+                }
+                set_indicator_status(settings, &offer_message);
+                rust_app_core::diagnostics::log_line(&format!(
+                    "translation_pipeline request={request_id} stage=required_pack_consent catalog_id={} bytes={}",
+                    offer.catalog_id, offer.size_bytes
+                ));
+                return;
+            }
+            state
+                .borrow_mut()
+                .selection_release_gates
+                .remove(&request_id);
             let locale = active_locale(state.borrow().ui_locale);
             let notice = translator_status::failure_notice(locale, &failure);
             let message = notice.message();
@@ -4750,6 +5517,27 @@ fn handle_translation_event(
                 app.selection_release_gates.remove(&id);
                 app.pending_translations.remove(&id)
             });
+            let queued_model = if request_id.is_none() {
+                let mut app = state.borrow_mut();
+                let is_same_install = app.queued_model_translation.as_ref().is_some_and(|queued| {
+                    catalog_id
+                        .as_deref()
+                        .is_none_or(|failed_id| failed_id == queued.catalog_id)
+                });
+                if is_same_install {
+                    app.queued_model_translation.take()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(queued) = queued_model.as_ref() {
+                state
+                    .borrow_mut()
+                    .selection_release_gates
+                    .remove(&queued.request_id);
+            }
             let queued_request_id = if request_id.is_none() {
                 state
                     .borrow_mut()
@@ -4765,7 +5553,7 @@ fn handle_translation_event(
                     .selection_release_gates
                     .remove(&queued_request_id);
             }
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             let queued_screen = if request_id.is_none() {
                 state.borrow_mut().queued_screen_translation.take()
             } else {
@@ -4797,7 +5585,7 @@ fn handle_translation_event(
                     }
                 }
             }
-            #[cfg(feature = "screen-translation-dev")]
+            #[cfg(feature = "screen-translation")]
             if let Some(queued) = queued_screen {
                 screen_translation.borrow_mut().complete(queued.request_id);
                 show_screen_translation_preview(
@@ -4808,6 +5596,40 @@ fn handle_translation_event(
                     translation_previews,
                     true,
                 );
+            }
+            if let Some(queued) = queued_model.as_ref() {
+                match queued.pending.origin {
+                    TranslationOrigin::Translator => {
+                        if let Some(translator) = translator.upgrade() {
+                            translator.set_processing(false);
+                            translator.set_presentation_state(4);
+                            translator.set_notice_headline(technical_message.clone().into());
+                            translator.set_notice_detail("".into());
+                            translator.set_status_text(technical_message.clone().into());
+                        }
+                    }
+                    TranslationOrigin::Selection { target, .. } => {
+                        show_selection_translation_preview(
+                            queued.request_id,
+                            target,
+                            &queued.pending.source_text,
+                            &technical_message,
+                            translation_previews,
+                            true,
+                        );
+                    }
+                    TranslationOrigin::ScreenRegion { anchor } => {
+                        screen_translation.borrow_mut().complete(queued.request_id);
+                        show_screen_translation_preview(
+                            queued.request_id,
+                            anchor,
+                            &queued.pending.source_text,
+                            &technical_message,
+                            translation_previews,
+                            true,
+                        );
+                    }
+                }
             }
             if matches!(
                 pending.as_ref().map(|pending| pending.origin),
@@ -5461,6 +6283,16 @@ mod provider_path_readiness_tests {
     }
 
     #[test]
+    fn manually_unloaded_speech_can_start_and_reload_without_being_reported_ready() {
+        let mut state = state();
+        state.speech_worker_ready = true;
+        state.speech_reload_on_next_use = true;
+
+        assert!(!state.speech_path_ready());
+        assert!(state.speech_path_can_start());
+    }
+
+    #[test]
     fn an_unavailable_cloud_only_route_does_not_fall_through_to_disabled_local() {
         let mut state = state();
         state.speech_worker_ready = true;
@@ -5497,6 +6329,16 @@ mod provider_path_readiness_tests {
         state.translation_worker_ready = true;
         assert!(state.translation_path_ready());
         assert!(!state.translation_waits_for_local());
+    }
+
+    #[test]
+    fn manually_unloaded_translation_can_start_and_reload_without_being_reported_ready() {
+        let mut state = state();
+        state.translation_worker_ready = true;
+        state.translation_reload_on_next_use = true;
+
+        assert!(!state.translation_path_ready());
+        assert!(state.translation_path_can_start());
     }
 
     #[test]
@@ -5753,6 +6595,115 @@ mod audio_level_coalescing_tests {
 }
 
 #[cfg(test)]
+mod compact_model_install_tests {
+    use std::time::Instant;
+
+    use rust_protocol::{
+        RequestId, TranslationFailureKind, TranslationFailureReport, TranslationLanguage,
+        TranslationLanguagePolicy, TranslationModelSummary, TranslationTier,
+    };
+
+    use super::{
+        CompactInstallOffer, PendingTranslation, QueuedModelMatch, QueuedModelTranslation,
+        TranslationOrigin, required_compact_install, take_matching_queued_model_translation,
+    };
+
+    fn model(installed: bool) -> TranslationModelSummary {
+        TranslationModelSummary {
+            catalog_id: "firefox-de-en-v3".to_owned(),
+            display_name: "German ↔ English".to_owned(),
+            description: "Compact".to_owned(),
+            tier: TranslationTier::Compact,
+            languages: vec![TranslationLanguage::English, TranslationLanguage::German],
+            size_bytes: 1,
+            installed,
+            selected: false,
+            recommended: false,
+            license: "MPL-2.0".to_owned(),
+        }
+    }
+
+    fn missing_report() -> TranslationFailureReport {
+        TranslationFailureReport {
+            kind: TranslationFailureKind::LocalModelMissing,
+            provider_id: None,
+            retry_after_ms: None,
+            required_catalog_id: Some("firefox-de-en-v3".to_owned()),
+            detail: String::new(),
+            attempts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_explicit_missing_compact_pack_can_be_installed_and_retried_once() {
+        let models = vec![model(false)];
+        assert_eq!(
+            required_compact_install(&missing_report(), &models, false),
+            Some(CompactInstallOffer {
+                catalog_id: "firefox-de-en-v3".to_owned(),
+                display_name: "German ↔ English".to_owned(),
+                size_bytes: 1,
+            })
+        );
+        assert_eq!(
+            required_compact_install(&missing_report(), &models, true),
+            None
+        );
+    }
+
+    #[test]
+    fn installed_or_untyped_failures_never_start_an_install() {
+        let installed = vec![model(true)];
+        assert_eq!(
+            required_compact_install(&missing_report(), &installed, false),
+            None
+        );
+
+        let mut failure = missing_report();
+        failure.kind = TranslationFailureKind::Internal;
+        assert_eq!(
+            required_compact_install(&failure, &[model(false)], false),
+            None
+        );
+    }
+
+    #[test]
+    fn dismissing_an_offer_allows_the_next_missing_pack_request_to_offer_again() {
+        let first_request = RequestId::new();
+        let mut queued = Some(QueuedModelTranslation {
+            catalog_id: "firefox-de-en-v3".to_owned(),
+            request_id: first_request,
+            pending: PendingTranslation {
+                origin: TranslationOrigin::Translator,
+                source_text: "Hallo".to_owned(),
+                source_language: None,
+                target_language: None,
+                language_policy: TranslationLanguagePolicy {
+                    primary: TranslationLanguage::English,
+                    secondary: TranslationLanguage::German,
+                },
+                started: Instant::now(),
+                request_started_unix_ms: 0,
+                first_partial_shown: false,
+                stable_paragraphs: None,
+            },
+        });
+
+        let dismissed = take_matching_queued_model_translation(
+            &mut queued,
+            QueuedModelMatch::Request(first_request),
+        );
+
+        assert!(dismissed.is_some());
+        assert!(queued.is_none());
+        assert!(
+            required_compact_install(&missing_report(), &[model(false)], queued.is_some())
+                .is_some()
+        );
+    }
+}
+
+#[cfg(test)]
 mod product_icon_tests {
     #[test]
     fn tray_waveform_is_the_accent_without_a_graphite_stripe() {
@@ -5835,7 +6786,7 @@ mod screen_translation_privacy_tests {
     }
 }
 
-#[cfg(all(test, feature = "screen-translation-dev"))]
+#[cfg(all(test, feature = "screen-translation"))]
 mod screen_translation_outcome_tests {
     use rust_platform_windows::screen_capture::CaptureError;
 

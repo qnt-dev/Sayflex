@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs::{self, File},
-    io::Read,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -15,11 +15,39 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BundleCompression {
+    Zstd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleArtifact {
     pub relative_path: String,
     pub url: String,
+    /// Bytes and SHA-256 of the network payload. For ordinary artifacts these
+    /// are also the installed-file values.
     pub bytes: u64,
     pub sha256: String,
+    /// Optional transport compression. Expanded metadata is mandatory when set
+    /// and describes the file which becomes part of the installed bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<BundleCompression>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded_sha256: Option<String>,
+}
+
+impl BundleArtifact {
+    #[must_use]
+    pub fn installed_bytes(&self) -> u64 {
+        self.expanded_bytes.unwrap_or(self.bytes)
+    }
+
+    #[must_use]
+    pub fn installed_sha256(&self) -> &str {
+        self.expanded_sha256.as_deref().unwrap_or(&self.sha256)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,9 +68,20 @@ impl BundleDescriptor {
         let mut paths = BTreeMap::new();
         for artifact in &self.artifacts {
             let relative = Path::new(&artifact.relative_path);
+            let compression_metadata_valid = match artifact.compression {
+                None => artifact.expanded_bytes.is_none() && artifact.expanded_sha256.is_none(),
+                Some(BundleCompression::Zstd) => {
+                    artifact.expanded_bytes.is_some_and(|bytes| bytes > 0)
+                        && artifact
+                            .expanded_sha256
+                            .as_ref()
+                            .is_some_and(|sha256| sha256.len() == 64)
+                }
+            };
             if artifact.url.trim().is_empty()
                 || artifact.bytes == 0
                 || artifact.sha256.len() != 64
+                || !compression_metadata_valid
                 || relative.is_absolute()
                 || relative
                     .components()
@@ -58,6 +97,14 @@ impl BundleDescriptor {
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
         self.artifacts.iter().map(|artifact| artifact.bytes).sum()
+    }
+
+    #[must_use]
+    pub fn installed_bytes(&self) -> u64 {
+        self.artifacts
+            .iter()
+            .map(BundleArtifact::installed_bytes)
+            .sum()
     }
 }
 
@@ -87,12 +134,12 @@ impl BundleInstaller {
             return Ok(true);
         }
         for artifact in &bundle.artifacts {
-            if verify_artifact(&root.join(&artifact.relative_path), artifact).is_err() {
+            if verify_installed_artifact(&root.join(&artifact.relative_path), artifact).is_err() {
                 let _ = fs::remove_file(bundle_receipt_path(&root));
                 return Ok(false);
             }
         }
-        write_bundle_receipt(&root, bundle)?;
+        tolerate_read_only_receipt_cache(write_bundle_receipt(&root, bundle))?;
         Ok(true)
     }
 
@@ -126,9 +173,17 @@ impl BundleInstaller {
                 if let Some(parent) = destination.parent() {
                     fs::create_dir_all(parent)?;
                 }
+                let download_destination = if artifact.compression.is_some() {
+                    let file_name = destination
+                        .file_name()
+                        .ok_or_else(|| ModelInstallError::InvalidBundle(bundle.id.clone()))?;
+                    destination.with_file_name(format!(".{}.source", file_name.to_string_lossy()))
+                } else {
+                    destination.clone()
+                };
                 fetcher.fetch(
                     &artifact.url,
-                    &destination,
+                    &download_destination,
                     artifact.bytes,
                     &mut |artifact_progress| {
                         progress(DownloadProgress {
@@ -144,7 +199,15 @@ impl BundleInstaller {
                     bytes_received: completed_bytes.saturating_add(artifact.bytes),
                     total_bytes,
                 });
-                verify_artifact(&destination, artifact)?;
+                verify_downloaded_artifact(&download_destination, artifact)?;
+                match artifact.compression {
+                    None => {}
+                    Some(BundleCompression::Zstd) => {
+                        expand_zstd(&download_destination, &destination)?;
+                        verify_installed_artifact(&destination, artifact)?;
+                        fs::remove_file(&download_destination)?;
+                    }
+                }
                 completed_bytes = completed_bytes.saturating_add(artifact.bytes);
             }
 
@@ -237,9 +300,11 @@ fn bundle_receipt_matches(
         let Ok(metadata) = fs::metadata(path) else {
             return Ok(false);
         };
-        if stored.bytes != artifact.bytes
-            || metadata.len() != artifact.bytes
-            || !stored.sha256.eq_ignore_ascii_case(&artifact.sha256)
+        if stored.bytes != artifact.installed_bytes()
+            || metadata.len() != artifact.installed_bytes()
+            || !stored
+                .sha256
+                .eq_ignore_ascii_case(artifact.installed_sha256())
             || stored.modified_unix_nanos != modified_unix_nanos(&metadata)?
         {
             return Ok(false);
@@ -256,8 +321,8 @@ fn write_bundle_receipt(root: &Path, bundle: &BundleDescriptor) -> Result<(), Mo
             let metadata = fs::metadata(root.join(&artifact.relative_path))?;
             Ok(ArtifactReceipt {
                 relative_path: artifact.relative_path.clone(),
-                bytes: artifact.bytes,
-                sha256: artifact.sha256.clone(),
+                bytes: artifact.installed_bytes(),
+                sha256: artifact.installed_sha256().to_owned(),
                 modified_unix_nanos: modified_unix_nanos(&metadata)?,
             })
         })
@@ -276,15 +341,50 @@ fn write_bundle_receipt(root: &Path, bundle: &BundleDescriptor) -> Result<(), Mo
     Ok(())
 }
 
+fn tolerate_read_only_receipt_cache(
+    result: Result<(), ModelInstallError>,
+) -> Result<(), ModelInstallError> {
+    match result {
+        Err(ModelInstallError::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 fn bundle_receipt_path(root: &Path) -> PathBuf {
     root.join("bundle.verified.json")
 }
 
-fn verify_artifact(path: &Path, artifact: &BundleArtifact) -> Result<(), ModelInstallError> {
+fn verify_downloaded_artifact(
+    path: &Path,
+    artifact: &BundleArtifact,
+) -> Result<(), ModelInstallError> {
+    verify_file(path, artifact.bytes, &artifact.sha256)
+}
+
+fn verify_installed_artifact(
+    path: &Path,
+    artifact: &BundleArtifact,
+) -> Result<(), ModelInstallError> {
+    verify_file(
+        path,
+        artifact.installed_bytes(),
+        artifact.installed_sha256(),
+    )
+}
+
+fn verify_file(
+    path: &Path,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<(), ModelInstallError> {
     let metadata = fs::metadata(path)?;
-    if metadata.len() != artifact.bytes {
+    if metadata.len() != expected_bytes {
         return Err(ModelInstallError::SizeMismatch {
-            expected: artifact.bytes,
+            expected: expected_bytes,
             actual: metadata.len(),
         });
     }
@@ -299,12 +399,25 @@ fn verify_artifact(path: &Path, artifact: &BundleArtifact) -> Result<(), ModelIn
         hasher.update(&buffer[..read]);
     }
     let actual = format!("{:x}", hasher.finalize());
-    if !actual.eq_ignore_ascii_case(&artifact.sha256) {
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
         return Err(ModelInstallError::ChecksumMismatch {
-            expected: artifact.sha256.clone(),
+            expected: expected_sha256.to_owned(),
             actual,
         });
     }
+    Ok(())
+}
+
+fn expand_zstd(source: &Path, destination: &Path) -> Result<(), ModelInstallError> {
+    let source = File::open(source)?;
+    let mut decoder = ruzstd::StreamingDecoder::new(source).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("zstd stream is invalid: {error}"),
+        )
+    })?;
+    let mut destination = File::create(destination)?;
+    io::copy(&mut decoder, &mut destination)?;
     Ok(())
 }
 
@@ -351,7 +464,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{BundleArtifact, BundleDescriptor, BundleInstaller};
+    use super::{
+        BundleArtifact, BundleCompression, BundleDescriptor, BundleInstaller,
+        tolerate_read_only_receipt_cache,
+    };
     use crate::{ArtifactFetcher, DownloadProgress, ModelInstallError};
 
     struct MapFetcher(HashMap<String, Vec<u8>>);
@@ -390,6 +506,9 @@ mod tests {
                     bytes: 5,
                     sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
                         .to_owned(),
+                    compression: None,
+                    expanded_bytes: None,
+                    expanded_sha256: None,
                 },
                 BundleArtifact {
                     relative_path: "ru-en/config.json".to_owned(),
@@ -397,9 +516,93 @@ mod tests {
                     bytes: 2,
                     sha256: "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
                         .to_owned(),
+                    compression: None,
+                    expanded_bytes: None,
+                    expanded_sha256: None,
                 },
             ],
         }
+    }
+
+    fn zstd_bundle(expanded_sha256: &str) -> BundleDescriptor {
+        BundleDescriptor {
+            id: "firefox-pair".to_owned(),
+            license: Some("MPL-2.0".to_owned()),
+            attribution: None,
+            artifacts: vec![BundleArtifact {
+                relative_path: "en-ru/model.bin".to_owned(),
+                url: "fixture:model.zst".to_owned(),
+                bytes: 44,
+                sha256: "cb7f98c7ec6f844d1d212cfa1f63aa554ae184e3e3d806f9b2476216352bc1d9"
+                    .to_owned(),
+                compression: Some(BundleCompression::Zstd),
+                expanded_bytes: Some(31),
+                expanded_sha256: Some(expanded_sha256.to_owned()),
+            }],
+        }
+    }
+
+    fn zstd_fixture() -> Vec<u8> {
+        vec![
+            0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x1f, 0xf9, 0x00, 0x00, 0x66, 0x78, 0x74, 0x72, 0x61,
+            0x6e, 0x73, 0x6c, 0x61, 0x74, 0x65, 0x20, 0x74, 0x69, 0x6e, 0x79, 0x20, 0x6d, 0x6f,
+            0x64, 0x65, 0x6c, 0x20, 0x66, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x0a, 0xcb, 0x8e,
+            0x0e, 0x1d,
+        ]
+    }
+
+    #[test]
+    fn installs_zstd_artifact_as_verified_expanded_file() {
+        let directory = tempdir().unwrap();
+        let installer = BundleInstaller::new(directory.path().to_owned());
+        let bundle =
+            zstd_bundle("5a9aaf6b319b6cdb5f3ef4ff520599018f2df654ddc4d9bb73dcb687092c77b8");
+        let fetcher = MapFetcher(HashMap::from([(
+            "fixture:model.zst".to_owned(),
+            zstd_fixture(),
+        )]));
+
+        let path = installer
+            .ensure_installed(&bundle, &fetcher, |_| {})
+            .unwrap();
+
+        assert_eq!(
+            fs::read(path.join("en-ru/model.bin")).unwrap(),
+            b"fxtranslate tiny model fixture\n"
+        );
+        assert_eq!(
+            fs::read_dir(path.join("en-ru")).unwrap().count(),
+            1,
+            "the compressed staging source must not be installed"
+        );
+        assert!(installer.is_installed(&bundle).unwrap());
+    }
+
+    #[test]
+    fn rejects_zstd_artifact_when_expanded_hash_is_wrong() {
+        let directory = tempdir().unwrap();
+        let installer = BundleInstaller::new(directory.path().to_owned());
+        let bundle =
+            zstd_bundle("0000000000000000000000000000000000000000000000000000000000000000");
+        let fetcher = MapFetcher(HashMap::from([(
+            "fixture:model.zst".to_owned(),
+            zstd_fixture(),
+        )]));
+
+        assert!(matches!(
+            installer.ensure_installed(&bundle, &fetcher, |_| {}),
+            Err(ModelInstallError::ChecksumMismatch { .. })
+        ));
+        assert!(!installer.bundle_path(&bundle).exists());
+    }
+
+    #[test]
+    fn reports_download_and_installed_sizes_separately() {
+        let bundle =
+            zstd_bundle("5a9aaf6b319b6cdb5f3ef4ff520599018f2df654ddc4d9bb73dcb687092c77b8");
+
+        assert_eq!(bundle.total_bytes(), 44);
+        assert_eq!(bundle.installed_bytes(), 31);
     }
 
     #[test]
@@ -416,6 +619,23 @@ mod tests {
 
         assert_eq!(fs::read(path.join("ru-en/model.bin")).unwrap(), b"hello");
         assert!(installer.is_installed(&bundle()).unwrap());
+    }
+
+    #[test]
+    fn verified_read_only_bundle_does_not_require_receipt_cache_write_access() {
+        let permission_denied = ModelInstallError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "packaged bundle is read-only",
+        ));
+
+        assert!(tolerate_read_only_receipt_cache(Err(permission_denied)).is_ok());
+    }
+
+    #[test]
+    fn unexpected_receipt_cache_errors_are_not_hidden() {
+        let disk_error = ModelInstallError::Io(std::io::Error::other("disk error"));
+
+        assert!(tolerate_read_only_receipt_cache(Err(disk_error)).is_err());
     }
 
     #[test]

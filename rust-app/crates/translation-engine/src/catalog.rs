@@ -13,31 +13,26 @@ pub enum TranslationBackendDescriptor {
         context_size: u32,
         max_output_tokens: u32,
     },
+    Firefox {
+        directions: Vec<FirefoxDirectionDescriptor>,
+    },
 }
 
 impl TranslationBackendDescriptor {
     #[must_use]
-    pub fn model_file(&self) -> &str {
-        match self {
-            Self::LlamaCpp { model_file, .. } => model_file,
-        }
+    pub const fn requires_llama_runtime(&self) -> bool {
+        matches!(self, Self::LlamaCpp { .. })
     }
+}
 
-    #[must_use]
-    pub const fn context_size(&self) -> u32 {
-        match self {
-            Self::LlamaCpp { context_size, .. } => *context_size,
-        }
-    }
-
-    #[must_use]
-    pub const fn max_output_tokens(&self) -> u32 {
-        match self {
-            Self::LlamaCpp {
-                max_output_tokens, ..
-            } => *max_output_tokens,
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirefoxDirectionDescriptor {
+    pub source: TranslationLanguage,
+    pub target: TranslationLanguage,
+    pub model_file: String,
+    pub source_vocab_file: String,
+    pub target_vocab_file: String,
+    pub shortlist_file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +108,7 @@ impl TranslationCatalog {
     }
 
     pub fn validate(&self) -> Result<(), TranslationCatalogError> {
-        if self.schema_version != 3 {
+        if self.schema_version != 4 {
             return Err(TranslationCatalogError::UnsupportedSchema(
                 self.schema_version,
             ));
@@ -125,34 +120,81 @@ impl TranslationCatalog {
             if pack.id.trim().is_empty()
                 || pack.display_name.trim().is_empty()
                 || pack.languages.len() < 2
-                || pack.backend.model_file().trim().is_empty()
-                || pack.backend.context_size() < 1_024
-                || pack.backend.max_output_tokens() == 0
                 || self
                     .packs
                     .iter()
                     .filter(|candidate| candidate.id == pack.id)
                     .count()
                     != 1
-                || self
-                    .packs
-                    .iter()
-                    .filter(|candidate| candidate.tier == pack.tier)
-                    .count()
-                    != 1
+                || (pack.tier != TranslationTier::Compact
+                    && self
+                        .packs
+                        .iter()
+                        .filter(|candidate| candidate.tier == pack.tier)
+                        .count()
+                        != 1)
+                || (pack.tier == TranslationTier::Compact
+                    && self
+                        .packs
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.tier == TranslationTier::Compact
+                                && candidate.languages.len() == pack.languages.len()
+                                && candidate
+                                    .languages
+                                    .iter()
+                                    .all(|language| pack.languages.contains(language))
+                        })
+                        .count()
+                        != 1)
             {
+                return Err(TranslationCatalogError::InvalidPack(pack.id.clone()));
+            }
+            let backend_valid = match &pack.backend {
+                TranslationBackendDescriptor::LlamaCpp {
+                    model_file,
+                    context_size,
+                    max_output_tokens,
+                } => {
+                    !model_file.trim().is_empty()
+                        && *context_size >= 1_024
+                        && *max_output_tokens > 0
+                        && pack
+                            .artifacts
+                            .iter()
+                            .any(|artifact| artifact.relative_path == *model_file)
+                }
+                TranslationBackendDescriptor::Firefox { directions } => {
+                    directions.len() == 2
+                        && directions.iter().all(|direction| {
+                            direction.source != direction.target
+                                && pack.languages.contains(&direction.source)
+                                && pack.languages.contains(&direction.target)
+                                && [
+                                    &direction.model_file,
+                                    &direction.source_vocab_file,
+                                    &direction.target_vocab_file,
+                                    &direction.shortlist_file,
+                                ]
+                                .into_iter()
+                                .all(|path| {
+                                    !path.trim().is_empty()
+                                        && pack
+                                            .artifacts
+                                            .iter()
+                                            .any(|artifact| artifact.relative_path == *path)
+                                })
+                        })
+                        && directions[0].source == directions[1].target
+                        && directions[0].target == directions[1].source
+                }
+            };
+            if !backend_valid {
                 return Err(TranslationCatalogError::InvalidPack(pack.id.clone()));
             }
             pack.as_bundle()
                 .validate()
                 .map_err(|_| TranslationCatalogError::InvalidPack(pack.id.clone()))?;
-            if !pack
-                .artifacts
-                .iter()
-                .any(|artifact| artifact.relative_path == pack.backend.model_file())
-            {
-                return Err(TranslationCatalogError::InvalidPack(pack.id.clone()));
-            }
             for language in &pack.languages {
                 if pack
                     .languages
@@ -171,6 +213,22 @@ impl TranslationCatalog {
     #[must_use]
     pub fn by_tier(&self, tier: TranslationTier) -> Option<&TranslationPackDescriptor> {
         self.packs.iter().find(|pack| pack.tier == tier)
+    }
+
+    #[must_use]
+    pub fn by_id(&self, catalog_id: &str) -> Option<&TranslationPackDescriptor> {
+        self.packs.iter().find(|pack| pack.id == catalog_id)
+    }
+
+    #[must_use]
+    pub fn compact_for_pair(
+        &self,
+        source: TranslationLanguage,
+        target: TranslationLanguage,
+    ) -> Option<&TranslationPackDescriptor> {
+        self.packs
+            .iter()
+            .find(|pack| pack.tier == TranslationTier::Compact && pack.supports(source, target))
     }
 }
 
@@ -195,7 +253,7 @@ mod tests {
     #[test]
     fn built_in_catalog_has_fast_and_quality_multilingual_packs() {
         let catalog = TranslationCatalog::load().unwrap();
-        assert_eq!(catalog.packs.len(), 2);
+        assert_eq!(catalog.packs.len(), 15);
         for tier in [TranslationTier::Tiny, TranslationTier::Teacher] {
             let pack = catalog.by_tier(tier).unwrap();
             assert!(pack.supports(TranslationLanguage::Russian, TranslationLanguage::English));
@@ -208,11 +266,96 @@ mod tests {
     }
 
     #[test]
+    fn compact_catalog_pack_is_bidirectional_russian_english_only() {
+        let catalog = TranslationCatalog::load().unwrap();
+        let compact = catalog.by_tier(TranslationTier::Compact).unwrap();
+
+        assert!(compact.supports(TranslationLanguage::English, TranslationLanguage::Russian));
+        assert!(compact.supports(TranslationLanguage::Russian, TranslationLanguage::English));
+        assert!(!compact.supports(TranslationLanguage::German, TranslationLanguage::Russian));
+        assert!(compact.as_bundle().total_bytes() > 46_000_000);
+        assert!(compact.as_bundle().total_bytes() < 48_000_000);
+        assert!(compact.as_bundle().installed_bytes() > 72_000_000);
+        assert!(compact.as_bundle().installed_bytes() < 74_000_000);
+    }
+
+    #[test]
     fn recommendation_uses_primary_system_language_but_not_english() {
         let catalog = TranslationCatalog::load().unwrap();
         let fast = catalog.by_tier(TranslationTier::Tiny).unwrap();
         assert!(fast.summary(false, false, "ru-RU").recommended);
         assert!(!fast.summary(false, false, "en-US").recommended);
         assert!(!fast.summary(false, false, "de-DE").recommended);
+    }
+
+    #[test]
+    fn compact_packs_are_identified_by_catalog_id_and_language_pair() {
+        let catalog = TranslationCatalog::load().unwrap();
+
+        assert!(catalog.validate().is_ok());
+        assert_eq!(
+            catalog.by_id("firefox-de-en-v3").unwrap().id,
+            "firefox-de-en-v3"
+        );
+        assert_eq!(
+            catalog
+                .compact_for_pair(TranslationLanguage::German, TranslationLanguage::English)
+                .unwrap()
+                .id,
+            "firefox-de-en-v3"
+        );
+        assert_eq!(
+            catalog
+                .compact_for_pair(TranslationLanguage::Russian, TranslationLanguage::English)
+                .unwrap()
+                .id,
+            "firefox-ru-en-v3.1"
+        );
+    }
+
+    #[test]
+    fn every_sayflex_language_has_one_verified_compact_english_pair() {
+        let catalog = TranslationCatalog::load().unwrap();
+        let compact = catalog
+            .packs
+            .iter()
+            .filter(|pack| pack.tier == TranslationTier::Compact)
+            .collect::<Vec<_>>();
+        assert_eq!(compact.len(), TranslationLanguage::ALL.len() - 1);
+
+        for language in TranslationLanguage::ALL
+            .into_iter()
+            .filter(|language| *language != TranslationLanguage::English)
+        {
+            let matches = compact
+                .iter()
+                .filter(|pack| {
+                    pack.supports(TranslationLanguage::English, language)
+                        && pack.supports(language, TranslationLanguage::English)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "compact coverage for {language:?}");
+            let pack = matches[0];
+            let super::TranslationBackendDescriptor::Firefox { directions } = &pack.backend else {
+                panic!("compact pack {} must use Firefox", pack.id);
+            };
+            for direction in directions {
+                for path in [
+                    &direction.model_file,
+                    &direction.source_vocab_file,
+                    &direction.target_vocab_file,
+                    &direction.shortlist_file,
+                ] {
+                    assert!(
+                        pack.artifacts
+                            .iter()
+                            .any(|artifact| artifact.relative_path == *path),
+                        "{} references missing {}",
+                        pack.id,
+                        path
+                    );
+                }
+            }
+        }
     }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "sayflex-translation-benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.100"
+rust-app-core = { path = "../../crates/app-core" }
+rust-model-manager = { path = "../../crates/model-manager" }
+rust-platform-windows = { path = "../../crates/platform-windows" }
+rust-protocol = { path = "../../crates/protocol" }
+rust-translation-engine = { path = "../../crates/translation-engine" }
+windows-sys.workspace = true

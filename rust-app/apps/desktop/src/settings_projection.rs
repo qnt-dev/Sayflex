@@ -12,7 +12,8 @@
 
 use rust_protocol::{
     HistoryEntry, ModelSummary, TranscriptionProviderEntry, TranscriptionProviderStatus,
-    TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
+    TranslationLanguage, TranslationModelSummary, TranslationProviderEntry,
+    TranslationProviderStatus, TranslationTier,
 };
 
 use crate::{
@@ -140,13 +141,18 @@ pub(crate) fn translation_model_row_localized(
         locale,
     );
     let size = human_size(model.size_bytes);
+    let title = translation_model_title_localized(model, locale);
     ModelRow {
         catalog_id: model.catalog_id.clone().into(),
-        section: text(locale, UiText::TranslationSection).into(),
-        title: model.display_name.clone().into(),
+        section: translation_model_section_localized(model.tier, locale).into(),
+        title: title.as_ref().into(),
         detail: format!(
             "{} · {}{}",
-            model_description_localized(&model.catalog_id, &model.description, locale),
+            if model.tier == TranslationTier::Compact {
+                std::borrow::Cow::Borrowed(text(locale, UiText::CompactTranslationModelHint))
+            } else {
+                model_description_localized(&model.catalog_id, &model.description, locale)
+            },
             model.license,
             if model.recommended {
                 format!(" · {}", text(locale, UiText::RecommendedForSystemLanguage))
@@ -165,13 +171,84 @@ pub(crate) fn translation_model_row_localized(
         remove_question: render(
             locale,
             UiText::RemoveModelQuestion,
-            &[("model", &model.display_name), ("size", &size)],
+            &[("model", title.as_ref()), ("size", &size)],
         )
         .into(),
         removing,
         selected,
         installed: model.installed,
         progress,
+    }
+}
+
+fn translation_model_section_localized(tier: TranslationTier, locale: UiLocale) -> &'static str {
+    match tier {
+        TranslationTier::Compact => text(locale, UiText::FastLanguagePackagesSection),
+        TranslationTier::Tiny | TranslationTier::Teacher => {
+            text(locale, UiText::ContextualTranslationModelsSection)
+        }
+    }
+}
+
+pub(crate) fn translation_model_title_localized<'a>(
+    model: &'a TranslationModelSummary,
+    locale: UiLocale,
+) -> std::borrow::Cow<'a, str> {
+    if model.tier == TranslationTier::Compact && model.languages.len() == 2 {
+        let first = model
+            .languages
+            .iter()
+            .copied()
+            .find(|language| *language != TranslationLanguage::English)
+            .unwrap_or(model.languages[0]);
+        let second = model
+            .languages
+            .iter()
+            .copied()
+            .find(|language| *language == TranslationLanguage::English)
+            .unwrap_or(model.languages[1]);
+        return std::borrow::Cow::Owned(format!(
+            "{} ↔ {}",
+            text(locale, translation_language_text(first)),
+            text(locale, translation_language_text(second))
+        ));
+    }
+    match model.catalog_id.as_str() {
+        "firefox-ru-en-v3.1" => {
+            std::borrow::Cow::Borrowed(text(locale, UiText::RussianEnglishModelName))
+        }
+        _ => std::borrow::Cow::Borrowed(&model.display_name),
+    }
+}
+
+const fn translation_language_text(language: TranslationLanguage) -> UiText {
+    match language {
+        TranslationLanguage::English => UiText::EnglishLanguage,
+        TranslationLanguage::Russian => UiText::RussianLanguage,
+        TranslationLanguage::Ukrainian => UiText::UkrainianLanguage,
+        TranslationLanguage::Spanish => UiText::SpanishLanguage,
+        TranslationLanguage::PortugueseBrazil => UiText::PortugueseBrazilLanguage,
+        TranslationLanguage::German => UiText::GermanLanguage,
+        TranslationLanguage::French => UiText::FrenchLanguage,
+        TranslationLanguage::Italian => UiText::ItalianLanguage,
+        TranslationLanguage::ChineseSimplified => UiText::ChineseSimplifiedLanguage,
+        TranslationLanguage::ChineseTraditional => UiText::ChineseTraditionalLanguage,
+        TranslationLanguage::Japanese => UiText::JapaneseLanguage,
+        TranslationLanguage::Korean => UiText::KoreanLanguage,
+        TranslationLanguage::Hindi => UiText::HindiLanguage,
+        TranslationLanguage::Arabic => UiText::ArabicLanguage,
+    }
+}
+
+pub(crate) fn translation_model_hint_localized(
+    tier: TranslationTier,
+    locale: UiLocale,
+) -> &'static str {
+    match tier {
+        TranslationTier::Compact => text(locale, UiText::CompactTranslationModelHint),
+        TranslationTier::Tiny | TranslationTier::Teacher => {
+            text(locale, UiText::ContextualTranslationModelHint)
+        }
     }
 }
 
@@ -187,6 +264,7 @@ fn model_description_localized<'a>(
         "whisper-large-v3" => UiText::WhisperLargeDescription,
         "qwen35-4b-q4" => UiText::QwenFastDescription,
         "qwen35-9b-q4" => UiText::QwenQualityDescription,
+        "firefox-ru-en-v3.1" => UiText::FirefoxRuEnDescription,
         _ => return std::borrow::Cow::Borrowed(fallback),
     };
     std::borrow::Cow::Borrowed(text(locale, message))
@@ -793,7 +871,7 @@ pub(crate) fn history_row_localized(entry: &HistoryEntry, locale: UiLocale) -> H
 #[cfg(test)]
 mod tests {
     use rust_protocol::{
-        ModelSummary, TranscriptionProviderEntry, TranscriptionProviderStatus,
+        ModelSummary, TranscriptionProviderEntry, TranscriptionProviderStatus, TranslationLanguage,
         TranslationModelSummary, TranslationProviderEntry, TranslationTier,
     };
 
@@ -890,6 +968,88 @@ mod tests {
             translation_row.detail,
             "Современная многоязычная модель 4B с локальным ускорением Vulkan. · Apache-2.0"
         );
+    }
+
+    #[test]
+    fn compact_and_contextual_translation_choices_are_explained_as_different_products() {
+        let compact = TranslationModelSummary {
+            catalog_id: "firefox-ru-en-v3.1".to_owned(),
+            display_name: "Russian ↔ English".to_owned(),
+            description: "Small CPU-only language package for fast everyday translation."
+                .to_owned(),
+            tier: TranslationTier::Compact,
+            languages: Vec::new(),
+            size_bytes: 46_545_826,
+            installed: false,
+            selected: false,
+            recommended: true,
+            license: "MPL-2.0".to_owned(),
+        };
+        let contextual = TranslationModelSummary {
+            catalog_id: "qwen35-4b-q4".to_owned(),
+            display_name: "Qwen3.5 4B · Fast".to_owned(),
+            description: "Modern multilingual 4B model accelerated locally through Vulkan."
+                .to_owned(),
+            tier: TranslationTier::Tiny,
+            languages: Vec::new(),
+            size_bytes: 3_000_000_000,
+            installed: false,
+            selected: false,
+            recommended: false,
+            license: "Apache-2.0".to_owned(),
+        };
+
+        let compact_row = translation_model_row_localized(
+            &compact,
+            false,
+            None,
+            false,
+            false,
+            crate::localization::UiLocale::Russian,
+        );
+        let contextual_row = translation_model_row_localized(
+            &contextual,
+            false,
+            None,
+            false,
+            false,
+            crate::localization::UiLocale::Russian,
+        );
+
+        assert_eq!(compact_row.section, "БЫСТРЫЕ ЯЗЫКОВЫЕ ПАКЕТЫ");
+        assert_eq!(compact_row.title, "Русский ↔ английский");
+        assert!(compact_row.detail.contains("не использует видеопамять"));
+        assert!(compact_row.detail.contains("Рекомендуется"));
+        assert_eq!(contextual_row.section, "КОНТЕКСТНЫЕ МОДЕЛИ ПЕРЕВОДА");
+    }
+
+    #[test]
+    fn every_compact_language_pair_uses_localized_names_and_the_generic_resource_hint() {
+        let german = TranslationModelSummary {
+            catalog_id: "firefox-de-en-v3".to_owned(),
+            display_name: "German ↔ English".to_owned(),
+            description: "German-specific catalog fallback".to_owned(),
+            tier: TranslationTier::Compact,
+            languages: vec![TranslationLanguage::English, TranslationLanguage::German],
+            size_bytes: 40_000_000,
+            installed: false,
+            selected: false,
+            recommended: false,
+            license: "MPL-2.0".to_owned(),
+        };
+
+        let row = translation_model_row_localized(
+            &german,
+            false,
+            None,
+            false,
+            false,
+            crate::localization::UiLocale::Russian,
+        );
+
+        assert_eq!(row.title, "Немецкий ↔ Английский");
+        assert!(row.detail.contains("не использует видеопамять"));
+        assert!(!row.detail.contains("German-specific"));
     }
 
     fn entry(id: &str, enabled: bool) -> TranscriptionProviderEntry {

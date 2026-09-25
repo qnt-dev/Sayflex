@@ -152,6 +152,7 @@ $previousCudaArchitectures = $env:CMAKE_CUDA_ARCHITECTURES
 $previousLibclangPath = $env:LIBCLANG_PATH
 $previousGeneratorInstance = $env:CMAKE_GENERATOR_INSTANCE
 $previousBuildCommit = $env:SAYFLEX_BUILD_COMMIT
+$previousOcrBundle = $env:SAYFLEX_OCR_BUNDLE
 $publishSucceeded = $false
 
 try {
@@ -182,12 +183,18 @@ try {
             'sayflex-desktop.exe' = 'SayFlex.exe'
             'sayflex-input-host.exe' = 'SayFlex.InputHost.exe'
             'sayflex-translation-worker.exe' = 'SayFlex.Translation.exe'
+            'sayflex-ocr-worker.exe' = 'SayFlex.Ocr.exe'
             'sayflex-companion-renderer.exe' = 'SayFlex.Companion.exe'
         }
         foreach ($sourceName in $binaryMap.Keys) {
             Copy-Item -LiteralPath (Join-Path $cpuTarget "$profile\$sourceName") `
                 -Destination (Join-Path $output $binaryMap[$sourceName])
         }
+
+        $env:SAYFLEX_OCR_BUNDLE = Join-Path $output `
+            'ocr-models\screen-ocr-ppocrv5-mobile-v3.9.2'
+        & (Join-Path $output 'SayFlex.Ocr.exe') --install-models
+        if ($LASTEXITCODE -ne 0) { throw 'The verified OCR model bundle could not be staged.' }
 
         Copy-Item -LiteralPath (Join-Path $rustRoot '..\LICENSE') `
             -Destination (Join-Path $output 'LICENSE.txt')
@@ -331,7 +338,8 @@ finally {
     $env:CMAKE_CUDA_ARCHITECTURES = $previousCudaArchitectures
     $env:LIBCLANG_PATH = $previousLibclangPath
     $env:CMAKE_GENERATOR_INSTANCE = $previousGeneratorInstance
-    $env:SAYFLEX_BUILD_COMMIT = $previousBuildCommit
+        $env:SAYFLEX_BUILD_COMMIT = $previousBuildCommit
+        $env:SAYFLEX_OCR_BUNDLE = $previousOcrBundle
     if (-not $KeepBuildArtifacts) {
         foreach ($target in $temporaryTargets) {
             if (Test-Path -LiteralPath $target) {

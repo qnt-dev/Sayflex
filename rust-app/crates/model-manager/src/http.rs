@@ -1,24 +1,24 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
     time::Duration,
 };
 
 use crate::{ArtifactFetcher, DownloadProgress, InstallPhase, ModelInstallError};
 use reqwest::{
-    StatusCode,
-    blocking::Client,
+    Client, StatusCode,
     header::{RANGE, USER_AGENT},
 };
+use tokio::runtime::Runtime;
 
 const MAX_ATTEMPTS: u32 = 4;
-const BUFFER_BYTES: usize = 1024 * 1024;
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Stops an installation that is already running.
 ///
@@ -49,6 +49,7 @@ impl CancelToken {
 /// server supports ranges.
 pub struct HttpFetcher {
     client: Client,
+    runtime: Runtime,
     user_agent: String,
     cancellation: CancelToken,
 }
@@ -62,8 +63,13 @@ impl HttpFetcher {
             .timeout(Duration::from_secs(60 * 60 * 6))
             .build()
             .map_err(|error| ModelInstallError::Download(error.to_string()))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| ModelInstallError::Download(error.to_string()))?;
         Ok(Self {
             client,
+            runtime,
             user_agent: format!("{} {component}", rust_app_core::product::USER_AGENT_PRODUCT),
             cancellation: CancelToken::default(),
         })
@@ -95,7 +101,15 @@ impl ArtifactFetcher for HttpFetcher {
                 Err(error) => return Err(error),
             }
             if attempt + 1 < MAX_ATTEMPTS {
-                thread::sleep(Duration::from_millis(350 * 2_u64.pow(attempt)));
+                let backoff = Duration::from_millis(350 * 2_u64.pow(attempt));
+                self.runtime.block_on(async {
+                    tokio::select! {
+                        () = tokio::time::sleep(backoff) => Ok(()),
+                        () = wait_until_cancelled(&self.cancellation) => {
+                            Err(ModelInstallError::Cancelled)
+                        }
+                    }
+                })?;
             }
         }
         Err(ModelInstallError::Download(last_error))
@@ -123,9 +137,15 @@ impl HttpFetcher {
         if offset > 0 {
             request = request.header(RANGE, format!("bytes={offset}-"));
         }
-        let mut response = request
-            .send()
-            .map_err(|error| ModelInstallError::Download(error.to_string()))?;
+        let mut response = self.runtime.block_on(async {
+            tokio::select! {
+                response = request.send() => response
+                    .map_err(|error| ModelInstallError::Download(error.to_string())),
+                () = wait_until_cancelled(&self.cancellation) => {
+                    Err(ModelInstallError::Cancelled)
+                }
+            }
+        })?;
 
         if response.status() == StatusCode::RANGE_NOT_SATISFIABLE && offset == expected_bytes {
             return Ok(());
@@ -152,22 +172,29 @@ impl HttpFetcher {
             bytes_received: received,
             total_bytes: expected_bytes,
         });
-        let mut buffer = vec![0_u8; BUFFER_BYTES];
         loop {
-            let count = response
-                .read(&mut buffer)
-                .map_err(|error| ModelInstallError::Download(error.to_string()))?;
-            if count == 0 {
+            let chunk = self.runtime.block_on(async {
+                tokio::select! {
+                    chunk = tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, response.chunk()) => {
+                        match chunk {
+                            Ok(Ok(chunk)) => Ok(chunk),
+                            Ok(Err(error)) => Err(ModelInstallError::Download(error.to_string())),
+                            Err(_) => Err(ModelInstallError::Download(format!(
+                                "download received no data for {} seconds",
+                                DOWNLOAD_IDLE_TIMEOUT.as_secs()
+                            ))),
+                        }
+                    }
+                    () = wait_until_cancelled(&self.cancellation) => {
+                        Err(ModelInstallError::Cancelled)
+                    }
+                }
+            })?;
+            let Some(chunk) = chunk else {
                 break;
-            }
-            file.write_all(&buffer[..count])?;
-            if self.cancellation.is_cancelled() {
-                // The partial file stays on disk: a later attempt resumes from
-                // exactly here instead of starting the download again.
-                file.flush()?;
-                return Err(ModelInstallError::Cancelled);
-            }
-            received = received.saturating_add(count as u64);
+            };
+            file.write_all(&chunk)?;
+            received = received.saturating_add(chunk.len() as u64);
             if received > expected_bytes {
                 return Err(ModelInstallError::SizeMismatch {
                     expected: expected_bytes,
@@ -187,5 +214,69 @@ impl HttpFetcher {
             )));
         }
         Ok(())
+    }
+}
+
+async fn wait_until_cancelled(cancellation: &CancelToken) {
+    while !cancellation.is_cancelled() {
+        tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
+
+    use tempfile::tempdir;
+
+    use super::HttpFetcher;
+    use crate::{ArtifactFetcher, ModelInstallError};
+
+    #[test]
+    fn cancellation_interrupts_a_stalled_response_body() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (headers_sent, headers_received) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+            headers_sent.send(()).unwrap();
+            thread::sleep(Duration::from_secs(5));
+        });
+
+        let fetcher = HttpFetcher::new("cancel-test").unwrap();
+        let cancellation = fetcher.cancellation();
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("partial.bin");
+        let (result_sent, result_received) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let result = fetcher.fetch(
+                &format!("http://{address}/model"),
+                &destination,
+                10,
+                &mut |_| {},
+            );
+            result_sent.send(result).unwrap();
+        });
+
+        headers_received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server response headers");
+        cancellation.cancel();
+        let result = result_received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cancelled download must not wait for the network timeout");
+        assert!(matches!(result, Err(ModelInstallError::Cancelled)));
     }
 }

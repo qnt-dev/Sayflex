@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0.100"
+fxtranslate = { version = "=0.4.2", default-features = false, features = ["fast", "icu-segmenter"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rust-model-manager = { version = "0.8.0", path = "../model-manager" }
 rust-protocol = { version = "0.8.0", path = "../protocol" }

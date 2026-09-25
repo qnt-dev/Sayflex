@@ -54,6 +54,22 @@ struct DecodedTranscript {
     segments: Vec<DecodedSegment>,
 }
 
+#[derive(Clone, Copy)]
+struct WhisperDecodePolicy {
+    no_timestamps: bool,
+    single_segment: bool,
+}
+
+const fn whisper_decode_policy(single_segment: bool) -> WhisperDecodePolicy {
+    WhisperDecodePolicy {
+        // Only the warm-up probe is intentionally a timestamp-free single
+        // segment. Real transcripts need segment boundaries so speculative
+        // work can become a reusable stable prefix.
+        no_timestamps: single_segment,
+        single_segment,
+    }
+}
+
 struct DecodedSegment {
     text: String,
     start_timestamp_cs: i64,
@@ -247,6 +263,7 @@ impl WhisperEngine {
             .as_mut()
             .context("Whisper inference state is not prepared")?;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let decode_policy = whisper_decode_policy(single_segment);
         params.set_n_threads(inference_threads());
         params.set_language(self.language.as_deref());
         params.set_translate(output_mode == SpeechOutputMode::TranslateToEnglish);
@@ -254,8 +271,8 @@ impl WhisperEngine {
         if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.is_empty()) {
             params.set_initial_prompt(prompt);
         }
-        params.set_no_timestamps(true);
-        params.set_single_segment(single_segment);
+        params.set_no_timestamps(decode_policy.no_timestamps);
+        params.set_single_segment(decode_policy.single_segment);
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
         params.set_print_progress(false);
@@ -373,7 +390,7 @@ mod tests {
 
     use super::{
         inference_threads, normalize_transcript, source_sample_at_timestamp,
-        supports_direct_translation,
+        supports_direct_translation, whisper_decode_policy,
     };
     use crate::audio::RecordedAudio;
 
@@ -411,5 +428,13 @@ mod tests {
         assert_eq!(source_sample_at_timestamp(&recording, 100), 144_000);
         assert_eq!(source_sample_at_timestamp(&recording, 500), 144_000);
         assert_eq!(source_sample_at_timestamp(&recording, -10), 96_000);
+    }
+
+    #[test]
+    fn reusable_transcription_keeps_segment_timestamps_enabled() {
+        let policy = whisper_decode_policy(false);
+
+        assert!(!policy.no_timestamps);
+        assert!(!policy.single_segment);
     }
 }

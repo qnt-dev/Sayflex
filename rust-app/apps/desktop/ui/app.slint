@@ -5,13 +5,13 @@ import { ListView } from "std-widgets.slint";
 // them apart is what lets each be judged on its own terms.
 import { SettingsWindow } from "settings.slint";
 import { SupportWindow } from "support.slint";
-import { ModelRow, ProviderRow, HistoryRow, HotkeyRow } from "rows.slint";
+import { ModelRow, ProviderRow, HistoryRow, HotkeyRow, ResourceRow } from "rows.slint";
 import { Fact } from "parts.slint";
 import { MenuOption, RowAction } from "controls.slint";
 import { Sheet } from "sheet.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
 
-export { SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, HotkeyRow, Fact, MenuOption, SlateLine }
+export { SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, HotkeyRow, ResourceRow, Fact, MenuOption, SlateLine }
 
 export struct TranslationPair {
     source: string,
@@ -290,8 +290,8 @@ export component RecordingIndicator inherits Window {
 
 export component SelectionChooser inherits Window {
     title: @tr("Correct keyboard layout");
-    width: 590px;
-    height: 117px + root.source-panel-height * 1px + root.candidate-labels.length * 61px;
+    width: 458px;
+    height: 62px + root.source-panel-height * 1px + root.candidate-labels.length * 56px;
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -306,15 +306,15 @@ export component SelectionChooser inherits Window {
     callback cancel();
 
     Rectangle {
-        border-radius: 7px;
+        border-radius: 9px;
         border-width: 1px;
         border-color: Theme.line;
-        background: Theme.acrylic;
+        background: Theme.glass;
         opacity: root.prepared ? 1 : 0;
 
         VerticalLayout {
-            padding: 18px;
-            spacing: 9px;
+            padding: 14px;
+            spacing: 8px;
 
             HorizontalLayout {
                 height: 24px;
@@ -322,11 +322,36 @@ export component SelectionChooser inherits Window {
                 Text {
                     text: @tr("Correct keyboard layout");
                     color: Theme.text;
-                    font-size: 16px;
-                    font-weight: 720;
+                    font-size: 14px;
+                    font-weight: 680;
                 }
                 Rectangle { horizontal-stretch: 1; }
-                Eyebrow { text: @tr("SELECT A RESULT"); }
+                close-action := Rectangle {
+                    width: 26px;
+                    height: 24px;
+                    border-radius: 5px;
+                    border-width: close-touch.has-hover ? 1px : 0px;
+                    border-color: Theme.line;
+                    background: close-touch.has-hover ? Theme.panel-raised : transparent;
+                    accessible-role: button;
+                    accessible-label: @tr("Close");
+                    accessible-enabled: true;
+                    accessible-action-default => { root.cancel(); }
+
+                    Text {
+                        text: "×";
+                        color: close-touch.has-hover ? Theme.text : Theme.text-muted;
+                        font-size: 17px;
+                        font-weight: 430;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    close-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cancel(); }
+                    }
+                }
             }
 
             Rectangle {
@@ -334,8 +359,8 @@ export component SelectionChooser inherits Window {
                 vertical-stretch: 0;
                 border-radius: 4px;
                 border-width: 1px;
-                border-color: Theme.line;
-                background: Theme.panel;
+                border-color: Theme.line-soft;
+                background: #16181ca8;
                 Text {
                     x: 10px;
                     y: 7px;
@@ -350,12 +375,16 @@ export component SelectionChooser inherits Window {
             }
 
             for label[index] in root.candidate-labels : Rectangle {
-                height: 52px;
+                height: 48px;
                 vertical-stretch: 0;
-                border-radius: 4px;
+                border-radius: 6px;
                 border-width: 1px;
                 border-color: option-touch.has-hover ? Theme.orange : Theme.line;
-                background: option-touch.has-hover ? Theme.orange-soft : Theme.panel;
+                background: option-touch.pressed
+                    ? #24272c
+                    : option-touch.has-hover
+                        ? Theme.orange-soft
+                        : Theme.panel-raised;
                 accessible-role: button;
                 accessible-label: label;
                 accessible-enabled: true;
@@ -364,7 +393,6 @@ export component SelectionChooser inherits Window {
                 HorizontalLayout {
                     padding-left: 11px;
                     padding-right: 11px;
-                    spacing: 10px;
                     VerticalLayout {
                         alignment: center;
                         spacing: 1px;
@@ -377,41 +405,17 @@ export component SelectionChooser inherits Window {
                         Text {
                             text: root.candidate-texts[index];
                             color: Theme.text;
-                            font-size: 11px;
+                            font-size: 13px;
+                            font-weight: 520;
                             overflow: elide;
                         }
-                    }
-                    Text {
-                        text: @tr("ENTER");
-                        color: Theme.text-faint;
-                        font-size: 8px;
-                        vertical-alignment: center;
                     }
                 }
 
                 option-touch := TouchArea {
+                    mouse-cursor: pointer;
                     clicked => {
                         root.choose-candidate(index);
-                    }
-                }
-            }
-
-            HorizontalLayout {
-                height: 30px;
-                vertical-stretch: 0;
-                Text {
-                    text: @tr("Original selection remains active");
-                    color: Theme.text-faint;
-                    font-size: 9px;
-                    vertical-alignment: center;
-                }
-                Rectangle { horizontal-stretch: 1; }
-                ActionButton {
-                    width: 80px;
-                    height: 30px;
-                    label: @tr("CANCEL");
-                    clicked => {
-                        root.cancel();
                     }
                 }
             }
@@ -530,6 +534,13 @@ export component TranslationPreview inherits Window {
     in-out property <bool> prepared: false;
     in-out property <string> source-text;
     in-out property <string> translated-text;
+    in-out property <[string]> translated-paragraphs;
+    in-out property <bool> processing: false;
+    in-out property <bool> model-offer-visible: false;
+    in-out property <string> model-offer-action;
+    in-out property <float> latest-paragraph-opacity: 1;
+    in-out property <float> visible-main-card-height: 96;
+    property <float> shimmer-phase: 0;
     out property <bool> source-available: root.source-text != "";
     in-out property <[TranslationPair]> dual-pairs;
     // 0 = translated result, 1 = original companion card, 2 = interleaved.
@@ -566,20 +577,25 @@ export component TranslationPreview inherits Window {
     out property <float> result-content-height:
         root.view-mode == 2
             ? root.dual-content-height
-            : max(20px, result-text.preferred-height + 4px) / 1px;
+            : root.translated-paragraphs.length > 0
+                ? max(20px, result-stack.preferred-height + 4px) / 1px
+                : max(20px, result-text.preferred-height + 4px) / 1px;
     out property <float> result-panel-height:
         min(252px, root.result-content-height * 1px) / 1px;
     out property <bool> result-scrollable:
         root.result-content-height * 1px > result-scroll.height + 0.5px;
     out property <float> result-scroll-offset: -result-scroll.viewport-y / 1px;
     out property <float> result-viewport-height: result-scroll.height / 1px;
-    out property <float> main-card-height: 50 + root.result-panel-height;
+    out property <float> main-card-height:
+        50 + root.result-panel-height + (root.processing ? 24 : 0)
+            + (root.model-offer-visible ? 40 : 0);
     callback begin-drag();
     callback begin-resize(int);
     callback pin-state-changed(bool);
     callback view-mode-changed(int);
     callback reset-scroll();
     callback scroll-by(float);
+    callback download-model();
     reset-scroll => {
         result-scroll.viewport-y = 0px;
     }
@@ -589,6 +605,35 @@ export component TranslationPreview inherits Window {
                 result-scroll.height - result-scroll.viewport-height,
                 min(0px, result-scroll.viewport-y + (delta / 120) * 48px)
             );
+        }
+    }
+
+    Timer {
+        interval: 16ms;
+        running: abs(root.visible-main-card-height - root.main-card-height) > 0.5;
+        triggered() => {
+            root.visible-main-card-height +=
+                (root.main-card-height - root.visible-main-card-height) * 0.24;
+            if (abs(root.visible-main-card-height - root.main-card-height) <= 0.5) {
+                root.visible-main-card-height = root.main-card-height;
+            }
+        }
+    }
+    Timer {
+        interval: 16ms;
+        running: root.latest-paragraph-opacity < 0.999;
+        triggered() => {
+            root.latest-paragraph-opacity = min(1, root.latest-paragraph-opacity + 0.105);
+        }
+    }
+    Timer {
+        interval: 16ms;
+        running: root.processing;
+        triggered() => {
+            root.shimmer-phase += 0.018;
+            if (root.shimmer-phase >= 1) {
+                root.shimmer-phase = 0;
+            }
         }
     }
 
@@ -674,7 +719,10 @@ export component TranslationPreview inherits Window {
         x: root.view-mode == 1 ? 5px : 0px;
         y: root.view-mode == 1 ? root.original-card-height * 1px + 18px : 0px;
         width: parent.width - (root.view-mode == 1 ? 10px : 0px);
-        height: parent.height - self.y - (root.view-mode == 1 ? 6px : 0px);
+        height: min(
+            parent.height - self.y - (root.view-mode == 1 ? 6px : 0px),
+            root.visible-main-card-height * 1px
+        );
         border-radius: 9px;
         border-width: 0px;
         background: @linear-gradient(145deg,
@@ -816,12 +864,14 @@ export component TranslationPreview inherits Window {
             // scrollbar appears would reflow the text and create a
             // height/scroll feedback loop while a streamed result grows.
             width: parent.width - self.x - 20px;
-            height: parent.height - self.y - 12px;
+            height: parent.height - self.y
+                - (root.processing ? 32px : 12px)
+                - (root.model-offer-visible ? 40px : 0px);
             viewport-width: self.width;
             viewport-height: root.result-content-height * 1px;
 
             result-text := Text {
-                visible: root.view-mode != 2;
+                visible: root.view-mode != 2 && root.translated-paragraphs.length == 0;
                 width: result-scroll.width;
                 height: root.result-content-height * 1px;
                 text: root.translated-text;
@@ -830,6 +880,34 @@ export component TranslationPreview inherits Window {
                 font-weight: 470;
                 wrap: word-wrap;
                 vertical-alignment: top;
+            }
+
+            result-stack := VerticalLayout {
+                visible: root.view-mode != 2 && root.translated-paragraphs.length > 0;
+                width: result-scroll.width;
+                spacing: 10px;
+
+                for paragraph[index] in root.translated-paragraphs: Rectangle {
+                    width: parent.width;
+                    height: paragraph-text.preferred-height;
+                    opacity: index + 1 == root.translated-paragraphs.length
+                        ? root.latest-paragraph-opacity
+                        : 1;
+
+                    paragraph-text := Text {
+                        x: 0;
+                        y: (index + 1 == root.translated-paragraphs.length
+                            ? (1 - root.latest-paragraph-opacity) * 5px
+                            : 0px);
+                        width: parent.width;
+                        text: paragraph;
+                        color: root.dark-text ? #111820 : #f5f3ef;
+                        font-size: 14px;
+                        font-weight: 470;
+                        wrap: word-wrap;
+                        vertical-alignment: top;
+                    }
+                }
             }
 
             dual-stack := VerticalLayout {
@@ -893,6 +971,86 @@ export component TranslationPreview inherits Window {
                 border-radius: 1px;
                 background: Theme.red;
                 opacity: 0.7;
+            }
+        }
+
+        translating-status := Rectangle {
+            x: 14px;
+            y: parent.height - 25px;
+            width: 86px;
+            height: 16px;
+            clip: true;
+            opacity: root.processing ? 1 : 0;
+            animate opacity { duration: 150ms; easing: ease-out; }
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "Translating";
+                color: root.dark-text ? #2d333a8a : #d8d4cd8a;
+                font-size: 11px;
+                font-weight: 560;
+                vertical-alignment: center;
+            }
+            wave-red := Rectangle {
+                x: -34px + root.shimmer-phase * (parent.width + 48px);
+                width: 34px;
+                height: parent.height;
+                clip: true;
+
+                Text {
+                    x: -wave-red.x;
+                    width: translating-status.width;
+                    height: parent.height;
+                    text: "Translating";
+                    color: #d9362b;
+                    font-size: 11px;
+                    font-weight: 620;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    x: 9px;
+                    width: 16px;
+                    height: parent.height;
+                    clip: true;
+
+                    Text {
+                        x: -wave-red.x - parent.x;
+                        width: translating-status.width;
+                        height: parent.height;
+                        text: "Translating";
+                        color: #f0a33a;
+                        font-size: 11px;
+                        font-weight: 650;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        if root.model-offer-visible: model-offer-button := Rectangle {
+            x: 14px;
+            y: parent.height - 38px;
+            width: parent.width - 28px;
+            height: 30px;
+            border-radius: 6px;
+            background: model-offer-touch.pressed
+                ? #bd2f27
+                : model-offer-touch.has-hover ? #ef5147 : Theme.red;
+            accessible-role: button;
+            accessible-label: root.model-offer-action;
+            accessible-action-default => { root.download-model(); }
+
+            Text {
+                text: root.model-offer-action;
+                color: #0b0e13;
+                font-size: 11px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            model-offer-touch := TouchArea {
+                clicked => { root.download-model(); }
             }
         }
 
@@ -1071,7 +1229,7 @@ export component ScreenRegionOverlay inherits Window {
     in property <float> selection-y: 0;
     in property <float> selection-width: 0;
     in property <float> selection-height: 0;
-    in property <float> dim-opacity: 0.58;
+    in property <float> dim-opacity: 0.28;
 
     Image {
         width: parent.width;
@@ -1123,11 +1281,15 @@ export component TranslatorWindow inherits Window {
     in-out property <int> presentation-state: 0;
     in-out property <string> notice-headline;
     in-out property <string> notice-detail;
+    in-out property <bool> model-offer-visible: false;
+    in-out property <string> model-offer-action;
     out property <bool> source-focused: source-input.has-focus;
     callback translate();
     callback submit-shortcut();
     callback copy-result();
     callback swap-text();
+    callback download-model();
+    callback close-requested();
     submit-shortcut => {
         source-input.clear-focus();
         root.translate();
@@ -1306,6 +1468,10 @@ export component TranslatorWindow inherits Window {
                 label: @tr("Copy result");
                 enabled: !root.processing && root.result-text != "";
                 clicked => { root.copy-result(); }
+            }
+            if root.model-offer-visible: RowAction {
+                label: root.model-offer-action;
+                clicked => { root.download-model(); }
             }
             RowAction {
                 label: @tr("Translate (Ctrl+Enter)");

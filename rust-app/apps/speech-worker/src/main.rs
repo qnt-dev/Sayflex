@@ -295,6 +295,9 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                 started_unix_ms: _,
             } => match recorder.begin(session_id) {
                 Ok(()) => {
+                    if local_model_enabled {
+                        inference.prepare_if_needed();
+                    }
                     inference.begin_session(session_id);
                     if !use_routing_actor(local_model_enabled, transcription.prefers_cloud()) {
                         speculation.begin(session_id, output_mode, fast_release_previews);
@@ -353,6 +356,19 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                 transcription.cancel(session_id);
                 if recorder.cancel(session_id) {
                     let _ = events.send(SpeechWorkerEvent::Cancelled { session_id });
+                }
+            }
+            SpeechWorkerCommand::UnloadLocalModel => {
+                if inference.has_active_session() {
+                    let _ = events.send(SpeechWorkerEvent::Failed {
+                        session_id: None,
+                        code: "model_busy".to_owned(),
+                        message: "Finish the active dictation before releasing its local model."
+                            .to_owned(),
+                        retryable: true,
+                    });
+                } else {
+                    inference.unload_model_for_memory();
                 }
             }
             SpeechWorkerCommand::EnsureModel { catalog_id } => {

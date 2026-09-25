@@ -1002,7 +1002,7 @@ mod tests {
             "the global header must not carry an application setting"
         );
 
-        settings.set_active_page(8);
+        settings.set_active_page(9);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
         assert!(
             ElementHandle::find_by_accessible_label(&settings, "System language")
@@ -1014,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn every_settings_page_reports_the_real_nine_page_count() {
+    fn every_settings_page_reports_the_real_ten_page_count() {
         use i_slint_backend_testing::ElementHandle;
         use slint::ComponentHandle;
 
@@ -1024,10 +1024,10 @@ mod tests {
         let settings = crate::SettingsWindow::new().expect("settings surface");
         settings.show().expect("show headless settings surface");
 
-        for page in 0..9 {
+        for page in 0..10 {
             settings.set_active_page(page);
             i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
-            let expected = format!("{:02} / 09", page + 1);
+            let expected = format!("{:02} / 10", page + 1);
             assert!(
                 ElementHandle::find_by_accessible_label(&settings, &expected)
                     .next()
@@ -1036,6 +1036,52 @@ mod tests {
             );
         }
         drop(seed);
+    }
+
+    #[test]
+    fn resources_page_explains_that_unloaded_models_return_automatically_in_every_locale() {
+        let source = "Unloading only frees working memory. The selected models remain installed. The next time you use a function, SayFlex loads its model automatically and the function continues normally.";
+        for (locale, po) in [
+            (
+                "ru",
+                include_str!("../translations/ru/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "uk",
+                include_str!("../translations/uk/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "es",
+                include_str!("../translations/es/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "pt-BR",
+                include_str!("../translations/pt-BR/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "de",
+                include_str!("../translations/de/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "fr",
+                include_str!("../translations/fr/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "it",
+                include_str!("../translations/it/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+            (
+                "ko",
+                include_str!("../translations/ko/LC_MESSAGES/sayflex-desktop.po"),
+            ),
+        ] {
+            let entries = catalog(po);
+            let translated = entries
+                .get(source)
+                .unwrap_or_else(|| panic!("{locale}: missing resources-page explanation"));
+            assert!(!translated.trim().is_empty(), "{locale}: empty explanation");
+            assert_ne!(translated, source, "{locale}: explanation is not localized");
+        }
     }
 
     #[test]
@@ -2049,7 +2095,7 @@ mod tests {
             settings.show().expect("show headless settings surface");
             let surface = settings.root_element().size();
 
-            for page in 0..9 {
+            for page in 0..10 {
                 settings.set_active_page(page);
                 i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
                 let controls = ElementQuery::from_root(&settings)
@@ -2103,7 +2149,7 @@ mod tests {
             settings.show().expect("show headless settings surface");
             let surface = settings.root_element().size();
 
-            for page in 0..9 {
+            for page in 0..10 {
                 settings.set_active_page(page);
                 i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
                 let labelled = ElementQuery::from_root(&settings)
@@ -2282,7 +2328,7 @@ mod tests {
         slint::select_bundled_translation("en").expect("select English bundle");
         let settings = crate::SettingsWindow::new().expect("settings surface");
         settings.show().expect("show headless settings surface");
-        settings.set_active_page(8);
+        settings.set_active_page(9);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
         let selected = Rc::new(RefCell::new(String::new()));
@@ -2758,6 +2804,65 @@ mod tests {
                 "unapproved toolbar token: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn layout_chooser_is_compact_and_exposes_candidate_and_close_actions() {
+        use std::{cell::Cell, rc::Rc};
+
+        use i_slint_backend_testing::{ElementHandle, ElementRoot};
+        use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let chooser = crate::SelectionChooser::new().expect("layout chooser");
+        chooser.set_source_text("ghbdtn vbh".into());
+        chooser.set_source_panel_height(38.0);
+        chooser.set_candidate_labels(ModelRc::new(VecModel::from(vec![SharedString::from(
+            "English keys → Cyrillic layout",
+        )])));
+        chooser.set_candidate_texts(ModelRc::new(VecModel::from(vec![SharedString::from(
+            "привет мир",
+        )])));
+
+        let chosen = Rc::new(Cell::new(None));
+        let chosen_from_callback = Rc::clone(&chosen);
+        chooser.on_choose_candidate(move |index| chosen_from_callback.set(Some(index)));
+        let cancelled = Rc::new(Cell::new(false));
+        let cancelled_from_callback = Rc::clone(&cancelled);
+        chooser.on_cancel(move || cancelled_from_callback.set(true));
+
+        chooser.show().expect("show layout chooser");
+        chooser.set_prepared(true);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+
+        let surface = chooser.root_element().size();
+        assert!(
+            surface.width <= 480.0,
+            "layout chooser regressed to a wide dialog"
+        );
+        assert!(
+            surface.height <= 205.0,
+            "one correction must fit in a compact transient card"
+        );
+
+        let candidate =
+            ElementHandle::find_by_accessible_label(&chooser, "English keys → Cyrillic layout")
+                .next()
+                .expect("correction candidate action");
+        candidate.invoke_accessible_default_action();
+        assert_eq!(chosen.get(), Some(0));
+
+        let close = ElementHandle::find_by_accessible_label(&chooser, "Close")
+            .next()
+            .expect("icon close action");
+        close.invoke_accessible_default_action();
+        assert!(cancelled.get());
+        assert!(
+            ElementHandle::find_by_accessible_label(&chooser, "CANCEL")
+                .next()
+                .is_none(),
+            "the legacy footer button must not return"
+        );
     }
 
     #[test]

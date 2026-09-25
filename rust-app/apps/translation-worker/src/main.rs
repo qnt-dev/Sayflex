@@ -55,6 +55,7 @@ fn request_failure(
         kind,
         provider_id: None,
         retry_after_ms: None,
+        required_catalog_id: None,
         detail: detail.into(),
         attempts,
     })
@@ -100,6 +101,7 @@ impl EventWriter {
 /// cancellation nor a shutdown could reach it.
 enum InstallCommand {
     Initialize {
+        selected_catalog_id: Option<String>,
         selected_tier: Option<TranslationTier>,
         keep_warm: bool,
         history_enabled: bool,
@@ -107,18 +109,21 @@ enum InstallCommand {
         skip_local_prepare: bool,
     },
     EnsureModel {
-        tier: TranslationTier,
+        catalog_id: String,
     },
     RemoveModel {
-        tier: TranslationTier,
+        catalog_id: String,
     },
-    SelectTier {
-        tier: TranslationTier,
+    SelectModel {
+        catalog_id: String,
         keep_warm: bool,
     },
     SetLocalEnabled {
         enabled: bool,
     },
+    /// Drops only the resident engine. Selection, provider order and installed
+    /// files stay intact so the next local request can prepare it again.
+    UnloadResident,
     Shutdown,
 }
 
@@ -149,10 +154,11 @@ fn command_after_queued_cancellation(
             Some(command)
         }
         InstallCommand::EnsureModel { .. }
-        | InstallCommand::SelectTier { .. }
+        | InstallCommand::SelectModel { .. }
         | InstallCommand::SetLocalEnabled { enabled: true } => None,
         InstallCommand::RemoveModel { .. }
         | InstallCommand::SetLocalEnabled { enabled: false }
+        | InstallCommand::UnloadResident
         | InstallCommand::Shutdown => Some(command),
     }
 }
@@ -193,7 +199,7 @@ impl InstallActor {
                     // Read before the command is consumed: a failure has to say
                     // which row it belongs to, and after this the command is
                     // gone.
-                    let installing = installing_tier(&command);
+                    let installing = installing_catalog_id(&command);
                     let failure_code = install_failure_code(&command);
                     if let Err(error) = run_install(command, &state, &writer) {
                         let cancelled = error
@@ -204,12 +210,7 @@ impl InstallActor {
                             // The row that was installing gets its own failure,
                             // so it can stop offering a Cancel for a download
                             // that is already over.
-                            catalog_id: installing.and_then(|tier| {
-                                recover_lock(&state)
-                                    .pack(tier)
-                                    .ok()
-                                    .map(|pack| pack.id.clone())
-                            }),
+                            catalog_id: installing,
                             code: if cancelled {
                                 "model_install_cancelled".to_owned()
                             } else {
@@ -256,6 +257,7 @@ struct WorkerState {
     installer: BundleInstaller,
     runtime: LlamaRuntimeManager,
     fetcher: HttpFetcher,
+    selected_catalog_id: Option<String>,
     selected_tier: Option<TranslationTier>,
     keep_warm: bool,
     local_model_enabled: bool,
@@ -263,6 +265,85 @@ struct WorkerState {
     locale: String,
     history: TranslationHistory,
     history_enabled: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LocalPackSelectionError {
+    NoSelection,
+    UnsupportedPair,
+    Missing { catalog_id: String },
+}
+
+impl std::fmt::Display for LocalPackSelectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSelection => formatter.write_str("no translation model is selected"),
+            Self::UnsupportedPair => formatter.write_str("no compact package supports this pair"),
+            Self::Missing { catalog_id } => {
+                write!(
+                    formatter,
+                    "translation package {catalog_id} is not installed"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LocalPackSelectionError {}
+
+fn select_local_catalog_id(
+    catalog: &TranslationCatalog,
+    selected_tier: Option<TranslationTier>,
+    selected_catalog_id: Option<&str>,
+    source: TranslationLanguage,
+    target: TranslationLanguage,
+    is_installed: impl Fn(&str) -> bool,
+) -> std::result::Result<String, LocalPackSelectionError> {
+    let pack = match selected_tier {
+        Some(TranslationTier::Compact) => catalog
+            .compact_for_pair(source, target)
+            .ok_or(LocalPackSelectionError::UnsupportedPair)?,
+        Some(tier @ (TranslationTier::Tiny | TranslationTier::Teacher)) => {
+            if let Some(catalog_id) = selected_catalog_id {
+                catalog
+                    .by_id(catalog_id)
+                    .filter(|pack| pack.tier == tier)
+                    .or_else(|| catalog.by_tier(tier))
+            } else {
+                catalog.by_tier(tier)
+            }
+            .ok_or(LocalPackSelectionError::NoSelection)?
+        }
+        None => return Err(LocalPackSelectionError::NoSelection),
+    };
+    if !pack.supports(source, target) {
+        return Err(LocalPackSelectionError::UnsupportedPair);
+    }
+    if !is_installed(&pack.id) {
+        return Err(LocalPackSelectionError::Missing {
+            catalog_id: pack.id.clone(),
+        });
+    }
+    Ok(pack.id.clone())
+}
+
+fn replace_resident_resource<T, E>(
+    slot: &mut Option<T>,
+    announce_release: impl FnOnce() -> Result<(), E>,
+    create: impl FnOnce() -> Result<T, E>,
+) -> Result<(), E> {
+    // Dropping the old process before invoking the factory prevents the peak
+    // where two model allocations briefly coexist in RAM or VRAM.
+    let released = slot.take().is_some();
+    if released {
+        announce_release()?;
+    }
+    *slot = Some(create()?);
+    Ok(())
+}
+
+fn release_resident_resource<T>(slot: &mut Option<T>) -> Option<T> {
+    slot.take()
 }
 
 impl WorkerState {
@@ -273,6 +354,7 @@ impl WorkerState {
             installer: BundleInstaller::new(root.join("translation-models")),
             runtime: LlamaRuntimeManager::new(root.join("runtimes")),
             fetcher: HttpFetcher::new("translation-model-manager")?,
+            selected_catalog_id: None,
             selected_tier: None,
             keep_warm: true,
             local_model_enabled: true,
@@ -283,26 +365,45 @@ impl WorkerState {
         })
     }
 
-    fn pack(&self, tier: TranslationTier) -> Result<&TranslationPackDescriptor> {
+    fn pack(&self, catalog_id: &str) -> Result<&TranslationPackDescriptor> {
         self.catalog
-            .by_tier(tier)
-            .ok_or_else(|| anyhow!("translation tier is missing from the catalog"))
+            .by_id(catalog_id)
+            .ok_or_else(|| anyhow!("translation model is missing from the catalog"))
     }
 
-    fn model_installed(&self, tier: TranslationTier) -> bool {
-        self.pack(tier).ok().is_some_and(|pack| {
+    fn model_installed(&self, catalog_id: &str) -> bool {
+        self.pack(catalog_id).ok().is_some_and(|pack| {
             self.installer
                 .is_installed(&pack.as_bundle())
                 .unwrap_or(false)
         })
     }
 
-    fn initial_tier(&self, requested: Option<TranslationTier>) -> Option<TranslationTier> {
-        choose_initial_tier(
-            requested,
-            self.model_installed(TranslationTier::Tiny),
-            self.model_installed(TranslationTier::Teacher),
-        )
+    fn initial_selection(
+        &self,
+        requested_catalog_id: Option<&str>,
+        requested_tier: Option<TranslationTier>,
+    ) -> Option<(String, TranslationTier)> {
+        if let Some(catalog_id) = requested_catalog_id
+            && self.model_installed(catalog_id)
+        {
+            let pack = self.pack(catalog_id).ok()?;
+            return Some((pack.id.clone(), pack.tier));
+        }
+        let installed_for_tier = |tier| {
+            self.catalog
+                .packs
+                .iter()
+                .find(|pack| pack.tier == tier && self.model_installed(&pack.id))
+        };
+        let tier = choose_initial_tier(
+            requested_tier,
+            installed_for_tier(TranslationTier::Compact).is_some(),
+            installed_for_tier(TranslationTier::Tiny).is_some(),
+            installed_for_tier(TranslationTier::Teacher).is_some(),
+        )?;
+        let pack = installed_for_tier(tier)?;
+        Some((pack.id.clone(), pack.tier))
     }
 
     fn summaries(&self) -> Vec<TranslationModelSummary> {
@@ -314,7 +415,7 @@ impl WorkerState {
                     self.installer
                         .is_installed(&pack.as_bundle())
                         .unwrap_or(false),
-                    self.selected_tier == Some(pack.tier),
+                    self.selected_catalog_id.as_deref() == Some(pack.id.as_str()),
                     &self.locale,
                 )
             })
@@ -332,41 +433,84 @@ impl WorkerState {
         Ok(())
     }
 
-    fn load_engine(&mut self, tier: TranslationTier, warm: bool) -> Result<(String, u64)> {
+    fn load_engine(
+        &mut self,
+        writer: &EventWriter,
+        catalog_id: &str,
+        warm: bool,
+    ) -> Result<(String, u64)> {
         let started = Instant::now();
-        let pack = self.pack(tier)?.clone();
+        let pack = self.pack(catalog_id)?.clone();
         let root = self.installer.bundle_path(&pack.as_bundle());
-        if !self.runtime.is_installed() {
+        if pack.backend.requires_llama_runtime() && !self.runtime.is_installed() {
             return Err(anyhow!("llama.cpp translation runtime is not installed"));
         }
-        let mut engine = TranslationEngine::new(pack.clone(), root, self.runtime.runtime_path());
-        if warm {
-            engine.warm()?;
-        }
-        self.engine = Some(engine);
+        let runtime_path = self.runtime.runtime_path();
+        let released_catalog_id = self
+            .engine
+            .as_ref()
+            .map(|engine| engine.catalog_id().to_owned());
+        replace_resident_resource(
+            &mut self.engine,
+            || {
+                writer.send(&TranslationWorkerEvent::LocalModelState {
+                    catalog_id: released_catalog_id,
+                    loaded: false,
+                })
+            },
+            || {
+                let mut engine = TranslationEngine::new(pack.clone(), root, runtime_path);
+                if warm {
+                    engine.warm()?;
+                }
+                Ok::<_, anyhow::Error>(engine)
+            },
+        )?;
         Ok((
             pack.id,
             started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         ))
     }
 
-    fn ensure_engine(&mut self, writer: &EventWriter) -> Result<TranslationTier> {
+    fn ensure_engine(
+        &mut self,
+        writer: &EventWriter,
+        source: TranslationLanguage,
+        target: TranslationLanguage,
+    ) -> Result<TranslationTier> {
         if !self.local_model_enabled {
             return Err(anyhow!("the local translation engine is disabled"));
         }
-        let tier = self
-            .selected_tier
-            .ok_or_else(|| anyhow!("no translation model is selected"))?;
+        let catalog_id = select_local_catalog_id(
+            &self.catalog,
+            self.selected_tier,
+            self.selected_catalog_id.as_deref(),
+            source,
+            target,
+            |candidate| self.model_installed(candidate),
+        )?;
+        let tier = self.pack(&catalog_id)?.tier;
+        if self.selected_catalog_id.as_deref() != Some(catalog_id.as_str()) {
+            self.selected_catalog_id = Some(catalog_id.clone());
+            writer.send(&TranslationWorkerEvent::ModelSelected {
+                catalog_id: catalog_id.clone(),
+                tier,
+            })?;
+        }
         if self
             .engine
             .as_ref()
-            .is_none_or(|engine| engine.tier() != tier)
+            .is_none_or(|engine| engine.catalog_id() != catalog_id)
         {
-            let (catalog_id, load_duration_ms) = self.load_engine(tier, false)?;
+            let (catalog_id, load_duration_ms) = self.load_engine(writer, &catalog_id, false)?;
             writer.send(&TranslationWorkerEvent::ModelReady {
-                catalog_id,
+                catalog_id: catalog_id.clone(),
                 tier,
                 load_duration_ms,
+            })?;
+            writer.send(&TranslationWorkerEvent::LocalModelState {
+                catalog_id: Some(catalog_id),
+                loaded: true,
             })?;
         }
         Ok(tier)
@@ -461,6 +605,7 @@ fn handle_command(
 ) -> Result<()> {
     match command {
         TranslationWorkerCommand::Initialize {
+            selected_catalog_id,
             selected_tier,
             keep_warm,
             history_enabled,
@@ -468,6 +613,7 @@ fn handle_command(
         } => {
             coordinator.cancel_all();
             installs.send(InstallCommand::Initialize {
+                selected_catalog_id,
                 selected_tier,
                 keep_warm,
                 history_enabled,
@@ -475,22 +621,28 @@ fn handle_command(
                 skip_local_prepare: false,
             });
         }
-        TranslationWorkerCommand::EnsureModel { tier } => {
+        TranslationWorkerCommand::EnsureModel { catalog_id } => {
             coordinator.cancel_all();
-            installs.send(InstallCommand::EnsureModel { tier });
+            installs.send(InstallCommand::EnsureModel { catalog_id });
         }
-        TranslationWorkerCommand::RemoveModel { tier } => {
+        TranslationWorkerCommand::RemoveModel { catalog_id } => {
             coordinator.cancel_all();
             installs.cancel();
-            installs.send(InstallCommand::RemoveModel { tier });
+            installs.send(InstallCommand::RemoveModel { catalog_id });
         }
         TranslationWorkerCommand::CancelModelInstall => installs.cancel(),
-        TranslationWorkerCommand::SelectTier { tier, keep_warm } => {
+        TranslationWorkerCommand::SelectModel {
+            catalog_id,
+            keep_warm,
+        } => {
             coordinator.cancel_all();
             // Choosing another tier abandons an installation still running for
             // the previous one.
             installs.cancel();
-            installs.send(InstallCommand::SelectTier { tier, keep_warm });
+            installs.send(InstallCommand::SelectModel {
+                catalog_id,
+                keep_warm,
+            });
         }
         TranslationWorkerCommand::Translate {
             request_id,
@@ -513,6 +665,10 @@ fn handle_command(
         }
         TranslationWorkerCommand::Cancel { request_id } => {
             coordinator.cancel(request_id);
+        }
+        TranslationWorkerCommand::UnloadLocalModel => {
+            installs.cancel();
+            installs.send(InstallCommand::UnloadResident);
         }
         TranslationWorkerCommand::SetTranslationProviders { providers: entries } => {
             let local_enabled = local_translation_enabled(&entries);
@@ -593,13 +749,18 @@ fn local_translation_enabled(entries: &[TranslationProviderEntry]) -> bool {
 /// A failure has to name the row it belongs to. Without it the desktop guessed
 /// from whatever happened to be downloading, and a download that died of a
 /// network fault left its row offering a Cancel for something already over.
-const fn installing_tier(command: &InstallCommand) -> Option<TranslationTier> {
+fn installing_catalog_id(command: &InstallCommand) -> Option<String> {
     match command {
-        InstallCommand::Initialize { selected_tier, .. } => *selected_tier,
-        InstallCommand::EnsureModel { tier }
-        | InstallCommand::RemoveModel { tier }
-        | InstallCommand::SelectTier { tier, .. } => Some(*tier),
-        InstallCommand::SetLocalEnabled { .. } | InstallCommand::Shutdown => None,
+        InstallCommand::Initialize {
+            selected_catalog_id,
+            ..
+        } => selected_catalog_id.clone(),
+        InstallCommand::EnsureModel { catalog_id }
+        | InstallCommand::RemoveModel { catalog_id }
+        | InstallCommand::SelectModel { catalog_id, .. } => Some(catalog_id.clone()),
+        InstallCommand::SetLocalEnabled { .. }
+        | InstallCommand::UnloadResident
+        | InstallCommand::Shutdown => None,
     }
 }
 
@@ -610,6 +771,7 @@ fn run_install(
 ) -> Result<()> {
     match command {
         InstallCommand::Initialize {
+            selected_catalog_id,
             selected_tier,
             keep_warm,
             history_enabled,
@@ -620,19 +782,25 @@ fn run_install(
             state.keep_warm = keep_warm;
             state.local_model_enabled = prepare_local_model;
             state.history_enabled = history_enabled;
-            state.selected_tier = state.initial_tier(selected_tier);
+            let selection = state.initial_selection(selected_catalog_id.as_deref(), selected_tier);
+            state.selected_catalog_id = selection.as_ref().map(|(id, _)| id.clone());
+            state.selected_tier = selection.map(|(_, tier)| tier);
             writer.send(&TranslationWorkerEvent::Ready {
                 protocol_version: PROTOCOL_VERSION,
+                selected_catalog_id: state.selected_catalog_id.clone(),
                 selected_tier: state.selected_tier,
                 models: state.summaries(),
             })?;
             if state.local_model_enabled
                 && !skip_local_prepare
-                && let Some(tier) = state.selected_tier
+                && let Some(catalog_id) = state.selected_catalog_id.clone()
             {
-                let catalog_id = state.pack(tier)?.id.clone();
-                state.ensure_runtime(writer, &catalog_id)?;
-                let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
+                let tier = state.pack(&catalog_id)?.tier;
+                if state.pack(&catalog_id)?.backend.requires_llama_runtime() {
+                    state.ensure_runtime(writer, &catalog_id)?;
+                }
+                let (catalog_id, load_duration_ms) =
+                    state.load_engine(writer, &catalog_id, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
                     catalog_id: catalog_id.clone(),
                     tier,
@@ -649,24 +817,28 @@ fn run_install(
                 })?;
             }
         }
-        InstallCommand::EnsureModel { tier } => {
+        InstallCommand::EnsureModel { catalog_id } => {
             let mut state = recover_lock(state);
-            let pack = state.pack(tier)?.clone();
+            let pack = state.pack(&catalog_id)?.clone();
+            let tier = pack.tier;
             let bundle = pack.as_bundle();
-            let runtime_download = if state.runtime.is_installed() {
-                0
-            } else {
-                RUNTIME_DOWNLOAD_BYTES
-            };
+            let runtime_download =
+                if !pack.backend.requires_llama_runtime() || state.runtime.is_installed() {
+                    0
+                } else {
+                    RUNTIME_DOWNLOAD_BYTES
+                };
             let model_download = bundle.total_bytes();
             let combined_total = runtime_download.saturating_add(model_download);
-            state.runtime.ensure_installed(&state.fetcher, |progress| {
-                let _ = writer.send(&TranslationWorkerEvent::ModelDownloadProgress {
-                    catalog_id: pack.id.clone(),
-                    downloaded_bytes: progress.bytes_received.min(runtime_download),
-                    total_bytes: combined_total,
-                });
-            })?;
+            if pack.backend.requires_llama_runtime() {
+                state.runtime.ensure_installed(&state.fetcher, |progress| {
+                    let _ = writer.send(&TranslationWorkerEvent::ModelDownloadProgress {
+                        catalog_id: pack.id.clone(),
+                        downloaded_bytes: progress.bytes_received.min(runtime_download),
+                        total_bytes: combined_total,
+                    });
+                })?;
+            }
             let path = state
                 .installer
                 .ensure_installed(&bundle, &state.fetcher, |progress| {
@@ -681,11 +853,16 @@ fn run_install(
                 tier,
                 path: path.to_string_lossy().into_owned(),
             })?;
+            state.selected_catalog_id = Some(pack.id.clone());
             state.selected_tier = Some(tier);
-            writer.send(&TranslationWorkerEvent::ModelSelected { tier })?;
+            writer.send(&TranslationWorkerEvent::ModelSelected {
+                catalog_id: pack.id.clone(),
+                tier,
+            })?;
             if state.local_model_enabled {
                 let keep_warm = state.keep_warm;
-                let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
+                let (catalog_id, load_duration_ms) =
+                    state.load_engine(writer, &pack.id, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
                     catalog_id: catalog_id.clone(),
                     tier,
@@ -697,15 +874,18 @@ fn run_install(
                 })?;
             }
         }
-        InstallCommand::RemoveModel { tier } => {
+        InstallCommand::RemoveModel { catalog_id } => {
             let mut state = recover_lock(state);
-            let pack = state.pack(tier)?.clone();
-            if state.selected_tier == Some(tier) && state.local_model_enabled {
+            let pack = state.pack(&catalog_id)?.clone();
+            let tier = pack.tier;
+            if state.selected_catalog_id.as_deref() == Some(pack.id.as_str())
+                && state.local_model_enabled
+            {
                 bail!(
                     "switch off the local translation provider before removing its selected model"
                 );
             }
-            if state.selected_tier == Some(tier) {
+            if state.selected_catalog_id.as_deref() == Some(pack.id.as_str()) {
                 let had_engine = state.engine.take().is_some();
                 if had_engine {
                     writer.send(&TranslationWorkerEvent::LocalModelState {
@@ -713,14 +893,17 @@ fn run_install(
                         loaded: false,
                     })?;
                 }
+                state.selected_catalog_id = None;
+                state.selected_tier = None;
             }
             let mut removed = state.installer.remove_complete(&pack.as_bundle())?;
-            let last_pack_removed = !state
+            let last_llama_pack_removed = !state
                 .catalog
                 .packs
                 .iter()
-                .any(|candidate| state.model_installed(candidate.tier));
-            if last_pack_removed {
+                .filter(|candidate| candidate.backend.requires_llama_runtime())
+                .any(|candidate| state.model_installed(&candidate.id));
+            if last_llama_pack_removed {
                 let runtime = state.runtime.remove()?;
                 removed.removed_files = removed.removed_files.saturating_add(runtime.removed_files);
                 removed.removed_bytes = removed.removed_bytes.saturating_add(runtime.removed_bytes);
@@ -729,22 +912,33 @@ fn run_install(
                 catalog_id: pack.id,
                 tier,
                 removed_bytes: removed.removed_bytes,
-                runtime_removed: last_pack_removed,
+                runtime_removed: last_llama_pack_removed,
                 models: state.summaries(),
             })?;
         }
-        InstallCommand::SelectTier { tier, keep_warm } => {
+        InstallCommand::SelectModel {
+            catalog_id,
+            keep_warm,
+        } => {
             let mut state = recover_lock(state);
-            if !state.model_installed(tier) {
+            if !state.model_installed(&catalog_id) {
                 return Err(anyhow!("translation model is not installed"));
             }
+            let pack = state.pack(&catalog_id)?.clone();
+            let tier = pack.tier;
             state.keep_warm = keep_warm;
+            state.selected_catalog_id = Some(pack.id.clone());
             state.selected_tier = Some(tier);
-            writer.send(&TranslationWorkerEvent::ModelSelected { tier })?;
+            writer.send(&TranslationWorkerEvent::ModelSelected {
+                catalog_id: pack.id.clone(),
+                tier,
+            })?;
             if state.local_model_enabled {
-                let catalog_id = state.pack(tier)?.id.clone();
-                state.ensure_runtime(writer, &catalog_id)?;
-                let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
+                if pack.backend.requires_llama_runtime() {
+                    state.ensure_runtime(writer, &pack.id)?;
+                }
+                let (catalog_id, load_duration_ms) =
+                    state.load_engine(writer, &pack.id, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
                     catalog_id: catalog_id.clone(),
                     tier,
@@ -761,10 +955,7 @@ fn run_install(
             if state.local_model_enabled == enabled {
                 writer.send(&TranslationWorkerEvent::LocalModelState {
                     catalog_id: if state.engine.is_some() {
-                        state
-                            .selected_tier
-                            .and_then(|tier| state.pack(tier).ok())
-                            .map(|pack| pack.id.clone())
+                        state.selected_catalog_id.clone()
                     } else {
                         None
                     },
@@ -776,10 +967,7 @@ fn run_install(
             if !enabled {
                 let had_engine = state.engine.take().is_some();
                 let unloaded = if had_engine {
-                    state
-                        .selected_tier
-                        .and_then(|tier| state.pack(tier).ok())
-                        .map(|pack| pack.id.clone())
+                    state.selected_catalog_id.clone()
                 } else {
                     None
                 };
@@ -787,11 +975,14 @@ fn run_install(
                     catalog_id: unloaded,
                     loaded: false,
                 })?;
-            } else if let Some(tier) = state.selected_tier {
-                let catalog_id = state.pack(tier)?.id.clone();
-                state.ensure_runtime(writer, &catalog_id)?;
+            } else if let Some(catalog_id) = state.selected_catalog_id.clone() {
+                let tier = state.pack(&catalog_id)?.tier;
+                if state.pack(&catalog_id)?.backend.requires_llama_runtime() {
+                    state.ensure_runtime(writer, &catalog_id)?;
+                }
                 let keep_warm = state.keep_warm;
-                let (catalog_id, load_duration_ms) = state.load_engine(tier, keep_warm)?;
+                let (catalog_id, load_duration_ms) =
+                    state.load_engine(writer, &catalog_id, keep_warm)?;
                 writer.send(&TranslationWorkerEvent::ModelReady {
                     catalog_id: catalog_id.clone(),
                     tier,
@@ -803,6 +994,18 @@ fn run_install(
                 })?;
             }
         }
+        InstallCommand::UnloadResident => {
+            let mut state = recover_lock(state);
+            let catalog_id = state
+                .engine
+                .as_ref()
+                .map(|engine| engine.catalog_id().to_owned());
+            let _ = release_resident_resource(&mut state.engine);
+            writer.send(&TranslationWorkerEvent::LocalModelState {
+                catalog_id,
+                loaded: false,
+            })?;
+        }
         InstallCommand::Shutdown => {}
     }
     Ok(())
@@ -810,21 +1013,31 @@ fn run_install(
 
 fn choose_initial_tier(
     requested: Option<TranslationTier>,
+    compact_installed: bool,
     fast_installed: bool,
     quality_installed: bool,
 ) -> Option<TranslationTier> {
+    if requested == Some(TranslationTier::Compact) && compact_installed {
+        return Some(TranslationTier::Compact);
+    }
     if requested == Some(TranslationTier::Teacher) && quality_installed {
         return Some(TranslationTier::Teacher);
     }
     if requested == Some(TranslationTier::Tiny) && fast_installed {
         return Some(TranslationTier::Tiny);
     }
-    if quality_installed {
-        Some(TranslationTier::Teacher)
-    } else if fast_installed {
-        Some(TranslationTier::Tiny)
-    } else {
-        None
+    match requested {
+        // A stale Qwen choice stays in the contextual-model family when the
+        // other Qwen pack is still present. This avoids silently changing an
+        // existing user's quality/coverage expectations after an update.
+        Some(TranslationTier::Tiny) if quality_installed => Some(TranslationTier::Teacher),
+        Some(TranslationTier::Teacher) if fast_installed => Some(TranslationTier::Tiny),
+        Some(TranslationTier::Compact) if quality_installed => Some(TranslationTier::Teacher),
+        Some(TranslationTier::Compact) if fast_installed => Some(TranslationTier::Tiny),
+        _ if compact_installed => Some(TranslationTier::Compact),
+        _ if quality_installed => Some(TranslationTier::Teacher),
+        _ if fast_installed => Some(TranslationTier::Tiny),
+        _ => None,
     }
 }
 
@@ -978,13 +1191,32 @@ fn translate_request(
     } else {
         TranslationFailureKind::LocalModelMissing
     };
-    let tier = state.ensure_engine(writer).map_err(|error| {
-        request_failure(
-            local_failure_kind.clone(),
-            format!("{error:#}"),
-            provider_attempts.clone(),
-        )
-    })?;
+    let tier = state
+        .ensure_engine(writer, source, target)
+        .map_err(|error| {
+            if let Some(LocalPackSelectionError::Missing { catalog_id }) =
+                error.downcast_ref::<LocalPackSelectionError>()
+            {
+                return TranslationRequestFailure(TranslationFailureReport {
+                    kind: TranslationFailureKind::LocalModelMissing,
+                    provider_id: None,
+                    retry_after_ms: None,
+                    required_catalog_id: Some(catalog_id.clone()),
+                    detail: format!("{error:#}"),
+                    attempts: provider_attempts.clone(),
+                })
+                .into();
+            }
+            let kind = if error
+                .downcast_ref::<LocalPackSelectionError>()
+                .is_some_and(|error| matches!(error, LocalPackSelectionError::UnsupportedPair))
+            {
+                TranslationFailureKind::UnsupportedRequest
+            } else {
+                local_failure_kind.clone()
+            };
+            request_failure(kind, format!("{error:#}"), provider_attempts.clone())
+        })?;
     let mut last_partial_at = None;
     let mut last_partial_text = String::new();
     let output = state
@@ -1126,42 +1358,51 @@ mod selection_tests {
     #[test]
     fn preserves_an_installed_explicit_selection() {
         assert_eq!(
-            choose_initial_tier(Some(TranslationTier::Tiny), true, true),
+            choose_initial_tier(Some(TranslationTier::Tiny), true, true, true),
             Some(TranslationTier::Tiny)
         );
         assert_eq!(
-            choose_initial_tier(Some(TranslationTier::Teacher), true, true),
+            choose_initial_tier(Some(TranslationTier::Teacher), true, true, true),
             Some(TranslationTier::Teacher)
+        );
+        assert_eq!(
+            choose_initial_tier(Some(TranslationTier::Compact), true, true, true),
+            Some(TranslationTier::Compact)
         );
     }
 
     #[test]
     fn recovers_to_best_installed_model_when_selection_is_missing_or_stale() {
         assert_eq!(
-            choose_initial_tier(None, true, true),
+            choose_initial_tier(None, true, true, true),
+            Some(TranslationTier::Compact)
+        );
+        assert_eq!(
+            choose_initial_tier(Some(TranslationTier::Tiny), true, false, true),
             Some(TranslationTier::Teacher)
         );
         assert_eq!(
-            choose_initial_tier(Some(TranslationTier::Tiny), false, true),
-            Some(TranslationTier::Teacher)
-        );
-        assert_eq!(
-            choose_initial_tier(Some(TranslationTier::Teacher), true, false),
+            choose_initial_tier(Some(TranslationTier::Teacher), true, true, false),
             Some(TranslationTier::Tiny)
+        );
+        assert_eq!(
+            choose_initial_tier(Some(TranslationTier::Compact), false, true, true),
+            Some(TranslationTier::Teacher)
         );
     }
 
     #[test]
     fn leaves_translation_unselected_when_no_model_is_installed() {
-        assert_eq!(choose_initial_tier(None, false, false), None);
+        assert_eq!(choose_initial_tier(None, false, false, false), None);
     }
 }
 
 #[cfg(test)]
 mod direction_tests {
     use rust_protocol::{TranslationLanguage, TranslationLanguagePolicy};
+    use rust_translation_engine::TranslationCatalog;
 
-    use super::resolve_direction;
+    use super::{LocalPackSelectionError, resolve_direction, select_local_catalog_id};
 
     #[test]
     fn a_request_that_names_nothing_is_read_from_the_text() {
@@ -1337,15 +1578,59 @@ mod direction_tests {
             "translating a language into itself spends an allowance for nothing"
         );
     }
+
+    #[test]
+    fn compact_mode_routes_each_request_to_its_installed_language_package() {
+        let catalog = TranslationCatalog::load().unwrap();
+        let installed = ["firefox-ru-en-v3.1", "firefox-de-en-v3"];
+
+        assert_eq!(
+            select_local_catalog_id(
+                &catalog,
+                Some(rust_protocol::TranslationTier::Compact),
+                Some("firefox-ru-en-v3.1"),
+                TranslationLanguage::German,
+                TranslationLanguage::English,
+                |id| installed.contains(&id),
+            )
+            .unwrap(),
+            "firefox-de-en-v3"
+        );
+    }
+
+    #[test]
+    fn compact_mode_names_the_exact_package_that_is_missing() {
+        let catalog = TranslationCatalog::load().unwrap();
+
+        assert_eq!(
+            select_local_catalog_id(
+                &catalog,
+                Some(rust_protocol::TranslationTier::Compact),
+                Some("firefox-ru-en-v3.1"),
+                TranslationLanguage::German,
+                TranslationLanguage::English,
+                |id| id == "firefox-ru-en-v3.1",
+            )
+            .unwrap_err(),
+            LocalPackSelectionError::Missing {
+                catalog_id: "firefox-de-en-v3".to_owned()
+            }
+        );
+    }
 }
 
 #[cfg(test)]
 mod local_model_policy_tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use rust_protocol::{TranslationProviderEntry, TranslationTier};
 
     use super::{
         InstallCommand, command_after_queued_cancellation, install_failure_code,
-        local_translation_enabled,
+        local_translation_enabled, release_resident_resource, replace_resident_resource,
     };
 
     fn entry(id: &str, enabled: bool) -> TranslationProviderEntry {
@@ -1376,13 +1661,13 @@ mod local_model_policy_tests {
     fn a_remove_failure_can_release_the_desktop_removing_state() {
         assert_eq!(
             install_failure_code(&InstallCommand::RemoveModel {
-                tier: TranslationTier::Tiny,
+                catalog_id: "firefox-de-en-v3".to_owned(),
             }),
             "model_remove"
         );
         assert_eq!(
             install_failure_code(&InstallCommand::EnsureModel {
-                tier: TranslationTier::Tiny,
+                catalog_id: "firefox-ru-en-v3.1".to_owned(),
             }),
             "translation_worker"
         );
@@ -1392,10 +1677,10 @@ mod local_model_policy_tests {
     fn a_cancel_supersedes_expensive_work_that_was_still_queued() {
         for command in [
             InstallCommand::EnsureModel {
-                tier: TranslationTier::Tiny,
+                catalog_id: "firefox-ru-en-v3.1".to_owned(),
             },
-            InstallCommand::SelectTier {
-                tier: TranslationTier::Teacher,
+            InstallCommand::SelectModel {
+                catalog_id: "qwen35-9b-q4".to_owned(),
                 keep_warm: true,
             },
             InstallCommand::SetLocalEnabled { enabled: true },
@@ -1411,6 +1696,7 @@ mod local_model_policy_tests {
     fn a_cancelled_initialization_still_becomes_ready_without_loading_local() {
         let command = command_after_queued_cancellation(
             InstallCommand::Initialize {
+                selected_catalog_id: Some("qwen35-9b-q4".to_owned()),
                 selected_tier: Some(TranslationTier::Teacher),
                 keep_warm: true,
                 history_enabled: true,
@@ -1445,14 +1731,77 @@ mod local_model_policy_tests {
         assert!(matches!(
             command_after_queued_cancellation(
                 InstallCommand::RemoveModel {
-                    tier: TranslationTier::Teacher,
+                    catalog_id: "firefox-de-en-v3".to_owned(),
                 },
                 1,
                 2,
             ),
             Some(InstallCommand::RemoveModel {
-                tier: TranslationTier::Teacher,
+                catalog_id,
             })
+            if catalog_id == "firefox-de-en-v3"
         ));
+    }
+
+    #[test]
+    fn model_replacement_drops_the_old_resident_before_loading_the_new_one() {
+        struct Resident(Arc<AtomicUsize>);
+        impl Drop for Resident {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let resident_count = Arc::new(AtomicUsize::new(1));
+        let mut slot = Some(Resident(Arc::clone(&resident_count)));
+        let release_announced = Arc::new(AtomicUsize::new(0));
+        replace_resident_resource(
+            &mut slot,
+            || {
+                assert_eq!(resident_count.load(Ordering::SeqCst), 0);
+                release_announced.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+            || {
+                assert_eq!(release_announced.load(Ordering::SeqCst), 1);
+                resident_count.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(Resident(Arc::clone(&resident_count)))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resident_count.load(Ordering::SeqCst), 1);
+        assert_eq!(release_announced.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_model_replacement_still_announces_that_the_old_model_was_released() {
+        let mut slot = Some("old");
+        let release_announced = AtomicUsize::new(0);
+
+        let result = replace_resident_resource(
+            &mut slot,
+            || {
+                release_announced.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, &'static str>(())
+            },
+            || Err("new model failed"),
+        );
+
+        assert_eq!(result, Err("new model failed"));
+        assert!(slot.is_none());
+        assert_eq!(release_announced.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn manual_memory_release_drops_only_the_resident_engine_slot() {
+        let mut slot = Some(String::from("resident"));
+
+        assert_eq!(
+            release_resident_resource(&mut slot),
+            Some(String::from("resident"))
+        );
+        assert!(slot.is_none());
+        assert_eq!(release_resident_resource(&mut slot), None);
     }
 }

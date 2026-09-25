@@ -17,8 +17,8 @@ use std::{cell::RefCell, rc::Rc};
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::{
-    Fact, FirstRunWindow, HistoryRow, HotkeyRow, ModelRow, ProviderRow, SettingsWindow,
-    SupportWindow, TranslatorWindow,
+    Fact, FirstRunWindow, HistoryRow, HotkeyRow, ModelRow, ProviderRow, ResourceRow,
+    SettingsWindow, SupportWindow, TranslatorWindow,
     pulse_matrix::PulseMatrixPalette,
     visualizer::{
         BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, VisualizerStyle,
@@ -262,10 +262,10 @@ pub(crate) fn requested_page() -> i32 {
                 .and_then(|value| value.parse::<i32>().ok())
         })
         .unwrap_or(0)
-        // 9 is History again, with nothing in it — the state most people see
+        // 10 is History again, with nothing in it — the state most people see
         // first, and the one easiest to leave undrawn.
-        .clamp(0, 9);
-    if asked == 9 { HISTORY_PAGE } else { asked }
+        .clamp(0, 10);
+    if asked == 10 { HISTORY_PAGE } else { asked }
 }
 
 /// Where History sits in the navigation.
@@ -311,6 +311,7 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     fill_visuals(&settings);
     fill_history(&settings);
     fill_hotkeys(&settings);
+    fill_resources(&settings);
 
     wire(&settings);
     let animation = new_settings_preview(&settings);
@@ -656,7 +657,11 @@ fn fill_dictation(settings: &SettingsWindow) {
 }
 
 fn fill_translation(settings: &SettingsWindow) {
-    settings.set_translation_model_name("Gemma 3 4B".into());
+    settings.set_translation_model_name("Русский ↔ английский".into());
+    settings.set_translation_model_detail(
+        "Небольшой языковой пакет: быстрый, работает только на процессоре и не использует видеопамять."
+            .into(),
+    );
     settings.set_translation_ready(true);
     settings.set_translation_enabled(true);
     settings.set_translation_warm(true);
@@ -741,14 +746,16 @@ fn fill_models(settings: &SettingsWindow) {
             installed: false,
             progress: 0.0,
         },
-        // The translator is in the same list, under its own label.
+        // Compact language packs and contextual models are intentionally
+        // separate choices: their resource cost and language coverage differ
+        // too much for one undifferentiated "Translation" section.
         ModelRow {
-            catalog_id: "gemma-3-4b".into(),
-            section: "Translation".into(),
-            title: "Gemma 3 4B".into(),
-            detail: "Balanced \u{b7} Gemma licence \u{b7} recommended for your system language"
+            catalog_id: "firefox-ru-en-v3.1".into(),
+            section: "БЫСТРЫЕ ЯЗЫКОВЫЕ ПАКЕТЫ".into(),
+            title: "Русский ↔ английский".into(),
+            detail: "Русский и английский · только CPU · без видеопамяти · MPL-2.0 · рекомендуется"
                 .into(),
-            size: "2.5 GB".into(),
+            size: "44.4 MB".into(),
             state: "In use".into(),
             tone: "active".into(),
             action: "".into(),
@@ -759,6 +766,44 @@ fn fill_models(settings: &SettingsWindow) {
             removing: false,
             selected: true,
             installed: true,
+            progress: 0.0,
+        },
+        ModelRow {
+            catalog_id: "qwen35-4b-q4".into(),
+            section: "КОНТЕКСТНЫЕ МОДЕЛИ ПЕРЕВОДА".into(),
+            title: "Qwen3.5 4B · Fast".into(),
+            detail: "Современная многоязычная модель 4B с локальным ускорением Vulkan. · Apache-2.0"
+                .into(),
+            size: "2.7 GB".into(),
+            state: "Not installed".into(),
+            tone: "off".into(),
+            action: "Install".into(),
+            action_key: "install".into(),
+            removable: false,
+            remove_label: "Remove".into(),
+            remove_question: "Remove this model?".into(),
+            removing: false,
+            selected: false,
+            installed: false,
+            progress: 0.0,
+        },
+        ModelRow {
+            catalog_id: "qwen35-9b-q4".into(),
+            section: "КОНТЕКСТНЫЕ МОДЕЛИ ПЕРЕВОДА".into(),
+            title: "Qwen3.5 9B · Quality".into(),
+            detail: "Более качественная многоязычная модель 9B для современных дискретных видеокарт. · Apache-2.0"
+                .into(),
+            size: "5.8 GB".into(),
+            state: "Not installed".into(),
+            tone: "off".into(),
+            action: "Install".into(),
+            action_key: "install".into(),
+            removable: false,
+            remove_label: "Remove".into(),
+            remove_question: "Remove this model?".into(),
+            removing: false,
+            selected: false,
+            installed: false,
             progress: 0.0,
         },
     ])));
@@ -918,9 +963,9 @@ fn fill_visuals(settings: &SettingsWindow) {
 }
 
 fn fill_history(settings: &SettingsWindow) {
-    // `--settings-preview=9` shows the page with nothing on it: the state most
+    // `--settings-preview=10` shows the page with nothing on it: the state most
     // people see first, and the one easiest to leave undrawn.
-    if std::env::args().any(|argument| argument == "--settings-preview=9") {
+    if std::env::args().any(|argument| argument == "--settings-preview=10") {
         settings.set_history_scope("Nothing kept yet".into());
         settings.set_history_rows(ModelRc::new(VecModel::from(Vec::new())));
         return;
@@ -1040,6 +1085,42 @@ fn fill_hotkeys(settings: &SettingsWindow) {
             mode: "".into(),
             mode_value: "".into(),
             mode_key: "".into(),
+        },
+    ])));
+}
+
+fn fill_resources(settings: &SettingsWindow) {
+    settings.set_resources_can_unload(true);
+    settings.set_resource_rows(ModelRc::new(VecModel::from(vec![
+        ResourceRow {
+            id: "speech".into(),
+            state: "ready".into(),
+            tone: "resting".into(),
+            cpu: "0.3 %".into(),
+            ram: "846 MB".into(),
+            gpu: "0.0 %".into(),
+            vram: "2.04 GB".into(),
+            can_unload: true,
+        },
+        ResourceRow {
+            id: "translation".into(),
+            state: "working".into(),
+            tone: "working".into(),
+            cpu: "7.8 %".into(),
+            ram: "1.62 GB".into(),
+            gpu: "12.4 %".into(),
+            vram: "3.18 GB".into(),
+            can_unload: false,
+        },
+        ResourceRow {
+            id: "ocr".into(),
+            state: "not-loaded".into(),
+            tone: "off".into(),
+            cpu: "—".into(),
+            ram: "—".into(),
+            gpu: "—".into(),
+            vram: "—".into(),
+            can_unload: false,
         },
     ])));
 }

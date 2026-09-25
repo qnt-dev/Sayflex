@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.8.0"
+  #define AppVersion "0.8.1"
 #endif
 
 #define AppName "SayFlex"
@@ -12,7 +12,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 DefaultDirName={localappdata}\Programs\SayFlex
-UsePreviousAppDir=no
+UsePreviousAppDir=yes
 DefaultGroupName=SayFlex
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest

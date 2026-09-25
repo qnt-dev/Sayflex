@@ -18,7 +18,7 @@ use std::{
 
 use rust_protocol::RequestId;
 use slint::{
-    ComponentHandle, Image, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer,
+    ComponentHandle, Image, Model, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer,
     winit_030::WinitWindowAccessor,
 };
 
@@ -159,6 +159,64 @@ pub(crate) fn translation_units(text: &str) -> Vec<String> {
     units
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct StableParagraphStream {
+    published: String,
+    last_partial: String,
+    last_chunk: Option<u32>,
+}
+
+impl StableParagraphStream {
+    pub(crate) fn observe(&mut self, partial: &str, chunk_index: u32) -> Option<String> {
+        let normalized = partial.replace("\r\n", "\n");
+        let completed_chunk = self
+            .last_chunk
+            .is_some_and(|previous| chunk_index > previous)
+            .then(|| self.last_partial.trim().to_owned())
+            .filter(|text| !text.is_empty());
+        let completed_paragraphs = stable_paragraph_prefix(&normalized);
+        self.last_partial = normalized;
+        self.last_chunk = Some(chunk_index);
+
+        let candidate = match (completed_chunk, completed_paragraphs) {
+            (Some(chunk), Some(paragraphs)) if paragraphs.len() >= chunk.len() => paragraphs,
+            (Some(chunk), _) => chunk,
+            (None, Some(paragraphs)) => paragraphs,
+            (None, None) => return None,
+        };
+        if candidate == self.published {
+            return None;
+        }
+        self.published.clone_from(&candidate);
+        Some(candidate)
+    }
+}
+
+fn stable_paragraph_prefix(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut stable_end = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\n' {
+            index += 1;
+            continue;
+        }
+        let mut next = index + 1;
+        while next < bytes.len() && matches!(bytes[next], b' ' | b'\t' | b'\r') {
+            next += 1;
+        }
+        if next < bytes.len() && bytes[next] == b'\n' {
+            stable_end = Some(next + 1);
+            index = next + 1;
+        } else {
+            index += 1;
+        }
+    }
+    stable_end
+        .map(|end| text[..end].trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
 pub(crate) fn is_sentence_abbreviation(token: &str) -> bool {
     matches!(
         token.to_ascii_lowercase().as_str(),
@@ -168,6 +226,9 @@ pub(crate) fn is_sentence_abbreviation(token: &str) -> bool {
 
 pub(crate) fn wire_translation_preview(preview: &TranslationPreview, presenter: &OverlayPresenter) {
     let drag_active = Arc::new(AtomicBool::new(false));
+    preview.on_download_model(|| {
+        dispatch_runtime_event(RuntimeEvent::ConfirmQueuedModelInstall);
+    });
     {
         let preview_weak = preview.as_weak();
         preview.on_pin_state_changed(move |pinned| {
@@ -347,6 +408,14 @@ pub(crate) fn retire_translation_preview(slot: &TranslationPreviewSlot, reason: 
 fn clear_translation_preview_content(preview: &TranslationPreview) {
     preview.set_source_text("".into());
     preview.set_translated_text("".into());
+    preview.set_translated_paragraphs(slint::ModelRc::new(slint::VecModel::from(Vec::<
+        slint::SharedString,
+    >::new())));
+    preview.set_processing(false);
+    preview.set_model_offer_visible(false);
+    preview.set_model_offer_action("".into());
+    preview.set_latest_paragraph_opacity(1.0);
+    preview.set_visible_main_card_height(96.0);
     preview.set_dual_pairs(slint::ModelRc::new(slint::VecModel::from(Vec::<
         TranslationPair,
     >::new())));
@@ -615,13 +684,27 @@ pub(crate) fn update_translation_preview_content(
     source_text: &str,
     translated_text: &str,
 ) {
+    let previous_paragraph_count = preview.get_translated_paragraphs().row_count();
+    let paragraphs = translated_text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|paragraph| !paragraph.is_empty())
+        .map(slint::SharedString::from)
+        .collect::<Vec<_>>();
+    if paragraphs.len() > previous_paragraph_count {
+        preview.set_latest_paragraph_opacity(0.0);
+    }
     preview.set_source_text(source_text.into());
     preview.set_translated_text(translated_text.into());
+    preview.set_translated_paragraphs(slint::ModelRc::new(slint::VecModel::from(paragraphs)));
     preview.set_dual_pairs(slint::ModelRc::new(slint::VecModel::from(
         translation_pairs(source_text, translated_text),
     )));
     apply_translation_preview_layout(preview, source_text, translated_text);
-    presenter.content_changed(preview.window(), !translated_text.trim().is_empty());
+    presenter.content_changed(
+        preview.window(),
+        preview.get_processing() || !translated_text.trim().is_empty(),
+    );
 }
 
 pub(crate) fn refresh_cloaked_translation_backdrop(
@@ -837,8 +920,8 @@ mod adaptive_popup_tests {
     use slint::ComponentHandle;
 
     use super::{
-        TranslationPreview, adaptive_text_panel_height, backdrop_prefers_dark_text,
-        translation_pairs, translation_units,
+        StableParagraphStream, TranslationPreview, adaptive_text_panel_height,
+        backdrop_prefers_dark_text, translation_pairs, translation_units,
     };
 
     fn uniform_backdrop(value: u8) -> Vec<u8> {
@@ -940,6 +1023,36 @@ mod adaptive_popup_tests {
         assert_eq!(
             translation_units("Mr. Ratchett paid 3.5 dollars. Then he left."),
             vec!["Mr. Ratchett paid 3.5 dollars.", "Then he left."]
+        );
+    }
+
+    #[test]
+    fn streamed_tokens_stay_hidden_until_a_paragraph_is_stable() {
+        let mut stream = StableParagraphStream::default();
+
+        assert_eq!(stream.observe("Первый абза", 1), None);
+        assert_eq!(
+            stream.observe("Первый абзац.\n\nВторой ещё печатается", 1),
+            Some("Первый абзац.".to_owned())
+        );
+        assert_eq!(
+            stream.observe("Первый абзац.\n\nВторой всё ещё печатается", 1),
+            None
+        );
+        assert_eq!(
+            stream.observe("Первый абзац.\n\nВторой завершён.\n\n", 1),
+            Some("Первый абзац.\n\nВторой завершён.".to_owned())
+        );
+    }
+
+    #[test]
+    fn finishing_a_translation_chunk_publishes_its_last_paragraph() {
+        let mut stream = StableParagraphStream::default();
+
+        assert_eq!(stream.observe("Короткий законченный фрагмент.", 1), None);
+        assert_eq!(
+            stream.observe("Короткий законченный фрагмент. Начало нового", 2),
+            Some("Короткий законченный фрагмент.".to_owned())
         );
     }
 

@@ -6,8 +6,10 @@ rust-version = "1.95"
 license.workspace = true
 
 [features]
-default = []
-screen-translation-dev = ["rust-ocr-engine/ppocr"]
+default = ["screen-translation"]
+screen-translation = ["rust-ocr-engine/ppocr"]
+# Temporary compatibility alias for existing developer commands.
+screen-translation-dev = ["screen-translation"]
 
 [dependencies]
 anyhow = "1.0.100"

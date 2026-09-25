@@ -443,6 +443,7 @@ fn run_job(
                     },
                     provider_id: None,
                     retry_after_ms: None,
+                    required_catalog_id: None,
                     detail: format!("{error:#}"),
                     attempts: Vec::new(),
                 }

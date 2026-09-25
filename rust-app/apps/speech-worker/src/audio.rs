@@ -83,6 +83,7 @@ impl AudioSnapshotSource {
         &self,
         session_id: SessionId,
         source_start_sample: usize,
+        max_segment_duration_ms: u64,
     ) -> Option<RecordedAudio> {
         let (reply, response) = mpsc::sync_channel(1);
         let commands = self.commands.read().ok()?.clone();
@@ -90,6 +91,7 @@ impl AudioSnapshotSource {
             .send(CaptureCommand::Snapshot {
                 session_id,
                 source_start_sample,
+                max_segment_duration_ms,
                 reply,
             })
             .ok()?;
@@ -220,6 +222,7 @@ enum CaptureCommand {
     Snapshot {
         session_id: SessionId,
         source_start_sample: usize,
+        max_segment_duration_ms: u64,
         reply: mpsc::SyncSender<Option<RecordedAudio>>,
     },
     Shutdown,
@@ -608,6 +611,7 @@ fn capture_loop(
             Ok(CaptureCommand::Snapshot {
                 session_id,
                 source_start_sample,
+                max_segment_duration_ms,
                 reply,
             }) => {
                 drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
@@ -615,7 +619,12 @@ fn capture_loop(
                     .as_ref()
                     .filter(|capture| capture.session_id == session_id)
                     .and_then(|capture| {
-                        snapshot_audio(capture, sample_rate_hz, source_start_sample)
+                        snapshot_audio(
+                            capture,
+                            sample_rate_hz,
+                            source_start_sample,
+                            max_segment_duration_ms,
+                        )
                     });
                 let _ = reply.send(snapshot);
             }
@@ -694,8 +703,14 @@ fn snapshot_audio(
     capture: &ActiveCapture,
     sample_rate_hz: u32,
     source_start_sample: usize,
+    max_segment_duration_ms: u64,
 ) -> Option<RecordedAudio> {
     if source_start_sample > capture.samples.len() {
+        return None;
+    }
+    let segment_samples = capture.samples.len() - source_start_sample;
+    let segment_duration_ms = segment_samples as u64 * 1000 / u64::from(sample_rate_hz.max(1));
+    if segment_duration_ms > max_segment_duration_ms {
         return None;
     }
     let source_total_samples = capture.samples.len();
@@ -796,9 +811,9 @@ mod tests {
     use rust_protocol::SessionId;
 
     use super::{
-        RecordedAudio, SPECTRUM_WINDOW_SAMPLES, SpectrumAnalyzer,
+        ActiveCapture, RecordedAudio, SPECTRUM_WINDOW_SAMPLES, SpectrumAnalyzer,
         capture_pipeline_needs_replacement, post_release_target_sample, resample_bandlimited,
-        spectrum_band_frequency,
+        snapshot_audio, spectrum_band_frequency,
     };
     use rust_protocol::AUDIO_SPECTRUM_BANDS;
 
@@ -874,6 +889,22 @@ mod tests {
         assert_eq!(tail.samples.first(), Some(&8_000.0));
         assert!(recording.segment_from_absolute(31_999).is_none());
         assert!(recording.segment_from_absolute(48_001).is_none());
+    }
+
+    #[test]
+    fn an_oversized_speculative_tail_is_rejected_before_snapshot_allocation() {
+        let capture = ActiveCapture {
+            session_id: SessionId::new(),
+            samples: vec![0.0; 20_000],
+            spectrum: SpectrumAnalyzer::new(),
+            last_level_report: std::time::Instant::now(),
+            peak_since_report: 0.0,
+            limit_reported: false,
+        };
+
+        assert!(snapshot_audio(&capture, 1_000, 5_000, 12_000).is_none());
+        let bounded = snapshot_audio(&capture, 1_000, 8_000, 12_000).expect("bounded tail");
+        assert_eq!(bounded.samples.len(), 12_000);
     }
 
     #[test]

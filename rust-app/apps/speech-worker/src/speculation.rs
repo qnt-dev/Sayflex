@@ -110,9 +110,11 @@ impl SpeculationScheduler {
                         continue;
                     }
                     let stable_source_sample_count = inference.stable_source_sample_count();
-                    let Some(recording) =
-                        snapshots.snapshot_from(session.session_id, stable_source_sample_count)
-                    else {
+                    let Some(recording) = snapshots.snapshot_from(
+                        session.session_id,
+                        stable_source_sample_count,
+                        MAX_SPECULATIVE_TAIL_MS,
+                    ) else {
                         continue;
                     };
                     let new_audio_ms = recording.segment_duration_ms();

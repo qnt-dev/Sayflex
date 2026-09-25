@@ -4,7 +4,7 @@ mod http;
 mod installer;
 mod ocr_catalog;
 
-pub use bundle::{BundleArtifact, BundleDescriptor, BundleInstaller};
+pub use bundle::{BundleArtifact, BundleCompression, BundleDescriptor, BundleInstaller};
 pub use catalog::{BuiltInCatalog, ModelArtifact, ModelCatalog, ModelDescriptor, ModelTier};
 pub use http::{CancelToken, HttpFetcher};
 pub use installer::{

@@ -101,6 +101,58 @@ Describe 'SayFlex public repository presentation' {
         $generator | Should Match 'cublasLt64_13\.dll'
         $notice | Should Match '(?s)## NVIDIA CUDA runtime.*proprietary NVIDIA software.*NVIDIA CUDA.*Toolkit EULA'
     }
+
+    It 'ships and validates the OCR worker in the ordinary release payload' {
+        $publish = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\publish.ps1') -Raw
+        $validator = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\validate-release.ps1') -Raw
+
+        $publish | Should Match "'sayflex-ocr-worker\.exe'\s*=\s*'SayFlex\.Ocr\.exe'"
+        $publish | Should Match "SayFlex\.Ocr\.exe'\)\s+--install-models"
+        $validator | Should Match "'SayFlex\.Ocr\.exe'"
+        $validator | Should Match "ocr-models\\screen-ocr-ppocrv5-mobile-v3\.9\.2\\bundle\.verified\.json"
+        $validator | Should Match '(?s)Every process that speaks the protocol.*SayFlex\.Ocr\.exe'
+    }
+
+    It 'pins every supported compact Firefox language pack without bundling another runtime' {
+        $catalogPath = Join-Path $PSScriptRoot '..\..\crates\translation-engine\models\catalog.json'
+        $catalog = Get-Content -LiteralPath $catalogPath -Raw | ConvertFrom-Json
+        $compact = @($catalog.packs | Where-Object tier -eq 'compact')
+        $expected = @(
+            'firefox-ru-en-v3.1', 'firefox-uk-en-v3', 'firefox-es-en-v3',
+            'firefox-pt-en-v3', 'firefox-de-en-v3', 'firefox-fr-en-v3',
+            'firefox-it-en-v3', 'firefox-zh-hans-en-v3', 'firefox-zh-hant-en-v3',
+            'firefox-ja-en-v3', 'firefox-ko-en-v3', 'firefox-hi-en-v3',
+            'firefox-ar-en-v3'
+        )
+        $generator = Get-Content -LiteralPath (
+            Join-Path $PSScriptRoot '..\generate-third-party-notices.ps1'
+        ) -Raw
+        $notice = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\THIRD_PARTY_NOTICES.md') -Raw
+        $validator = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\validate-release.ps1') -Raw
+
+        $catalog.schema_version | Should Be 4
+        $compact.Count | Should Be 13
+        @($compact.id | Sort-Object) -join ',' | Should Be (@($expected | Sort-Object) -join ',')
+        foreach ($pack in $compact) {
+            $pack.license | Should Be 'MPL-2.0'
+            @($pack.backend.directions).Count | Should Be 2
+            (@($pack.languages) -contains 'english') | Should Be $true
+            @($pack.artifacts).Count | Should BeGreaterThan 5
+            @($pack.artifacts | Where-Object {
+                $_.compression -eq 'zstd' -and
+                $_.bytes -gt 0 -and
+                $_.sha256 -match '^[0-9a-f]{64}$' -and
+                $_.expanded_bytes -gt 0 -and
+                $_.expanded_sha256 -match '^[0-9a-f]{64}$'
+            }).Count | Should Be @($pack.artifacts).Count
+        }
+        $generator | Should Match 'fxtranslate'
+        $generator | Should Match 'Firefox Translations'
+        $notice | Should Match '(?s)fxtranslate.*MPL-2\.0'
+        $notice | Should Match '(?s)Firefox Translations.*installed separately on demand'
+        $validator | Should Match 'expectedCompactIds'
+        $validator | Should Match 'Python\|WASM\|MKL'
+    }
 }
 
 Describe 'SayFlex installed smoke contract' {
@@ -158,6 +210,15 @@ Describe 'SayFlex installed smoke contract' {
 }
 
 Describe 'SayFlex installer artifact validation' {
+    It 'reuses the existing install directory during an in-place upgrade' {
+        $installerScript = Get-Content -LiteralPath (
+            Join-Path $PSScriptRoot '..\..\installer\SayFlex.iss'
+        ) -Raw
+
+        $installerScript | Should Match '(?m)^UsePreviousAppDir=yes\r?$'
+        $installerScript | Should Not Match '(?m)^UsePreviousAppDir=no\r?$'
+    }
+
     It 'rejects a staged executable whose Windows identity names another file' {
         $validator = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\validate-release.ps1') -Raw
 

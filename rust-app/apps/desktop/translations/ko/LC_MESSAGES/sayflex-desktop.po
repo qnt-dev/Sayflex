@@ -681,8 +681,8 @@ msgstr "호환되는 음성 엔진이 없습니다: {error}"
 msgid "No key stored"
 msgstr "키가 저장되어 있지 않음"
 
-msgid "No model installed. Choose Fast or Quality in Settings."
-msgstr "설치된 모델이 없습니다. 설정에서 빠름 또는 품질을 선택하세요."
+msgid "No model installed. Choose a language package or contextual model in Settings."
+msgstr "설치된 모델이 없습니다. 설정에서 언어 팩 또는 문맥 모델을 선택하세요."
 
 msgid "no overlay"
 msgstr "시각화 없음"
@@ -1527,3 +1527,49 @@ msgstr "화면 텍스트 인식이 예기치 않게 중단되었습니다. 다�
 
 msgid "Screen translation was cancelled."
 msgstr "화면 번역이 취소되었습니다."
+msgid "Resources"
+msgstr "리소스"
+
+msgid "Live resource use by function."
+msgstr "기능별 현재 리소스 사용량입니다."
+
+msgid "Unload"
+msgstr "언로드"
+
+msgid "Free all memory"
+msgstr "모든 메모리 확보"
+
+msgid "Not loaded"
+msgstr "로드되지 않음"
+
+msgid "Working"
+msgstr "사용 중"
+
+msgid "Releasing…"
+msgstr "언로드 중…"
+
+msgid "Unloading only frees working memory. The selected models remain installed. The next time you use a function, SayFlex loads its model automatically and the function continues normally."
+msgstr "언로드는 작업 메모리만 확보합니다. 선택한 모델은 설치된 상태로 유지됩니다. 다음에 기능을 사용하면 SayFlex가 해당 모델을 자동으로 다시 불러오며 기능은 정상적으로 계속 작동합니다."
+msgid "Russian and English · CPU-only · no GPU memory."
+msgstr "러시아어 및 영어 · CPU 전용 · GPU 메모리 미사용."
+
+msgid "FAST LANGUAGE PACKAGES"
+msgstr "빠른 언어 팩"
+
+msgid "CONTEXTUAL TRANSLATION MODELS"
+msgstr "문맥 번역 모델"
+
+msgid "Russian ↔ English"
+msgstr "러시아어 ↔ 영어"
+
+msgid "Small language package: fast, CPU-only, and no GPU memory."
+msgstr "작은 언어 팩: 빠르고 CPU만 사용하며 GPU 메모리를 사용하지 않습니다."
+
+msgid "Contextual model: broader language coverage, with higher RAM and possible GPU use."
+msgstr "문맥 모델: 더 많은 언어를 지원하지만 RAM 사용량이 많고 GPU를 사용할 수 있습니다."
+
+msgid "Download {model} ({size}) to translate this language pair."
+msgstr "이 언어 쌍을 번역하려면 {model}({size})을 다운로드하세요."
+
+msgid "Download model"
+msgstr "모델 다운로드"

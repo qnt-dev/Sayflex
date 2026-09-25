@@ -681,8 +681,8 @@ msgstr "Немає сумісного рушія мовлення: {error}"
 msgid "No key stored"
 msgstr "Ключ не збережено"
 
-msgid "No model installed. Choose Fast or Quality in Settings."
-msgstr "Модель не встановлена. Виберіть «Швидко» або «Якісно» в налаштуваннях."
+msgid "No model installed. Choose a language package or contextual model in Settings."
+msgstr "Модель не встановлена. Виберіть мовний пакет або контекстну модель в налаштуваннях."
 
 msgid "no overlay"
 msgstr "без візуалізації"
@@ -1527,3 +1527,49 @@ msgstr "Розпізнавання тексту на екрані несподі
 
 msgid "Screen translation was cancelled."
 msgstr "Переклад з екрана скасовано."
+msgid "Resources"
+msgstr "Ресурси"
+
+msgid "Live resource use by function."
+msgstr "Поточне використання ресурсів за функціями."
+
+msgid "Unload"
+msgstr "Вивантажити"
+
+msgid "Free all memory"
+msgstr "Звільнити всю пам’ять"
+
+msgid "Not loaded"
+msgstr "Не завантажено"
+
+msgid "Working"
+msgstr "Працює"
+
+msgid "Releasing…"
+msgstr "Вивантаження…"
+
+msgid "Unloading only frees working memory. The selected models remain installed. The next time you use a function, SayFlex loads its model automatically and the function continues normally."
+msgstr "Вивантаження лише звільняє робочу пам’ять. Вибрані моделі залишаються встановленими. Під час наступного використання функції SayFlex автоматично завантажить її модель, і функція працюватиме як зазвичай."
+msgid "Russian and English · CPU-only · no GPU memory."
+msgstr "Російська й англійська · лише CPU · без відеопам’яті."
+
+msgid "FAST LANGUAGE PACKAGES"
+msgstr "ШВИДКІ МОВНІ ПАКЕТИ"
+
+msgid "CONTEXTUAL TRANSLATION MODELS"
+msgstr "КОНТЕКСТНІ МОДЕЛІ ПЕРЕКЛАДУ"
+
+msgid "Russian ↔ English"
+msgstr "Російська ↔ англійська"
+
+msgid "Small language package: fast, CPU-only, and no GPU memory."
+msgstr "Невеликий мовний пакет: швидкий, працює лише на процесорі й не використовує відеопам’ять."
+
+msgid "Contextual model: broader language coverage, with higher RAM and possible GPU use."
+msgstr "Контекстна модель: більше мов, але вище споживання оперативної пам’яті та можливе використання відеокарти."
+
+msgid "Download {model} ({size}) to translate this language pair."
+msgstr "Завантажте {model} ({size}), щоб перекладати цю мовну пару."
+
+msgid "Download model"
+msgstr "Завантажити модель"
