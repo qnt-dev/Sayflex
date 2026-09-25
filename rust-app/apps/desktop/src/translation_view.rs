@@ -937,6 +937,18 @@ mod adaptive_popup_tests {
     }
 
     #[test]
+    fn a_short_result_paints_the_entire_minimum_window() {
+        i_slint_backend_testing::init_no_event_loop();
+        let preview = TranslationPreview::new().unwrap();
+        preview
+            .window()
+            .set_size(slint::LogicalSize::new(252.0, 96.0));
+        preview.set_translated_text("Done".into());
+
+        assert_eq!(preview.get_main_card_height(), 96.0);
+    }
+
+    #[test]
     fn wrapped_text_grows_until_the_defined_cap() {
         let medium = adaptive_text_panel_height(&"word ".repeat(50), 70, 2, 4, 15.0, 16.0);
         let very_long = adaptive_text_panel_height(&"word ".repeat(500), 70, 2, 4, 15.0, 16.0);

@@ -587,8 +587,8 @@ export component TranslationPreview inherits Window {
     out property <float> result-scroll-offset: -result-scroll.viewport-y / 1px;
     out property <float> result-viewport-height: result-scroll.height / 1px;
     out property <float> main-card-height:
-        50 + root.result-panel-height + (root.processing ? 24 : 0)
-            + (root.model-offer-visible ? 40 : 0);
+        max(96, 50 + root.result-panel-height + (root.processing ? 24 : 0)
+            + (root.model-offer-visible ? 40 : 0));
     callback begin-drag();
     callback begin-resize(int);
     callback pin-state-changed(bool);
