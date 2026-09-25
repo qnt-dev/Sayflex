@@ -5444,7 +5444,7 @@ checksum = "fae8ee26b0371a29a77d2b2d6b3ae13aa81def6f9bf1b1b92a32d279a5e709b7"
 
 [[package]]
 name = "rust-app-core"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rust-protocol",
  "serde",
@@ -5455,7 +5455,7 @@ dependencies = [
 
 [[package]]
 name = "rust-cloud-speech"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "reqwest",
  "rust-app-core",
@@ -5466,7 +5466,7 @@ dependencies = [
 
 [[package]]
 name = "rust-cloud-translation"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "reqwest",
  "rust-app-core",
@@ -5478,7 +5478,7 @@ dependencies = [
 
 [[package]]
 name = "rust-model-manager"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "reqwest",
  "rust-app-core",
@@ -5494,7 +5494,7 @@ dependencies = [
 
 [[package]]
 name = "rust-ocr-engine"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -5507,7 +5507,7 @@ dependencies = [
 
 [[package]]
 name = "rust-platform-windows"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rust-app-core",
  "rust-protocol",
@@ -5519,7 +5519,7 @@ dependencies = [
 
 [[package]]
 name = "rust-protocol"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -5528,7 +5528,7 @@ dependencies = [
 
 [[package]]
 name = "rust-speech-api"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rust-protocol",
  "serde",
@@ -5537,7 +5537,7 @@ dependencies = [
 
 [[package]]
 name = "rust-translation-engine"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "fxtranslate",
@@ -5757,7 +5757,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-companion-renderer"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "pet_orb",
  "pet_particles",
@@ -5771,7 +5771,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-desktop"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "base64 0.22.1",
  "i-slint-backend-testing",
@@ -5796,7 +5796,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-input-host"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rust-app-core",
  "rust-platform-windows",
@@ -5811,7 +5811,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-ocr-benchmark"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -5828,7 +5828,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-ocr-worker"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5844,7 +5844,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-speech-worker"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "cpal",
@@ -5865,7 +5865,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-translation-benchmark"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "rust-app-core",
@@ -5878,7 +5878,7 @@ dependencies = [
 
 [[package]]
 name = "sayflex-translation-worker"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "rust-app-core",
