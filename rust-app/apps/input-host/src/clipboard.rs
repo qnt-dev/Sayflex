@@ -907,13 +907,13 @@ struct ClipboardSnapshot {
 
 fn collect_preservable_formats<T>(
     advertised_formats: impl IntoIterator<Item = u32>,
-    mut preserve: impl FnMut(u32) -> Option<T>,
+    mut preserve: impl FnMut(u32) -> Result<Option<T>, ClipboardError>,
 ) -> Result<Vec<T>, ClipboardError> {
     let mut advertised_count = 0usize;
     let mut preserved = Vec::new();
     for format in advertised_formats {
         advertised_count += 1;
-        if let Some(value) = preserve(format) {
+        if let Some(value) = preserve(format)? {
             preserved.push(value);
         }
     }
@@ -922,6 +922,23 @@ fn collect_preservable_formats<T>(
         return Err(ClipboardError::InvalidData);
     }
     Ok(preserved)
+}
+
+fn restore_preserved_formats_if_current<T>(
+    formats: &mut [T],
+    expected_sequence: u32,
+    current_sequence: u32,
+    mut empty_clipboard: impl FnMut() -> Result<(), ClipboardError>,
+    mut restore_format: impl FnMut(&mut T) -> Result<(), ClipboardError>,
+) -> Result<bool, ClipboardError> {
+    if !clipboard_sequence_still_owned(expected_sequence, current_sequence) {
+        return Ok(false);
+    }
+    empty_clipboard()?;
+    for format in formats {
+        restore_format(format)?;
+    }
+    Ok(true)
 }
 
 impl ClipboardSnapshot {
@@ -956,26 +973,22 @@ impl ClipboardSnapshot {
                     crate::diagnostic_line(&format!(
                         "clipboard_snapshot format={format} result=skipped reason=unavailable"
                     ));
-                    return None;
+                    return Ok(None);
                 }
-                let Ok(clipboard_format) = u16::try_from(format) else {
-                    crate::diagnostic_line(&format!(
-                        "clipboard_snapshot format={format} result=skipped reason=invalid_identifier"
-                    ));
-                    return None;
-                };
+                let clipboard_format =
+                    u16::try_from(format).map_err(|_| ClipboardError::InvalidData)?;
                 let duplicated =
                     unsafe { OleDuplicateData(clipboard_handle, clipboard_format, GMEM_MOVEABLE) };
                 if duplicated.is_null() {
                     crate::diagnostic_line(&format!(
-                        "clipboard_snapshot format={format} result=skipped reason=not_duplicable"
+                        "clipboard_snapshot format={format} result=failed reason=not_duplicable"
                     ));
-                    return None;
+                    return Err(ClipboardError::Allocation);
                 }
-                Some(ClipboardFormatSnapshot {
+                Ok(Some(ClipboardFormatSnapshot {
                     format,
                     handle: duplicated,
-                })
+                }))
             })?;
             Ok(Self { formats })
         })
@@ -1002,20 +1015,26 @@ impl ClipboardSnapshot {
         let mut formats = self.prepare_restore()?;
         with_open_clipboard(|| {
             let current_sequence = unsafe { GetClipboardSequenceNumber() };
-            if !clipboard_sequence_still_owned(expected_sequence, current_sequence) {
-                return Ok(false);
-            }
-            if unsafe { EmptyClipboard() } == 0 {
-                return Err(ClipboardError::Busy);
-            }
-            for format in &mut formats {
-                let accepted = unsafe { SetClipboardData(format.format, format.handle) };
-                if accepted.is_null() {
-                    return Err(ClipboardError::Allocation);
-                }
-                format.release_to_clipboard();
-            }
-            Ok(true)
+            restore_preserved_formats_if_current(
+                &mut formats,
+                expected_sequence,
+                current_sequence,
+                || {
+                    if unsafe { EmptyClipboard() } == 0 {
+                        Err(ClipboardError::Busy)
+                    } else {
+                        Ok(())
+                    }
+                },
+                |format| {
+                    let accepted = unsafe { SetClipboardData(format.format, format.handle) };
+                    if accepted.is_null() {
+                        return Err(ClipboardError::Allocation);
+                    }
+                    format.release_to_clipboard();
+                    Ok(())
+                },
+            )
         })
     }
 }
@@ -1048,13 +1067,13 @@ mod tests {
     use super::{
         ClipboardError, ClipboardFormatSnapshot, ClipboardSnapshot, GMEM_MOVEABLE, GlobalAlloc,
         clipboard_sequence_still_owned, collect_preservable_formats, is_retryable_capture_error,
-        is_transient_read_error, request_is_from_target,
+        is_transient_read_error, request_is_from_target, restore_preserved_formats_if_current,
     };
 
     #[test]
     fn an_unreadable_private_format_does_not_discard_readable_clipboard_data() {
         let formats = collect_preservable_formats([13, 49_858, 17], |format| {
-            (format != 49_858).then_some(format)
+            Ok((format != 49_858).then_some(format))
         })
         .expect("standard clipboard formats remain preservable");
 
@@ -1063,9 +1082,77 @@ mod tests {
 
     #[test]
     fn a_nonempty_clipboard_with_no_readable_formats_is_rejected() {
-        let result = collect_preservable_formats([49_858], |_| None::<u32>);
+        let result = collect_preservable_formats([49_858], |_| Ok(None::<u32>));
 
         assert_eq!(result, Err(ClipboardError::InvalidData));
+    }
+
+    #[test]
+    fn a_duplication_failure_aborts_the_entire_snapshot() {
+        let result = collect_preservable_formats([13, 17], |format| {
+            if format == 17 {
+                Err(ClipboardError::Allocation)
+            } else {
+                Ok(Some(format))
+            }
+        });
+
+        assert_eq!(result, Err(ClipboardError::Allocation));
+    }
+
+    #[test]
+    fn readable_formats_survive_an_unavailable_private_format_and_restore_together() {
+        let mut formats = collect_preservable_formats([13, 49_858, 8], |format| {
+            Ok((format != 49_858).then_some(format))
+        })
+        .expect("readable standard formats should form a complete snapshot");
+        let mut clipboard_was_emptied = false;
+        let mut restored = Vec::new();
+
+        let restored_snapshot = restore_preserved_formats_if_current(
+            &mut formats,
+            41,
+            41,
+            || {
+                clipboard_was_emptied = true;
+                Ok(())
+            },
+            |format| {
+                restored.push(*format);
+                Ok(())
+            },
+        )
+        .expect("matching clipboard sequence should restore the snapshot");
+
+        assert!(restored_snapshot);
+        assert!(clipboard_was_emptied);
+        assert_eq!(restored, vec![13, 8]);
+    }
+
+    #[test]
+    fn a_newer_user_copy_wins_without_emptying_the_clipboard() {
+        let mut formats = vec![13, 8];
+        let mut clipboard_was_emptied = false;
+        let mut restored = Vec::new();
+
+        let restored_snapshot = restore_preserved_formats_if_current(
+            &mut formats,
+            41,
+            42,
+            || {
+                clipboard_was_emptied = true;
+                Ok(())
+            },
+            |format| {
+                restored.push(*format);
+                Ok(())
+            },
+        )
+        .expect("a superseded clipboard is a safe no-op");
+
+        assert!(!restored_snapshot);
+        assert!(!clipboard_was_emptied);
+        assert!(restored.is_empty());
     }
 
     #[test]
