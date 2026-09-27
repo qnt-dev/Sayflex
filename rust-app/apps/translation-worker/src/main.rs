@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod history;
+mod history_actor;
 mod provider_actor;
 mod providers;
 mod runtime;
@@ -18,7 +19,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
-use history::TranslationHistory;
+use history_actor::TranslationHistoryActor;
 use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
 use rust_protocol::{
@@ -104,7 +105,6 @@ enum InstallCommand {
         selected_catalog_id: Option<String>,
         selected_tier: Option<TranslationTier>,
         keep_warm: bool,
-        history_enabled: bool,
         prepare_local_model: bool,
         skip_local_prepare: bool,
     },
@@ -263,8 +263,7 @@ struct WorkerState {
     local_model_enabled: bool,
     engine: Option<TranslationEngine>,
     locale: String,
-    history: TranslationHistory,
-    history_enabled: bool,
+    history: TranslationHistoryActor,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -347,7 +346,7 @@ fn release_resident_resource<T>(slot: &mut Option<T>) -> Option<T> {
 }
 
 impl WorkerState {
-    fn new() -> Result<Self> {
+    fn new(history: TranslationHistoryActor) -> Result<Self> {
         let root = data_root();
         Ok(Self {
             catalog: TranslationCatalog::load()?,
@@ -360,8 +359,7 @@ impl WorkerState {
             local_model_enabled: true,
             engine: None,
             locale: system_language(),
-            history: TranslationHistory::load(root.join("translation-history.json")),
-            history_enabled: true,
+            history,
         })
     }
 
@@ -529,7 +527,10 @@ fn main() -> Result<()> {
         println!("{PROTOCOL_VERSION}");
         return Ok(());
     }
-    let state = Arc::new(Mutex::new(WorkerState::new()?));
+    let root = data_root();
+    let (history, history_thread) =
+        TranslationHistoryActor::start(root.join("translation-history.json"))?;
+    let state = Arc::new(Mutex::new(WorkerState::new(history.clone())?));
     // Its own lock, not the worker's. A translation out on the network holds
     // this one for as long as the walk takes; nothing else in the worker should
     // have to wait for that.
@@ -570,6 +571,7 @@ fn main() -> Result<()> {
             &writer,
             &coordinator,
             &installs,
+            &history,
         ) {
             writer.send(&TranslationWorkerEvent::Failed {
                 request_id: None,
@@ -585,6 +587,8 @@ fn main() -> Result<()> {
     installs.send(InstallCommand::Shutdown);
     drop(installs);
     let _ = install_thread.join();
+    history.shutdown();
+    let _ = history_thread.join();
     drop(writer);
     if provider_stopped {
         let _ = output_thread.join();
@@ -602,6 +606,7 @@ fn handle_command(
     writer: &EventWriter,
     coordinator: &ProviderActorHandle,
     installs: &InstallActor,
+    history: &TranslationHistoryActor,
 ) -> Result<()> {
     match command {
         TranslationWorkerCommand::Initialize {
@@ -612,11 +617,11 @@ fn handle_command(
             prepare_local_model,
         } => {
             coordinator.cancel_all();
+            history.set_enabled(history_enabled);
             installs.send(InstallCommand::Initialize {
                 selected_catalog_id,
                 selected_tier,
                 keep_warm,
-                history_enabled,
                 prepare_local_model,
                 skip_local_prepare: false,
             });
@@ -714,21 +719,13 @@ fn handle_command(
             writer.send(&TranslationWorkerEvent::TranslationProviders { statuses })?;
         }
         TranslationWorkerCommand::GetHistory { limit } => {
-            let state = recover_lock(&state);
-            writer.send(&TranslationWorkerEvent::History {
-                entries: state.history.recent(limit),
-            })?;
+            history.recent(limit, writer.clone());
         }
         TranslationWorkerCommand::SetHistoryEnabled { enabled } => {
-            let mut state = recover_lock(&state);
-            state.history_enabled = enabled;
+            history.set_enabled(enabled);
         }
         TranslationWorkerCommand::ClearHistory => {
-            let mut state = recover_lock(&state);
-            state.history.clear();
-            writer.send(&TranslationWorkerEvent::History {
-                entries: Vec::new(),
-            })?;
+            history.clear(writer.clone());
         }
         TranslationWorkerCommand::Shutdown => {}
     }
@@ -774,14 +771,12 @@ fn run_install(
             selected_catalog_id,
             selected_tier,
             keep_warm,
-            history_enabled,
             prepare_local_model,
             skip_local_prepare,
         } => {
             let mut state = recover_lock(state);
             state.keep_warm = keep_warm;
             state.local_model_enabled = prepare_local_model;
-            state.history_enabled = history_enabled;
             let selection = state.initial_selection(selected_catalog_id.as_deref(), selected_tier);
             state.selected_catalog_id = selection.as_ref().map(|(id, _)| id.clone());
             state.selected_tier = selection.map(|(_, tier)| tier);
@@ -1303,12 +1298,10 @@ fn translate_request(
 /// what the result says about where it came from.
 fn finish(state: &mut WorkerState, writer: &EventWriter, result: TranslationResult) -> Result<()> {
     let created_unix_ms = unix_ms();
-    if state.history_enabled {
-        state.history.push(TranslationHistoryEntry {
-            result: result.clone(),
-            created_unix_ms,
-        });
-    }
+    state.history.append(TranslationHistoryEntry {
+        result: result.clone(),
+        created_unix_ms,
+    });
     writer.send(&TranslationWorkerEvent::Completed {
         result,
         created_unix_ms,
@@ -1699,7 +1692,6 @@ mod local_model_policy_tests {
                 selected_catalog_id: Some("qwen35-9b-q4".to_owned()),
                 selected_tier: Some(TranslationTier::Teacher),
                 keep_warm: true,
-                history_enabled: true,
                 prepare_local_model: true,
                 skip_local_prepare: false,
             },

@@ -1,0 +1,144 @@
+[package]
+name = "fxtranslate"
+version = "0.4.2"
+edition = "2021"
+description = "Rust reimplementation of the Firefox Translations inference engine, validated against the C++ translator-cli."
+license = "MPL-2.0"
+repository = "https://github.com/gregtatum/translations"
+readme = "README.md"
+keywords = ["translation", "machine-translation", "nlp", "inference", "firefox"]
+categories = ["text-processing", "science"]
+
+[lib]
+name = "fxtranslate"
+path = "src/lib.rs"
+# rlib for normal Rust consumers (cli/oracle/wasm crates); cdylib so the lean
+# engine can be built as a standalone shared object for the native-vs-wasm size
+# comparison (release_build.py --wasm-size). The cdylib is harmless for native
+# builds — nothing links against it — and only materializes when explicitly built.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# Memory-map the model file (feature `mmap`, on under `fast`): weight tensors
+# become views into the mapping instead of owned heap copies, which lowers
+# settled RSS since the pages are file-backed and reclaimable. Optional so a
+# no-mmap build (e.g. wasm, or a target where mmap doesn't pay) drops it.
+memmap2 = { version = "0.9", optional = true }
+
+# Model-management deps (features `download`/`net` below); all optional so the
+# default engine stays lean. Pure-Rust, no C toolchain and — except `ureq` — no TLS.
+# Tiny JSON parser for the Remote Settings records response (no serde/proc-macro).
+tinyjson = { version = "2", optional = true }
+# Pure-Rust zstd *decoder* (attachments are zstd); decode-only, no C toolchain.
+ruzstd = { version = "0.7", optional = true }
+# SHA-256 to verify decompressed attachments against the record's decompressedHash.
+sha2 = { version = "0.10", optional = true }
+# Platform-native cache directory (macOS/Linux/Windows) for the model cache root.
+dirs = { version = "6", optional = true }
+# Blocking HTTP(S) client (rustls, no system TLS) for the built-in `NetworkFetch`.
+ureq = { version = "2", optional = true }
+
+# Unicode (UAX #29) sentence segmentation for long-input translation (feature
+# `icu-segmenter`). Rule-based with bundled `compiled_data` — no runtime data
+# files, and CJK works without the large word-segmentation dictionaries (those are
+# only for word breaking). Optional so a size-sensitive build can drop ICU and
+# fall back to `BasicSegmenter`; the CLI and the wasm/npm build both enable it.
+icu_segmenter = { version = "2", optional = true }
+
+[features]
+# Fast by default. `gemmology` requests the SIMD kernel; build.rs compiles it for
+# the target when it can (aarch64 and x86_64 today, C++17 toolchain present) and otherwise
+# falls back to the portable scalar kernel without failing the build — so this
+# default builds and runs everywhere, just faster where a kernel is wired. The
+# jemalloc/dhat allocators are a binary concern and live in the fxtranslate-oracle
+# dev crate, not here.
+default = ["fast"]
+fast = ["lean-embed", "gemmology", "mmap"]
+
+# Memory-map the model file rather than reading it into an owned heap buffer:
+# tensors become views into the mapping (file-backed, reclaimable pages) via
+# `Engine::load_mmapped`. On under `fast`; drop it (`--no-default-features` or a
+# custom feature set) on targets where mmap isn't available or doesn't pay.
+mmap = ["dep:memmap2"]
+
+# Drop the resident dequantized-f32 embedding tables: dequantize embedding rows
+# on demand and run the output projection full-vocab in int8. Pure Rust (portable);
+# large load/retained memory win, and a throughput win with `gemmology`.
+lean-embed = []
+
+# Request the vendored gemmology SIMD kernel for the shifted int8 affine
+# (`ops::intgemm_affine`) instead of the scalar Rust loop. build.rs compiles it
+# only where a kernel exists (aarch64 i8mm and x86_64 AVX2 today) and a
+# C++17 toolchain is present, emitting `--cfg gemmology_simd`; otherwise the
+# `gemm` module is a scalar-returning stub and callers use the scalar kernel.
+# Numerically identical to the scalar path (see tests/gemm_parity.rs).
+gemmology = []
+
+# Data-parallel batch translation (Option B): `Engine::translate_batch` /
+# `greedy_batch` spread a batch's sentences across CPU cores, one worker per core,
+# all sharing one copy of the weights (each worker keeps its own thread-local
+# activation scratch). Pure Rust (`std::thread::scope`), no deps. Off by default so
+# the default build and wasm stay single-threaded and deterministic; enable it and
+# call `Engine::with_threads(n)` to opt in. See notes/11-threading-opportunities.md.
+threads = []
+
+# Intra-op GEMM parallelism (Option A): split each *large* int8 matrix multiply
+# (the full-vocab output projection and the encoder layers) across CPU cores via a
+# persistent thread pool in the C++ shim. Only meaningful with the SIMD kernel, so
+# it implies `gemmology`. Off by default; helps single-sentence latency where the
+# data-parallel `threads` path can't. See notes/11-threading-opportunities.md.
+gemm-threads = ["gemmology"]
+
+# Force the portable scalar kernel: no SIMD, no C++ toolchain — even when
+# `gemmology`/`fast` are on. An opt-out from the fast default without
+# `--no-default-features` (e.g. `cargo build --features portable`), for
+# reproducible/audited builds, wasm, or targets without a C++ compiler.
+portable = []
+
+# Portable model *discovery*: Remote Settings record parsing (`remote`), pivot /
+# catalog routing (`route`), and the pure `cache::verify_and_decompress` (sha256 +
+# zstd). Depends only on wasm-safe pure-Rust crates — no `dirs`, no `std::fs` cache
+# storage, no HTTP — so this whole surface compiles into the wasm build. `download`
+# implies it, so native builds are unchanged. Off by default so a plain engine
+# dependency stays lean.
+discovery = ["dep:tinyjson", "dep:ruzstd", "dep:sha2"]
+
+# Model management: everything in `discovery` plus the verified local cache
+# (`cache::Cache`, `std::fs` + `dirs`), the bring-your-own-HTTP `Fetch`
+# trait/plumbing (`fetch`), the language-tag display-name table (`lang`), and the
+# `src→trg`→`Engine` convenience (`loader`). Pure-Rust deps only (no TLS, no C
+# toolchain) — an embedder with its own HTTP client implements `Fetch` and reuses
+# all of this. Adds `dirs` for the platform cache root, which is NOT wasm-safe, so
+# it is kept out of `discovery`. Off by default.
+download = ["discovery", "dep:dirs"]
+
+# Add the built-in `ureq`-backed `NetworkFetch` (HTTPS via rustls). Implies
+# `download`. Off by default so embedders that supply their own client (Firefox,
+# wasm) don't pull a TLS stack.
+net = ["download", "dep:ureq"]
+
+# Unicode sentence segmentation for `Engine::translate_long` / `translate_segmented`
+# via `icu_segmenter` (UAX #29, CJK-capable). Off by default at the crate level: the
+# segmentation logic and the built-in `BasicSegmenter` fallback are always compiled;
+# this swaps in the Unicode-correct segmenter. Both fxtranslate-cli and
+# fxtranslate-wasm enable it, so the product ships one segmentation engine across
+# native and wasm/npm; leaving it off is the compile-time opt-out that drops the ICU
+# dependency entirely.
+# Binary-size impact (release, aarch64): +~18 KiB when ICU is already linked (the
+# CLI pulls it via `net`→idna→icu_normalizer); the segmenter code is ~380 B and
+# the rest is the UAX#29 sentence-break data. In the lean wasm build (no other ICU)
+# the sentence-break tables add +~19 KiB wasm-opt'd. Measured via `cargo bloat` /
+# release binary diff and the wasm module size.
+icu-segmenter = ["dep:icu_segmenter"]
+
+[build-dependencies]
+# Compiles src/gemmology_shim.cpp, but only under the `gemmology` feature (build.rs
+# early-returns otherwise). Build-only; no runtime dependency.
+cc = "1"
+
+# wasm-only dev dep: run `tests/gemm_parity.rs` under a real wasm runtime
+# (`wasm-pack test --node`) so the wasm SIMD128 kernel is proven live, not just
+# compiled. Native test runs don't need it, so it's target-scoped to keep the
+# native `cargo test` dependency graph unchanged.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

@@ -149,33 +149,33 @@
 - Produces: nonblocking `TranslationHistoryActor::{recent, set_enabled, append, clear, shutdown}` whose command lane never holds `WorkerState.engine`.
 - Consumes: existing `Partial`, `Completed`, typed request failure, and automatic replacement gates.
 
-- [ ] **Step 1: Add failing engine tests for whitespace, EOS, cap, cancellation, and pivot propagation**
+- [x] **Step 1: Add failing engine tests for whitespace, EOS, cap, cancellation, and pivot propagation**
 
   Add tests for `Hello\n\n \t\n\nWorld`, Unicode whitespace, a decoder sequence that emits EOS, a decoder sequence that exhausts `max_len`, cancellation between fragments, and a pivot whose first or second leg reaches the cap. Name the production decision that would make each test fail.
 
-- [ ] **Step 2: Add a failing worker concurrency test**
+- [x] **Step 2: Add a failing worker concurrency test**
 
   Start a controllably blocked translation operation, issue `GetHistory` and then `Cancel`, and assert Cancel is observed without waiting for the engine lock. Assert an incomplete compact result never emits `Completed` and cannot reach replacement.
 
-- [ ] **Step 3: Run focused tests and verify RED**
+- [x] **Step 3: Run focused tests and verify RED**
 
   Run: `cargo test -p rust-translation-engine -p sayflex-translation-worker -- --nocapture`
   Expected: whitespace range panic/cap ambiguity and history-lock responsiveness tests fail.
 
-- [ ] **Step 4: Pin the minimal completion-aware fxtranslate patch**
+- [x] **Step 4: Pin the minimal completion-aware fxtranslate patch**
 
   Vendor the exact locked crate; change only decode result reporting so every loop records whether EOS ended decoding or the length cap did. Preserve existing public APIs for compatibility and add checked APIs used by SayFlex. Record the original crate checksum, patch diff, license, and update procedure.
 
-- [ ] **Step 5: Implement typed fragment completion and the history actor**
+- [x] **Step 5: Implement typed fragment completion and the history actor**
 
   Guard whitespace ranges before slicing; propagate checked termination through direct, segmented, and pivot paths; publish success only when every fragment is Completed. Move history I/O and reads behind its own actor so the stdin command loop never waits for the engine mutex.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
   Run: `cargo test -p rust-translation-engine -p sayflex-translation-worker -- --nocapture`
   Expected: PASS, including explicit length-limit and Cancel-after-GetHistory cases.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
   `git commit -m "fix(translation): report compact completion and isolate history"`
 

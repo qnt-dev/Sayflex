@@ -7,3 +7,4 @@ pub use catalog::{
     TranslationCatalogError, TranslationPackDescriptor,
 };
 pub use engine::{TranslationCancelled, TranslationEngine, TranslationOutput, detect_language};
+pub use firefox::FragmentCompletion;

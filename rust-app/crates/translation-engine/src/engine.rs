@@ -18,7 +18,10 @@ use rust_protocol::{TranslationLanguage, TranslationLanguagePolicy, TranslationT
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{TranslationBackendDescriptor, TranslationPackDescriptor, firefox::FirefoxRuntime};
+use crate::{
+    TranslationBackendDescriptor, TranslationPackDescriptor,
+    firefox::{FirefoxRuntime, FragmentCompletion},
+};
 
 const MAX_INPUT_CHARACTERS: usize = 32_000;
 const MAX_SOURCE_TOKENS_PER_REQUEST: usize = 1_200;
@@ -275,6 +278,14 @@ impl TranslationEngine {
                 )
             },
         )?;
+        match translated.completion {
+            FragmentCompletion::Completed => {}
+            FragmentCompletion::LimitReached => return Err(TranslationIncomplete.into()),
+            FragmentCompletion::Cancelled => return Err(TranslationCancelled.into()),
+            FragmentCompletion::Failed => {
+                bail!("compact translation runtime failed before completion")
+            }
+        }
         Ok(PlannedTranslation {
             text: translated.text,
             first_token_duration_ms: translated.first_result_duration_ms,

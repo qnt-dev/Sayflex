@@ -1,7 +1,10 @@
 use std::{path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use fxtranslate::{engine::Engine, shortlist::Shortlist};
+use fxtranslate::{
+    engine::{DecodeTermination, Engine},
+    shortlist::Shortlist,
+};
 use rust_protocol::TranslationLanguage;
 
 #[cfg(test)]
@@ -23,12 +26,37 @@ pub(crate) struct FirefoxTranslation {
     pub text: String,
     pub first_result_duration_ms: u64,
     pub translated_paragraphs: u32,
+    pub completion: FragmentCompletion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FragmentCompletion {
+    Completed,
+    LimitReached,
+    Cancelled,
+    Failed,
 }
 
 #[derive(Debug)]
 struct ParagraphTranslation {
     text: String,
     translated_paragraphs: u32,
+    completion: FragmentCompletion,
+}
+
+struct FragmentTranslation {
+    text: String,
+    completion: FragmentCompletion,
+}
+
+impl FragmentTranslation {
+    #[cfg(test)]
+    fn completed(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            completion: FragmentCompletion::Completed,
+        }
+    }
 }
 
 impl FirefoxRuntime {
@@ -71,9 +99,12 @@ impl FirefoxRuntime {
         // valid language-neutral probe for every admitted model and avoids a
         // Russian/English warm-up accidentally rejecting another pair.
         for direction in &self.directions {
-            let translated = direction.engine.translate("1");
-            if translated.trim().is_empty() {
+            let translated = direction.engine.translate_checked("1");
+            if translated.text.trim().is_empty() {
                 bail!("compact translation warm-up returned no text");
+            }
+            if !translated.is_complete() {
+                bail!("compact translation warm-up reached its output token limit");
             }
         }
         Ok(())
@@ -95,7 +126,13 @@ impl FirefoxRuntime {
             source,
             target,
             should_continue,
-            |_, _, paragraph| Ok(engine.translate_long(paragraph)),
+            |_, _, paragraph| {
+                let translated = engine.translate_long_checked(paragraph);
+                Ok(FragmentTranslation {
+                    text: translated.text,
+                    completion: completion_from_terminations(&translated.terminations),
+                })
+            },
             |visible, index, count| {
                 let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
                 first_result_duration_ms.get_or_insert(elapsed_ms);
@@ -107,6 +144,7 @@ impl FirefoxRuntime {
             first_result_duration_ms: first_result_duration_ms
                 .unwrap_or_else(|| started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
             translated_paragraphs: translated.translated_paragraphs,
+            completion: translated.completion,
         })
     }
 
@@ -148,7 +186,11 @@ fn translate_paragraphs_with(
     source: TranslationLanguage,
     target: TranslationLanguage,
     should_continue: impl Fn() -> bool,
-    mut translate: impl FnMut(TranslationLanguage, TranslationLanguage, &str) -> Result<String>,
+    mut translate: impl FnMut(
+        TranslationLanguage,
+        TranslationLanguage,
+        &str,
+    ) -> Result<FragmentTranslation>,
     mut on_partial: impl FnMut(&str, u32, u32) -> bool,
 ) -> Result<ParagraphTranslation> {
     let units = paragraph_units(text);
@@ -163,6 +205,11 @@ fn translate_paragraphs_with(
         if !should_continue() {
             return Err(TranslationCancelled.into());
         }
+        if body.trim().is_empty() {
+            output.push_str(body);
+            output.push_str(separator);
+            continue;
+        }
         let leading_bytes = body.len() - body.trim_start().len();
         let trailing_bytes = body.len() - body.trim_end().len();
         let body_end = body.len().saturating_sub(trailing_bytes);
@@ -172,12 +219,19 @@ fn translate_paragraphs_with(
         output.push_str(leading);
         if !content.is_empty() {
             let translated = translate(source, target, content)?;
-            if translated.trim().is_empty() {
+            if translated.text.trim().is_empty() {
                 bail!("compact translation runtime returned an empty result");
             }
-            output.push_str(translated.trim());
+            output.push_str(translated.text.trim());
             output.push_str(trailing);
             paragraph_index = paragraph_index.saturating_add(1);
+            if translated.completion != FragmentCompletion::Completed {
+                return Ok(ParagraphTranslation {
+                    text: output,
+                    translated_paragraphs: paragraph_index,
+                    completion: translated.completion,
+                });
+            }
             if !on_partial(&output, paragraph_index, paragraph_count) {
                 return Err(TranslationCancelled.into());
             }
@@ -192,7 +246,16 @@ fn translate_paragraphs_with(
     Ok(ParagraphTranslation {
         text: output,
         translated_paragraphs: paragraph_index,
+        completion: FragmentCompletion::Completed,
     })
+}
+
+fn completion_from_terminations(terminations: &[DecodeTermination]) -> FragmentCompletion {
+    if terminations.contains(&DecodeTermination::LengthLimit) {
+        FragmentCompletion::LimitReached
+    } else {
+        FragmentCompletion::Completed
+    }
 }
 
 fn paragraph_units(text: &str) -> Vec<(&str, &str)> {
@@ -224,7 +287,9 @@ mod tests {
 
     use rust_protocol::TranslationLanguage;
 
-    use super::{find_direction, translate_paragraphs_with};
+    use super::{
+        FragmentCompletion, FragmentTranslation, find_direction, translate_paragraphs_with,
+    };
     use crate::{FirefoxDirectionDescriptor, TranslationCancelled};
 
     fn direction(
@@ -250,8 +315,8 @@ mod tests {
             TranslationLanguage::Russian,
             || true,
             |_, _, paragraph| match paragraph {
-                "One." => Ok("Один.".to_owned()),
-                "Two." => Ok("Два.".to_owned()),
+                "One." => Ok(FragmentTranslation::completed("Один.")),
+                "Two." => Ok(FragmentTranslation::completed("Два.")),
                 other => panic!("unexpected paragraph {other:?}"),
             },
             |text, index, count| {
@@ -263,8 +328,49 @@ mod tests {
 
         assert_eq!(output.text, "Один.\n\nДва.");
         assert_eq!(output.translated_paragraphs, 2);
+        assert_eq!(output.completion, FragmentCompletion::Completed);
         assert_eq!(partials[0], ("Один.".to_owned(), 1, 2));
         assert_eq!(partials[1], ("Один.\n\nДва.".to_owned(), 2, 2));
+    }
+
+    #[test]
+    fn compact_translation_preserves_ascii_whitespace_only_paragraphs() {
+        let output = translate_paragraphs_with(
+            "Hello\n\n \t\n\nWorld",
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+            || true,
+            |_, _, paragraph| match paragraph {
+                "Hello" => Ok(FragmentTranslation::completed("Привет")),
+                "World" => Ok(FragmentTranslation::completed("Мир")),
+                other => panic!("whitespace-only paragraph reached the engine: {other:?}"),
+            },
+            |_, _, _| true,
+        )
+        .unwrap();
+
+        assert_eq!(output.text, "Привет\n\n \t\n\nМир");
+        assert_eq!(output.translated_paragraphs, 2);
+    }
+
+    #[test]
+    fn compact_translation_preserves_unicode_whitespace_only_paragraphs() {
+        let output = translate_paragraphs_with(
+            "Hello\n\n\u{2003}\u{00a0}\n\nWorld",
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+            || true,
+            |_, _, paragraph| match paragraph {
+                "Hello" => Ok(FragmentTranslation::completed("Привет")),
+                "World" => Ok(FragmentTranslation::completed("Мир")),
+                other => panic!("whitespace-only paragraph reached the engine: {other:?}"),
+            },
+            |_, _, _| true,
+        )
+        .unwrap();
+
+        assert_eq!(output.text, "Привет\n\n\u{2003}\u{00a0}\n\nМир");
+        assert_eq!(output.translated_paragraphs, 2);
     }
 
     #[test]
@@ -277,7 +383,7 @@ mod tests {
             || calls.get() == 0,
             |_, _, _| {
                 calls.set(calls.get() + 1);
-                Ok("Один.".to_owned())
+                Ok(FragmentTranslation::completed("Один."))
             },
             |_, _, _| true,
         );
@@ -289,6 +395,32 @@ mod tests {
                 .is_some()
         );
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn length_limited_fragment_is_never_emitted_as_completed() {
+        let mut partials = 0;
+        let output = translate_paragraphs_with(
+            "One.\n\nTwo.",
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+            || true,
+            |_, _, _| {
+                Ok(FragmentTranslation {
+                    text: "Один".to_owned(),
+                    completion: FragmentCompletion::LimitReached,
+                })
+            },
+            |_, _, _| {
+                partials += 1;
+                true
+            },
+        )
+        .unwrap();
+
+        assert_eq!(output.completion, FragmentCompletion::LimitReached);
+        assert_eq!(partials, 0);
+        assert_eq!(output.translated_paragraphs, 1);
     }
 
     #[test]

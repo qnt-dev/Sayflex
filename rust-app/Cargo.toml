@@ -19,6 +19,7 @@ members = [
     "tools/translation-benchmark",
 ]
 resolver = "3"
+exclude = ["vendor/fxtranslate"]
 
 [workspace.package]
 version = "0.8.2"
@@ -80,3 +81,6 @@ windows-sys = { version = "0.61.2", features = [
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[patch.crates-io]
+fxtranslate = { path = "vendor/fxtranslate" }
