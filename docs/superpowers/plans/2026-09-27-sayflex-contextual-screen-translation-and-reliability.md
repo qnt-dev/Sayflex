@@ -324,7 +324,9 @@
 **Files:**
 - Create: `rust-app/apps/desktop/src/screen_result.rs`
 - Modify: `rust-app/apps/desktop/src/main.rs`
-- Modify: `rust-app/apps/desktop/src/screen_translation.rs`
+- Modify: `rust-app/crates/ocr-engine/src/lib.rs`
+- Modify: `rust-app/crates/ocr-engine/src/reconstruct.rs`
+- Modify: `rust-app/crates/ocr-engine/tests/reconstruct.rs`
 
 **Interfaces:**
 - Produces: `ScreenTranslationDocument { request_id, revision, crop, blocks, context, created_unix_ms, expires_unix_ms }`.
@@ -332,29 +334,29 @@
 - Produces: `apply_machine_blocks(request_id, base_revision, blocks)`, `save_user_edit(block_id, expected_revision, edit)`, `effective_translation(block_id)`, and `expire_pixels(now)`.
 - Consumes: Task 6 protocol blocks and the selected `RgbaFrame`; pixels stay desktop-local.
 
-- [ ] **Step 1: Add failing document-state tests**
+- [x] **Step 1: Add failing document-state tests**
 
   Test unique/complete ID mapping, unknown/missing/duplicate output rejection, number/URL/placeholder preservation warnings, low-confidence flags, stale request/revision rejection, user edit precedence over a late machine result, corrected Copy projection, and pixel expiry without text loss.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation screen_result -- --nocapture`
   Expected: FAIL because the document owner does not exist.
 
-- [ ] **Step 3: Implement the pure state owner**
+- [x] **Step 3: Implement the pure state owner**
 
   Keep all mutation methods deterministic and UI-free. Increment revision on accepted machine/user/persistence changes. Store the crop in an optional reference-counted buffer/path handle that can be dropped independently from block text.
 
-- [ ] **Step 4: Route OCR geometry into the document without flattening it**
+- [x] **Step 4: Route OCR geometry into the document without flattening it**
 
   Generate stable request-local block IDs from OCR reading order, preserve geometry/confidence, and derive the existing plain source string/DUAL projection from document blocks rather than a second copy.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation screen_result -- --nocapture`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   `git commit -m "feat(screen): add canonical revisioned translation document"`
 

@@ -3,8 +3,16 @@ use rust_protocol::{OcrFailureKind, OcrLine};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconstructedText {
     pub text: String,
+    pub blocks: Vec<ReconstructedBlock>,
     pub accepted_line_count: usize,
     pub average_confidence_milli: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconstructedBlock {
+    pub text: String,
+    pub bounds: rust_protocol::PhysicalRect,
+    pub confidence_milli: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -102,15 +110,18 @@ pub fn reconstruct_text(
     columns.sort_by_key(Column::anchor_x);
 
     let paragraph_gap = i64::from(median_height) * 7 / 5;
-    let text = columns
+    let blocks = columns
         .iter_mut()
-        .map(|column| {
+        .flat_map(|column| {
             column
                 .lines
                 .sort_by_key(|line| (line.source.bounds.y, line.source.bounds.x, line.index));
-            render_column(&column.lines, paragraph_gap)
+            reconstruct_column(&column.lines, paragraph_gap)
         })
-        .filter(|column| !column.is_empty())
+        .collect::<Vec<_>>();
+    let text = blocks
+        .iter()
+        .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
     if text.trim().is_empty() {
@@ -126,32 +137,99 @@ pub fn reconstruct_text(
             .unwrap_or(u16::MAX);
     Ok(ReconstructedText {
         text,
+        blocks,
         accepted_line_count: accepted.len(),
         average_confidence_milli,
     })
 }
 
-fn render_column(lines: &[AcceptedLine<'_>], paragraph_gap: i64) -> String {
-    let mut output = String::new();
+fn reconstruct_column(lines: &[AcceptedLine<'_>], paragraph_gap: i64) -> Vec<ReconstructedBlock> {
+    let mut blocks = Vec::new();
+    let mut current: Option<ReconstructedBlockBuilder> = None;
     let mut previous: Option<AcceptedLine<'_>> = None;
     for line in lines {
+        let starts_paragraph = previous.is_some_and(|previous| {
+            let previous_bottom = i64::from(previous.source.bounds.y)
+                .saturating_add(i64::from(previous.source.bounds.height));
+            i64::from(line.source.bounds.y).saturating_sub(previous_bottom) > paragraph_gap
+        });
+        if starts_paragraph && let Some(block) = current.take() {
+            blocks.push(block.finish());
+        }
+        let new_block = current.is_none();
+        let block = current.get_or_insert_with(|| ReconstructedBlockBuilder::new(*line));
         if let Some(previous) = previous {
             if lexical_hyphen_continuation(previous.text, line.text) {
-                output.pop();
-            } else {
-                let previous_bottom = i64::from(previous.source.bounds.y)
-                    .saturating_add(i64::from(previous.source.bounds.height));
-                let gap = i64::from(line.source.bounds.y).saturating_sub(previous_bottom);
-                output.push('\n');
-                if gap > paragraph_gap {
-                    output.push('\n');
-                }
+                block.text.pop();
+            } else if !starts_paragraph {
+                block.text.push('\n');
             }
         }
-        output.push_str(line.text);
+        if !new_block {
+            block.include(*line);
+        }
+        block.text.push_str(line.text);
         previous = Some(*line);
     }
-    output
+    if let Some(block) = current {
+        blocks.push(block.finish());
+    }
+    blocks
+}
+
+struct ReconstructedBlockBuilder {
+    text: String,
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+    confidence_total: u64,
+    line_count: u64,
+}
+
+impl ReconstructedBlockBuilder {
+    fn new(line: AcceptedLine<'_>) -> Self {
+        let bounds = line.source.bounds;
+        Self {
+            text: String::new(),
+            left: i64::from(bounds.x),
+            top: i64::from(bounds.y),
+            right: i64::from(bounds.x).saturating_add(i64::from(bounds.width)),
+            bottom: i64::from(bounds.y).saturating_add(i64::from(bounds.height)),
+            confidence_total: u64::from(line.source.confidence_milli),
+            line_count: 1,
+        }
+    }
+
+    fn include(&mut self, line: AcceptedLine<'_>) {
+        let bounds = line.source.bounds;
+        self.left = self.left.min(i64::from(bounds.x));
+        self.top = self.top.min(i64::from(bounds.y));
+        self.right = self
+            .right
+            .max(i64::from(bounds.x).saturating_add(i64::from(bounds.width)));
+        self.bottom = self
+            .bottom
+            .max(i64::from(bounds.y).saturating_add(i64::from(bounds.height)));
+        self.confidence_total = self
+            .confidence_total
+            .saturating_add(u64::from(line.source.confidence_milli));
+        self.line_count = self.line_count.saturating_add(1);
+    }
+
+    fn finish(self) -> ReconstructedBlock {
+        ReconstructedBlock {
+            text: self.text,
+            bounds: rust_protocol::PhysicalRect {
+                x: i32::try_from(self.left).unwrap_or(i32::MIN),
+                y: i32::try_from(self.top).unwrap_or(i32::MIN),
+                width: u32::try_from(self.right.saturating_sub(self.left)).unwrap_or(u32::MAX),
+                height: u32::try_from(self.bottom.saturating_sub(self.top)).unwrap_or(u32::MAX),
+            },
+            confidence_milli: u16::try_from(self.confidence_total / self.line_count.max(1))
+                .unwrap_or(u16::MAX),
+        }
+    }
 }
 
 fn lexical_hyphen_continuation(previous: &str, next: &str) -> bool {

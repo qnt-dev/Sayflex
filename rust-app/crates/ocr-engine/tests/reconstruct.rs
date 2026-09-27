@@ -68,6 +68,20 @@ fn paragraph_gap_is_preserved_inside_one_column() {
 }
 
 #[test]
+fn reconstructed_blocks_keep_reading_order_geometry_and_confidence() {
+    let reconstructed = reconstruct_text(&two_columns_shuffled(), 650).unwrap();
+
+    assert_eq!(reconstructed.blocks.len(), 2);
+    assert_eq!(reconstructed.blocks[0].text, "Left one\nLeft two");
+    assert_eq!(reconstructed.blocks[0].bounds.x, 20);
+    assert_eq!(reconstructed.blocks[0].bounds.y, 10);
+    assert_eq!(reconstructed.blocks[0].bounds.width, 80);
+    assert_eq!(reconstructed.blocks[0].bounds.height, 50);
+    assert_eq!(reconstructed.blocks[0].confidence_milli, 920);
+    assert_eq!(reconstructed.blocks[1].text, "Right one\nRight two");
+}
+
+#[test]
 fn low_confidence_noise_is_not_translated() {
     assert_eq!(
         reconstruct_text(&[line("noise", 0, 0, 20, 200)], 650),
