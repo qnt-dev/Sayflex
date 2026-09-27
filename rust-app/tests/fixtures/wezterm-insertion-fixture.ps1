@@ -1,8 +1,27 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
-    [string]$ResultPath
+    [string]$ResultPath,
+    [switch]$PipePressure,
+    [int]$ExpectedInputBytes = 0
 )
+
+if ($PipePressure) {
+    $payload = 'X' * (256 * 1024)
+    [Console]::Out.Write($payload)
+    [Console]::Out.Flush()
+    [Console]::Error.Write($payload)
+    [Console]::Error.Flush()
+    $received = [System.IO.MemoryStream]::new()
+    [Console]::OpenStandardInput().CopyTo($received)
+    if ($received.Length -ne $ExpectedInputBytes) {
+        exit 23
+    }
+    exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($ResultPath)) {
+    throw 'ResultPath is required outside PipePressure mode.'
+}
 
 $Host.UI.RawUI.WindowTitle = 'SayFlex WezTerm Insertion E2E'
 Clear-Host

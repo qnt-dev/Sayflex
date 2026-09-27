@@ -12,10 +12,10 @@ use windows_sys::Win32::{
             TH32CS_SNAPPROCESS,
         },
         Performance::{
-            PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE,
-            PDH_FMT_LARGE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA, PdhAddEnglishCounterW,
-            PdhCloseQuery, PdhCollectQueryData, PdhExpandWildCardPathW,
-            PdhGetFormattedCounterValue,
+            PDH_COUNTER_INFO_W, PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE,
+            PDH_FMT_DOUBLE, PDH_FMT_LARGE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA, PdhAddCounterW,
+            PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhExpandWildCardPathW,
+            PdhGetCounterInfoW, PdhGetFormattedCounterValue, PdhRemoveCounter,
         },
         ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
         Threading::{
@@ -108,6 +108,8 @@ pub struct ProcessResourceSampler {
     gpu: Option<GpuQuery>,
 }
 
+const GPU_COUNTER_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
 impl Default for ProcessResourceSampler {
     fn default() -> Self {
         Self::new()
@@ -194,10 +196,18 @@ impl ProcessResourceSampler {
     }
 
     fn sample_gpu(&mut self, pids: &[u32]) -> HashMap<u32, (Option<f32>, Option<u64>)> {
-        let rebuild = self
-            .gpu
-            .as_ref()
-            .is_none_or(|query| query.pids.as_slice() != pids);
+        if pids.is_empty() {
+            self.gpu = None;
+            return HashMap::new();
+        }
+        let rebuild = self.gpu.as_ref().is_none_or(|query| {
+            gpu_query_needs_refresh(
+                &query.pids,
+                pids,
+                query.counters.is_empty(),
+                query.created_at.elapsed(),
+            )
+        });
         if rebuild {
             self.gpu = GpuQuery::new(pids).ok();
         }
@@ -310,6 +320,7 @@ struct GpuQuery {
     counters: Vec<GpuCounter>,
     pids: Vec<u32>,
     primed: bool,
+    created_at: Instant,
 }
 
 impl GpuQuery {
@@ -328,6 +339,7 @@ impl GpuQuery {
             counters: Vec::new(),
             pids: pids.to_vec(),
             primed: false,
+            created_at: Instant::now(),
         };
         for &pid in pids {
             query.add_wildcard(
@@ -345,33 +357,30 @@ impl GpuQuery {
     }
 
     fn add_wildcard(&mut self, pid: u32, kind: GpuCounterKind, pattern: &str) {
-        for path in expand_pdh_path(pattern) {
-            let wide = wide(&path);
-            let mut counter: PDH_HCOUNTER = ptr::null_mut();
-            // SAFETY: query is open and the NUL-terminated counter path lives
-            // through this call. PDH copies the path into the query.
-            if unsafe {
-                PdhAddEnglishCounterW(self.handle, wide.as_ptr(), pid as usize, &mut counter)
-            } == 0
-            {
-                self.counters.push(GpuCounter {
-                    pid,
-                    kind,
-                    handle: counter,
-                });
-            }
+        let mut api = WindowsPdhApi { query: self.handle };
+        for counter in install_localized_wildcard(&mut api, pattern, pid as usize) {
+            self.counters.push(GpuCounter {
+                pid,
+                kind,
+                handle: counter,
+            });
         }
     }
 
     fn sample(&mut self) -> HashMap<u32, (Option<f32>, Option<u64>)> {
         // SAFETY: handle is owned by self until Drop.
+        let mut values = self
+            .pids
+            .iter()
+            .copied()
+            .map(|pid| (pid, (None, None)))
+            .collect::<HashMap<_, _>>();
         if unsafe { PdhCollectQueryData(self.handle) } != 0 {
-            return HashMap::new();
+            return values;
         }
         let utilization_ready = std::mem::replace(&mut self.primed, true);
-        let mut values = HashMap::<u32, (Option<f32>, Option<u64>)>::new();
         for counter in &self.counters {
-            let entry = values.entry(counter.pid).or_insert((None, Some(0)));
+            let entry = values.entry(counter.pid).or_insert((None, None));
             match counter.kind {
                 GpuCounterKind::Utilization if utilization_ready => {
                     if let Some(value) = formatted_double(counter.handle) {
@@ -379,14 +388,129 @@ impl GpuQuery {
                     }
                 }
                 GpuCounterKind::DedicatedBytes => {
-                    if let Some(value) = formatted_large(counter.handle) {
-                        entry.1 = Some(entry.1.unwrap_or(0).saturating_add(value));
-                    }
+                    entry.1 = merge_optional_total(entry.1, formatted_large(counter.handle));
                 }
                 GpuCounterKind::Utilization => {}
             }
         }
         values
+    }
+}
+
+fn gpu_query_needs_refresh(
+    current_pids: &[u32],
+    requested_pids: &[u32],
+    counters_empty: bool,
+    age: Duration,
+) -> bool {
+    current_pids != requested_pids || counters_empty || age >= GPU_COUNTER_REFRESH_INTERVAL
+}
+
+fn merge_optional_total(current: Option<u64>, sample: Option<u64>) -> Option<u64> {
+    match (current, sample) {
+        (None, None) => None,
+        (Some(current), None) => Some(current),
+        (None, Some(sample)) => Some(sample),
+        (Some(current), Some(sample)) => Some(current.saturating_add(sample)),
+    }
+}
+
+trait PdhWildcardApi {
+    type Counter: Copy;
+
+    fn add_english(&mut self, path: &str, user_data: usize) -> Option<Self::Counter>;
+    fn localized_path(&mut self, counter: Self::Counter) -> Option<String>;
+    fn remove(&mut self, counter: Self::Counter);
+    fn expand_localized(&mut self, path: &str) -> Vec<String>;
+    fn add_localized(&mut self, path: &str, user_data: usize) -> Option<Self::Counter>;
+}
+
+fn install_localized_wildcard<A: PdhWildcardApi>(
+    api: &mut A,
+    english_pattern: &str,
+    user_data: usize,
+) -> Vec<A::Counter> {
+    let Some(probe) = api.add_english(english_pattern, user_data) else {
+        return Vec::new();
+    };
+    let localized_pattern = api.localized_path(probe);
+    api.remove(probe);
+    let Some(localized_pattern) = localized_pattern else {
+        return Vec::new();
+    };
+    api.expand_localized(&localized_pattern)
+        .into_iter()
+        .filter_map(|path| api.add_localized(&path, user_data))
+        .collect()
+}
+
+struct WindowsPdhApi {
+    query: PDH_HQUERY,
+}
+
+impl PdhWildcardApi for WindowsPdhApi {
+    type Counter = PDH_HCOUNTER;
+
+    fn add_english(&mut self, path: &str, user_data: usize) -> Option<Self::Counter> {
+        let path = wide(path);
+        let mut counter = ptr::null_mut();
+        // SAFETY: the query is live, the path is NUL-terminated, and the out
+        // pointer remains writable for the duration of the call.
+        (unsafe { PdhAddEnglishCounterW(self.query, path.as_ptr(), user_data, &mut counter) } == 0)
+            .then_some(counter)
+    }
+
+    fn localized_path(&mut self, counter: Self::Counter) -> Option<String> {
+        let mut bytes = 0_u32;
+        // SAFETY: the first call intentionally requests the required byte
+        // count without providing a destination buffer.
+        if unsafe { PdhGetCounterInfoW(counter, false, &mut bytes, ptr::null_mut()) }
+            != PDH_MORE_DATA
+            || bytes == 0
+        {
+            return None;
+        }
+        let words = (bytes as usize).div_ceil(size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        let info = storage.as_mut_ptr().cast::<PDH_COUNTER_INFO_W>();
+        // SAFETY: `storage` is pointer-aligned and at least the byte count PDH
+        // requested. PDH owns no part of the buffer after the call returns.
+        if unsafe { PdhGetCounterInfoW(counter, false, &mut bytes, info) } != 0 {
+            return None;
+        }
+        // SAFETY: a successful call populated `info`; `szFullPath` points into
+        // `storage` and is NUL-terminated by PDH.
+        let path = unsafe { (*info).szFullPath };
+        if path.is_null() {
+            return None;
+        }
+        let maximum_units = bytes as usize / size_of::<u16>();
+        let length = (0..maximum_units).position(|index| unsafe { *path.add(index) } == 0)?;
+        // SAFETY: the terminator search above bounded the slice to this PDH
+        // output allocation.
+        Some(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(path, length)
+        }))
+    }
+
+    fn remove(&mut self, counter: Self::Counter) {
+        // SAFETY: the probe belongs to this query and is removed exactly once.
+        unsafe {
+            PdhRemoveCounter(counter);
+        }
+    }
+
+    fn expand_localized(&mut self, path: &str) -> Vec<String> {
+        expand_pdh_path(path)
+    }
+
+    fn add_localized(&mut self, path: &str, user_data: usize) -> Option<Self::Counter> {
+        let path = wide(path);
+        let mut counter = ptr::null_mut();
+        // SAFETY: this path is already localized and fully expanded, and the
+        // query and out pointer remain valid through the call.
+        (unsafe { PdhAddCounterW(self.query, path.as_ptr(), user_data, &mut counter) } == 0)
+            .then_some(counter)
     }
 }
 
@@ -471,4 +595,130 @@ fn formatted_large(counter: PDH_HCOUNTER) -> Option<u64> {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{
+        GPU_COUNTER_REFRESH_INTERVAL, GpuQuery, PdhWildcardApi, gpu_query_needs_refresh,
+        install_localized_wildcard, merge_optional_total,
+    };
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Call {
+        AddEnglish(String),
+        LocalizedInfo,
+        RemoveEnglish,
+        LocalizedExpand(String),
+        AddLocalized(String),
+    }
+
+    struct FakePdh {
+        calls: Vec<Call>,
+    }
+
+    impl PdhWildcardApi for FakePdh {
+        type Counter = u64;
+
+        fn add_english(&mut self, path: &str, _: usize) -> Option<Self::Counter> {
+            self.calls.push(Call::AddEnglish(path.to_owned()));
+            Some(1)
+        }
+
+        fn localized_path(&mut self, _: Self::Counter) -> Option<String> {
+            self.calls.push(Call::LocalizedInfo);
+            Some(r"\GPU Engine(pid_42_*)\Utilisation".to_owned())
+        }
+
+        fn remove(&mut self, _: Self::Counter) {
+            self.calls.push(Call::RemoveEnglish);
+        }
+
+        fn expand_localized(&mut self, path: &str) -> Vec<String> {
+            self.calls.push(Call::LocalizedExpand(path.to_owned()));
+            vec!["counter-a".to_owned(), "counter-b".to_owned()]
+        }
+
+        fn add_localized(&mut self, path: &str, _: usize) -> Option<Self::Counter> {
+            self.calls.push(Call::AddLocalized(path.to_owned()));
+            Some(self.calls.len() as u64)
+        }
+    }
+
+    #[test]
+    fn localized_wildcard_setup_uses_the_documented_pdh_order() {
+        let mut api = FakePdh { calls: Vec::new() };
+
+        let counters = install_localized_wildcard(
+            &mut api,
+            r"\GPU Engine(pid_42_*)\Utilization Percentage",
+            42,
+        );
+
+        assert_eq!(counters.len(), 2);
+        assert_eq!(
+            api.calls,
+            vec![
+                Call::AddEnglish(r"\GPU Engine(pid_42_*)\Utilization Percentage".to_owned()),
+                Call::LocalizedInfo,
+                Call::RemoveEnglish,
+                Call::LocalizedExpand(r"\GPU Engine(pid_42_*)\Utilisation".to_owned()),
+                Call::AddLocalized("counter-a".to_owned()),
+                Call::AddLocalized("counter-b".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unchanged_pids_refresh_empty_and_late_gpu_instances() {
+        let pids = [42];
+        assert!(gpu_query_needs_refresh(&pids, &pids, true, Duration::ZERO));
+        assert!(!gpu_query_needs_refresh(
+            &pids,
+            &pids,
+            false,
+            GPU_COUNTER_REFRESH_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(gpu_query_needs_refresh(
+            &pids,
+            &pids,
+            false,
+            GPU_COUNTER_REFRESH_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn an_unavailable_counter_is_not_reported_as_zero() {
+        assert_eq!(merge_optional_total(None, None), None);
+        assert_eq!(merge_optional_total(None, Some(0)), Some(0));
+        assert_eq!(merge_optional_total(Some(7), None), Some(7));
+        assert_eq!(merge_optional_total(Some(7), Some(5)), Some(12));
+    }
+
+    #[test]
+    #[ignore = "requires an interactive Windows session and a PID with a GPU counter instance"]
+    fn live_pdh_discovers_gpu_instances_for_a_known_pid() {
+        let pid = std::env::var("SAYFLEX_GPU_TEST_PID")
+            .expect("set SAYFLEX_GPU_TEST_PID to a PID listed by the GPU Engine counter set")
+            .parse::<u32>()
+            .expect("SAYFLEX_GPU_TEST_PID must be an unsigned integer");
+        let mut query = GpuQuery::new(&[pid]).expect("the live PDH query must open");
+
+        assert!(
+            !query.counters.is_empty(),
+            "the localized wildcard path must discover live GPU counters for PID {pid}"
+        );
+        let _ = query.sample();
+        std::thread::sleep(Duration::from_millis(100));
+        let sampled = query.sample();
+        let (gpu, vram) = sampled
+            .get(&pid)
+            .expect("the requested PID must remain explicit in the sample");
+        assert!(
+            gpu.is_some() || vram.is_some(),
+            "at least one live GPU metric must be available for PID {pid}"
+        );
+    }
 }

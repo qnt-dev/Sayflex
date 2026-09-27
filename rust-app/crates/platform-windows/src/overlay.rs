@@ -823,7 +823,7 @@ pub fn configure_translation_window_for_region(
         {
             return Ok(());
         }
-        let (x, y) = offer_position_for_region(
+        let fitted = fit_window_for_region(
             region,
             window_rect.right - window_rect.left,
             window_rect.bottom - window_rect.top,
@@ -832,11 +832,11 @@ pub fn configure_translation_window_for_region(
         if SetWindowPos(
             hwnd,
             HWND_TOPMOST,
-            x,
-            y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            fitted.x,
+            fitted.y,
+            fitted.width,
+            fitted.height,
+            SWP_NOACTIVATE | SWP_FRAMECHANGED,
         ) == 0
         {
             return Err("SetWindowPos failed for screen-translation window".to_owned());
@@ -933,7 +933,7 @@ fn place_near(hwnd: HWND, anchor: POINT) -> Result<(), String> {
         {
             return Ok(());
         }
-        let (x, y) = offer_position(
+        let fitted = fit_window_near_anchor(
             anchor,
             window_rect.right - window_rect.left,
             window_rect.bottom - window_rect.top,
@@ -942,11 +942,11 @@ fn place_near(hwnd: HWND, anchor: POINT) -> Result<(), String> {
         if SetWindowPos(
             hwnd,
             HWND_TOPMOST,
-            x,
-            y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            fitted.x,
+            fitted.y,
+            fitted.width,
+            fitted.height,
+            SWP_NOACTIVATE | SWP_FRAMECHANGED,
         ) == 0
         {
             return Err("SetWindowPos failed for translation window".to_owned());
@@ -961,37 +961,111 @@ fn place_near(hwnd: HWND, anchor: POINT) -> Result<(), String> {
 /// Separated from the Win32 around it because the arithmetic is the part that
 /// goes wrong: a window wider than the work area used to produce a maximum
 /// below the minimum, which `clamp` panics on.
+#[cfg(test)]
 fn offer_position(anchor: POINT, width: i32, height: i32, work: RECT) -> (i32, i32) {
     const GAP_X: i32 = 18;
     const GAP_Y: i32 = 22;
-    const MARGIN: i32 = 8;
 
-    let left = work.left + MARGIN;
-    let top = work.top + MARGIN;
-    let x = (anchor.x + GAP_X).clamp(left, (work.right - width - MARGIN).max(left));
-    let y = (anchor.y + GAP_Y).clamp(top, (work.bottom - height - MARGIN).max(top));
-    (x, y)
+    let fitted = fit_window_to_work_area(
+        (width, height),
+        work,
+        POINT {
+            x: anchor.x.saturating_add(GAP_X),
+            y: anchor.y.saturating_add(GAP_Y),
+        },
+    );
+    (fitted.x, fitted.y)
 }
 
+#[cfg(test)]
 fn offer_position_for_region(region: RECT, width: i32, height: i32, work: RECT) -> (i32, i32) {
-    const GAP: i32 = 12;
-    const MARGIN: i32 = 8;
+    let fitted = fit_window_for_region(region, width, height, work);
+    (fitted.x, fitted.y)
+}
 
-    let left = work.left + MARGIN;
-    let top = work.top + MARGIN;
-    let max_x = (work.right - width - MARGIN).max(left);
-    let max_y = (work.bottom - height - MARGIN).max(top);
-    let x = region.left.clamp(left, max_x);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FittedWindow {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn fit_window_near_anchor(anchor: POINT, width: i32, height: i32, work: RECT) -> FittedWindow {
+    const GAP_X: i32 = 18;
+    const GAP_Y: i32 = 22;
+
+    fit_window_to_work_area(
+        (width, height),
+        work,
+        POINT {
+            x: anchor.x.saturating_add(GAP_X),
+            y: anchor.y.saturating_add(GAP_Y),
+        },
+    )
+}
+
+fn fit_window_for_region(region: RECT, width: i32, height: i32, work: RECT) -> FittedWindow {
+    const GAP: i32 = 12;
+    let provisional = fit_window_to_work_area(
+        (width, height),
+        work,
+        POINT {
+            x: region.left,
+            y: region.bottom.saturating_add(GAP),
+        },
+    );
+    let work_height = work.bottom.saturating_sub(work.top).max(1);
+    let margin_y = 8.min(work_height.saturating_sub(1) / 2);
+    let min_y = work.top.saturating_add(margin_y);
+    let max_y = work
+        .bottom
+        .saturating_sub(provisional.height)
+        .saturating_sub(8)
+        .max(min_y);
     let below = region.bottom.saturating_add(GAP);
-    let above = region.top.saturating_sub(GAP).saturating_sub(height);
+    let above = region
+        .top
+        .saturating_sub(GAP)
+        .saturating_sub(provisional.height);
     let y = if below <= max_y {
-        below.max(top)
-    } else if above >= top {
+        below.max(min_y)
+    } else if above >= min_y {
         above.min(max_y)
     } else {
-        below.clamp(top, max_y)
+        below.clamp(min_y, max_y)
     };
-    (x, y)
+    fit_window_to_work_area((width, height), work, POINT { x: region.left, y })
+}
+
+fn fit_window_to_work_area(
+    window_size: (i32, i32),
+    work: RECT,
+    desired_origin: POINT,
+) -> FittedWindow {
+    let work_width = work.right.saturating_sub(work.left).max(1);
+    let work_height = work.bottom.saturating_sub(work.top).max(1);
+    let right = work.left.saturating_add(work_width);
+    let bottom = work.top.saturating_add(work_height);
+    let margin_x = 8.min(work_width.saturating_sub(1) / 2);
+    let margin_y = 8.min(work_height.saturating_sub(1) / 2);
+    let left = work.left.saturating_add(margin_x);
+    let top = work.top.saturating_add(margin_y);
+    let inner_right = right.saturating_sub(margin_x);
+    let inner_bottom = bottom.saturating_sub(margin_y);
+    let available_width = inner_right.saturating_sub(left).max(1);
+    let available_height = inner_bottom.saturating_sub(top).max(1);
+    let width = window_size.0.max(1).min(available_width);
+    let height = window_size.1.max(1).min(available_height);
+    let max_x = inner_right.saturating_sub(width).max(left);
+    let max_y = inner_bottom.saturating_sub(height).max(top);
+
+    FittedWindow {
+        x: desired_origin.x.clamp(left, max_x),
+        y: desired_origin.y.clamp(top, max_y),
+        width,
+        height,
+    }
 }
 
 /// Places the preview with nothing to go on but the pointer.
@@ -1025,19 +1099,20 @@ pub fn configure_translation_window(window_handle: u64) -> Result<(), String> {
         {
             return Ok(());
         }
-        let width = window_rect.right - window_rect.left;
-        let height = window_rect.bottom - window_rect.top;
-        let work = monitor_info.rcWork;
-        let x = (cursor.x + 18).clamp(work.left + 8, work.right - width - 8);
-        let y = (cursor.y + 22).clamp(work.top + 8, work.bottom - height - 8);
+        let fitted = fit_window_near_anchor(
+            cursor,
+            window_rect.right - window_rect.left,
+            window_rect.bottom - window_rect.top,
+            monitor_info.rcWork,
+        );
         if SetWindowPos(
             hwnd,
             HWND_TOPMOST,
-            x,
-            y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            fitted.x,
+            fitted.y,
+            fitted.width,
+            fitted.height,
+            SWP_NOACTIVATE | SWP_FRAMECHANGED,
         ) == 0
         {
             return Err("SetWindowPos failed for translation window".to_owned());
@@ -1527,7 +1602,10 @@ mod backdrop_tests {
 
 #[cfg(test)]
 mod placement_tests {
-    use super::{POINT, RECT, offer_position, offer_position_for_region, selection_anchor};
+    use super::{
+        POINT, RECT, fit_window_to_work_area, offer_position, offer_position_for_region,
+        selection_anchor,
+    };
 
     /// A second monitor to the right of the first, as Windows lays them out.
     fn second_screen() -> RECT {
@@ -1573,6 +1651,35 @@ mod placement_tests {
         let (x, y) = offer_position(anchor, 9000, 9000, second_screen());
 
         assert_eq!((x, y), (3848, 8));
+    }
+
+    #[test]
+    fn a_window_larger_than_the_work_area_is_resized_before_placement() {
+        let fitted =
+            fit_window_to_work_area((9000, 9000), second_screen(), POINT { x: 4000, y: 500 });
+
+        assert_eq!((fitted.x, fitted.y), (3848, 8));
+        assert_eq!((fitted.width, fitted.height), (3824, 2144));
+    }
+
+    #[test]
+    fn even_a_tiny_work_area_has_valid_bounds() {
+        let fitted = fit_window_to_work_area(
+            (400, 200),
+            RECT {
+                left: 100,
+                top: 200,
+                right: 108,
+                bottom: 206,
+            },
+            POINT {
+                x: i32::MAX,
+                y: i32::MAX,
+            },
+        );
+
+        assert_eq!((fitted.x, fitted.y), (103, 202));
+        assert_eq!((fitted.width, fitted.height), (2, 2));
     }
 
     #[test]

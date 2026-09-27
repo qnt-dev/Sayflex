@@ -219,6 +219,37 @@ Describe 'SayFlex installer artifact validation' {
         $installerScript | Should Not Match '(?m)^UsePreviousAppDir=no\r?$'
     }
 
+    It 'never removes a legacy path when it is the active install directory' {
+        $installerScript = Get-Content -LiteralPath (
+            Join-Path $PSScriptRoot '..\..\installer\SayFlex.iss'
+        ) -Raw
+
+        $installerScript | Should Match 'function CanonicalInstallPath\('
+        $installerScript | Should Match 'PathNormalizeSlashes\(ExpandFileName\(Path\)\)'
+        $installerScript | Should Match 'CompareText\(CanonicalInstallPath\(LegacyDir\), CurrentDir\) <> 0'
+
+        function Get-TestCanonicalInstallPath([string]$Path) {
+            $canonical = [System.IO.Path]::GetFullPath($Path.Replace('/', '\')).TrimEnd('\')
+            while ($canonical.EndsWith('.') -or $canonical.EndsWith(' ')) {
+                $canonical = $canonical.Substring(0, $canonical.Length - 1)
+            }
+            $canonical.ToUpperInvariant()
+        }
+
+        $styleFlex = Join-Path $TestDrive 'Programs\StyleFlex'
+        $cases = @(
+            $styleFlex,
+            $styleFlex.ToUpperInvariant(),
+            ($styleFlex + '\'),
+            ($styleFlex.Replace('\', '/')),
+            ($styleFlex + '.')
+        )
+        $expected = Get-TestCanonicalInstallPath $styleFlex
+        foreach ($case in $cases) {
+            (Get-TestCanonicalInstallPath $case) | Should Be $expected
+        }
+    }
+
     It 'rejects a staged executable whose Windows identity names another file' {
         $validator = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\validate-release.ps1') -Raw
 

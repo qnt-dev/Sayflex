@@ -2,6 +2,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
 };
@@ -222,6 +223,9 @@ fn run_cli(
     timeout: Duration,
     socket_path: Option<&Path>,
 ) -> Result<CliOutput, String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
     let mut command = Command::new(executable);
     command
         .args(arguments)
@@ -244,33 +248,36 @@ fn run_cli(
         .spawn()
         .map_err(|error| format!("could not start wezterm cli: {error}"))?;
 
-    if let Some(input) = stdin {
-        child
+    let stdin_thread = if let Some(input) = stdin {
+        let input = input.to_vec();
+        let mut stream = child
             .stdin
             .take()
-            .ok_or_else(|| "wezterm cli stdin is unavailable".to_owned())?
-            .write_all(input)
-            .map_err(|error| {
-                let _ = child.kill();
-                format!("could not write text to wezterm cli: {error}")
-            })?;
-    }
+            .ok_or_else(|| "wezterm cli stdin is unavailable".to_owned())?;
+        Some(spawn_io_service(move || {
+            stream
+                .write_all(&input)
+                .map_err(|error| format!("could not write text to wezterm cli: {error}"))
+        }))
+    } else {
+        None
+    };
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|stream| spawn_io_service(move || drain_bounded(stream, "stdout")));
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|stream| spawn_io_service(move || drain_bounded(stream, "stderr")));
 
-    let status = wait_with_timeout(&mut child, timeout)?;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(stream) = child.stdout.take() {
-        stream
-            .take(MAX_DIAGNOSTIC_OUTPUT as u64)
-            .read_to_end(&mut stdout)
-            .map_err(|error| format!("could not read wezterm cli stdout: {error}"))?;
-    }
-    if let Some(stream) = child.stderr.take() {
-        stream
-            .take(MAX_DIAGNOSTIC_OUTPUT as u64)
-            .read_to_end(&mut stderr)
-            .map_err(|error| format!("could not read wezterm cli stderr: {error}"))?;
-    }
+    let status = wait_until_deadline(&mut child, deadline, timeout);
+    let status = status?;
+    let _ = receive_io_service(stdin_thread, deadline, timeout, "stdin")?;
+    let stdout =
+        receive_io_service(stdout_thread, deadline, timeout, "stdout")?.unwrap_or_default();
+    let stderr =
+        receive_io_service(stderr_thread, deadline, timeout, "stderr")?.unwrap_or_default();
     if !status.success() && arguments.contains(&"list-clients") {
         return Err(format!(
             "wezterm cli list-clients exited with {}: {}",
@@ -285,8 +292,66 @@ fn run_cli(
     })
 }
 
-fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
-    let deadline = Instant::now() + timeout;
+fn drain_bounded(mut stream: impl Read, name: &str) -> Result<Vec<u8>, String> {
+    let mut retained = Vec::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| format!("could not read wezterm cli {name}: {error}"))?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let remaining = MAX_DIAGNOSTIC_OUTPUT.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+}
+
+type IoService<T> = (thread::JoinHandle<()>, Receiver<Result<T, String>>);
+
+fn spawn_io_service<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> IoService<T> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let thread = thread::spawn(move || {
+        let _ = sender.send(operation());
+    });
+    (thread, receiver)
+}
+
+fn receive_io_service<T>(
+    service: Option<IoService<T>>,
+    deadline: Instant,
+    timeout: Duration,
+    name: &str,
+) -> Result<Option<T>, String> {
+    let Some((thread, receiver)) = service else {
+        return Ok(None);
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let received = match receiver.recv_timeout(remaining) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => {
+            return Err(format!(
+                "wezterm cli timed out after {} ms while servicing {name}",
+                timeout.as_millis()
+            ));
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err(format!("wezterm cli {name} service disconnected"));
+        }
+    };
+    thread
+        .join()
+        .map_err(|_| format!("wezterm cli {name} service panicked"))?;
+    received.map(Some)
+}
+
+fn wait_until_deadline(
+    child: &mut Child,
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<ExitStatus, String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -299,7 +364,11 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<ExitStatus,
                     timeout.as_millis()
                 ));
             }
-            Err(error) => return Err(format!("could not wait for wezterm cli: {error}")),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("could not wait for wezterm cli: {error}"));
+            }
         }
     }
 }
@@ -354,8 +423,11 @@ fn configure_hidden_process(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{focused_pane_for_pid, is_expected_gui_path, socket_candidates};
-    use std::{ffi::OsString, path::Path};
+    use super::{
+        MAX_DIAGNOSTIC_OUTPUT, focused_pane_for_pid, is_expected_gui_path, run_cli,
+        socket_candidates,
+    };
+    use std::{ffi::OsString, path::Path, time::Duration};
 
     #[test]
     fn resolves_the_focused_pane_for_the_exact_gui_client() {
@@ -417,5 +489,39 @@ mod tests {
             candidates[1],
             Path::new(r"D:\xdg-runtime\wezterm\gui-sock-42")
         );
+    }
+
+    #[test]
+    fn one_deadline_covers_stdin_and_both_output_pipes() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("wezterm-insertion-fixture.ps1");
+        let fixture = fixture.to_string_lossy();
+        let input = vec![b'I'; 1024 * 1024];
+        let expected = input.len().to_string();
+        let output = run_cli(
+            Path::new("powershell.exe"),
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &fixture,
+                "-PipePressure",
+                "-ExpectedInputBytes",
+                &expected,
+            ],
+            Some(&input),
+            Duration::from_secs(2),
+            None,
+        )
+        .expect("concurrent pipe service must not deadlock");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), MAX_DIAGNOSTIC_OUTPUT);
+        assert_eq!(output.stderr.len(), MAX_DIAGNOSTIC_OUTPUT);
     }
 }

@@ -101,40 +101,56 @@ Name: "{userstartup}\SayFlex"; Filename: "{app}\{#AppExeName}"; Parameters: "--b
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchTask}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+function CanonicalInstallPath(Path: String): String;
+begin
+  Result := RemoveBackslashUnlessRoot(PathNormalizeSlashes(ExpandFileName(Path)));
+  while (Length(Result) > 0) and
+    ((Result[Length(Result)] = '.') or (Result[Length(Result)] = ' ')) do
+    Delete(Result, Length(Result), 1);
+end;
+
 procedure RemoveLegacyApplicationFiles;
 var
   LegacyDir: String;
+  CurrentDir: String;
 begin
+  CurrentDir := CanonicalInstallPath(ExpandConstant('{app}'));
   LegacyDir := ExpandConstant('{localappdata}\Programs\RustVoice');
-  DeleteFile(LegacyDir + '\rust-desktop.exe');
-  DeleteFile(LegacyDir + '\rust-input-host.exe');
-  DeleteFile(LegacyDir + '\rust-speech-worker-cpu.exe');
-  DeleteFile(LegacyDir + '\rust-speech-worker-cuda.exe');
-  DeleteFile(LegacyDir + '\rust-translation-worker.exe');
-  DeleteFile(LegacyDir + '\LICENSE.txt');
-  DeleteFile(LegacyDir + '\THIRD_PARTY_NOTICES.md');
-  DeleteFile(LegacyDir + '\SECURITY.md');
-  DeleteFile(LegacyDir + '\unins000.exe');
-  DeleteFile(LegacyDir + '\unins000.dat');
-  DeleteFile(LegacyDir + '\unins000.msg');
-  RemoveDir(LegacyDir);
+  if CompareText(CanonicalInstallPath(LegacyDir), CurrentDir) <> 0 then begin
+    DeleteFile(LegacyDir + '\rust-desktop.exe');
+    DeleteFile(LegacyDir + '\rust-input-host.exe');
+    DeleteFile(LegacyDir + '\rust-speech-worker-cpu.exe');
+    DeleteFile(LegacyDir + '\rust-speech-worker-cuda.exe');
+    DeleteFile(LegacyDir + '\rust-translation-worker.exe');
+    DeleteFile(LegacyDir + '\LICENSE.txt');
+    DeleteFile(LegacyDir + '\THIRD_PARTY_NOTICES.md');
+    DeleteFile(LegacyDir + '\SECURITY.md');
+    DeleteFile(LegacyDir + '\unins000.exe');
+    DeleteFile(LegacyDir + '\unins000.dat');
+    DeleteFile(LegacyDir + '\unins000.msg');
+    RemoveDir(LegacyDir);
+  end else
+    Log('Skipping RustVoice cleanup because it is the active install directory.');
 
   { The former interim product name used the same AppId. Keep this cleanup
     explicit so an upgrade cannot leave two autostart entries or stale workers. }
   LegacyDir := ExpandConstant('{localappdata}\Programs\StyleFlex');
-  DeleteFile(LegacyDir + '\StyleFlex.exe');
-  DeleteFile(LegacyDir + '\StyleFlex.InputHost.exe');
-  DeleteFile(LegacyDir + '\StyleFlex.Speech.Cpu.exe');
-  DeleteFile(LegacyDir + '\StyleFlex.Speech.Cuda.exe');
-  DeleteFile(LegacyDir + '\StyleFlex.Translation.exe');
-  DeleteFile(LegacyDir + '\LICENSE.txt');
-  DeleteFile(LegacyDir + '\THIRD_PARTY_NOTICES.md');
-  DeleteFile(LegacyDir + '\SECURITY.md');
-  DelTree(LegacyDir + '\pet-assets', True, True, True);
-  DeleteFile(LegacyDir + '\unins000.exe');
-  DeleteFile(LegacyDir + '\unins000.dat');
-  DeleteFile(LegacyDir + '\unins000.msg');
-  RemoveDir(LegacyDir);
+  if CompareText(CanonicalInstallPath(LegacyDir), CurrentDir) <> 0 then begin
+    DeleteFile(LegacyDir + '\StyleFlex.exe');
+    DeleteFile(LegacyDir + '\StyleFlex.InputHost.exe');
+    DeleteFile(LegacyDir + '\StyleFlex.Speech.Cpu.exe');
+    DeleteFile(LegacyDir + '\StyleFlex.Speech.Cuda.exe');
+    DeleteFile(LegacyDir + '\StyleFlex.Translation.exe');
+    DeleteFile(LegacyDir + '\LICENSE.txt');
+    DeleteFile(LegacyDir + '\THIRD_PARTY_NOTICES.md');
+    DeleteFile(LegacyDir + '\SECURITY.md');
+    DelTree(LegacyDir + '\pet-assets', True, True, True);
+    DeleteFile(LegacyDir + '\unins000.exe');
+    DeleteFile(LegacyDir + '\unins000.dat');
+    DeleteFile(LegacyDir + '\unins000.msg');
+    RemoveDir(LegacyDir);
+  end else
+    Log('Skipping StyleFlex cleanup because it is the active install directory.');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

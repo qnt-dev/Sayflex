@@ -196,11 +196,11 @@
 - Produces: pure `fit_window_to_work_area(window_size, work_area, desired_origin) -> FittedWindow` used by both anchored and pointer placement.
 - Produces: PDH wildcard setup following English-add, localized-info, localized-expand, localized-add; refreshable counter generation and explicit unavailable status.
 
-- [ ] **Step 1: Add failing tests for path equality, pipe pressure, small work areas, and localized counters**
+- [x] **Step 1: Add failing tests for path equality, pipe pressure, small work areas, and localized counters**
 
   Extend release-validation tests with standard/custom paths including case, separators, and final-dot normalization. Add a fixture that blocks stdin while filling both output pipes. Add geometry tests where the card is larger than the work area. Extract PDH sequencing behind a test seam and assert the documented call order plus late-instance refresh and unavailable-not-zero.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   Run: `cargo test -p sayflex-input-host wezterm::tests -- --nocapture`
   Expected: pipe/deadline tests fail.
@@ -209,7 +209,7 @@
   Run: `pwsh -NoProfile -File scripts/tests/release-validation.Tests.ps1`
   Expected: same-directory StyleFlex cleanup scenario fails.
 
-- [ ] **Step 3: Implement owner-level fixes**
+- [x] **Step 3: Implement owner-level fixes**
 
   Skip legacy deletion when normalized `{app}` equals a legacy path; service stdin/stdout/stderr concurrently under one deadline and kill/reap once on timeout; fit size before clamping coordinates; implement Microsoft's localized PDH wildcard sequence, periodic/empty refresh, and `None` for unavailable data.
 
@@ -217,14 +217,16 @@
 
   Run unit/integration tests on the development installation, then execute the GPU sampling fixture on one English and one Russian/German Windows environment. Record locale, counter availability, late process appearance, zero-load, and unavailable cases as separate evidence.
 
-- [ ] **Step 5: Verify GREEN**
+  Evidence 2026-09-27: the live fixture discovered GPU Engine instances on the available en-US system locale (en-NL user culture). Deterministic tests cover late-instance refresh, valid zero, and unavailable counters. A separate Russian or German Windows environment is still required before release closure.
+
+- [x] **Step 5: Verify GREEN**
 
   Run: `cargo test -p sayflex-input-host -p rust-platform-windows -- --nocapture`
   Expected: PASS.
   Run: `pwsh -NoProfile -File scripts/tests/release-validation.Tests.ps1`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   `git commit -m "fix(windows): harden installer terminal and telemetry paths"`
 
