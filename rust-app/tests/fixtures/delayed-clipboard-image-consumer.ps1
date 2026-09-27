@@ -19,6 +19,7 @@ try {
     [ordered]@{
         process_id = $PID
         sha256 = (Get-FileHash -LiteralPath $OutputImagePath -Algorithm SHA256).Hash
+        text = [System.Windows.Forms.Clipboard]::GetText()
     } | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding utf8
 } catch {
     [System.IO.File]::WriteAllText($ErrorPath, ($_ | Out-String))

@@ -3,6 +3,7 @@ param(
     [string]$InputHostPath = (Join-Path $env:LOCALAPPDATA 'Programs\SayFlex\SayFlex.InputHost.exe'),
     [string[]]$Consumers = @('FixtureConsumer'),
     [int[]]$DelaySeconds = @(0, 1, 10, 60),
+    [string]$DelaySecondsCsv,
     [string]$ReceiptPath,
     [string]$ValidateReceiptPath
 )
@@ -10,6 +11,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $validationModule = Join-Path $PSScriptRoot 'release-validation.psm1'
 Import-Module $validationModule -Force
+
+if (-not [string]::IsNullOrWhiteSpace($DelaySecondsCsv)) {
+    $DelaySeconds = @($DelaySecondsCsv.Split(',') | ForEach-Object {
+        $parsed = 0
+        if (-not [int]::TryParse($_.Trim(), [ref]$parsed)) {
+            throw "DelaySecondsCsv contains an invalid integer: '$_'"
+        }
+        $parsed
+    })
+}
 
 if (-not [string]::IsNullOrWhiteSpace($ValidateReceiptPath)) {
     $resolved = [System.IO.Path]::GetFullPath($ValidateReceiptPath)
@@ -146,6 +157,38 @@ function New-KnownImage {
     } finally {
         $graphics.Dispose()
         $bitmap.Dispose()
+    }
+}
+
+function New-CompetitiveImage {
+    param([Parameter(Mandatory)][string]$Path)
+    $bitmap = [System.Drawing.Bitmap]::new(64, 64, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $graphics.Clear([System.Drawing.Color]::FromArgb(255, 245, 245, 245))
+        $graphics.FillRectangle([System.Drawing.Brushes]::DarkViolet, 3, 3, 58, 18)
+        $graphics.FillEllipse([System.Drawing.Brushes]::LimeGreen, 7, 25, 24, 31)
+        $graphics.FillRectangle([System.Drawing.Brushes]::Navy, 35, 27, 25, 29)
+        $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Bmp)
+    } finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
+}
+
+function Set-CompetitiveClipboard {
+    param(
+        [Parameter(Mandatory)][string]$ImagePath,
+        [Parameter(Mandatory)][string]$Text
+    )
+    $image = [System.Drawing.Bitmap]::FromFile([System.IO.Path]::GetFullPath($ImagePath))
+    try {
+        $data = [System.Windows.Forms.DataObject]::new()
+        $data.SetData([System.Windows.Forms.DataFormats]::UnicodeText, $true, $Text)
+        $data.SetData([System.Windows.Forms.DataFormats]::Bitmap, $false, $image)
+        [System.Windows.Forms.Clipboard]::SetDataObject($data, $true, 10, 100)
+    } finally {
+        $image.Dispose()
     }
 }
 
@@ -349,6 +392,156 @@ function Invoke-DelayedImageCase {
     }
 }
 
+function Invoke-CompetitiveCopyCase {
+    param(
+        [Parameter(Mandatory)][string]$CaseRoot,
+        [Parameter(Mandatory)][string]$CompetitiveImage,
+        [Parameter(Mandatory)][string]$CompetitiveHash
+    )
+
+    $payload = 'SAYFLEX_MATERIALIZATION_PROBE'
+    $foreignText = 'USER_COPY_MUST_WIN'
+    $hostOutput = Join-Path $CaseRoot 'competitive-host.out'
+    $hostError = Join-Path $CaseRoot 'competitive-host.err'
+    $consumerImage = Join-Path $CaseRoot 'competitive-received.bmp'
+    $consumerResult = Join-Path $CaseRoot 'competitive-consumer.json'
+    $consumerError = Join-Path $CaseRoot 'competitive-consumer.err'
+    $hostProcess = $null
+    $consumer = $null
+    $form = $null
+
+    try {
+        $form = [System.Windows.Forms.Form]::new()
+        $form.Text = 'SayFlex competitive clipboard fixture'
+        $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+        $form.Location = [System.Drawing.Point]::new(80, 80)
+        $form.Size = [System.Drawing.Size]::new(640, 220)
+        $form.TopMost = $true
+        $editor = [System.Windows.Forms.TextBox]::new()
+        $editor.Multiline = $true
+        $editor.Dock = [System.Windows.Forms.DockStyle]::Fill
+        $form.Controls.Add($editor)
+        $form.Show() | Out-Null
+        $form.BringToFront() | Out-Null
+        $form.Activate() | Out-Null
+        $editor.Focus() | Out-Null
+        [System.Windows.Forms.Application]::DoEvents()
+        [SayFlexDelayedImageNative]::Focus($form.Handle)
+        Start-Sleep -Milliseconds 250
+
+        $savedEnvironment = @{}
+        foreach ($name in @(
+            'SAYFLEX_RUN_INSERTION_SMOKE',
+            'SAYFLEX_INSERTION_SMOKE_HWND',
+            'SAYFLEX_INSERTION_SMOKE_TEXT',
+            'SAYFLEX_INSERTION_SMOKE_STABLE_FOCUS_MS',
+            'SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION',
+            'SAYFLEX_INSERTION_SMOKE_DISABLE_UIA_VERIFY',
+            'SAYFLEX_INSERTION_SMOKE_RELEASE_FILE'
+        )) {
+            $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        }
+        try {
+            $env:SAYFLEX_RUN_INSERTION_SMOKE = '1'
+            $env:SAYFLEX_INSERTION_SMOKE_HWND = [string]$form.Handle.ToInt64()
+            $env:SAYFLEX_INSERTION_SMOKE_TEXT = $payload
+            $env:SAYFLEX_INSERTION_SMOKE_STABLE_FOCUS_MS = '150'
+            $env:SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION = '1'
+            $env:SAYFLEX_INSERTION_SMOKE_DISABLE_UIA_VERIFY = '1'
+            Remove-Item Env:SAYFLEX_INSERTION_SMOKE_RELEASE_FILE -ErrorAction SilentlyContinue
+            $hostProcess = Start-Process -FilePath $inputHost -ArgumentList '--insertion-smoke' `
+                -RedirectStandardOutput $hostOutput -RedirectStandardError $hostError `
+                -WindowStyle Hidden -PassThru
+            $hostHandle = $hostProcess.Handle
+        } finally {
+            foreach ($name in $savedEnvironment.Keys) {
+                [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+            }
+        }
+
+        # Do not pump the target UI while polling. The target's queued paste
+        # cannot consume the delayed payload before this independent process
+        # materializes it and performs a newer Copy.
+        $materialized = $false
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while ([DateTime]::UtcNow -lt $deadline -and -not $hostProcess.HasExited) {
+            try {
+                if ([System.Windows.Forms.Clipboard]::GetText() -ceq $payload) {
+                    $materialized = $true
+                    break
+                }
+            } catch {
+                # Clipboard contention is expected while the input host publishes.
+            }
+            Start-Sleep -Milliseconds 5
+        }
+        if (-not $materialized) {
+            throw 'The competitive-copy fixture did not observe delayed materialization.'
+        }
+
+        Set-CompetitiveClipboard -ImagePath $CompetitiveImage -Text $foreignText
+        if (-not $hostProcess.WaitForExit(10000)) {
+            $hostProcess.Kill()
+            $hostProcess.WaitForExit()
+            throw 'InputHost did not terminate after its publication was superseded.'
+        }
+        $hostProcess.WaitForExit()
+        $hostProcess.Refresh()
+        $hostExitCode = [SayFlexDelayedImageNative]::ExitCode($hostHandle)
+
+        $consumer = Start-Process -FilePath powershell.exe -ArgumentList @(
+            '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+            '-File', (Join-Path $PSScriptRoot '..\tests\fixtures\delayed-clipboard-image-consumer.ps1'),
+            '-OutputImagePath', $consumerImage,
+            '-ResultPath', $consumerResult,
+            '-ErrorPath', $consumerError
+        ) -WindowStyle Hidden -PassThru
+        $consumerHandle = $consumer.Handle
+        if (-not $consumer.WaitForExit(10000)) {
+            $consumer.Kill()
+            $consumer.WaitForExit()
+            throw 'The competitive-copy consumer did not complete within 10 seconds.'
+        }
+        $consumer.WaitForExit()
+        $consumer.Refresh()
+        $consumerExitCode = [SayFlexDelayedImageNative]::ExitCode($consumerHandle)
+        if ($consumerExitCode -ne 0) {
+            $detail = if (Test-Path -LiteralPath $consumerError) {
+                Get-Content -LiteralPath $consumerError -Raw
+            } else { 'no consumer error was recorded' }
+            throw "The competitive-copy consumer failed: $detail"
+        }
+        $consumerEvidence = Get-Content -LiteralPath $consumerResult -Raw | ConvertFrom-Json
+
+        return [pscustomobject][ordered]@{
+            materialized_by_non_target = $materialized
+            expected_text = $foreignText
+            received_text = "$($consumerEvidence.text)"
+            source_sha256 = $CompetitiveHash
+            received_sha256 = "$($consumerEvidence.sha256)"
+            input_host_exit_code = $hostExitCode
+            consumer_probe_exit_code = $consumerExitCode
+            status = if (
+                $materialized -and
+                $hostExitCode -ne 0 -and
+                "$($consumerEvidence.text)" -ceq $foreignText -and
+                $CompetitiveHash -eq "$($consumerEvidence.sha256)" -and
+                $consumerExitCode -eq 0
+            ) { 'PASS' } else { 'FAIL' }
+        }
+    } finally {
+        if ($null -ne $form) { $form.Close(); $form.Dispose() }
+        if ($null -ne $hostProcess -and -not $hostProcess.HasExited) {
+            $hostProcess.Kill()
+            $hostProcess.WaitForExit()
+        }
+        if ($null -ne $consumer -and -not $consumer.HasExited) {
+            $consumer.Kill()
+            $consumer.WaitForExit()
+        }
+    }
+}
+
 $originalClipboard = Copy-ClipboardDataObject
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sayflex-delayed-image-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
@@ -357,6 +550,9 @@ try {
     $knownImage = Join-Path $temporaryRoot 'known.bmp'
     New-KnownImage -Path $knownImage
     $knownHash = (Get-FileHash -LiteralPath $knownImage -Algorithm SHA256).Hash
+    $competitiveImage = Join-Path $temporaryRoot 'competitive.bmp'
+    New-CompetitiveImage -Path $competitiveImage
+    $competitiveHash = (Get-FileHash -LiteralPath $competitiveImage -Algorithm SHA256).Hash
     $cases = @()
     foreach ($delay in $DelaySeconds) {
         $caseRoot = Join-Path $temporaryRoot ("delay-$delay")
@@ -367,12 +563,19 @@ try {
             -KnownImage $knownImage `
             -KnownHash $knownHash
     }
+    $competitiveRoot = Join-Path $temporaryRoot 'competitive-copy'
+    New-Item -ItemType Directory -Path $competitiveRoot | Out-Null
+    $competitiveCopy = Invoke-CompetitiveCopyCase `
+        -CaseRoot $competitiveRoot `
+        -CompetitiveImage $competitiveImage `
+        -CompetitiveHash $competitiveHash
     $receipt = [pscustomobject][ordered]@{
-        schema_version = 1
+        schema_version = 2
         product = 'SayFlex'
         input_host_sha256 = (Get-FileHash -LiteralPath $inputHost -Algorithm SHA256).Hash
         witnessed_utc = [DateTimeOffset]::UtcNow.ToString('o')
         cases = $cases
+        competitive_copy = $competitiveCopy
     }
     $receiptDirectory = Split-Path -Parent $receiptFile
     New-Item -ItemType Directory -Path $receiptDirectory -Force | Out-Null

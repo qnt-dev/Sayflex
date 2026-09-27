@@ -341,7 +341,7 @@ Describe 'SayFlex delayed clipboard image evidence validation' {
     BeforeEach {
         $script:imageHash = ('a' * 64)
         $script:receipt = [pscustomobject]@{
-            schema_version = 1
+            schema_version = 2
             product = 'SayFlex'
             input_host_sha256 = ('b' * 64)
             witnessed_utc = '2026-09-19T12:30:00Z'
@@ -361,6 +361,16 @@ Describe 'SayFlex delayed clipboard image evidence validation' {
                     }
                 }
             )
+            competitive_copy = [pscustomobject]@{
+                materialized_by_non_target = $true
+                expected_text = 'USER_COPY_MUST_WIN'
+                received_text = 'USER_COPY_MUST_WIN'
+                source_sha256 = $script:imageHash
+                received_sha256 = $script:imageHash
+                input_host_exit_code = 1
+                consumer_probe_exit_code = 0
+                status = 'PASS'
+            }
         }
     }
 
@@ -399,6 +409,21 @@ Describe 'SayFlex delayed clipboard image evidence validation' {
         ($failures -join "`n") | Should Match 'image hash'
         ($failures -join "`n") | Should Match 'responsive'
         ($failures -join "`n") | Should Match 'consumer probe exit code'
+    }
+
+    It 'rejects a competitive Copy that was overwritten or accepted as delivered' {
+        $script:receipt.competitive_copy.received_text = 'OLDER_CLIPBOARD'
+        $script:receipt.competitive_copy.received_sha256 = ('c' * 64)
+        $script:receipt.competitive_copy.input_host_exit_code = 0
+
+        $failures = @(Get-DelayedClipboardImageReceiptFailures `
+            -Receipt $script:receipt `
+            -ExpectedDelays @(0, 1, 10, 60) `
+            -ExpectedConsumers @('FixtureConsumer'))
+
+        ($failures -join "`n") | Should Match 'competitive Copy text'
+        ($failures -join "`n") | Should Match 'competitive Copy image'
+        ($failures -join "`n") | Should Match 'superseded insertion'
     }
 
     It 'validates a complete persisted receipt through the public smoke command' {

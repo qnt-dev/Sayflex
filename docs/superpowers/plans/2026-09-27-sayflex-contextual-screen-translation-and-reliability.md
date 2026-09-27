@@ -48,31 +48,31 @@
 - Produces: `ClipboardPasteHost::owns_publication(&self, publication: ClipboardPublication) -> bool` and an atomic restore helper that revalidates owner/generation while the clipboard is open.
 - Consumes: existing immutable `ClipboardSnapshot::prepare_restore` and continuously pumped STA render window.
 
-- [ ] **Step 1: Add failing unit tests for the capture-to-publish race and self-materialization**
+- [x] **Step 1: Add failing unit tests for the capture-to-publish race and self-materialization**
 
   Add tests named `a_user_copy_between_capture_and_publish_prevents_replacement`, `own_delayed_materialization_keeps_publication_owned`, and `a_user_copy_after_materialization_prevents_restore`. Assert that destructive callbacks are never entered after a foreign sequence/owner change and that a same-generation `WM_RENDERFORMAT` sequence change remains owned.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
   Run: `cargo test -p sayflex-input-host clipboard::tests -- --nocapture`
   Expected: the three new ownership tests fail because `dispatch_paste` publishes after an unlocked capture and restoration trusts only the original replacement sequence.
 
-- [ ] **Step 3: Implement publication identity and under-lock freshness checks**
+- [x] **Step 3: Implement publication identity and under-lock freshness checks**
 
   Move the pre-publish sequence check into the same `OpenClipboard` transaction as `EmptyClipboard`; increment a host generation for every publication; accept sequence movement caused by the same render HWND/generation; reject any different owner before replacement or restore. Keep `ClipboardSnapshot` immutable and duplicate formats per restore.
 
-- [ ] **Step 4: Extend the cross-process delayed-image fixture**
+- [x] **Step 4: Extend the cross-process delayed-image fixture**
 
   Exercise readable text plus image formats, foreign Copy between snapshot/publication, foreign Copy after materialization, and restored-image reads after 0, 1, 10, and 60 seconds. Assert clipboard fidelity, bounded completion, and no host/consumer hang.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
   Run: `cargo test -p sayflex-input-host clipboard::tests -- --nocapture`
   Expected: PASS.
   Run: `pwsh -NoProfile -File scripts/tests/delayed-clipboard-image.Integration.Tests.ps1`
   Expected: PASS with every delayed-read interval and competitive Copy scenario reported.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   `git commit -m "fix(input): make clipboard publication ownership atomic"`
 

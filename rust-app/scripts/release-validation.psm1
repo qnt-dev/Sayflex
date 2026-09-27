@@ -174,14 +174,21 @@ function Get-DelayedClipboardImageReceiptFailures {
     )
 
     $failures = New-Object System.Collections.Generic.List[string]
-    foreach ($field in @('schema_version', 'product', 'input_host_sha256', 'witnessed_utc', 'cases')) {
+    foreach ($field in @(
+        'schema_version',
+        'product',
+        'input_host_sha256',
+        'witnessed_utc',
+        'cases',
+        'competitive_copy'
+    )) {
         if ($null -eq $Receipt.PSObject.Properties[$field]) {
             $failures.Add("delayed-image receipt is missing '$field'")
         }
     }
     if ($failures.Count -gt 0) { return $failures }
 
-    if ($Receipt.schema_version -ne 1) {
+    if ($Receipt.schema_version -ne 2) {
         $failures.Add("delayed-image receipt schema '$($Receipt.schema_version)' is unsupported")
     }
     if ($Receipt.product -ne 'SayFlex') {
@@ -250,6 +257,33 @@ function Get-DelayedClipboardImageReceiptFailures {
         }
         if ("$($case.status)" -cne 'PASS') {
             $failures.Add("delayed-image case $identity has status '$($case.status)', not PASS")
+        }
+    }
+
+    $competitive = $Receipt.competitive_copy
+    if ($null -ne $competitive) {
+        if ($competitive.materialized_by_non_target -ne $true) {
+            $failures.Add('competitive Copy did not materialize the SayFlex payload from a non-target process')
+        }
+        if ([string]::IsNullOrWhiteSpace("$($competitive.expected_text)") -or
+            "$($competitive.received_text)" -cne "$($competitive.expected_text)") {
+            $failures.Add('competitive Copy text was overwritten during restoration')
+        }
+        $sourceHash = "$($competitive.source_sha256)"
+        $receivedHash = "$($competitive.received_sha256)"
+        if ($sourceHash -notmatch '^[0-9A-Fa-f]{64}$' -or
+            $receivedHash -notmatch '^[0-9A-Fa-f]{64}$' -or
+            -not $sourceHash.Equals($receivedHash, [StringComparison]::OrdinalIgnoreCase)) {
+            $failures.Add('competitive Copy image was overwritten during restoration')
+        }
+        if ($competitive.input_host_exit_code -eq 0) {
+            $failures.Add('competitive Copy was not reported as a superseded insertion')
+        }
+        if ($competitive.consumer_probe_exit_code -ne 0) {
+            $failures.Add("competitive Copy consumer exit code is '$($competitive.consumer_probe_exit_code)'")
+        }
+        if ("$($competitive.status)" -cne 'PASS') {
+            $failures.Add("competitive Copy status is '$($competitive.status)', not PASS")
         }
     }
     return $failures

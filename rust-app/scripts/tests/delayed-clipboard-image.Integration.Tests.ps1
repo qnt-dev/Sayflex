@@ -17,7 +17,7 @@ Describe 'SayFlex delayed clipboard image installed fixture' {
             -File (Join-Path $PSScriptRoot '..\test-delayed-clipboard-image.ps1') `
             -InputHostPath $inputHost `
             -Consumers FixtureConsumer `
-            -DelaySeconds 0 `
+            -DelaySecondsCsv '0,1,10,60' `
             -ReceiptPath $receiptPath
 
         $LASTEXITCODE | Should Be 0
@@ -26,7 +26,7 @@ Describe 'SayFlex delayed clipboard image installed fixture' {
         $failures = @(
             Get-DelayedClipboardImageReceiptFailures `
                 -Receipt $receipt `
-                -ExpectedDelays @(0) `
+                -ExpectedDelays @(0, 1, 10, 60) `
                 -ExpectedConsumers @('FixtureConsumer')
         )
         $failures | Should BeNullOrEmpty

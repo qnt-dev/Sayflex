@@ -112,9 +112,16 @@ struct ClipboardRenderState {
     payload: String,
     target_process_id: u32,
     target_window_handle: u64,
+    generation: u64,
     rendered: bool,
     target_requested: bool,
     render_failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClipboardPublication {
+    generation: u64,
+    replacement_sequence: u32,
 }
 
 /// Long-lived delayed-rendering owner for automatic insertion. The payload is
@@ -168,46 +175,56 @@ impl ClipboardPasteHost {
         Ok(Self { hwnd, state })
     }
 
-    fn publish(
+    fn publish_if_unchanged(
         &mut self,
+        expected_sequence: u32,
         payload: &str,
         target_process_id: u32,
         target_window_handle: u64,
-    ) -> Result<u32, ClipboardError> {
-        self.state.payload.clear();
-        self.state.payload.push_str(payload);
-        self.state.target_process_id = target_process_id;
-        self.state.target_window_handle = target_window_handle;
-        self.state.rendered = false;
-        self.state.target_requested = false;
-        self.state.render_failed = false;
-
+    ) -> Result<ClipboardPublication, ClipboardError> {
         let mut private_payloads = private_format_payloads()?;
-        with_open_clipboard_owner(self.hwnd, || {
-            if unsafe { EmptyClipboard() } == 0 {
-                return Err(ClipboardError::Busy);
-            }
-            // A null handle advertises delayed rendering. Windows sends
-            // WM_RENDERFORMAT only when a consumer actually requests text.
-            unsafe {
-                let _ = SetClipboardData(u32::from(CF_UNICODETEXT), ptr::null_mut());
-            }
-            for (format, payload) in &mut private_payloads {
-                let accepted = unsafe { SetClipboardData(*format, payload.handle) };
-                if accepted.is_null() {
-                    unsafe {
-                        let _ = EmptyClipboard();
-                    }
-                    return Err(ClipboardError::Allocation);
+        let generation = self.state.generation.wrapping_add(1).max(1);
+        let publication = with_open_clipboard_owner(self.hwnd, || {
+            let current_sequence = unsafe { GetClipboardSequenceNumber() };
+            publish_if_sequence_current(expected_sequence, current_sequence, || {
+                self.state.payload.clear();
+                self.state.payload.push_str(payload);
+                self.state.target_process_id = target_process_id;
+                self.state.target_window_handle = target_window_handle;
+                self.state.generation = generation;
+                self.state.rendered = false;
+                self.state.target_requested = false;
+                self.state.render_failed = false;
+
+                if unsafe { EmptyClipboard() } == 0 {
+                    return Err(ClipboardError::Busy);
                 }
-                payload.release_to_clipboard();
-            }
-            Ok(())
-        })?;
+                // A null handle advertises delayed rendering. Windows sends
+                // WM_RENDERFORMAT only when a consumer actually requests text.
+                unsafe {
+                    let _ = SetClipboardData(u32::from(CF_UNICODETEXT), ptr::null_mut());
+                }
+                for (format, payload) in &mut private_payloads {
+                    let accepted = unsafe { SetClipboardData(*format, payload.handle) };
+                    if accepted.is_null() {
+                        unsafe {
+                            let _ = EmptyClipboard();
+                        }
+                        return Err(ClipboardError::Allocation);
+                    }
+                    payload.release_to_clipboard();
+                }
+                Ok(ClipboardPublication {
+                    generation,
+                    replacement_sequence: unsafe { GetClipboardSequenceNumber() },
+                })
+            })
+        })?
+        .ok_or(ClipboardError::Superseded)?;
         if unsafe { IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) } == 0 {
             return Err(ClipboardError::Allocation);
         }
-        Ok(unsafe { GetClipboardSequenceNumber() })
+        Ok(publication)
     }
 
     fn await_target_read(
@@ -262,6 +279,51 @@ impl ClipboardPasteHost {
 
     fn owns_clipboard(&self) -> bool {
         (unsafe { GetClipboardOwner() }) == self.hwnd
+    }
+
+    fn owns_publication(&self, publication: ClipboardPublication) -> bool {
+        publication_still_owned(
+            publication,
+            self.state.generation,
+            unsafe { GetClipboardSequenceNumber() },
+            unsafe { GetClipboardOwner() } as usize as u64,
+            self.hwnd as usize as u64,
+        )
+    }
+
+    fn restore_snapshot_if_owned(
+        &self,
+        snapshot: &ClipboardSnapshot,
+        publication: ClipboardPublication,
+    ) -> Result<bool, ClipboardError> {
+        let mut formats = snapshot.prepare_restore()?;
+        let active_generation = self.state.generation;
+        let host_window = self.hwnd as usize as u64;
+        with_open_clipboard(|| {
+            restore_preserved_formats_if_publication_owned(
+                &mut formats,
+                publication,
+                active_generation,
+                unsafe { GetClipboardSequenceNumber() },
+                unsafe { GetClipboardOwner() } as usize as u64,
+                host_window,
+                || {
+                    if unsafe { EmptyClipboard() } == 0 {
+                        Err(ClipboardError::Busy)
+                    } else {
+                        Ok(())
+                    }
+                },
+                |format| {
+                    let accepted = unsafe { SetClipboardData(format.format, format.handle) };
+                    if accepted.is_null() {
+                        return Err(ClipboardError::Allocation);
+                    }
+                    format.release_to_clipboard();
+                    Ok(())
+                },
+            )
+        })
     }
 
     fn wait_until_clipboard_released(&mut self, deadline: Instant) {
@@ -742,6 +804,33 @@ fn clipboard_sequence_still_owned(expected_sequence: u32, current_sequence: u32)
     expected_sequence == current_sequence
 }
 
+fn publish_precondition_holds(expected_sequence: u32, current_sequence: u32) -> bool {
+    expected_sequence == current_sequence
+}
+
+fn publish_if_sequence_current<T>(
+    expected_sequence: u32,
+    current_sequence: u32,
+    publish: impl FnOnce() -> Result<T, ClipboardError>,
+) -> Result<Option<T>, ClipboardError> {
+    if !publish_precondition_holds(expected_sequence, current_sequence) {
+        return Ok(None);
+    }
+    publish().map(Some)
+}
+
+fn publication_still_owned(
+    publication: ClipboardPublication,
+    active_generation: u64,
+    _current_sequence: u32,
+    current_owner_window: u64,
+    host_window: u64,
+) -> bool {
+    publication.generation == active_generation
+        && current_owner_window != 0
+        && current_owner_window == host_window
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipboardPasteDisposition {
     /// The focused target's observable text changed by the exact payload and
@@ -788,9 +877,13 @@ pub fn dispatch_paste(
     }
     let (snapshot, original_sequence) = ClipboardSnapshot::capture_consistent()?;
     let target_window_handle = crate::inject::foreground_window_handle();
-    let replacement_sequence = match host.publish(payload, target_process_id, target_window_handle)
-    {
-        Ok(sequence) => sequence,
+    let publication = match host.publish_if_unchanged(
+        original_sequence,
+        payload,
+        target_process_id,
+        target_window_handle,
+    ) {
+        Ok(publication) => publication,
         Err(error) => {
             if host.owns_clipboard() {
                 let expected_sequence = unsafe { GetClipboardSequenceNumber() };
@@ -799,13 +892,17 @@ pub fn dispatch_paste(
             return Err(error);
         }
     };
+    let replacement_sequence = publication.replacement_sequence;
 
     if !target_still_focused() {
-        let _ = snapshot.restore_if_current(replacement_sequence)?;
+        let _ = host.restore_snapshot_if_owned(&snapshot, publication)?;
         return Err(ClipboardError::TargetChanged);
     }
+    if !host.owns_publication(publication) {
+        return Err(ClipboardError::Superseded);
+    }
     if let Err(error) = send_paste() {
-        let _ = snapshot.restore_if_current(replacement_sequence)?;
+        let _ = host.restore_snapshot_if_owned(&snapshot, publication)?;
         return Err(error);
     }
 
@@ -816,20 +913,20 @@ pub fn dispatch_paste(
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
-            let _ = snapshot.restore_if_current(replacement_sequence)?;
+            let _ = host.restore_snapshot_if_owned(&snapshot, publication)?;
             return Err(error);
         }
     };
     let disposition = match outcome {
         ClipboardReadOutcome::TargetVerified => {
-            if snapshot.restore_if_current(replacement_sequence)? {
+            if host.restore_snapshot_if_owned(&snapshot, publication)? {
                 ClipboardPasteDisposition::VerifiedAndRestored
             } else {
                 ClipboardPasteDisposition::VerifiedAndSuperseded
             }
         }
         ClipboardReadOutcome::TargetRead => {
-            if snapshot.restore_if_current(replacement_sequence)? {
+            if host.restore_snapshot_if_owned(&snapshot, publication)? {
                 ClipboardPasteDisposition::PayloadReadAndRestored
             } else {
                 // A newer clipboard owner is user/external state. Never overwrite
@@ -838,18 +935,18 @@ pub fn dispatch_paste(
             }
         }
         ClipboardReadOutcome::DispatchedUnverified => {
-            if snapshot.restore_if_current(replacement_sequence)? {
+            if host.restore_snapshot_if_owned(&snapshot, publication)? {
                 ClipboardPasteDisposition::DispatchedUnverifiedAndRestored
             } else {
                 return Err(ClipboardError::Superseded);
             }
         }
         ClipboardReadOutcome::TargetChanged => {
-            let _ = snapshot.restore_if_current(replacement_sequence)?;
+            let _ = host.restore_snapshot_if_owned(&snapshot, publication)?;
             return Err(ClipboardError::TargetChanged);
         }
         ClipboardReadOutcome::TimedOut => {
-            if snapshot.restore_if_current(replacement_sequence)? {
+            if host.restore_snapshot_if_owned(&snapshot, publication)? {
                 return Err(ClipboardError::NotDelivered);
             }
             return Err(ClipboardError::Superseded);
@@ -932,6 +1029,33 @@ fn restore_preserved_formats_if_current<T>(
     mut restore_format: impl FnMut(&mut T) -> Result<(), ClipboardError>,
 ) -> Result<bool, ClipboardError> {
     if !clipboard_sequence_still_owned(expected_sequence, current_sequence) {
+        return Ok(false);
+    }
+    empty_clipboard()?;
+    for format in formats {
+        restore_format(format)?;
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_preserved_formats_if_publication_owned<T>(
+    formats: &mut [T],
+    publication: ClipboardPublication,
+    active_generation: u64,
+    current_sequence: u32,
+    current_owner_window: u64,
+    host_window: u64,
+    mut empty_clipboard: impl FnMut() -> Result<(), ClipboardError>,
+    mut restore_format: impl FnMut(&mut T) -> Result<(), ClipboardError>,
+) -> Result<bool, ClipboardError> {
+    if !publication_still_owned(
+        publication,
+        active_generation,
+        current_sequence,
+        current_owner_window,
+        host_window,
+    ) {
         return Ok(false);
     }
     empty_clipboard()?;
@@ -1065,10 +1189,88 @@ fn with_open_clipboard_owner<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardError, ClipboardFormatSnapshot, ClipboardSnapshot, GMEM_MOVEABLE, GlobalAlloc,
-        clipboard_sequence_still_owned, collect_preservable_formats, is_retryable_capture_error,
-        is_transient_read_error, request_is_from_target, restore_preserved_formats_if_current,
+        ClipboardError, ClipboardFormatSnapshot, ClipboardPublication, ClipboardSnapshot,
+        GMEM_MOVEABLE, GlobalAlloc, clipboard_sequence_still_owned, collect_preservable_formats,
+        is_retryable_capture_error, is_transient_read_error, publication_still_owned,
+        publish_if_sequence_current, publish_precondition_holds, request_is_from_target,
+        restore_preserved_formats_if_current, restore_preserved_formats_if_publication_owned,
     };
+
+    #[test]
+    fn a_user_copy_between_capture_and_publish_prevents_replacement() {
+        assert!(publish_precondition_holds(41, 41));
+        assert!(!publish_precondition_holds(41, 42));
+
+        let mut destructive_callback_entered = false;
+        let result = publish_if_sequence_current(41, 42, || {
+            destructive_callback_entered = true;
+            Ok(())
+        })
+        .expect("a foreign Copy is a non-destructive rejection");
+
+        assert_eq!(result, None);
+        assert!(!destructive_callback_entered);
+    }
+
+    #[test]
+    fn own_delayed_materialization_keeps_publication_owned() {
+        let publication = ClipboardPublication {
+            generation: 7,
+            replacement_sequence: 41,
+        };
+
+        assert!(publication_still_owned(publication, 7, 42, 100, 100,));
+
+        let mut formats = vec![13];
+        let mut clipboard_was_emptied = false;
+        let restored = restore_preserved_formats_if_publication_owned(
+            &mut formats,
+            publication,
+            7,
+            42,
+            100,
+            100,
+            || {
+                clipboard_was_emptied = true;
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .expect("own materialization remains restorable");
+
+        assert!(restored);
+        assert!(clipboard_was_emptied);
+    }
+
+    #[test]
+    fn a_user_copy_after_materialization_prevents_restore() {
+        let publication = ClipboardPublication {
+            generation: 7,
+            replacement_sequence: 41,
+        };
+
+        assert!(!publication_still_owned(publication, 7, 43, 200, 100,));
+
+        let mut formats = vec![13];
+        let mut clipboard_was_emptied = false;
+        let restored = restore_preserved_formats_if_publication_owned(
+            &mut formats,
+            publication,
+            7,
+            43,
+            200,
+            100,
+            || {
+                clipboard_was_emptied = true;
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .expect("a foreign Copy is a safe no-op");
+
+        assert!(!restored);
+        assert!(!clipboard_was_emptied);
+    }
 
     #[test]
     fn an_unreadable_private_format_does_not_discard_readable_clipboard_data() {
