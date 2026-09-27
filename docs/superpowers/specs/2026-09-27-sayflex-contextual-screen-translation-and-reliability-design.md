@@ -90,9 +90,16 @@ process. Existing immutable snapshot/duplicated-handle behavior is preserved.
 - Firefox/Bergamot handles blank and whitespace-only fragments, including
   Unicode whitespace, without invalid ranges or worker loss.
 - Compact translation has a bounded cancellation path for long paragraphs.
-  Because this backend does not expose llama.cpp's completion reason, it uses
-  backend-specific chunk/completion validation and never presents a cancelled or
-  incomplete result as successful.
+  Every translated fragment has an explicit terminal outcome: `completed`,
+  `limit_reached`, `cancelled`, or `failed`. The adapter may publish a successful
+  combined result only when every non-empty fragment is `completed`. The current
+  library returns text without distinguishing normal completion from truncation,
+  so its output is not treated as confirmed complete until the adapter can prove
+  completion through an admitted backend contract or an independently validated
+  completion mechanism. Splitting input into shorter fragments alone is not such
+  proof. An unconfirmed, limit-reached, cancelled, or failed fragment may be shown
+  with an explicit incomplete status for recovery, but it is never published as
+  a successful terminal translation and never used for automatic replacement.
 - History retrieval cannot block the command receiver behind an active engine
   lock. Cancellation, shutdown, and installation control remain responsive.
 - Automatic external-text replacement is disabled for any incomplete result.
@@ -123,8 +130,17 @@ process. Existing immutable snapshot/duplicated-handle behavior is preserved.
   paths. It never deletes the active installation's licenses, assets, or
   uninstaller, including custom-path upgrades.
 - GPU telemetry refreshes wildcard instances even while process IDs remain
-  unchanged and distinguishes unavailable data from measured zero. Existing use
-  of English PDH counter names remains; localization support is not rewritten.
+  unchanged and distinguishes unavailable data from measured zero. Language-
+  neutral counter names remain in source, but wildcard setup follows Microsoft's
+  localized-PDH sequence: add the English wildcard with
+  `PdhAddEnglishCounterW`, obtain its localized full path through
+  `PdhGetCounterInfoW`, expand instances with `PdhExpandWildCardPathW`, then add
+  each expanded localized path with `PdhAddCounterW`. Counter refresh repeats the
+  required expansion when instances appear later. This behavior is verified on
+  at least one English Windows installation and one non-English installation
+  using Russian or German display language. A localized-path failure reports
+  telemetry as unavailable rather than as zero. The required sequence follows
+  the [Microsoft `PdhAddEnglishCounterW` contract](https://learn.microsoft.com/en-us/windows/win32/api/pdh/nf-pdh-pdhaddenglishcounterw).
 
 The governing principle is one owner per operation state: that owner controls
 start, cancellation, terminal publication, resource release, and rejection of
@@ -171,18 +187,35 @@ block, and revision. It cannot overwrite a user-edited revision.
 
 ## 5. Source context
 
-Context is captured before SayFlex overlays appear. The source window is selected
-deterministically:
+The window inventory is frozen in the same capture generation as the desktop
+pixels and before any SayFlex overlay appears. For every eligible top-level window
+it records stable identity, physical bounds/region, DWM visibility and cloaking,
+Z order, process identity, and the context fields available at that instant.
+Context lookup after selection uses only this snapshot; it does not inspect the
+then-active SayFlex overlay or a newer foreground window.
 
-1. choose the eligible top-level window with the largest physical-pixel
-   intersection with the selected rectangle;
-2. break an intersection tie using the window containing the selection center;
-3. break any remaining tie by visible Z order;
-4. if no reliable candidate exists, continue without application context.
+The source is selected from what was actually visible inside the chosen region:
 
-SayFlex-owned and invisible/tool windows are excluded. A selection spanning
-several applications uses the winning source only and records that the context is
-partial rather than merging unrelated application data.
+1. reconstruct each candidate's visible physical-pixel region by clipping its
+   saved window region to the desktop and subtracting the saved regions of visible
+   eligible windows above it in Z order;
+2. intersect each reconstructed visible region with the user's selection and
+   calculate its visible area; pixels occluded by a higher window never count for
+   the covered window behind it;
+3. select a source only when one candidate has a unique largest visible area and
+   either owns more than half of the accounted visible selection or owns the
+   selection center with at least a 1.5-to-1 visible-area lead over the runner-up;
+4. otherwise treat the result as ambiguous and continue without application
+   context.
+
+SayFlex-owned, invisible, cloaked, and ordinary tool windows are excluded before
+occlusion is evaluated. Shaped windows use their saved window region; per-pixel
+alpha that Windows does not expose reliably is not guessed. A selection spanning
+several applications uses the unambiguous winner only and records that the context
+is partial rather than merging unrelated application data. Tests cover a small
+game window above a large browser, partially overlapping peer windows, shaped
+windows, selections crossing applications, and an ambiguous split that produces
+no context.
 
 Standard Windows/application interfaces may provide:
 
@@ -391,4 +424,3 @@ release builds, installer validation, installed Windows scenarios, and screensho
 of the five approved UI states. README, SECURITY, third-party/model notices,
 release notes, and the OCR benchmark are updated from the same application path
 that ships.
-
