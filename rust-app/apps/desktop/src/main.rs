@@ -228,9 +228,13 @@ enum RuntimeEvent {
     ScreenSelectionWatchdog {
         request_id: RequestId,
     },
+    ScreenSelectionSurfacesReady {
+        request_id: RequestId,
+    },
     #[cfg(feature = "screen-translation")]
     ScreenCapturePrepared {
         request_id: RequestId,
+        excluded_overlays: Vec<overlay_presenter::CaptureExcludedOverlay>,
         result: Result<
             rust_platform_windows::screen_capture::DesktopCapture,
             rust_platform_windows::screen_capture::CaptureError,
@@ -1279,7 +1283,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         #[cfg(feature = "screen-translation")]
         ocr_child: RefCell::new(None),
         #[cfg(feature = "screen-translation")]
-        active_ocr_request: RefCell::new(None),
+        ocr_request: RefCell::new(worker_supervisor::OcrRequestOwner::default()),
         companion: RefCell::new(None),
         companion_child: RefCell::new(None),
         lifecycle: Cell::new(WorkerLifecycle::Running),
@@ -1583,8 +1587,35 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 handle_screen_selection_terminal(terminal, runtime);
             }
         }
+        RuntimeEvent::ScreenSelectionSurfacesReady { request_id } => {
+            let terminal = runtime
+                .screen_selection
+                .borrow_mut()
+                .surfaces_ready(request_id);
+            if let Some(terminal) = terminal {
+                handle_screen_selection_terminal(terminal, runtime);
+            }
+        }
         #[cfg(feature = "screen-translation")]
-        RuntimeEvent::ScreenCapturePrepared { request_id, result } => {
+        RuntimeEvent::ScreenCapturePrepared {
+            request_id,
+            excluded_overlays,
+            result,
+        } => {
+            runtime.screen_capture_backend.expire_reuse_frames();
+            let capture_backend = Arc::clone(&runtime.screen_capture_backend);
+            Timer::single_shot(
+                rust_platform_windows::screen_capture::CAPTURE_REUSE_TTL
+                    + std::time::Duration::from_millis(10),
+                move || capture_backend.expire_reuse_frames(),
+            );
+            for surface in excluded_overlays {
+                if let Err(error) = surface.restore() {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "screen_translation request={request_id} stage=capture_exclusion_restore result=failed error={error}"
+                    ));
+                }
+            }
             if !runtime.screen_translation.borrow().is_selecting(request_id) {
                 rust_app_core::diagnostics::log_line(&format!(
                     "screen_translation request={request_id} stage=capture result=stale_ignored"
@@ -1639,20 +1670,15 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             }
             Ok(false) => {}
             Err(error) => {
-                if runtime.workers.complete_ocr_request(request_id)
-                    && let Some(anchor) =
-                        runtime.screen_translation.borrow_mut().complete(request_id)
-                {
-                    show_screen_translation_outcome(
-                        request_id,
-                        Some(anchor),
-                        ScreenTranslationOutcome::WorkerFailed,
-                        runtime,
-                    );
-                }
                 rust_app_core::diagnostics::log_line(&format!(
                     "ocr_worker request={request_id} outcome=failed kind=timeout action=terminate_failed error={error}"
                 ));
+                Timer::single_shot(std::time::Duration::from_secs(2), move || {
+                    dispatch_runtime_event(RuntimeEvent::OcrWatchdog {
+                        request_id,
+                        instance_id,
+                    });
+                });
             }
         },
         RuntimeEvent::Speech { instance_id, event } => {
@@ -1716,7 +1742,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 ));
                 return;
             }
-            handle_ocr_event(event, runtime);
+            handle_ocr_event(instance_id, event, runtime);
         }
         RuntimeEvent::Companion(event) => match event {
             CompanionRendererEvent::Ready { protocol_version } => {
@@ -2097,7 +2123,7 @@ fn handle_worker_exit(
 
     #[cfg(feature = "screen-translation")]
     if kind == WorkerKind::Ocr {
-        if let Some(request_id) = runtime.workers.abandon_active_ocr_request() {
+        if let Some(request_id) = runtime.workers.abandon_active_ocr_request(instance_id) {
             if let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) {
                 show_screen_translation_outcome(
                     request_id,
@@ -2302,7 +2328,6 @@ fn apply_screen_translation_cancellation(
                 let _ = runtime
                     .workers
                     .send_ocr(&OcrWorkerCommand::Cancel { request_id });
-                runtime.workers.complete_ocr_request(request_id);
             }
             #[cfg(not(feature = "screen-translation"))]
             let _ = request_id;
@@ -2498,7 +2523,6 @@ fn handle_prepared_screen_ocr(
         return;
     }
     let Some(instance_id) = runtime.workers.current_ocr_instance_id() else {
-        runtime.workers.complete_ocr_request(request_id);
         runtime.screen_translation.borrow_mut().complete(request_id);
         show_screen_translation_outcome(
             request_id,
@@ -2525,7 +2549,7 @@ fn handle_prepared_screen_ocr(
 }
 
 #[cfg(feature = "screen-translation")]
-fn handle_ocr_event(event: OcrWorkerEvent, runtime: &RuntimeUi) {
+fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi) {
     match event {
         OcrWorkerEvent::Ready {
             protocol_version,
@@ -2548,7 +2572,9 @@ fn handle_ocr_event(event: OcrWorkerEvent, runtime: &RuntimeUi) {
             processing_duration_ms,
             ..
         } => {
-            runtime.workers.complete_ocr_request(request_id);
+            runtime
+                .workers
+                .complete_ocr_request(request_id, instance_id);
             let Some(anchor) = runtime
                 .screen_translation
                 .borrow_mut()
@@ -2593,7 +2619,9 @@ fn handle_ocr_event(event: OcrWorkerEvent, runtime: &RuntimeUi) {
         OcrWorkerEvent::Failed {
             request_id, kind, ..
         } => {
-            runtime.workers.complete_ocr_request(request_id);
+            runtime
+                .workers
+                .complete_ocr_request(request_id, instance_id);
             let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) else {
                 return;
             };
@@ -2613,7 +2641,9 @@ fn handle_ocr_event(event: OcrWorkerEvent, runtime: &RuntimeUi) {
             ));
         }
         OcrWorkerEvent::Cancelled { request_id } => {
-            runtime.workers.complete_ocr_request(request_id);
+            runtime
+                .workers
+                .complete_ocr_request(request_id, instance_id);
             if let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) {
                 show_screen_translation_outcome(
                     request_id,
@@ -2884,6 +2914,27 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             if let Some(cancellation) = cancellation {
                 apply_screen_translation_cancellation(cancellation, runtime);
             }
+            let excluded_overlays = match runtime
+                .translation_previews
+                .borrow()
+                .cloak_presented_for_capture()
+            {
+                Ok(surfaces) => surfaces,
+                Err(error) => {
+                    runtime.screen_translation.borrow_mut().complete(request_id);
+                    show_screen_translation_outcome(
+                        request_id,
+                        None,
+                        ScreenTranslationOutcome::CaptureUnavailable,
+                        runtime,
+                    );
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "screen_translation request={request_id} stage=capture_exclusion result=failed error={error}"
+                    ));
+                    return;
+                }
+            };
+            let excluded_on_spawn_failure = excluded_overlays.clone();
             let capture_backend = Arc::clone(&runtime.screen_capture_backend);
             let spawn = std::thread::Builder::new()
                 .name(format!("screen-capture-{request_id}"))
@@ -2908,10 +2959,14 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     }
                     dispatch_runtime_event(RuntimeEvent::ScreenCapturePrepared {
                         request_id,
+                        excluded_overlays,
                         result,
                     });
                 });
             if let Err(error) = spawn {
+                for surface in excluded_on_spawn_failure {
+                    let _ = surface.restore();
+                }
                 runtime.screen_translation.borrow_mut().complete(request_id);
                 show_screen_translation_outcome(
                     request_id,

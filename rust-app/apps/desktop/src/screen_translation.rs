@@ -1,4 +1,8 @@
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use rust_platform_windows::{
     region_selection::{MonitorRegion, PointerEvent, RegionSelectionMonitor},
@@ -18,6 +22,8 @@ use crate::{
 };
 
 const SELECTION_WATCHDOG_SECONDS: u64 = 15;
+const SURFACE_READY_DEADLINE: Duration = Duration::from_millis(2_500);
+const SURFACE_READY_RETRY: Duration = Duration::from_millis(16);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "screen-translation"), allow(dead_code))]
@@ -196,12 +202,19 @@ pub(crate) trait SelectionEnvironment {
     #[cfg(test)]
     fn capture(&mut self) -> Result<DesktopCapture, CaptureError>;
     fn set_capture_mode(&mut self, request_id: RequestId, active: bool) -> Result<(), String>;
-    fn show_surfaces(&mut self, capture: &DesktopCapture) -> Result<(), String>;
+    fn show_surfaces(&mut self, capture: &DesktopCapture) -> Result<SurfacePresentation, String>;
+    fn schedule_surface_retry(&mut self, request_id: RequestId);
     fn update_selection(&mut self, selection: Option<PhysicalRect>);
     fn teardown_surfaces(&mut self);
     fn arm_watchdog(&mut self, request_id: RequestId);
     fn disarm_watchdog(&mut self);
     fn desktop_layout_current(&self) -> bool;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SurfacePresentation {
+    Ready,
+    Preparing,
 }
 
 struct ActiveSelection {
@@ -265,12 +278,35 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
             drag_origin: None,
             capture_mode_active: false,
         });
+        self.present_active_surfaces()
+    }
+
+    pub(crate) fn surfaces_ready(&mut self, request_id: RequestId) -> Option<SelectionTerminal> {
+        if self
+            .active
+            .as_ref()
+            .is_none_or(|active| active.request_id != request_id || active.capture_mode_active)
+        {
+            return None;
+        }
+        self.present_active_surfaces()
+    }
+
+    fn present_active_surfaces(&mut self) -> Option<SelectionTerminal> {
+        let request_id = self.active.as_ref()?.request_id;
         let show_result = {
             let active = self.active.as_ref().expect("selection was just installed");
             self.environment.show_surfaces(&active.capture)
         };
-        if let Err(error) = show_result {
-            return self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(error)));
+        match show_result {
+            Ok(SurfacePresentation::Preparing) => {
+                self.environment.schedule_surface_retry(request_id);
+                return None;
+            }
+            Ok(SurfacePresentation::Ready) => {}
+            Err(error) => {
+                return self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(error)));
+            }
         }
         if let Err(error) = self.environment.set_capture_mode(request_id, true) {
             return self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(error)));
@@ -412,6 +448,8 @@ pub(crate) struct DesktopSelectionEnvironment {
     surfaces: Option<ScreenSelectionSurfaces>,
     pointer_monitor: Option<RegionSelectionMonitor>,
     watchdog: Timer,
+    surface_ready_retry: Timer,
+    surface_ready_deadline: Option<Instant>,
 }
 
 impl DesktopSelectionEnvironment {
@@ -432,6 +470,8 @@ impl DesktopSelectionEnvironment {
             surfaces,
             pointer_monitor: None,
             watchdog: Timer::default(),
+            surface_ready_retry: Timer::default(),
+            surface_ready_deadline: None,
         }
     }
 }
@@ -451,7 +491,7 @@ impl SelectionEnvironment for DesktopSelectionEnvironment {
             .map_err(|error| error.to_string())
     }
 
-    fn show_surfaces(&mut self, capture: &DesktopCapture) -> Result<(), String> {
+    fn show_surfaces(&mut self, capture: &DesktopCapture) -> Result<SurfacePresentation, String> {
         let current_regions = rust_platform_windows::region_selection::attached_monitor_regions()?;
         let needs_rebuild = self
             .surfaces
@@ -465,17 +505,33 @@ impl SelectionEnvironment for DesktopSelectionEnvironment {
             rust_app_core::diagnostics::log_line(
                 "screen_translation stage=surface_precreate result=recreated_for_desktop_layout",
             );
+            self.surface_ready_deadline = Some(Instant::now() + SURFACE_READY_DEADLINE);
         }
         let surfaces = self
             .surfaces
             .as_ref()
             .ok_or_else(|| "screen-selection surfaces are unavailable".to_owned())?;
+        let deadline = *self
+            .surface_ready_deadline
+            .get_or_insert_with(|| Instant::now() + SURFACE_READY_DEADLINE);
+        if surfaces.await_ready(deadline)? == SurfacePresentation::Preparing {
+            return Ok(SurfacePresentation::Preparing);
+        }
         surfaces.verify_regions(&current_regions)?;
         surfaces.present(capture)?;
+        self.surface_ready_deadline = None;
+        self.surface_ready_retry.stop();
         self.pointer_monitor = Some(RegionSelectionMonitor::start(|event| {
             dispatch_runtime_event(RuntimeEvent::ScreenSelectionPointer(event));
         })?);
-        Ok(())
+        Ok(SurfacePresentation::Ready)
+    }
+
+    fn schedule_surface_retry(&mut self, request_id: RequestId) {
+        self.surface_ready_retry
+            .start(TimerMode::SingleShot, SURFACE_READY_RETRY, move || {
+                dispatch_runtime_event(RuntimeEvent::ScreenSelectionSurfacesReady { request_id });
+            });
     }
 
     fn update_selection(&mut self, selection: Option<PhysicalRect>) {
@@ -485,6 +541,8 @@ impl SelectionEnvironment for DesktopSelectionEnvironment {
     }
 
     fn teardown_surfaces(&mut self) {
+        self.surface_ready_retry.stop();
+        self.surface_ready_deadline = None;
         self.pointer_monitor.take();
         if let Some(surfaces) = &self.surfaces {
             surfaces.retire();
@@ -578,6 +636,16 @@ impl ScreenSelectionSurfaces {
             return Err("screen-selection surfaces are still preparing".into());
         }
         Ok(())
+    }
+
+    fn await_ready(&self, deadline: Instant) -> Result<SurfacePresentation, String> {
+        if self.surfaces.iter().all(|surface| surface.attached.get()) {
+            return Ok(SurfacePresentation::Ready);
+        }
+        if Instant::now() >= deadline {
+            return Err("screen-selection surfaces did not attach before the deadline".into());
+        }
+        Ok(SurfacePresentation::Preparing)
     }
 
     fn regions_match(&self, current: &[MonitorRegion]) -> bool {
@@ -743,7 +811,7 @@ mod tests {
 
     use super::{
         ScreenSelectionCoordinator, ScreenTranslationBegin, ScreenTranslationCancellation,
-        ScreenTranslationFlow, SelectionEnvironment, SelectionTerminal,
+        ScreenTranslationFlow, SelectionEnvironment, SelectionTerminal, SurfacePresentation,
         surface_regions_need_rebuild,
     };
 
@@ -816,6 +884,8 @@ mod tests {
         show_error: Option<String>,
         visible_surfaces: usize,
         layout_current: bool,
+        surfaces_ready: bool,
+        readiness_retries: usize,
     }
 
     impl FakeEnvironment {
@@ -826,6 +896,8 @@ mod tests {
                 show_error: None,
                 visible_surfaces: 0,
                 layout_current: true,
+                surfaces_ready: true,
+                readiness_retries: 0,
             }
         }
     }
@@ -842,7 +914,14 @@ mod tests {
             Ok(())
         }
 
-        fn show_surfaces(&mut self, capture: &DesktopCapture) -> Result<(), String> {
+        fn show_surfaces(
+            &mut self,
+            capture: &DesktopCapture,
+        ) -> Result<SurfacePresentation, String> {
+            if !self.surfaces_ready {
+                self.events.push("surfaces:preparing".into());
+                return Ok(SurfacePresentation::Preparing);
+            }
             for bounds in capture.output_bounds() {
                 self.events.push(format!("show:{}", bounds.x));
                 self.visible_surfaces += 1;
@@ -850,7 +929,12 @@ mod tests {
             if let Some(error) = self.show_error.take() {
                 return Err(error);
             }
-            Ok(())
+            Ok(SurfacePresentation::Ready)
+        }
+
+        fn schedule_surface_retry(&mut self, _request_id: RequestId) {
+            self.events.push("surfaces:retry".into());
+            self.readiness_retries += 1;
         }
 
         fn update_selection(&mut self, _selection: Option<PhysicalRect>) {}
@@ -934,6 +1018,39 @@ mod tests {
             ["show:-1920", "show:0", "esc:on"]
         );
         assert!(coordinator.cancel(request_id).is_some());
+    }
+
+    #[test]
+    fn rebuilt_surfaces_continue_the_same_request_after_native_attachment() {
+        let request_id = RequestId::new();
+        let mut environment = FakeEnvironment::successful();
+        environment.surfaces_ready = false;
+        let mut coordinator = ScreenSelectionCoordinator::new(environment);
+
+        assert!(
+            coordinator
+                .begin_with_capture(request_id, capture())
+                .is_none()
+        );
+        assert!(coordinator.is_active());
+        assert_eq!(
+            coordinator.environment().events,
+            ["surfaces:preparing", "surfaces:retry"]
+        );
+
+        coordinator.environment.surfaces_ready = true;
+        assert!(coordinator.surfaces_ready(request_id).is_none());
+        assert_eq!(
+            coordinator.environment().events,
+            [
+                "surfaces:preparing",
+                "surfaces:retry",
+                "show:-1920",
+                "show:0",
+                "esc:on",
+            ]
+        );
+        assert_eq!(coordinator.environment().readiness_retries, 1);
     }
 
     #[test]

@@ -227,6 +227,86 @@ pub(crate) enum WorkerRecovery {
     Stale,
 }
 
+#[cfg(feature = "screen-translation")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum OcrRequestState {
+    Running,
+    CancelRequested,
+    #[default]
+    Terminated,
+}
+
+#[cfg(feature = "screen-translation")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActiveOcrRequest {
+    request_id: rust_protocol::RequestId,
+    instance_id: u64,
+    state: OcrRequestState,
+}
+
+#[cfg(feature = "screen-translation")]
+#[derive(Debug, Default)]
+pub(crate) struct OcrRequestOwner {
+    active: Option<ActiveOcrRequest>,
+}
+
+#[cfg(feature = "screen-translation")]
+impl OcrRequestOwner {
+    fn start(&mut self, request_id: rust_protocol::RequestId, instance_id: u64) {
+        self.active = Some(ActiveOcrRequest {
+            request_id,
+            instance_id,
+            state: OcrRequestState::Running,
+        });
+    }
+
+    fn request_cancel(&mut self, request_id: rust_protocol::RequestId) -> bool {
+        let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.request_id == request_id)
+        else {
+            return false;
+        };
+        active.state = OcrRequestState::CancelRequested;
+        true
+    }
+
+    fn terminate(&mut self, request_id: rust_protocol::RequestId, instance_id: u64) -> bool {
+        if !self.watchdog_is_current(request_id, instance_id) {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+
+    fn abandon_instance(&mut self, instance_id: u64) -> Option<rust_protocol::RequestId> {
+        if self
+            .active
+            .is_none_or(|active| active.instance_id != instance_id)
+        {
+            return None;
+        }
+        self.active.take().map(|active| active.request_id)
+    }
+
+    fn active_request_id(&self) -> Option<rust_protocol::RequestId> {
+        self.active.map(|active| active.request_id)
+    }
+
+    fn watchdog_is_current(&self, request_id: rust_protocol::RequestId, instance_id: u64) -> bool {
+        self.active.is_some_and(|active| {
+            active.request_id == request_id && active.instance_id == instance_id
+        })
+    }
+
+    #[cfg(test)]
+    fn state(&self) -> OcrRequestState {
+        self.active
+            .map_or(OcrRequestState::Terminated, |active| active.state)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestartPolicyDecision {
     Restart,
@@ -251,7 +331,7 @@ pub(crate) struct Workers {
     #[cfg(feature = "screen-translation")]
     pub(crate) ocr_child: RefCell<Option<WorkerProcess>>,
     #[cfg(feature = "screen-translation")]
-    pub(crate) active_ocr_request: RefCell<Option<rust_protocol::RequestId>>,
+    pub(crate) ocr_request: RefCell<OcrRequestOwner>,
     pub(crate) companion: RefCell<Option<JsonWriter>>,
     pub(crate) companion_child: RefCell<Option<WorkerProcess>>,
     pub(crate) lifecycle: Cell<WorkerLifecycle>,
@@ -283,7 +363,7 @@ impl Workers {
 
     #[cfg(feature = "screen-translation")]
     pub(crate) fn ocr_busy(&self) -> bool {
-        self.active_ocr_request.borrow().is_some()
+        self.ocr_request.borrow().active_request_id().is_some()
     }
 
     #[cfg(not(feature = "screen-translation"))]
@@ -293,7 +373,7 @@ impl Workers {
 
     #[cfg(feature = "screen-translation")]
     pub(crate) fn unload_ocr(&self) -> Result<bool, String> {
-        if self.active_ocr_request.borrow().is_some() {
+        if self.ocr_request.borrow().active.is_some() {
             return Err("OCR is processing a screen translation".to_owned());
         }
         if self.ocr.borrow().is_none() && self.ocr_child.borrow().is_none() {
@@ -321,7 +401,7 @@ impl Workers {
         // reaped. Its reader-thread exit notification becomes stale only now.
         self.ocr.borrow_mut().take();
         self.ocr_child.borrow_mut().take();
-        self.active_ocr_request.borrow_mut().take();
+        self.ocr_request.borrow_mut().active.take();
         rust_app_core::diagnostics::log_line(&format!(
             "ocr_worker lifecycle=unloaded_by_user forced={forced} shutdown_send_failed={}",
             send_error.is_some()
@@ -561,13 +641,22 @@ impl Workers {
         } else if self.ocr.borrow().is_none() {
             return Ok(());
         }
-        let request_id = match command {
-            OcrWorkerCommand::Recognize { request_id, .. } => Some(*request_id),
-            OcrWorkerCommand::Cancel { .. } | OcrWorkerCommand::Shutdown => None,
+        let recognition = match command {
+            OcrWorkerCommand::Recognize { request_id, .. } => {
+                let instance_id = self
+                    .current_ocr_instance_id()
+                    .ok_or_else(|| "OCR worker process is unavailable".to_owned())?;
+                self.ocr_request
+                    .borrow_mut()
+                    .start(*request_id, instance_id);
+                Some((*request_id, instance_id))
+            }
+            OcrWorkerCommand::Cancel { request_id } => {
+                self.ocr_request.borrow_mut().request_cancel(*request_id);
+                None
+            }
+            OcrWorkerCommand::Shutdown => None,
         };
-        if let Some(request_id) = request_id {
-            self.active_ocr_request.replace(Some(request_id));
-        }
         let send_result = self
             .ocr
             .borrow()
@@ -575,8 +664,8 @@ impl Workers {
             .ok_or_else(|| "OCR worker is unavailable".to_owned())?
             .send(command);
         if let Err(error) = send_result {
-            if let Some(request_id) = request_id {
-                self.complete_ocr_request(request_id);
+            if let Some((request_id, instance_id)) = recognition {
+                self.complete_ocr_request(request_id, instance_id);
             }
             return Err(error.to_string());
         }
@@ -584,19 +673,22 @@ impl Workers {
     }
 
     #[cfg(feature = "screen-translation")]
-    pub(crate) fn complete_ocr_request(&self, request_id: rust_protocol::RequestId) -> bool {
-        let mut active = self.active_ocr_request.borrow_mut();
-        if *active == Some(request_id) {
-            active.take();
-            true
-        } else {
-            false
-        }
+    pub(crate) fn complete_ocr_request(
+        &self,
+        request_id: rust_protocol::RequestId,
+        instance_id: u64,
+    ) -> bool {
+        self.ocr_request
+            .borrow_mut()
+            .terminate(request_id, instance_id)
     }
 
     #[cfg(feature = "screen-translation")]
-    pub(crate) fn abandon_active_ocr_request(&self) -> Option<rust_protocol::RequestId> {
-        self.active_ocr_request.borrow_mut().take()
+    pub(crate) fn abandon_active_ocr_request(
+        &self,
+        instance_id: u64,
+    ) -> Option<rust_protocol::RequestId> {
+        self.ocr_request.borrow_mut().abandon_instance(instance_id)
     }
 
     #[cfg(feature = "screen-translation")]
@@ -613,11 +705,15 @@ impl Workers {
         request_id: rust_protocol::RequestId,
         instance_id: u64,
     ) -> Result<bool, String> {
-        let active = *self.active_ocr_request.borrow();
         let Some(current_instance) = self.current_ocr_instance_id() else {
             return Ok(false);
         };
-        if !ocr_watchdog_is_current(active, current_instance, request_id, instance_id) {
+        if current_instance != instance_id
+            || !self
+                .ocr_request
+                .borrow()
+                .watchdog_is_current(request_id, instance_id)
+        {
             return Ok(false);
         }
         let mut process_slot = self.ocr_child.borrow_mut();
@@ -632,7 +728,9 @@ impl Workers {
         {
             process.child.kill().map_err(|error| error.to_string())?;
         }
-        self.active_ocr_request.borrow_mut().take();
+        self.ocr_request
+            .borrow_mut()
+            .terminate(request_id, instance_id);
         Ok(true)
     }
 
@@ -767,6 +865,7 @@ impl Workers {
 }
 
 #[cfg(feature = "screen-translation")]
+#[cfg(test)]
 fn ocr_watchdog_is_current(
     active_request: Option<rust_protocol::RequestId>,
     current_instance: u64,
@@ -1571,8 +1670,9 @@ mod ocr_supervision_tests {
     use rust_protocol::{OcrLanguagePolicy, OcrPixelFormat, OcrWorkerCommand, RequestId};
 
     use super::{
-        DEV_OCR_WORKER_EXE, OCR_WORKER_EXE, development_worker_name, ocr_command_requires_worker,
-        ocr_watchdog_is_current, terminate_child_bounded,
+        DEV_OCR_WORKER_EXE, OCR_WORKER_EXE, OcrRequestOwner, OcrRequestState,
+        development_worker_name, ocr_command_requires_worker, ocr_watchdog_is_current,
+        terminate_child_bounded,
     };
 
     #[test]
@@ -1591,6 +1691,24 @@ mod ocr_supervision_tests {
         assert!(!ocr_watchdog_is_current(Some(active), 7, stale, 7));
         assert!(!ocr_watchdog_is_current(Some(active), 7, active, 6));
         assert!(!ocr_watchdog_is_current(None, 7, active, 7));
+    }
+
+    #[test]
+    fn cancellation_keeps_the_ocr_watchdog_owned_until_a_terminal_event() {
+        let request_id = RequestId::new();
+        let stale = RequestId::new();
+        let mut owner = OcrRequestOwner::default();
+
+        owner.start(request_id, 7);
+        assert_eq!(owner.state(), OcrRequestState::Running);
+        assert!(owner.request_cancel(request_id));
+        assert_eq!(owner.state(), OcrRequestState::CancelRequested);
+        assert!(owner.watchdog_is_current(request_id, 7));
+        assert!(!owner.terminate(stale, 7));
+        assert!(owner.watchdog_is_current(request_id, 7));
+        assert!(owner.terminate(request_id, 7));
+        assert_eq!(owner.state(), OcrRequestState::Terminated);
+        assert!(!owner.watchdog_is_current(request_id, 7));
     }
 
     #[test]

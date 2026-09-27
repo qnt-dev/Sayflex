@@ -238,6 +238,7 @@
 - Modify: `rust-app/crates/platform-windows/src/screen_capture.rs`
 - Modify: `rust-app/apps/desktop/src/screen_translation.rs`
 - Modify: `rust-app/apps/desktop/src/overlay_presenter.rs`
+- Modify: `rust-app/apps/desktop/src/translation_view.rs`
 - Modify: `rust-app/apps/desktop/src/worker_supervisor.rs`
 - Modify: `rust-app/apps/desktop/src/main.rs`
 
@@ -247,35 +248,35 @@
 - Produces: bounded DXGI reuse entries with `captured_at` and `take_or_expire(now, ttl)`; request completion drops non-reused captures.
 - Consumes: existing request ID, capture generation, overlay presenter frame ticket, OCR watchdog, and previous preview identity.
 
-- [ ] **Step 1: Add failing lifecycle tests**
+- [x] **Step 1: Add failing lifecycle tests**
 
   Cover a monitor/DPI change immediately before the first request; overlay hide confirmation before capture; pinned/current SayFlex surfaces excluded from the next frame; user Cancel followed by a stuck OCR worker; terminal OCR acknowledgement; DXGI cache expiry; and GDI read refusal until flush succeeds.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation screen_translation -- --nocapture`
   Expected: readiness and cancellation/watchdog tests fail on current behavior.
   Run: `cargo test -p rust-platform-windows screen_capture -- --nocapture`
   Expected: cache-lifetime or flush tests fail on current behavior.
 
-- [ ] **Step 3: Implement readiness and self-surface exclusion**
+- [x] **Step 3: Implement readiness and self-surface exclusion**
 
   Rebuild and asynchronously await surface HWND attachment within a bounded deadline; continue the same request. Retire/cloak current and pinned surfaces by their old identities, wait on presenter/DWM confirmation, then capture.
 
-- [ ] **Step 4: Separate user cancellation from compute termination**
+- [x] **Step 4: Separate user cancellation from compute termination**
 
   Send OCR Cancel and mark `CancelRequested` without clearing the watchdog. Clear only on `Cancelled`, `Recognized`, `Failed`, confirmed process exit, or forced watchdog termination. Reject stale instance/request events.
 
-- [ ] **Step 5: Bound capture resources and synchronize GDI**
+- [x] **Step 5: Bound capture resources and synchronize GDI**
 
   Call `GdiFlush` after successful `BitBlt` and before reading DIB bytes. Expire/drop cached CPU frames by the documented short reuse TTL and topology generation while preserving cached D3D devices/duplication objects; ensure protected content on one monitor does not poison unrelated output selection.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
   Run: `cargo test -p sayflex-desktop -p rust-platform-windows --features screen-translation -- --nocapture`
   Expected: PASS with no retained full-frame bytes after terminal/expiry tests.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
   `git commit -m "fix(screen): retain ownership through capture and OCR termination"`
 

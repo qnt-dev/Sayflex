@@ -25,7 +25,7 @@ use slint::{
 use crate::{
     MAX_TRANSLATION_BLUR_RADIUS, RuntimeEvent, TranslationPair, TranslationPreview,
     TranslationPreviewAnchor, TranslatorWindow, dispatch_runtime_event, native_window_handle,
-    overlay_presenter::{OverlayContract, OverlayPresenter},
+    overlay_presenter::{CaptureExcludedOverlay, OverlayContract, OverlayPresenter},
     present_translation_preview, slint_window_handle,
 };
 
@@ -89,6 +89,25 @@ impl TranslationPreviewRegistry {
                 refresh_cloaked_translation_backdrop(&slot.preview, handle);
             }
         }
+    }
+
+    pub(crate) fn cloak_presented_for_capture(
+        &self,
+    ) -> Result<Vec<CaptureExcludedOverlay>, String> {
+        let mut excluded = Vec::new();
+        for slot in std::iter::once(&self.current).chain(self.pinned.iter()) {
+            match slot.presenter.cloak_for_capture() {
+                Ok(Some(surface)) => excluded.push(surface),
+                Ok(None) => {}
+                Err(error) => {
+                    for surface in &excluded {
+                        let _ = surface.restore();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(excluded)
     }
 }
 

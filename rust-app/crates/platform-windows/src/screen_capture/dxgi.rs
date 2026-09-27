@@ -35,8 +35,8 @@ use windows::{
 use rust_protocol::PhysicalRect;
 
 use super::{
-    CaptureError, CapturedOutput, DesktopCapture, DesktopCaptureBackend, Rotation,
-    next_capture_generation,
+    CAPTURE_REUSE_TTL, CaptureError, CapturedOutput, DesktopCapture, DesktopCaptureBackend,
+    Rotation, next_capture_generation,
 };
 
 const FRAME_TIMEOUT_MILLIS: u32 = 250;
@@ -92,6 +92,26 @@ impl Default for DxgiDesktopCaptureBackend {
     fn default() -> Self {
         Self {
             session: Mutex::new(None),
+        }
+    }
+}
+
+impl DxgiDesktopCaptureBackend {
+    pub(super) fn expire_cached_frames(&self, now: Instant) {
+        let mut session = lock(&self.session);
+        if let Some(session) = session.as_mut() {
+            for output in &mut session.outputs {
+                if let Some(frame) = output.last_frame.as_mut() {
+                    frame.expire(now, CAPTURE_REUSE_TTL);
+                }
+                if output
+                    .last_frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.frame.is_none())
+                {
+                    output.last_frame = None;
+                }
+            }
         }
     }
 }
@@ -196,15 +216,20 @@ impl DxgiCaptureSession {
     fn capture(&mut self) -> Result<DesktopCapture, CaptureError> {
         let mut captures = Vec::with_capacity(self.outputs.len());
         for output in &mut self.outputs {
+            let now = Instant::now();
+            let last_frame = output
+                .last_frame
+                .as_mut()
+                .and_then(|frame| frame.take_or_expire(now, CAPTURE_REUSE_TTL));
             let captured = capture_output(
                 &output.device,
                 &output.context,
                 &output.duplication,
                 output.bounds,
                 output.dpi_scale_milli,
-                output.last_frame.as_ref(),
+                last_frame.as_ref(),
             )?;
-            output.last_frame = Some(captured.clone());
+            output.last_frame = Some(CachedFrame::new(captured.clone(), Instant::now()));
             captures.push(captured);
         }
         DesktopCapture::try_new(next_capture_generation(), captures)
@@ -217,7 +242,43 @@ struct DxgiOutputCapture {
     duplication: IDXGIOutputDuplication,
     bounds: PhysicalRect,
     dpi_scale_milli: u32,
-    last_frame: Option<CapturedOutput>,
+    last_frame: Option<CachedFrame>,
+}
+
+struct CachedFrame {
+    frame: Option<CapturedOutput>,
+    captured_at: Instant,
+}
+
+impl CachedFrame {
+    fn new(frame: CapturedOutput, captured_at: Instant) -> Self {
+        Self {
+            frame: Some(frame),
+            captured_at,
+        }
+    }
+
+    fn take_or_expire(&mut self, now: Instant, ttl: Duration) -> Option<CapturedOutput> {
+        let frame = self.frame.take();
+        if now.saturating_duration_since(self.captured_at) <= ttl {
+            frame
+        } else {
+            None
+        }
+    }
+
+    fn expire(&mut self, now: Instant, ttl: Duration) {
+        if now.saturating_duration_since(self.captured_at) > ttl {
+            self.frame = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_bytes(&self) -> usize {
+        self.frame
+            .as_ref()
+            .map_or(0, CapturedOutput::owned_frame_bytes)
+    }
 }
 
 fn append_adapter_outputs(
@@ -548,14 +609,15 @@ impl Drop for MappedTexture<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use rust_protocol::PhysicalRect;
 
     use super::{
-        BootstrapFrameDisposition, CaptureTopologyEntry, classify_bootstrap_frame,
+        BootstrapFrameDisposition, CachedFrame, CaptureTopologyEntry, classify_bootstrap_frame,
         topology_requires_rebuild,
     };
+    use crate::screen_capture::{CAPTURE_REUSE_TTL, CapturedOutput, Rotation};
 
     #[test]
     fn a_fresh_duplication_retries_the_zero_timestamp_frame_but_accepts_the_next_present() {
@@ -604,5 +666,39 @@ mod tests {
             ..original[0]
         }];
         assert!(topology_requires_rebuild(&original, &moved));
+    }
+
+    #[test]
+    fn cached_cpu_frames_are_consumed_or_dropped_at_the_short_ttl() {
+        let captured_at = Instant::now();
+        let frame = CapturedOutput::try_new(
+            PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            Rotation::Identity,
+            1_000,
+            4,
+            vec![1, 2, 3, 255],
+        )
+        .unwrap();
+        let mut reusable = CachedFrame::new(frame.clone(), captured_at);
+        assert_eq!(
+            reusable.take_or_expire(captured_at + CAPTURE_REUSE_TTL, CAPTURE_REUSE_TTL,),
+            Some(frame.clone())
+        );
+        assert_eq!(reusable.retained_bytes(), 0);
+
+        let mut expired = CachedFrame::new(frame, captured_at);
+        assert_eq!(
+            expired.take_or_expire(
+                captured_at + CAPTURE_REUSE_TTL + Duration::from_millis(1),
+                CAPTURE_REUSE_TTL,
+            ),
+            None
+        );
+        assert_eq!(expired.retained_bytes(), 0);
     }
 }

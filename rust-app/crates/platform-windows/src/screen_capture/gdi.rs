@@ -3,7 +3,7 @@ use std::{ffi::c_void, mem::size_of, ptr::null_mut, slice};
 use windows_sys::Win32::{
     Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
-        DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, ReleaseDC, SRCCOPY, SelectObject,
+        DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, ReleaseDC, SRCCOPY, SelectObject,
     },
     UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -121,8 +121,9 @@ fn capture_virtual_desktop() -> Result<DesktopCapture, CaptureError> {
             y,
             SRCCOPY | CAPTUREBLT,
         );
-        let result = if copied == 0 {
-            Err(CaptureError::BackendFailure("GDI BitBlt failed".into()))
+        let flushed = copied != 0 && GdiFlush() != 0;
+        let result = if let Err(error) = gdi_copy_is_readable(copied != 0, flushed) {
+            Err(error)
         } else {
             let bgra = slice::from_raw_parts(bits.cast::<u8>(), byte_len);
             let mut rgba = vec![0_u8; byte_len];
@@ -138,5 +139,29 @@ fn capture_virtual_desktop() -> Result<DesktopCapture, CaptureError> {
         let _ = DeleteDC(memory_dc);
         let _ = ReleaseDC(null_mut(), screen_dc);
         result
+    }
+}
+
+fn gdi_copy_is_readable(copied: bool, flushed: bool) -> Result<(), CaptureError> {
+    if !copied {
+        return Err(CaptureError::BackendFailure("GDI BitBlt failed".into()));
+    }
+    if !flushed {
+        return Err(CaptureError::BackendFailure(
+            "GDI did not flush the copied DIB before readback".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gdi_copy_is_readable;
+
+    #[test]
+    fn dib_pixels_are_never_read_before_blt_and_flush_both_succeed() {
+        assert!(gdi_copy_is_readable(true, true).is_ok());
+        assert!(gdi_copy_is_readable(false, true).is_err());
+        assert!(gdi_copy_is_readable(true, false).is_err());
     }
 }

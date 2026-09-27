@@ -303,6 +303,13 @@ impl PresentationState {
         self.phase = PresentationPhase::Parked { window_handle };
         Some((window_handle, generation))
     }
+
+    fn presented_ticket(&self) -> Option<PresentationTicket> {
+        let PresentationPhase::Presented(ticket) = self.phase else {
+            return None;
+        };
+        Some(ticket)
+    }
 }
 
 type PresentedCallback = Arc<dyn Fn(u64) + Send + Sync>;
@@ -316,6 +323,29 @@ pub(crate) struct OverlayPresenter {
     /// completes the same transition and owes the same notification.
     name: &'static str,
     contract: OverlayContract,
+}
+
+#[derive(Clone)]
+pub(crate) struct CaptureExcludedOverlay {
+    presenter: OverlayPresenter,
+    ticket: PresentationTicket,
+}
+
+impl CaptureExcludedOverlay {
+    pub(crate) fn restore(&self) -> Result<bool, String> {
+        let still_presented = self
+            .presenter
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .presented_ticket()
+            == Some(self.ticket);
+        if !still_presented {
+            return Ok(false);
+        }
+        rust_platform_windows::reveal_overlay_window(self.ticket.window_handle)?;
+        Ok(true)
+    }
 }
 
 impl OverlayPresenter {
@@ -485,6 +515,28 @@ impl OverlayPresenter {
             | PresentationPhase::RevealQueued(ticket)
             | PresentationPhase::Presented(ticket) => Some(ticket.window_handle),
         }
+    }
+
+    pub(crate) fn cloak_for_capture(&self) -> Result<Option<CaptureExcludedOverlay>, String> {
+        let ticket = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .presented_ticket();
+        let Some(ticket) = ticket else {
+            return Ok(None);
+        };
+        rust_platform_windows::cloak_overlay_window(ticket.window_handle)?;
+        let still_presented = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .presented_ticket()
+            == Some(ticket);
+        Ok(still_presented.then(|| CaptureExcludedOverlay {
+            presenter: self.clone(),
+            ticket,
+        }))
     }
 
     pub(crate) fn attach(&self, window_handle: u64) -> Result<(), String> {
@@ -901,6 +953,20 @@ mod tests {
         assert!(!state.can_reveal(ticket));
         assert!(!state.complete_reveal(ticket));
         assert_eq!(state.phase, PresentationPhase::Parked { window_handle: 42 });
+    }
+
+    #[test]
+    fn capture_exclusion_identity_cannot_reveal_a_retired_surface() {
+        let mut state = PresentationState::new(ContentPolicy::AlwaysRenderable);
+        state.attach(41).unwrap();
+        let ticket = state.begin_prepare().unwrap();
+        state.await_frame(ticket).unwrap();
+        assert_eq!(state.frame_rendered(), Some(ticket));
+        assert!(state.complete_reveal(ticket));
+        assert_eq!(state.presented_ticket(), Some(ticket));
+
+        state.retire();
+        assert_eq!(state.presented_ticket(), None);
     }
 
     #[test]

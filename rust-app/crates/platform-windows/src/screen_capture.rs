@@ -1,4 +1,6 @@
 use rust_protocol::PhysicalRect;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -11,6 +13,8 @@ mod gdi;
 
 const BYTES_PER_PIXEL: u32 = 4;
 pub const MAX_CAPTURE_BYTES: usize = 512 * 1024 * 1024;
+#[cfg(windows)]
+pub const CAPTURE_REUSE_TTL: Duration = Duration::from_millis(250);
 
 #[cfg(windows)]
 static CAPTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -361,6 +365,13 @@ pub use gdi::GdiDesktopCaptureBackend;
 pub struct WindowsDesktopCaptureBackend {
     dxgi: DxgiDesktopCaptureBackend,
     gdi: GdiDesktopCaptureBackend,
+}
+
+#[cfg(windows)]
+impl WindowsDesktopCaptureBackend {
+    pub fn expire_reuse_frames(&self) {
+        self.dxgi.expire_cached_frames(Instant::now());
+    }
 }
 
 #[cfg(windows)]
