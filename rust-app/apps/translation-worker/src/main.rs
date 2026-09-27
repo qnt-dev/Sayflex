@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod glossary;
+mod glossary_actor;
 mod history;
 mod history_actor;
 mod provider_actor;
@@ -19,11 +21,12 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
+use glossary_actor::GlossaryActor;
 use history_actor::TranslationHistoryActor;
 use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
 use rust_protocol::{
-    PROTOCOL_VERSION, RequestId, TranslationAttemptReport, TranslationFailureKind,
+    GlossaryOrigin, PROTOCOL_VERSION, RequestId, TranslationAttemptReport, TranslationFailureKind,
     TranslationFailureReport, TranslationHistoryEntry, TranslationLanguage,
     TranslationLanguagePolicy, TranslationModelSummary, TranslationProviderEntry,
     TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
@@ -530,6 +533,7 @@ fn main() -> Result<()> {
     let root = data_root();
     let (history, history_thread) =
         TranslationHistoryActor::start(root.join("translation-history.json"))?;
+    let (glossary, glossary_thread) = GlossaryActor::start(root.join("translation-glossary.json"))?;
     let state = Arc::new(Mutex::new(WorkerState::new(history.clone())?));
     // Its own lock, not the worker's. A translation out on the network holds
     // this one for as long as the walk takes; nothing else in the worker should
@@ -575,6 +579,7 @@ fn main() -> Result<()> {
             &coordinator,
             &installs,
             &history,
+            &glossary,
         ) {
             writer.send(&TranslationWorkerEvent::Failed {
                 request_id: None,
@@ -592,6 +597,8 @@ fn main() -> Result<()> {
     let _ = install_thread.join();
     history.shutdown();
     let _ = history_thread.join();
+    glossary.shutdown();
+    let _ = glossary_thread.join();
     drop(writer);
     if provider_stopped {
         let _ = output_thread.join();
@@ -643,6 +650,7 @@ fn handle_command(
     coordinator: &ProviderActorHandle,
     installs: &InstallActor,
     history: &TranslationHistoryActor,
+    glossary: &GlossaryActor,
 ) -> Result<()> {
     match command {
         TranslationWorkerCommand::Initialize {
@@ -713,17 +721,44 @@ fn handle_command(
                 retryable: false,
             })?;
         }
-        TranslationWorkerCommand::SaveGlossaryEntry { operation_id, .. }
-        | TranslationWorkerCommand::ListGlossary { operation_id, .. }
-        | TranslationWorkerCommand::UpdateGlossaryEntry { operation_id, .. }
-        | TranslationWorkerCommand::DeleteGlossaryEntry { operation_id, .. } => {
-            writer.send(&TranslationWorkerEvent::GlossaryFailed {
+        TranslationWorkerCommand::SaveGlossaryEntry {
+            operation_id,
+            request_id,
+            block_id,
+            expected_revision,
+            entry,
+        } => match entry.origin {
+            GlossaryOrigin::Confirmed => glossary.confirm(
                 operation_id,
-                code: "glossary_not_ready".to_owned(),
-                message: "personal glossary storage is not initialized".to_owned(),
-                retryable: false,
-            })?;
-        }
+                request_id,
+                block_id,
+                expected_revision,
+                entry,
+                writer.clone(),
+            ),
+            GlossaryOrigin::Corrected => glossary.save_correction(
+                operation_id,
+                request_id,
+                block_id,
+                expected_revision,
+                entry,
+                writer.clone(),
+            ),
+        },
+        TranslationWorkerCommand::ListGlossary {
+            operation_id,
+            query,
+            limit,
+        } => glossary.list(operation_id, query, limit, writer.clone()),
+        TranslationWorkerCommand::UpdateGlossaryEntry {
+            operation_id,
+            entry_id,
+            entry,
+        } => glossary.update(operation_id, entry_id, entry, writer.clone()),
+        TranslationWorkerCommand::DeleteGlossaryEntry {
+            operation_id,
+            entry_id,
+        } => glossary.delete(operation_id, entry_id, writer.clone()),
         TranslationWorkerCommand::Cancel { request_id } => {
             coordinator.cancel(request_id);
         }

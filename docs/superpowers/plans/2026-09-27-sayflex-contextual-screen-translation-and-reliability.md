@@ -465,29 +465,29 @@
 - Produces: deterministic merge key `(normalized source phrase, language pair, normalized domain scope)`; reconfirmation appends a deduplicated example.
 - Consumes: Task 6 glossary protocol; stores independently at `%LOCALAPPDATA%\SayFlex\translation-glossary.json`.
 
-- [ ] **Step 1: Add failing glossary-domain and persistence tests**
+- [x] **Step 1: Add failing glossary-domain and persistence tests**
 
   Assert machine completion/Copy/Close write nothing; Save correction and Confirm write; Dota and Counter-Strike meanings coexist; reconfirmation merges examples; clear history/screenshot deletion leaves entries; edit/delete survive restart; corrupt primary recovers/quarantines; failed write retains the caller's corrected text and returns a retryable operation error.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
   Run: `cargo test -p sayflex-translation-worker glossary -- --nocapture`
   Expected: FAIL because glossary storage/actor do not exist.
 
-- [ ] **Step 3: Implement atomic actor-owned storage and ranking**
+- [x] **Step 3: Implement atomic actor-owned storage and ranking**
 
   Serialize all glossary writes through one actor. Rank lookup by exact language pair, normalized expression, exact domain/application, then general scope; return bounded structured matches without substring mutation.
 
-- [ ] **Step 4: Wire commands/events without blocking translation control**
+- [x] **Step 4: Wire commands/events without blocking translation control**
 
   Glossary list/write/read work must not acquire the active engine mutex in the stdin loop. Every save/confirm carries operation ID, request ID, block ID, and expected revision and returns saved/error explicitly.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
   Run: `cargo test -p sayflex-translation-worker glossary -- --nocapture`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   `git commit -m "feat(translation): add domain-aware personal glossary"`
 

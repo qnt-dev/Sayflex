@@ -16,8 +16,8 @@ use std::os::windows::process::CommandExt;
 
 use rust_app_core::worker_stream::{JsonWriter, SendError, WORKER_COMMAND_QUEUE};
 use rust_protocol::{
-    PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext, TranslationLanguage,
-    TranslationLanguagePolicy, TranslationWorkerCommand,
+    GlossaryEntryDraft, GlossaryOrigin, PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock,
+    SourceContext, TranslationLanguage, TranslationLanguagePolicy, TranslationWorkerCommand,
 };
 
 const CONTRACT_WORKER: &str = env!("CARGO_BIN_EXE_contract_worker");
@@ -137,6 +137,49 @@ fn contextual_screen_commands_cross_the_worker_pipe_whole() {
         source_language: Some(TranslationLanguage::English),
         target_language: Some(TranslationLanguage::Russian),
         language_policy: TranslationLanguagePolicy::default(),
+    };
+
+    writer.send(&command).expect("command is deliverable");
+    writer.send(&"shutdown").expect("shutdown is deliverable");
+
+    let line = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("one response")
+        .expect("valid response line");
+    let reply: serde_json::Value = serde_json::from_str(&line).expect("one JSON document");
+    let echoed = reply["echoed"].as_str().expect("serialized command");
+
+    assert_eq!(
+        serde_json::from_str::<TranslationWorkerCommand>(echoed).unwrap(),
+        command
+    );
+}
+
+#[test]
+fn glossary_write_context_crosses_the_worker_pipe_whole() {
+    let mut worker = spawn("echo");
+    let stdin = worker.0.stdin.take().expect("piped stdin");
+    let stdout = worker.0.stdout.take().expect("piped stdout");
+    let writer = JsonWriter::start(stdin, "glossary-contract").expect("writer thread");
+    let command = TranslationWorkerCommand::SaveGlossaryEntry {
+        operation_id: RequestId::new(),
+        request_id: RequestId::new(),
+        block_id: ScreenBlockId::from("screen-block-0001"),
+        expected_revision: 7,
+        entry: GlossaryEntryDraft {
+            source_phrase: "cooldown".to_owned(),
+            approved_translation: "время перезарядки".to_owned(),
+            source_language: TranslationLanguage::English,
+            target_language: TranslationLanguage::Russian,
+            example: "Reduces the cooldown by 2 seconds.".to_owned(),
+            context: SourceContext {
+                application_id: Some("dota2".to_owned()),
+                domain: Some("dota2".to_owned()),
+                ..SourceContext::default()
+            },
+            origin: GlossaryOrigin::Corrected,
+        },
     };
 
     writer.send(&command).expect("command is deliverable");
