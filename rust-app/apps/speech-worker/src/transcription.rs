@@ -28,7 +28,6 @@ use rust_cloud_speech::{
     TranscriptionRequest, Unavailable,
     audio::{UPLOAD_SAMPLE_RATE_HZ, encode_wav},
     http::DEFAULT_TIMEOUT,
-    router::CancelSignal,
 };
 use rust_platform_windows::credentials::DpapiCipher;
 use rust_protocol::{
@@ -121,7 +120,7 @@ pub fn start(
     let (commands, requests) = TranscriptionMailbox::bounded(32);
     let prefers_cloud = Arc::new(AtomicBool::new(false));
     let worker_prefers_cloud = Arc::clone(&prefers_cloud);
-    let cancelled = SessionCancellationSet::default();
+    let cancelled = inference.cancellations();
     let worker_cancelled = cancelled.clone();
     let actor_events = events.clone();
     let network = NetworkWorker::start()?;
@@ -289,17 +288,26 @@ impl NetworkJob {
                     self.audio_finalize_ms,
                     self.release_started,
                 );
+                // The inference actor now owns terminal publication and clears
+                // this shared session tombstone only after it finishes.
+                return;
             } else {
-                let _ = self.events.send(SpeechWorkerEvent::Failed {
-                    session_id: Some(session_id),
-                    code: "transcription_failed".to_owned(),
-                    message:
-                        "No network client could be created, and local speech is switched off."
-                            .to_owned(),
-                    retryable: true,
-                });
+                if !watcher.try_publish(|| {
+                    let _ = self.events.send(SpeechWorkerEvent::Failed {
+                        session_id: Some(session_id),
+                        code: "transcription_failed".to_owned(),
+                        message:
+                            "No network client could be created, and local speech is switched off."
+                                .to_owned(),
+                        retryable: true,
+                    });
+                }) {
+                    let _ = self
+                        .events
+                        .send(SpeechWorkerEvent::Cancelled { session_id });
+                }
             }
-            self.cancelled.complete(session_id);
+            watcher.complete();
             return;
         };
 
@@ -328,12 +336,9 @@ impl NetworkJob {
         );
 
         report_attempts(&outcome, &self.secrets);
+        let mut terminal_transferred = false;
         match outcome {
             RouteOutcome::Transcribed { provider, text, .. } => {
-                let _ = self.events.send(SpeechWorkerEvent::TranscribedRemotely {
-                    session_id,
-                    provider_id: provider.to_string(),
-                });
                 let created_unix_ms = crate::unix_ms();
                 let transcript = Transcript {
                     session_id,
@@ -348,33 +353,52 @@ impl NetworkJob {
                         ..TranscriptionLatency::default()
                     },
                 };
-                let _ = self.events.send(SpeechWorkerEvent::Completed {
-                    transcript: transcript.clone(),
-                    created_unix_ms,
-                });
-                let _ = self.history.send(HistoryCommand::Append {
-                    transcript,
-                    created_unix_ms,
-                });
+                if !watcher.try_publish(|| {
+                    let _ = self.events.send(SpeechWorkerEvent::TranscribedRemotely {
+                        session_id,
+                        provider_id: provider.to_string(),
+                    });
+                    let _ = self.events.send(SpeechWorkerEvent::Completed {
+                        transcript: transcript.clone(),
+                        created_unix_ms,
+                    });
+                    let _ = self.history.send(HistoryCommand::Append {
+                        transcript,
+                        created_unix_ms,
+                    });
+                }) {
+                    let _ = self
+                        .events
+                        .send(SpeechWorkerEvent::Cancelled { session_id });
+                }
             }
-            RouteOutcome::UseLocalEngine { .. } => self.inference.finalize(
-                self.recording,
-                self.output_mode,
-                self.audio_finalize_ms,
-                self.release_started,
-            ),
+            RouteOutcome::UseLocalEngine { .. } => {
+                terminal_transferred = true;
+                self.inference.finalize(
+                    self.recording,
+                    self.output_mode,
+                    self.audio_finalize_ms,
+                    self.release_started,
+                );
+            }
             RouteOutcome::Cancelled { .. } => {
                 let _ = self
                     .events
                     .send(SpeechWorkerEvent::Cancelled { session_id });
             }
             RouteOutcome::NoSpeech { .. } => {
-                let _ = self.events.send(SpeechWorkerEvent::Failed {
-                    session_id: Some(session_id),
-                    code: "transcription".to_owned(),
-                    message: "no speech was recognized".to_owned(),
-                    retryable: true,
-                });
+                if !watcher.try_publish(|| {
+                    let _ = self.events.send(SpeechWorkerEvent::Failed {
+                        session_id: Some(session_id),
+                        code: "transcription".to_owned(),
+                        message: "no speech was recognized".to_owned(),
+                        retryable: true,
+                    });
+                }) {
+                    let _ = self
+                        .events
+                        .send(SpeechWorkerEvent::Cancelled { session_id });
+                }
             }
             RouteOutcome::Exhausted { ref attempts } => {
                 let message = if attempts.is_empty() {
@@ -385,19 +409,27 @@ impl NetworkJob {
                         |attempt| format!("{}: {}", attempt.provider, attempt.reason()),
                     )
                 };
-                let _ = self.events.send(SpeechWorkerEvent::Failed {
-                    session_id: Some(session_id),
-                    code: "transcription_failed".to_owned(),
-                    message,
-                    retryable: true,
-                });
+                if !watcher.try_publish(|| {
+                    let _ = self.events.send(SpeechWorkerEvent::Failed {
+                        session_id: Some(session_id),
+                        code: "transcription_failed".to_owned(),
+                        message,
+                        retryable: true,
+                    });
+                }) {
+                    let _ = self
+                        .events
+                        .send(SpeechWorkerEvent::Cancelled { session_id });
+                }
             }
         }
         let _ = self.results.send(NetworkLedger {
             revision: self.revision,
             ledger: self.router.into_ledger(),
         });
-        self.cancelled.complete(session_id);
+        if !terminal_transferred {
+            watcher.complete();
+        }
     }
 }
 

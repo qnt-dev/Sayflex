@@ -163,6 +163,7 @@ impl Router {
         });
         let mut attempts = Vec::new();
         let deadline = started + TOTAL_DEADLINE;
+        let mut network_budget_exhausted = false;
 
         for id in candidates {
             if cancel.is_cancelled() {
@@ -170,6 +171,13 @@ impl Router {
             }
             if id.is_local() {
                 return RouteOutcome::UseLocalEngine { attempts };
+            }
+            if network_budget_exhausted {
+                attempts.push(Attempt {
+                    provider: id,
+                    outcome: AttemptOutcome::Skipped("no time left for another service"),
+                });
+                continue;
             }
             if let Some(refusal) = capabilities(&id).refusal(request) {
                 // Not a fault of the service and not worth remembering: the
@@ -220,7 +228,8 @@ impl Router {
                     provider: id,
                     outcome: AttemptOutcome::Skipped("no time left for another service"),
                 });
-                break;
+                network_budget_exhausted = true;
+                continue;
             };
 
             match executor.execute(&id, plan, budget.min(PER_PROVIDER_LIMIT)) {
@@ -627,6 +636,22 @@ mod tests {
             executor.asked().is_empty(),
             "a user already past the deadline is not served by asking one more service"
         );
+    }
+
+    #[test]
+    fn an_exhausted_network_budget_still_reaches_a_later_local_fallback() {
+        let mut router = router_of(&[
+            (ProviderId::GROQ, true),
+            (ProviderId::AZURE, true),
+            (ProviderId::LOCAL, true),
+        ]);
+        let executor = ScriptedExecutor::new(&[]);
+        let started = Instant::now() - TOTAL_DEADLINE;
+
+        let outcome = router.transcribe(b"wav", &request(), started, &every_key, &executor, &());
+
+        assert!(matches!(outcome, RouteOutcome::UseLocalEngine { .. }));
+        assert!(executor.asked().is_empty());
     }
 
     #[test]

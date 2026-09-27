@@ -108,7 +108,10 @@ pub fn start(
                         catalog_id,
                         announce_selection,
                     } => {
-                        if worker_cancels.load(Ordering::Acquire) != request.cancels_at_send {
+                        if !model_request_is_current(
+                            request.cancels_at_send,
+                            worker_cancels.load(Ordering::Acquire),
+                        ) {
                             // Cancelled while it was still in the queue.
                             continue;
                         }
@@ -117,6 +120,16 @@ pub fn start(
                         installer_cancellation.reset();
                         match ensure_model(&catalog, &installer, &fetcher, &catalog_id, &events) {
                             Ok(path) => {
+                                if !model_request_is_current(
+                                    request.cancels_at_send,
+                                    worker_cancels.load(Ordering::Acquire),
+                                ) {
+                                    continue;
+                                }
+                                let _ = events.send(SpeechWorkerEvent::ModelInstalled {
+                                    catalog_id: catalog_id.clone(),
+                                    path: path.display().to_string(),
+                                });
                                 inference.load_model(catalog_id, path, announce_selection);
                             }
                             Err(error) => {
@@ -201,6 +214,10 @@ pub fn start(
     })
 }
 
+fn model_request_is_current(cancels_at_send: u64, current_cancels: u64) -> bool {
+    cancels_at_send == current_cancels
+}
+
 pub fn model_summaries(
     catalog: &ModelCatalog,
     installer: &ModelInstaller,
@@ -242,10 +259,6 @@ fn ensure_model(
             });
         }
     })?;
-    let _ = events.send(SpeechWorkerEvent::ModelInstalled {
-        catalog_id: catalog_id.to_owned(),
-        path: path.display().to_string(),
-    });
     Ok(path)
 }
 
@@ -273,5 +286,16 @@ fn try_adopt_existing_windows_model(installer: &ModelInstaller, model: &ModelDes
                 existing.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_request_is_current;
+
+    #[test]
+    fn cancellation_after_file_verification_prevents_model_activation() {
+        assert!(model_request_is_current(7, 7));
+        assert!(!model_request_is_current(7, 8));
     }
 }

@@ -117,26 +117,58 @@ impl SessionCancellationSet {
             .remove(&session_id);
     }
 
-    pub(crate) fn watcher(&self, session_id: SessionId) -> SessionWatcher {
-        SessionWatcher {
-            cancellations: self.clone(),
-            session_id,
-        }
+    pub(crate) fn watcher(&self, session_id: SessionId) -> SessionPublicationGuard {
+        SessionPublicationGuard::new(self.clone(), session_id)
     }
 }
 
-pub(crate) struct SessionWatcher {
+/// Linearizes terminal publication against cancellation for one session.
+/// The cancellation mutex remains held while the terminal callbacks enqueue
+/// UI/history output, so Cancel is ordered either wholly before or wholly
+/// after that publication instead of racing between its checks.
+#[derive(Clone)]
+pub(crate) struct SessionPublicationGuard {
     cancellations: SessionCancellationSet,
     session_id: SessionId,
 }
 
-impl CancelSignal for SessionWatcher {
-    fn is_cancelled(&self) -> bool {
+impl SessionPublicationGuard {
+    pub(crate) fn new(cancellations: SessionCancellationSet, session_id: SessionId) -> Self {
+        Self {
+            cancellations,
+            session_id,
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancellations
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(&self.session_id)
+    }
+
+    pub(crate) fn try_publish(&self, publish: impl FnOnce()) -> bool {
+        let cancellations = self
+            .cancellations
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cancellations.contains(&self.session_id) {
+            return false;
+        }
+        publish();
+        true
+    }
+
+    pub(crate) fn complete(&self) {
+        self.cancellations.complete(self.session_id);
+    }
+}
+
+impl CancelSignal for SessionPublicationGuard {
+    fn is_cancelled(&self) -> bool {
+        SessionPublicationGuard::is_cancelled(self)
     }
 }
 
@@ -144,10 +176,11 @@ impl CancelSignal for SessionWatcher {
 mod tests {
     use std::{sync::mpsc::TrySendError, time::Duration};
 
-    use rust_cloud_speech::router::CancelSignal;
     use rust_protocol::SessionId;
 
-    use super::{MailboxItem, SessionCancellationSet, TranscriptionMailbox};
+    use super::{
+        MailboxItem, SessionCancellationSet, SessionPublicationGuard, TranscriptionMailbox,
+    };
 
     #[test]
     fn overlapping_sessions_keep_independent_cancellation_tombstones() {
@@ -165,6 +198,22 @@ mod tests {
         cancellations.complete(a);
         assert!(!watch_a.is_cancelled());
         assert!(watch_b.is_cancelled());
+    }
+
+    #[test]
+    fn cancelled_session_cannot_publish_until_terminal_acknowledgement() {
+        let cancellations = SessionCancellationSet::default();
+        let session_id = SessionId::new();
+        let publication = SessionPublicationGuard::new(cancellations.clone(), session_id);
+        let mut published = false;
+
+        cancellations.cancel(session_id);
+        assert!(!publication.try_publish(|| published = true));
+        assert!(!published);
+        assert!(publication.is_cancelled());
+
+        publication.complete();
+        assert!(!publication.is_cancelled());
     }
 
     #[test]

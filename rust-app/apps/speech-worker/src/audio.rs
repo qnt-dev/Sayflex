@@ -1,9 +1,9 @@
 use std::{
     mem,
     sync::{
-        Arc, OnceLock, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Receiver, Sender, SyncSender},
     },
     thread,
     time::{Duration, Instant},
@@ -108,7 +108,32 @@ struct ActiveCapture {
     spectrum: SpectrumAnalyzer,
     last_level_report: Instant,
     peak_since_report: f32,
-    limit_reported: bool,
+}
+
+#[derive(Debug)]
+enum CaptureDrainOutcome {
+    Active,
+    LimitReached { recording: RecordedAudio },
+}
+
+pub(crate) struct RecordingLimitNotification {
+    session_id: SessionId,
+    owners_stopped: SyncSender<()>,
+    terminal_published: Receiver<()>,
+}
+
+impl RecordingLimitNotification {
+    pub(crate) fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub(crate) fn acknowledge_owners_stopped(&self) {
+        let _ = self.owners_stopped.send(());
+    }
+
+    pub(crate) fn wait_for_terminal_publication(self) {
+        let _ = self.terminal_published.recv_timeout(Duration::from_secs(1));
+    }
 }
 
 struct SpectrumAnalyzer {
@@ -231,11 +256,13 @@ enum CaptureCommand {
 pub struct AudioRecorder {
     pipeline: CapturePipeline,
     snapshot_commands: Arc<RwLock<Sender<CaptureCommand>>>,
+    recording_limit_events: Option<Receiver<RecordingLimitNotification>>,
+    recording_limit_sender: Sender<RecordingLimitNotification>,
     events: Sender<SpeechWorkerEvent>,
 }
 
 struct CapturePipeline {
-    stream: Stream,
+    stream: Arc<Mutex<Stream>>,
     commands: Sender<CaptureCommand>,
     counters: Arc<CaptureCounters>,
     sample_rate_hz: u32,
@@ -245,13 +272,24 @@ struct CapturePipeline {
 
 impl AudioRecorder {
     pub fn open(events: Sender<SpeechWorkerEvent>) -> Result<Self> {
-        let pipeline = CapturePipeline::open(events.clone())?;
+        let (recording_limit_sender, recording_limit_events) = mpsc::channel();
+        let pipeline = CapturePipeline::open(events.clone(), recording_limit_sender.clone())?;
         let snapshot_commands = Arc::new(RwLock::new(pipeline.commands.clone()));
         Ok(Self {
             pipeline,
             snapshot_commands,
+            recording_limit_events: Some(recording_limit_events),
+            recording_limit_sender,
             events,
         })
+    }
+
+    pub(crate) fn take_recording_limit_events(
+        &mut self,
+    ) -> Result<Receiver<RecordingLimitNotification>> {
+        self.recording_limit_events
+            .take()
+            .context("recording-limit observer was already installed")
     }
 
     pub fn snapshot_source(&self) -> AudioSnapshotSource {
@@ -285,7 +323,12 @@ impl AudioRecorder {
             return Ok(());
         }
 
-        let replacement = CapturePipeline::open_device(device, default_id, self.events.clone())?;
+        let replacement = CapturePipeline::open_device(
+            device,
+            default_id,
+            self.events.clone(),
+            self.recording_limit_sender.clone(),
+        )?;
         *self
             .snapshot_commands
             .write()
@@ -310,7 +353,10 @@ impl AudioRecorder {
 }
 
 impl CapturePipeline {
-    fn open(events: Sender<SpeechWorkerEvent>) -> Result<Self> {
+    fn open(
+        events: Sender<SpeechWorkerEvent>,
+        recording_limit_events: Sender<RecordingLimitNotification>,
+    ) -> Result<Self> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -319,13 +365,14 @@ impl CapturePipeline {
             .id()
             .context("could not identify the default microphone")?
             .to_string();
-        Self::open_device(device, device_id, events)
+        Self::open_device(device, device_id, events, recording_limit_events)
     }
 
     fn open_device(
         device: cpal::Device,
         device_id: String,
         events: Sender<SpeechWorkerEvent>,
+        recording_limit_events: Sender<RecordingLimitNotification>,
     ) -> Result<Self> {
         let supported = device
             .default_input_config()
@@ -343,21 +390,7 @@ impl CapturePipeline {
             last_audible_sample: AtomicU64::new(0),
         });
         let faulted = Arc::new(AtomicBool::new(false));
-        let (commands, command_receiver) = mpsc::channel();
         let consumer_events = events.clone();
-        let consumer_counters = Arc::clone(&counters);
-        thread::Builder::new()
-            .name("speech-audio-consumer".to_owned())
-            .spawn(move || {
-                capture_loop(
-                    consumer,
-                    command_receiver,
-                    consumer_events,
-                    consumer_counters,
-                    sample_rate_hz,
-                );
-            })?;
-
         let stream = match sample_format {
             SampleFormat::F32 => build_stream::<f32>(
                 &device,
@@ -397,6 +430,23 @@ impl CapturePipeline {
             )?,
             other => bail!("unsupported microphone sample format: {other}"),
         };
+        let stream = Arc::new(Mutex::new(stream));
+        let (commands, command_receiver) = mpsc::channel();
+        let consumer_counters = Arc::clone(&counters);
+        let consumer_stream = Arc::clone(&stream);
+        thread::Builder::new()
+            .name("speech-audio-consumer".to_owned())
+            .spawn(move || {
+                capture_loop(
+                    consumer,
+                    command_receiver,
+                    consumer_events,
+                    consumer_counters,
+                    consumer_stream,
+                    recording_limit_events,
+                    sample_rate_hz,
+                );
+            })?;
         Ok(Self {
             stream,
             commands,
@@ -416,7 +466,7 @@ impl CapturePipeline {
             .recv()
             .context("audio capture worker did not acknowledge begin")?
             .map_err(anyhow::Error::msg)?;
-        if let Err(error) = self.stream.play() {
+        if let Err(error) = recover_stream(&self.stream).play() {
             self.faulted.store(true, Ordering::Release);
             let _ = self.cancel(session_id);
             return Err(error).context("could not start microphone capture");
@@ -426,7 +476,7 @@ impl CapturePipeline {
 
     fn end(&self, session_id: SessionId) -> Result<RecordedAudio> {
         self.wait_for_post_release_audio();
-        self.stream
+        recover_stream(&self.stream)
             .pause()
             .inspect_err(|_| self.faulted.store(true, Ordering::Release))
             .context("could not stop microphone capture")?;
@@ -453,7 +503,7 @@ impl CapturePipeline {
     }
 
     fn cancel(&self, session_id: SessionId) -> bool {
-        if self.stream.pause().is_err() {
+        if recover_stream(&self.stream).pause().is_err() {
             self.faulted.store(true, Ordering::Release);
         }
         let (reply, response) = mpsc::sync_channel(1);
@@ -470,9 +520,15 @@ impl CapturePipeline {
 
 impl Drop for CapturePipeline {
     fn drop(&mut self) {
-        let _ = self.stream.pause();
+        let _ = recover_stream(&self.stream).pause();
         let _ = self.commands.send(CaptureCommand::Shutdown);
     }
+}
+
+fn recover_stream(stream: &Mutex<Stream>) -> std::sync::MutexGuard<'_, Stream> {
+    stream
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn build_stream<T>(
@@ -557,11 +613,20 @@ fn capture_loop(
     commands: Receiver<CaptureCommand>,
     events: Sender<SpeechWorkerEvent>,
     counters: Arc<CaptureCounters>,
+    stream: Arc<Mutex<Stream>>,
+    recording_limit_events: Sender<RecordingLimitNotification>,
     sample_rate_hz: u32,
 ) {
     let mut active: Option<ActiveCapture> = None;
     loop {
-        drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
+        publish_capture_drain_outcome(
+            drain_audio(&mut consumer, &mut active, &events, sample_rate_hz),
+            &mut consumer,
+            &events,
+            &counters,
+            &stream,
+            &recording_limit_events,
+        );
         let command = if active.is_some() {
             commands.recv_timeout(Duration::from_millis(2))
         } else {
@@ -583,12 +648,18 @@ fn capture_loop(
                     spectrum: SpectrumAnalyzer::new(),
                     last_level_report: Instant::now() - LEVEL_INTERVAL,
                     peak_since_report: 0.0,
-                    limit_reported: false,
                 });
                 let _ = reply.send(Ok(()));
             }
             Ok(CaptureCommand::End { session_id, reply }) => {
-                drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
+                publish_capture_drain_outcome(
+                    drain_audio(&mut consumer, &mut active, &events, sample_rate_hz),
+                    &mut consumer,
+                    &events,
+                    &counters,
+                    &stream,
+                    &recording_limit_events,
+                );
                 let result = finish_capture(&mut active, session_id, sample_rate_hz);
                 let dropped = counters.dropped_samples.swap(0, Ordering::AcqRel);
                 if dropped > 0 {
@@ -614,7 +685,14 @@ fn capture_loop(
                 max_segment_duration_ms,
                 reply,
             }) => {
-                drain_audio(&mut consumer, active.as_mut(), &events, sample_rate_hz);
+                publish_capture_drain_outcome(
+                    drain_audio(&mut consumer, &mut active, &events, sample_rate_hz),
+                    &mut consumer,
+                    &events,
+                    &counters,
+                    &stream,
+                    &recording_limit_events,
+                );
                 let snapshot = active
                     .as_ref()
                     .filter(|capture| capture.session_id == session_id)
@@ -636,40 +714,86 @@ fn capture_loop(
 
 fn drain_audio(
     consumer: &mut Consumer<f32>,
-    active: Option<&mut ActiveCapture>,
+    active: &mut Option<ActiveCapture>,
     events: &Sender<SpeechWorkerEvent>,
     sample_rate_hz: u32,
-) {
-    let Some(active) = active else {
+) -> CaptureDrainOutcome {
+    let Some(capture) = active.as_mut() else {
         drain_discard(consumer);
-        return;
+        return CaptureDrainOutcome::Active;
     };
     let max_samples = sample_rate_hz as usize * MAX_CAPTURE_SECONDS;
     while let Ok(sample) = consumer.pop() {
-        active.peak_since_report = active.peak_since_report.max(sample.abs());
-        active.spectrum.push(sample);
-        if active.samples.len() < max_samples {
-            active.samples.push(sample);
-        } else if !active.limit_reported {
-            active.limit_reported = true;
-            let _ = events.send(SpeechWorkerEvent::Failed {
-                session_id: Some(active.session_id),
-                code: "recording_limit".to_owned(),
-                message: "The five-minute recording limit was reached.".to_owned(),
-                retryable: false,
-            });
+        capture.peak_since_report = capture.peak_since_report.max(sample.abs());
+        capture.spectrum.push(sample);
+        if capture.samples.len() < max_samples {
+            capture.samples.push(sample);
+            continue;
         }
+
+        let capture = active.take().expect("active capture was checked above");
+        let duration_ms = capture.samples.len() as u64 * 1000 / u64::from(sample_rate_hz.max(1));
+        return CaptureDrainOutcome::LimitReached {
+            recording: RecordedAudio {
+                session_id: capture.session_id,
+                source_start_sample: 0,
+                source_total_samples: capture.samples.len(),
+                samples: capture.samples,
+                sample_rate_hz,
+                duration_ms,
+            },
+        };
     }
-    if active.last_level_report.elapsed() >= LEVEL_INTERVAL {
-        active.last_level_report = Instant::now();
-        let peak = mem::take(&mut active.peak_since_report).clamp(0.0, 1.0);
-        let spectrum = active.spectrum.normalized_bands(sample_rate_hz, peak);
+    if capture.last_level_report.elapsed() >= LEVEL_INTERVAL {
+        capture.last_level_report = Instant::now();
+        let peak = mem::take(&mut capture.peak_since_report).clamp(0.0, 1.0);
+        let spectrum = capture.spectrum.normalized_bands(sample_rate_hz, peak);
         let _ = events.send(SpeechWorkerEvent::AudioLevel {
-            session_id: active.session_id,
+            session_id: capture.session_id,
             peak,
             spectrum,
         });
     }
+    CaptureDrainOutcome::Active
+}
+
+fn publish_capture_drain_outcome(
+    outcome: CaptureDrainOutcome,
+    consumer: &mut Consumer<f32>,
+    events: &Sender<SpeechWorkerEvent>,
+    counters: &CaptureCounters,
+    stream: &Mutex<Stream>,
+    recording_limit_events: &Sender<RecordingLimitNotification>,
+) {
+    let CaptureDrainOutcome::LimitReached { recording } = outcome else {
+        return;
+    };
+    // `drain_audio` removed the active capture before this terminal event is
+    // visible to the UI. Speculative snapshots therefore stop immediately and
+    // a subsequent Begin cannot be rejected as an overlapping recording.
+    drain_discard(consumer);
+    counters.dropped_samples.store(0, Ordering::Release);
+    let _ = recover_stream(stream).pause();
+
+    let (owners_stopped, owners_stopped_ack) = mpsc::sync_channel(0);
+    let (terminal_published, terminal_published_ack) = mpsc::sync_channel(0);
+    if recording_limit_events
+        .send(RecordingLimitNotification {
+            session_id: recording.session_id,
+            owners_stopped,
+            terminal_published: terminal_published_ack,
+        })
+        .is_ok()
+    {
+        let _ = owners_stopped_ack.recv_timeout(Duration::from_secs(1));
+    }
+    let _ = events.send(SpeechWorkerEvent::Failed {
+        session_id: Some(recording.session_id),
+        code: "recording_limit".to_owned(),
+        message: "The five-minute recording limit was reached.".to_owned(),
+        retryable: false,
+    });
+    let _ = terminal_published.send(());
 }
 
 fn drain_discard(consumer: &mut Consumer<f32>) {
@@ -808,12 +932,15 @@ fn sinc(value: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use rtrb::RingBuffer;
     use rust_protocol::SessionId;
 
     use super::{
-        ActiveCapture, RecordedAudio, SPECTRUM_WINDOW_SAMPLES, SpectrumAnalyzer,
-        capture_pipeline_needs_replacement, post_release_target_sample, resample_bandlimited,
-        snapshot_audio, spectrum_band_frequency,
+        ActiveCapture, CaptureDrainOutcome, RecordedAudio, SPECTRUM_WINDOW_SAMPLES,
+        SpectrumAnalyzer, capture_pipeline_needs_replacement, drain_audio,
+        post_release_target_sample, resample_bandlimited, snapshot_audio, spectrum_band_frequency,
     };
     use rust_protocol::AUDIO_SPECTRUM_BANDS;
 
@@ -845,6 +972,35 @@ mod tests {
             Some("microphone-a"),
             true
         ));
+    }
+
+    #[test]
+    fn reaching_the_recording_limit_releases_capture_before_failure_publication() {
+        let session_id = SessionId::new();
+        let (mut producer, mut consumer) = RingBuffer::new(302);
+        for _ in 0..=300 {
+            producer.push(0.1).expect("fixture ring has capacity");
+        }
+        let mut active = Some(ActiveCapture {
+            session_id,
+            samples: Vec::new(),
+            spectrum: SpectrumAnalyzer::new(),
+            last_level_report: std::time::Instant::now(),
+            peak_since_report: 0.0,
+        });
+        let (events, _received_events) = mpsc::channel();
+
+        let outcome = drain_audio(&mut consumer, &mut active, &events, 1);
+
+        assert!(matches!(
+            outcome,
+            CaptureDrainOutcome::LimitReached { recording }
+                if recording.session_id == session_id && recording.samples.len() == 300
+        ));
+        assert!(
+            active.is_none(),
+            "the next Begin must not see an active capture"
+        );
     }
 
     #[test]
@@ -899,7 +1055,6 @@ mod tests {
             spectrum: SpectrumAnalyzer::new(),
             last_level_report: std::time::Instant::now(),
             peak_since_report: 0.0,
-            limit_reported: false,
         };
 
         assert!(snapshot_audio(&capture, 1_000, 5_000, 12_000).is_none());

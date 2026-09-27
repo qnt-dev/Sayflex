@@ -44,6 +44,7 @@ struct ActiveSession {
     tail_backoff_logged: bool,
 }
 
+#[derive(Clone)]
 pub struct SpeculationScheduler {
     commands: Sender<SpeculationCommand>,
 }

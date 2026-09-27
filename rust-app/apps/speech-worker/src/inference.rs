@@ -18,6 +18,7 @@ use crate::{
     audio::RecordedAudio,
     engine::{AbortGeneration, EngineTranscript, WhisperEngine},
     history_actor::HistoryCommand,
+    transcription_mailbox::{SessionCancellationSet, SessionPublicationGuard},
 };
 
 const MAX_PREVIEW_COMPLETION_TAIL_MS: u64 = 1_200;
@@ -58,6 +59,8 @@ enum InferenceCommand {
         output_mode: SpeechOutputMode,
         audio_finalize_ms: u64,
         release_started: Instant,
+        abort_generation: u64,
+        publication: SessionPublicationGuard,
     },
     /// Releases the local model and its backend allocations. Cloud-only mode
     /// must not keep VRAM or RAM occupied by an engine it cannot route to.
@@ -77,6 +80,8 @@ pub struct InferenceHandle {
     candidate: Arc<Mutex<Option<PreviewCandidate>>>,
     preview_in_flight: Arc<AtomicBool>,
     stable_source_sample_count: Arc<AtomicUsize>,
+    cancellations: SessionCancellationSet,
+    finalizing_session: Arc<Mutex<Option<SessionId>>>,
 }
 
 impl InferenceHandle {
@@ -91,6 +96,9 @@ impl InferenceHandle {
         let actor_preview_in_flight = Arc::clone(&preview_in_flight);
         let stable_source_sample_count = Arc::new(AtomicUsize::new(0));
         let actor_stable_source_sample_count = Arc::clone(&stable_source_sample_count);
+        let cancellations = SessionCancellationSet::default();
+        let finalizing_session = Arc::new(Mutex::new(None));
+        let actor_finalizing_session = Arc::clone(&finalizing_session);
         thread::Builder::new()
             .name("speech-inference".to_owned())
             .spawn(move || {
@@ -99,6 +107,7 @@ impl InferenceHandle {
                     actor_generation,
                     actor_preview_in_flight,
                     actor_stable_source_sample_count,
+                    actor_finalizing_session,
                     events,
                     history,
                 )
@@ -110,6 +119,8 @@ impl InferenceHandle {
             candidate: Arc::new(Mutex::new(None)),
             preview_in_flight,
             stable_source_sample_count,
+            cancellations,
+            finalizing_session,
         })
     }
 
@@ -184,16 +195,27 @@ impl InferenceHandle {
 
     pub fn begin_session(&self, session_id: SessionId) {
         self.reset_segmented_session();
+        self.cancellations.complete(session_id);
         *recover_lock(&self.active_session) = Some(session_id);
     }
 
     pub fn cancel_session(&self, session_id: SessionId) {
+        self.cancellations.cancel(session_id);
         let mut active = recover_lock(&self.active_session);
-        if *active == Some(session_id) {
+        let finalizing = *recover_lock(&self.finalizing_session) == Some(session_id);
+        if *active == Some(session_id) || finalizing {
             *active = None;
             drop(active);
             self.reset_segmented_session();
         }
+    }
+
+    pub(crate) fn cancellations(&self) -> SessionCancellationSet {
+        self.cancellations.clone()
+    }
+
+    pub fn complete_cancelled_session(&self, session_id: SessionId) {
+        self.cancellations.complete(session_id);
     }
 
     #[must_use]
@@ -266,12 +288,18 @@ impl InferenceHandle {
         if !allow_preview_completion {
             self.cancel_preview_generation();
         }
+        let session_id = recording.session_id;
+        let abort_generation = self.generation.load(Ordering::Acquire);
+        *recover_lock(&self.finalizing_session) = Some(session_id);
         if let Err(error) = self.commands.send(InferenceCommand::Finalize {
             recording,
             output_mode,
             audio_finalize_ms,
             release_started,
+            abort_generation,
+            publication: self.cancellations.watcher(session_id),
         }) {
+            *recover_lock(&self.finalizing_session) = None;
             eprintln!("could not queue final transcription: {error}");
         }
     }
@@ -297,6 +325,7 @@ fn inference_loop(
     generation: Arc<AtomicU64>,
     preview_in_flight: Arc<AtomicBool>,
     stable_source_sample_count: Arc<AtomicUsize>,
+    finalizing_session: Arc<Mutex<Option<SessionId>>>,
     events: mpsc::Sender<SpeechWorkerEvent>,
     history: mpsc::Sender<HistoryCommand>,
 ) {
@@ -304,6 +333,7 @@ fn inference_loop(
     let mut loaded_catalog_id: Option<String> = None;
     let mut reload_target: Option<(String, PathBuf)> = None;
     let mut stable_prefix: Option<PreviewResult> = None;
+    let mut selected_language = DictationLanguage::Auto;
     for command in commands {
         match command {
             InferenceCommand::Load {
@@ -313,6 +343,8 @@ fn inference_loop(
             } => {
                 stable_prefix = None;
                 reload_target = Some((catalog_id.clone(), path.clone()));
+                let previously_loaded = loaded_catalog_id.take();
+                engine.set_language(selected_language.locale());
                 match engine.prepare(&path) {
                     Ok(prepared) => {
                         let _ = events.send(SpeechWorkerEvent::ModelReady {
@@ -332,6 +364,10 @@ fn inference_loop(
                         }
                     }
                     Err(error) => {
+                        let _ = events.send(SpeechWorkerEvent::LocalModelState {
+                            catalog_id: previously_loaded,
+                            loaded: false,
+                        });
                         let _ = events.send(SpeechWorkerEvent::Failed {
                             session_id: None,
                             code: "model_prepare".to_owned(),
@@ -349,6 +385,7 @@ fn inference_loop(
                     continue;
                 };
                 stable_prefix = None;
+                engine.set_language(selected_language.locale());
                 match engine.prepare(&path) {
                     Ok(prepared) => {
                         let _ = events.send(SpeechWorkerEvent::ModelReady {
@@ -365,6 +402,10 @@ fn inference_loop(
                         });
                     }
                     Err(error) => {
+                        let _ = events.send(SpeechWorkerEvent::LocalModelState {
+                            catalog_id: None,
+                            loaded: false,
+                        });
                         let _ = events.send(SpeechWorkerEvent::Failed {
                             session_id: None,
                             code: "model_prepare".to_owned(),
@@ -376,6 +417,7 @@ fn inference_loop(
             }
             InferenceCommand::SetLanguage(language) => {
                 stable_prefix = None;
+                selected_language = language;
                 engine.set_language(language.locale());
             }
             InferenceCommand::Preview {
@@ -438,7 +480,16 @@ fn inference_loop(
                 output_mode,
                 audio_finalize_ms,
                 release_started,
+                abort_generation,
+                publication,
             } => {
+                let session_id = recording.session_id;
+                if publication.is_cancelled() {
+                    let _ = events.send(SpeechWorkerEvent::Cancelled { session_id });
+                    publication.complete();
+                    clear_finalizing_session(&finalizing_session, session_id);
+                    continue;
+                }
                 let final_queue_wait_ms =
                     elapsed_ms(release_started).saturating_sub(audio_finalize_ms);
                 let stable_prefix = stable_prefix.take().filter(|preview| {
@@ -453,10 +504,21 @@ fn inference_loop(
                             &recording,
                             output_mode,
                             &prefix.transcript,
+                            AbortGeneration::new(Arc::clone(&generation), abort_generation),
                         ),
                         true,
                     ),
-                    None => (engine.transcribe(&recording, output_mode, None), false),
+                    None => (
+                        engine.transcribe(
+                            &recording,
+                            output_mode,
+                            Some(AbortGeneration::new(
+                                Arc::clone(&generation),
+                                abort_generation,
+                            )),
+                        ),
+                        false,
+                    ),
                 };
                 stable_source_sample_count.store(0, Ordering::Release);
                 match engine_result {
@@ -478,25 +540,35 @@ fn inference_loop(
                                 speculative_reuse,
                             },
                         };
-                        // User-visible completion is deliberately ahead of durable history I/O.
-                        let _ = events.send(SpeechWorkerEvent::Completed {
-                            transcript: transcript.clone(),
-                            created_unix_ms,
-                        });
-                        let _ = history.send(HistoryCommand::Append {
-                            transcript,
-                            created_unix_ms,
-                        });
+                        if !publish_terminal_if_current(&publication, || {
+                            // User-visible completion is deliberately ahead of durable history I/O.
+                            let _ = events.send(SpeechWorkerEvent::Completed {
+                                transcript: transcript.clone(),
+                                created_unix_ms,
+                            });
+                            let _ = history.send(HistoryCommand::Append {
+                                transcript,
+                                created_unix_ms,
+                            });
+                        }) {
+                            let _ = events.send(SpeechWorkerEvent::Cancelled { session_id });
+                        }
                     }
                     Err(error) => {
-                        let _ = events.send(SpeechWorkerEvent::Failed {
-                            session_id: Some(recording.session_id),
-                            code: "transcription".to_owned(),
-                            message: format!("{error:#}"),
-                            retryable: true,
-                        });
+                        if !publish_terminal_if_current(&publication, || {
+                            let _ = events.send(SpeechWorkerEvent::Failed {
+                                session_id: Some(session_id),
+                                code: "transcription".to_owned(),
+                                message: format!("{error:#}"),
+                                retryable: true,
+                            });
+                        }) {
+                            let _ = events.send(SpeechWorkerEvent::Cancelled { session_id });
+                        }
                     }
                 }
+                publication.complete();
+                clear_finalizing_session(&finalizing_session, session_id);
             }
             InferenceCommand::Unload {
                 only_catalog_id,
@@ -509,7 +581,8 @@ fn inference_loop(
                         .is_none_or(|expected| loaded_catalog_id.as_ref() == Some(expected));
                 let unloaded = if matches {
                     stable_prefix = None;
-                    engine = WhisperEngine::new();
+                    engine.release_runtime();
+                    engine.set_language(selected_language.locale());
                     let unloaded = loaded_catalog_id.take();
                     reload_target = retained_reload_target(reload_target, retain_reload_target);
                     let _ = events.send(SpeechWorkerEvent::LocalModelState {
@@ -534,6 +607,23 @@ fn retained_reload_target(
     retain: bool,
 ) -> Option<(String, PathBuf)> {
     retain.then_some(target).flatten()
+}
+
+fn publish_terminal_if_current(
+    publication: &SessionPublicationGuard,
+    publish: impl FnOnce(),
+) -> bool {
+    publication.try_publish(publish)
+}
+
+fn clear_finalizing_session(
+    finalizing_session: &Mutex<Option<SessionId>>,
+    completed_session: SessionId,
+) {
+    let mut finalizing = recover_lock(finalizing_session);
+    if *finalizing == Some(completed_session) {
+        *finalizing = None;
+    }
 }
 
 fn advance_stable_prefix(
@@ -584,28 +674,29 @@ fn finalize_from_stable_prefix(
     recording: &RecordedAudio,
     output_mode: SpeechOutputMode,
     prefix: &EngineTranscript,
+    abort: AbortGeneration,
 ) -> anyhow::Result<EngineTranscript> {
     if prefix.source_sample_count >= recording.source_total_samples {
-        return engine.transcribe(recording, output_mode, None);
+        return engine.transcribe(recording, output_mode, Some(abort));
     }
 
     let Some(tail) = recording.segment_from_absolute(prefix.source_sample_count) else {
-        return engine.transcribe(recording, output_mode, None);
+        return engine.transcribe(recording, output_mode, Some(abort));
     };
     // Whisper needs a small amount of audio to decode reliably. A sub-180 ms
     // spoken tail is rare, but re-running the authoritative recording is safer
     // than silently dropping a final syllable.
     if tail.segment_duration_ms() < MIN_FINAL_TAIL_AUDIO_MS {
-        return engine.transcribe(recording, output_mode, None);
+        return engine.transcribe(recording, output_mode, Some(abort));
     }
     let prompt = context_prompt(&prefix.text);
-    match engine.transcribe_with_prompt(&tail, output_mode, Some(&prompt), None) {
+    match engine.transcribe_with_prompt(&tail, output_mode, Some(&prompt), Some(abort.clone())) {
         Ok(segment) => Ok(merge_engine_transcripts(prefix, segment)),
         Err(error) => {
             eprintln!(
                 "segmented final tail was not usable; falling back to authoritative pass: {error:#}"
             );
-            engine.transcribe(recording, output_mode, None)
+            engine.transcribe(recording, output_mode, Some(abort))
         }
     }
 }
@@ -742,11 +833,13 @@ mod tests {
 
     use super::{
         InferenceHandle, advance_stable_prefix, context_prompt, has_trailing_silence,
-        join_transcript_text, quiet_tail_after, retained_reload_target,
+        join_transcript_text, publish_terminal_if_current, quiet_tail_after,
+        retained_reload_target,
     };
     use crate::{
         audio::RecordedAudio,
         engine::{EngineSegment, EngineTranscript},
+        transcription_mailbox::{SessionCancellationSet, SessionPublicationGuard},
     };
 
     fn recording(samples: Vec<f32>, rate: u32) -> RecordedAudio {
@@ -781,6 +874,25 @@ mod tests {
             }
         );
         inference.shutdown();
+    }
+
+    #[test]
+    fn cancellation_before_final_publication_blocks_ui_and_history() {
+        let cancellations = SessionCancellationSet::default();
+        let session_id = SessionId::new();
+        let publication = SessionPublicationGuard::new(cancellations.clone(), session_id);
+        let mut ui_published = false;
+        let mut history_published = false;
+        cancellations.cancel(session_id);
+
+        let published = publish_terminal_if_current(&publication, || {
+            ui_published = true;
+            history_published = true;
+        });
+
+        assert!(!published);
+        assert!(!ui_published);
+        assert!(!history_published);
     }
 
     #[test]

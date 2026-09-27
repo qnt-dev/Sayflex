@@ -76,6 +76,7 @@ struct DecodedSegment {
     end_timestamp_cs: i64,
 }
 
+#[derive(Clone)]
 pub struct AbortGeneration {
     current: Arc<AtomicU64>,
     expected: u64,
@@ -115,6 +116,23 @@ impl WhisperEngine {
             language.map(|language| language.split('-').next().unwrap_or(language).to_owned());
     }
 
+    /// Releases native model/backend allocations while preserving user
+    /// configuration that must be reapplied to the next runtime instance.
+    pub fn release_runtime(&mut self) {
+        // WhisperState borrows model-owned native data conceptually, so release
+        // it before the context. This is also the peak-memory boundary used by
+        // model replacement: no second context is allocated while one is live.
+        self.state = None;
+        self.context = None;
+        self.loaded_path = None;
+        self.direct_translation_supported = false;
+    }
+
+    #[cfg(test)]
+    fn configured_language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+
     /// Loads the model and performs one silent pass. Once this returns, a user gesture never
     /// pays model I/O, CUDA context creation, or first-kernel initialization.
     pub fn prepare(&mut self, model_path: &Path) -> Result<PreparedModel> {
@@ -128,6 +146,8 @@ impl WhisperEngine {
                 backend: backend_name(),
             });
         }
+
+        self.release_runtime();
 
         let load_started = Instant::now();
         let model = model_path
@@ -163,14 +183,16 @@ impl WhisperEngine {
         // Model loading alone does not prove that the selected GPU contains
         // compatible kernels. A full silent pass is the backend capability
         // probe; no-speech is a valid result, while a compute error is not.
-        self.run_whisper(
+        if let Err(error) = self.run_whisper(
             &silence,
             SpeechOutputMode::OriginalLanguage,
             true,
             None,
             None,
-        )
-        .context("speech backend warm-up probe failed")?;
+        ) {
+            self.release_runtime();
+            return Err(error).context("speech backend warm-up probe failed");
+        }
 
         Ok(PreparedModel {
             load_duration_ms,
@@ -389,7 +411,7 @@ mod tests {
     use rust_protocol::SessionId;
 
     use super::{
-        inference_threads, normalize_transcript, source_sample_at_timestamp,
+        WhisperEngine, inference_threads, normalize_transcript, source_sample_at_timestamp,
         supports_direct_translation, whisper_decode_policy,
     };
     use crate::audio::RecordedAudio;
@@ -436,5 +458,15 @@ mod tests {
 
         assert!(!policy.no_timestamps);
         assert!(!policy.single_segment);
+    }
+
+    #[test]
+    fn releasing_runtime_preserves_the_configured_language() {
+        let mut engine = WhisperEngine::new();
+        engine.set_language(Some("ru-RU"));
+
+        engine.release_runtime();
+
+        assert_eq!(engine.configured_language(), Some("ru"));
     }
 }

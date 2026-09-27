@@ -228,6 +228,21 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
         history.clone(),
         inference.clone(),
     )?;
+    let recording_limit_events = recorder.take_recording_limit_events()?;
+    let limit_inference = inference.clone();
+    let limit_speculation = speculation.clone();
+    thread::Builder::new()
+        .name("speech-recording-limit-owner".to_owned())
+        .spawn(move || {
+            for notification in recording_limit_events {
+                let session_id = notification.session_id();
+                limit_speculation.stop(session_id);
+                limit_inference.cancel_session(session_id);
+                notification.acknowledge_owners_stopped();
+                notification.wait_for_terminal_publication();
+                limit_inference.complete_cancelled_session(session_id);
+            }
+        })?;
     let mut output_mode = SpeechOutputMode::OriginalLanguage;
     let mut fast_release_previews = previews_allowed(true);
     let mut selected_model_id = catalog.default_model.clone();
@@ -356,6 +371,11 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
                 transcription.cancel(session_id);
                 if recorder.cancel(session_id) {
                     let _ = events.send(SpeechWorkerEvent::Cancelled { session_id });
+                    // No finalization job exists for an active capture that was
+                    // cancelled here. Preview generation has already been
+                    // invalidated, so this is the terminal acknowledgement for
+                    // the shared cancellation tombstone.
+                    inference.complete_cancelled_session(session_id);
                 }
             }
             SpeechWorkerCommand::UnloadLocalModel => {

@@ -94,36 +94,39 @@
 - Produces: configuration-owned `selected_language: DictationLanguage` reapplied to every prepared engine.
 - Consumes: existing `SessionCancellationSet`, `InferenceCommand`, `ModelActor` cancellation generation, and cloud `RouteOutcome`.
 
-- [ ] **Step 1: Add failing tests for each owner transition**
+- [x] **Step 1: Add failing tests for each owner transition**
 
   Add tests for five-minute auto-stop followed by a successful Begin; cancel during local final inference; cancel after a cloud response but before publication; cancel after model-file verification but before activation; language preservation through Unload/Prepare; old-context destruction before new-context construction; and an exhausted network budget with Local later in the provider order.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   Run: `cargo test -p sayflex-speech-worker -- --nocapture`
   Expected: the capture, publication, activation, language, and replacement tests fail on current ownership.
   Run: `cargo test -p rust-cloud-speech router::tests -- --nocapture`
   Expected: the budget/local-fallback test returns `Exhausted` instead of `UseLocalEngine`.
 
-- [ ] **Step 3: Move the recording-limit terminal transition to the capture loop**
+- [x] **Step 3: Move the recording-limit terminal transition to the capture loop**
 
   Have `drain_audio` report a typed limit outcome once. The capture loop takes and finalizes the active buffer, stops further level/snapshot publication, resets dropped-sample state, notifies the inference/speculation owner to cancel that session, and only then sends the typed failure.
 
-- [ ] **Step 4: Preserve cancellation through final publication**
+- [x] **Step 4: Preserve cancellation through final publication**
 
   Pass a session publication watcher into local `InferenceCommand::Finalize` and remote `NetworkJob`. Recheck it after native/network work and immediately before `Completed`, `TranscribedRemotely`, and `HistoryCommand::Append`. A cancelled local fallback retains its tombstone until inference acknowledges the terminal result.
 
-- [ ] **Step 5: Correct model activation, language ownership, replacement order, and budget fallback**
+- [x] **Step 5: Correct model activation, language ownership, replacement order, and budget fallback**
 
   Recheck the model-actor cancellation generation after `ensure_model`; store language outside `WhisperEngine`; drop context/state before constructing a replacement and report the resulting unloaded/error state if preparation fails; when network budget is exhausted, skip remaining network candidates but continue scanning for an enabled Local candidate.
 
-- [ ] **Step 6: Verify GREEN and record the memory probe command**
+- [x] **Step 6: Verify GREEN and record the memory probe command**
 
   Run: `cargo test -p sayflex-speech-worker -p rust-cloud-speech -- --nocapture`
   Expected: PASS.
   Record in the task ledger the release-build command used later to sample private bytes during repeated speech-model switches; do not record an unmeasured peak here.
 
-- [ ] **Step 7: Commit**
+  Recorded release probe for Task 16 (run while repeatedly switching installed speech models):
+  `Get-Process -Name 'SayFlex.Speech.*' | Select-Object Id, ProcessName, PrivateMemorySize64, WorkingSet64`
+
+- [x] **Step 7: Commit**
 
   `git commit -m "fix(speech): preserve operation ownership through completion"`
 
