@@ -81,6 +81,8 @@ use slint::winit_030::{
 use slint::{
     ComponentHandle, Image, PhysicalPosition, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
 };
+#[cfg(feature = "screen-translation")]
+use source_context::ContextCollector;
 use translation_view::{
     StableParagraphStream, TranslationPreviewRegistry, TranslationPreviewSlot,
     adaptive_text_panel_height, apply_translation_preview_layout,
@@ -114,6 +116,8 @@ mod settings_document;
 mod settings_preview;
 mod settings_projection;
 mod settings_view;
+#[cfg(feature = "screen-translation")]
+mod source_context;
 mod speech_backend;
 mod support_action;
 mod translation_view;
@@ -243,10 +247,7 @@ enum RuntimeEvent {
     ScreenCapturePrepared {
         request_id: RequestId,
         excluded_overlays: Vec<overlay_presenter::CaptureExcludedOverlay>,
-        result: Result<
-            rust_platform_windows::screen_capture::DesktopCapture,
-            rust_platform_windows::screen_capture::CaptureError,
-        >,
+        result: Result<PreparedScreenCapture, rust_platform_windows::screen_capture::CaptureError>,
     },
     #[cfg(feature = "screen-translation")]
     ScreenOcrPrepared {
@@ -276,6 +277,12 @@ enum RuntimeEvent {
 struct PreparedScreenOcr {
     command: OcrWorkerCommand,
     crop: Arc<rust_platform_windows::screen_capture::RgbaFrame>,
+}
+
+#[cfg(feature = "screen-translation")]
+struct PreparedScreenCapture {
+    capture: rust_platform_windows::screen_capture::DesktopCapture,
+    inventory: Option<rust_platform_windows::WindowInventory>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -756,6 +763,10 @@ struct AppState {
     #[cfg(feature = "screen-translation")]
     pending_screen_crops: HashMap<RequestId, Arc<rust_platform_windows::screen_capture::RgbaFrame>>,
     #[cfg(feature = "screen-translation")]
+    pending_window_inventories: HashMap<RequestId, rust_platform_windows::WindowInventory>,
+    #[cfg(feature = "screen-translation")]
+    pending_screen_contexts: HashMap<RequestId, SourceContext>,
+    #[cfg(feature = "screen-translation")]
     screen_documents: HashMap<RequestId, ScreenTranslationDocument>,
     translation_history: Vec<TranslationHistoryEntry>,
     /// Installs in flight, by catalog id. The workers report progress for
@@ -878,6 +889,10 @@ impl AppState {
             queued_screen_translation: None,
             #[cfg(feature = "screen-translation")]
             pending_screen_crops: HashMap::new(),
+            #[cfg(feature = "screen-translation")]
+            pending_window_inventories: HashMap::new(),
+            #[cfg(feature = "screen-translation")]
+            pending_screen_contexts: HashMap::new(),
             #[cfg(feature = "screen-translation")]
             screen_documents: HashMap::new(),
             translation_history: Vec::new(),
@@ -1645,10 +1660,19 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             }
             let present_started = Instant::now();
             let terminal = match result {
-                Ok(capture) => runtime
-                    .screen_selection
-                    .borrow_mut()
-                    .begin_with_capture(request_id, capture),
+                Ok(prepared) => {
+                    if let Some(inventory) = prepared.inventory {
+                        runtime
+                            .state
+                            .borrow_mut()
+                            .pending_window_inventories
+                            .insert(request_id, inventory);
+                    }
+                    runtime
+                        .screen_selection
+                        .borrow_mut()
+                        .begin_with_capture(request_id, prepared.capture)
+                }
                 Err(error) => Some(SelectionTerminal::Failed {
                     request_id,
                     error: SelectionFailure::Capture(error),
@@ -1681,6 +1705,11 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                     .state
                     .borrow_mut()
                     .pending_screen_crops
+                    .remove(&request_id);
+                runtime
+                    .state
+                    .borrow_mut()
+                    .pending_screen_contexts
                     .remove(&request_id);
                 if let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) {
                     show_screen_translation_outcome(
@@ -2155,6 +2184,11 @@ fn handle_worker_exit(
                 .borrow_mut()
                 .pending_screen_crops
                 .remove(&request_id);
+            runtime
+                .state
+                .borrow_mut()
+                .pending_screen_contexts
+                .remove(&request_id);
             if let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) {
                 show_screen_translation_outcome(
                     request_id,
@@ -2356,11 +2390,11 @@ fn apply_screen_translation_cancellation(
         ScreenTranslationCancellation::Ocr(request_id) => {
             #[cfg(feature = "screen-translation")]
             {
-                runtime
-                    .state
-                    .borrow_mut()
-                    .pending_screen_crops
-                    .remove(&request_id);
+                let mut state = runtime.state.borrow_mut();
+                state.pending_screen_crops.remove(&request_id);
+                state.pending_window_inventories.remove(&request_id);
+                state.pending_screen_contexts.remove(&request_id);
+                drop(state);
                 let _ = runtime
                     .workers
                     .send_ocr(&OcrWorkerCommand::Cancel { request_id });
@@ -2415,7 +2449,22 @@ fn handle_screen_selection_terminal(terminal: SelectionTerminal, runtime: &Runti
                 rect.x, rect.y, rect.width, rect.height
             ));
             #[cfg(feature = "screen-translation")]
-            dispatch_screen_capture_to_ocr(request_id, rect, capture, runtime);
+            {
+                let context = runtime
+                    .state
+                    .borrow_mut()
+                    .pending_window_inventories
+                    .remove(&request_id)
+                    .as_ref()
+                    .map(|inventory| ContextCollector::from_inventory(inventory, rect))
+                    .unwrap_or_default();
+                runtime
+                    .state
+                    .borrow_mut()
+                    .pending_screen_contexts
+                    .insert(request_id, context);
+                dispatch_screen_capture_to_ocr(request_id, rect, capture, runtime);
+            }
             #[cfg(not(feature = "screen-translation"))]
             {
                 let _ = capture;
@@ -2423,6 +2472,12 @@ fn handle_screen_selection_terminal(terminal: SelectionTerminal, runtime: &Runti
             }
         }
         SelectionTerminal::Cancelled { request_id } => {
+            #[cfg(feature = "screen-translation")]
+            {
+                let mut state = runtime.state.borrow_mut();
+                state.pending_window_inventories.remove(&request_id);
+                state.pending_screen_contexts.remove(&request_id);
+            }
             if let Some(cancellation) = runtime.screen_translation.borrow_mut().close(request_id) {
                 apply_screen_translation_cancellation(cancellation, runtime);
             }
@@ -2431,6 +2486,12 @@ fn handle_screen_selection_terminal(terminal: SelectionTerminal, runtime: &Runti
             ));
         }
         SelectionTerminal::Failed { request_id, error } => {
+            #[cfg(feature = "screen-translation")]
+            {
+                let mut state = runtime.state.borrow_mut();
+                state.pending_window_inventories.remove(&request_id);
+                state.pending_screen_contexts.remove(&request_id);
+            }
             runtime.screen_translation.borrow_mut().complete(request_id);
             #[cfg(feature = "screen-translation")]
             {
@@ -2555,6 +2616,11 @@ fn handle_prepared_screen_ocr(
         }
     };
     if runtime.workers.send_ocr(&prepared.command).is_err() {
+        runtime
+            .state
+            .borrow_mut()
+            .pending_screen_contexts
+            .remove(&request_id);
         runtime.screen_translation.borrow_mut().complete(request_id);
         show_screen_translation_outcome(
             request_id,
@@ -2574,6 +2640,11 @@ fn handle_prepared_screen_ocr(
             .state
             .borrow_mut()
             .pending_screen_crops
+            .remove(&request_id);
+        runtime
+            .state
+            .borrow_mut()
+            .pending_screen_contexts
             .remove(&request_id);
         runtime.screen_translation.borrow_mut().complete(request_id);
         show_screen_translation_outcome(
@@ -2637,6 +2708,11 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                     .borrow_mut()
                     .pending_screen_crops
                     .remove(&request_id);
+                runtime
+                    .state
+                    .borrow_mut()
+                    .pending_screen_contexts
+                    .remove(&request_id);
                 rust_app_core::diagnostics::log_line(&format!(
                     "ocr_worker request={request_id} outcome=recognized result=stale_ignored"
                 ));
@@ -2654,6 +2730,11 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                         .pending_screen_crops
                         .remove(&request_id)
                     else {
+                        runtime
+                            .state
+                            .borrow_mut()
+                            .pending_screen_contexts
+                            .remove(&request_id);
                         runtime.screen_translation.borrow_mut().complete(request_id);
                         show_screen_translation_outcome(
                             request_id,
@@ -2666,11 +2747,17 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                     let expected_text = reconstructed.text;
                     let blocks = screen_blocks_from_ocr(reconstructed.blocks);
                     let created_unix_ms = unix_ms();
+                    let context = runtime
+                        .state
+                        .borrow_mut()
+                        .pending_screen_contexts
+                        .remove(&request_id)
+                        .unwrap_or_default();
                     let document = match ScreenTranslationDocument::new(
                         request_id,
                         crop,
                         blocks,
-                        SourceContext::default(),
+                        context,
                         created_unix_ms,
                         created_unix_ms.saturating_add(DEFAULT_SCREENSHOT_RETENTION_MS),
                     ) {
@@ -2725,6 +2812,11 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                         .borrow_mut()
                         .pending_screen_crops
                         .remove(&request_id);
+                    runtime
+                        .state
+                        .borrow_mut()
+                        .pending_screen_contexts
+                        .remove(&request_id);
                     runtime.screen_translation.borrow_mut().complete(request_id);
                     show_screen_translation_outcome(
                         request_id,
@@ -2745,6 +2837,11 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                 .state
                 .borrow_mut()
                 .pending_screen_crops
+                .remove(&request_id);
+            runtime
+                .state
+                .borrow_mut()
+                .pending_screen_contexts
                 .remove(&request_id);
             let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) else {
                 return;
@@ -2772,6 +2869,11 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                 .state
                 .borrow_mut()
                 .pending_screen_crops
+                .remove(&request_id);
+            runtime
+                .state
+                .borrow_mut()
+                .pending_screen_contexts
                 .remove(&request_id);
             if let Some(anchor) = runtime.screen_translation.borrow_mut().complete(request_id) {
                 show_screen_translation_outcome(
@@ -3089,17 +3191,44 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 .name(format!("screen-capture-{request_id}"))
                 .spawn(move || {
                     let capture_started = Instant::now();
-                    let result = capture_backend.capture();
+                    let result = capture_backend.capture().map(|capture| {
+                        let context_started = Instant::now();
+                        let inventory = rust_platform_windows::WindowInventory::capture(
+                            capture.generation(),
+                            capture.bounds(),
+                            Instant::now() + std::time::Duration::from_millis(120),
+                        );
+                        match &inventory {
+                            Ok(inventory) => rust_app_core::diagnostics::log_line(&format!(
+                                "screen_translation request={request_id} stage=window_snapshot duration_ms={} windows={} generation={} result=ready",
+                                context_started.elapsed().as_millis(),
+                                inventory.len(),
+                                inventory.generation(),
+                            )),
+                            Err(error) => rust_app_core::diagnostics::log_line(&format!(
+                                "screen_translation request={request_id} stage=window_snapshot duration_ms={} result=unavailable error_kind={}",
+                                context_started.elapsed().as_millis(),
+                                match error {
+                                    rust_platform_windows::WindowSnapshotError::DeadlineExceeded => "deadline",
+                                    rust_platform_windows::WindowSnapshotError::Enumeration(_) => "enumeration",
+                                },
+                            )),
+                        }
+                        PreparedScreenCapture {
+                            capture,
+                            inventory: inventory.ok(),
+                        }
+                    });
                     match &result {
-                        Ok(capture) => rust_app_core::diagnostics::log_line(&format!(
+                        Ok(prepared) => rust_app_core::diagnostics::log_line(&format!(
                             "screen_translation request={request_id} stage=capture duration_ms={} backend={} outputs={}",
                             capture_started.elapsed().as_millis(),
-                            match capture.backend() {
+                            match prepared.capture.backend() {
                                 rust_platform_windows::screen_capture::CaptureBackendKind::Primary => "dxgi",
                                 rust_platform_windows::screen_capture::CaptureBackendKind::Fallback => "gdi",
                                 rust_platform_windows::screen_capture::CaptureBackendKind::Unknown => "unknown",
                             },
-                            capture.output_bounds().len()
+                            prepared.capture.output_bounds().len()
                         )),
                         Err(error) => rust_app_core::diagnostics::log_line(&format!(
                             "screen_translation request={request_id} stage=capture duration_ms={} result=failed error={error}",

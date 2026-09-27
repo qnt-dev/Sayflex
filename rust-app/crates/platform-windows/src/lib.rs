@@ -26,6 +26,8 @@ pub mod screen_capture;
 mod session_end;
 #[cfg(windows)]
 mod single_instance;
+#[cfg(windows)]
+mod window_snapshot;
 
 #[cfg(windows)]
 pub use job::WorkerJob;
@@ -60,6 +62,8 @@ pub use process_resources::{
 pub use session_end::{SessionEndEvent, SessionEndMonitor, session_is_ending};
 #[cfg(windows)]
 pub use single_instance::SingleInstanceGuard;
+#[cfg(windows)]
+pub use window_snapshot::{WindowIdentity, WindowInventory, WindowSnapshot, WindowSnapshotError};
 
 #[cfg(windows)]
 pub fn open_https_url(url: &str) -> io::Result<()> {

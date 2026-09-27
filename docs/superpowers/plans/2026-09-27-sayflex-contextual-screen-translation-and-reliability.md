@@ -365,9 +365,8 @@
 **Files:**
 - Create: `rust-app/crates/platform-windows/src/window_snapshot.rs`
 - Modify: `rust-app/crates/platform-windows/src/lib.rs`
-- Modify: `rust-app/crates/platform-windows/Cargo.toml`
-- Modify: `rust-app/apps/desktop/src/screen_translation.rs`
 - Create: `rust-app/apps/desktop/src/source_context.rs`
+- Modify: `rust-app/apps/desktop/src/main.rs`
 
 **Interfaces:**
 - Produces: `WindowInventory::capture(generation: u64, deadline: Instant) -> Result<Self, WindowSnapshotError>`.
@@ -375,35 +374,35 @@
 - Produces: `ContextCollector::from_snapshot(source: &WindowSnapshot) -> SourceContext` with bounded executable/title/UIA fields captured within the pre-overlay deadline.
 - Consumes: capture generation from Task 7 and Task 6 `SourceContext`.
 
-- [ ] **Step 1: Add failing pure geometry/occlusion tests**
+- [x] **Step 1: Add failing pure geometry/occlusion tests**
 
   Cover the review-focus game-over-browser case, peer overlap, shaped region, negative monitor origin, cloaked/tool/SayFlex exclusion, majority winner, center plus 1.5 lead, and ambiguous split returning `None`.
 
-- [ ] **Step 2: Add failing context tests**
+- [x] **Step 2: Add failing context tests**
 
   Cover browser without URL, PDF without book metadata, stale/reused HWND identity, command-like OCR/title text treated as data, and a context timeout that still permits translation.
 
-- [ ] **Step 3: Run and verify RED**
+- [x] **Step 3: Run and verify RED**
 
   Run: `cargo test -p rust-platform-windows window_snapshot -- --nocapture`
   Expected: FAIL because the snapshot module does not exist.
   Run: `cargo test -p sayflex-desktop --features screen-translation source_context -- --nocapture`
   Expected: FAIL because the context module does not exist.
 
-- [ ] **Step 4: Implement the frozen inventory and context collector**
+- [x] **Step 4: Implement the frozen inventory and context collector**
 
   Enumerate eligible top-level windows before overlays, save process identity, extended bounds/window region, cloaking, Z order, and available bounded metadata. Reconstruct visible regions by subtracting saved higher windows. Never query current foreground state to choose the source after selection; omit optional URL/document fields on unavailable/timeout.
 
-- [ ] **Step 5: Integrate inventory capture with the same background capture generation**
+- [x] **Step 5: Integrate inventory capture with the same background capture generation**
 
   Return pixels plus inventory as one capture preparation result. Selection later consumes only that immutable pair. Diagnostics record counts/timing and typed omissions, never titles, URLs, or nearby text.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
   Run: `cargo test -p rust-platform-windows -p sayflex-desktop --features screen-translation -- --nocapture`
   Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
   `git commit -m "feat(screen): capture visible source-window context"`
 
