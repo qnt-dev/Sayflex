@@ -170,6 +170,20 @@ impl ProvidersSnapshot {
         target: &str,
         is_current: &impl Fn() -> bool,
     ) -> Routed {
+        self.translate_started(text, source, target, Instant::now(), is_current)
+    }
+
+    /// Uses one deadline origin for every block in a screen-document request,
+    /// so a large screenshot cannot multiply the provider timeout by its block
+    /// count.
+    pub fn translate_started(
+        &mut self,
+        text: &str,
+        source: Option<&str>,
+        target: &str,
+        started: Instant,
+        is_current: &impl Fn() -> bool,
+    ) -> Routed {
         let Some(executor) = self.executor.as_ref() else {
             return if self
                 .router
@@ -201,7 +215,7 @@ impl ProvidersSnapshot {
                 source,
                 target,
             },
-            Instant::now(),
+            started,
             &|id: &ProviderId| self.secrets.get(id.as_str()).cloned(),
             executor,
             &|| !is_current(),

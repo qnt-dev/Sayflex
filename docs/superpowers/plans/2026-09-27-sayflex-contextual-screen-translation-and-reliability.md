@@ -507,26 +507,26 @@
 - Produces: capability flags `structured_blocks`, `context_instructions`, and `glossary_guidance` surfaced in completed metadata.
 - Consumes: Task 6 protocol and Task 10 glossary lookup.
 
-- [ ] **Step 1: Add failing structured translation tests**
+- [x] **Step 1: Add failing structured translation tests**
 
   Cover reordered output, missing/duplicate/unknown IDs, JSON/prose injection inside OCR/context, numbers/URLs/placeholders, two related blocks sharing context, different domain glossary matches, late cancellation, compact limited-capability mode, and cloud provider without contextual instruction support.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
   Run: `cargo test -p sayflex-translation-worker block_translation -- --nocapture`
   Expected: FAIL because only plain-string translation exists.
   Run: `cargo test -p rust-translation-engine -p rust-cloud-translation -- --nocapture`
   Expected: FAIL on the new completion/capability adapter contracts.
 
-- [ ] **Step 3: Implement Qwen structured block translation**
+- [x] **Step 3: Implement Qwen structured block translation**
 
   Place immutable translation instructions in the system message and a typed JSON envelope in the user message. Require strict JSON output, validate the exact ID set and protected values, use deterministic generation, and retry malformed/incomplete groups only within a bounded policy.
 
-- [ ] **Step 4: Implement honest limited-mode adapters**
+- [x] **Step 4: Implement honest limited-mode adapters**
 
   Compact and ordinary cloud APIs preserve block identity with separate bounded requests or deterministic separators but advertise no instruction-based glossary/context support. Never prepend service text to the source. Propagate Task 3 fragment completion per block.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
   Run: `cargo test -p sayflex-translation-worker -p rust-translation-engine -p rust-cloud-translation -- --nocapture`
   Expected: PASS.

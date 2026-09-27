@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod block_translation;
 mod glossary;
 mod glossary_actor;
 mod history;
@@ -9,6 +10,7 @@ mod providers;
 mod runtime;
 
 use std::{
+    collections::HashSet,
     io::{self, BufRead, BufReader, BufWriter, Write},
     path::PathBuf,
     sync::{
@@ -26,8 +28,9 @@ use history_actor::TranslationHistoryActor;
 use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
 use rust_protocol::{
-    GlossaryOrigin, PROTOCOL_VERSION, RequestId, TranslationAttemptReport, TranslationFailureKind,
-    TranslationFailureReport, TranslationHistoryEntry, TranslationLanguage,
+    BlockCompletion, GlossaryOrigin, PROTOCOL_VERSION, RequestId, ScreenTextBlock, SourceContext,
+    TranslatedScreenBlock, TranslationAttemptReport, TranslationBackendCapabilities,
+    TranslationFailureKind, TranslationFailureReport, TranslationHistoryEntry, TranslationLanguage,
     TranslationLanguagePolicy, TranslationModelSummary, TranslationProviderEntry,
     TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
@@ -36,8 +39,11 @@ use rust_translation_engine::{
     detect_language,
 };
 
-use crate::provider_actor::ProviderActorHandle;
 use crate::providers::{Providers, Routed};
+use crate::{
+    block_translation::{BlockTranslationPlan, validate_completed_blocks},
+    provider_actor::ProviderActorHandle,
+};
 
 #[derive(Debug)]
 struct TranslationRequestFailure(TranslationFailureReport);
@@ -703,7 +709,7 @@ fn handle_command(
             coordinator.submit(
                 state,
                 writer.clone(),
-                Asked {
+                Asked::Text {
                     request_id,
                     text,
                     source_language,
@@ -712,15 +718,28 @@ fn handle_command(
                 },
             )?;
         }
-        TranslationWorkerCommand::TranslateBlocks { request_id, .. } => {
-            writer.send(&TranslationWorkerEvent::Failed {
-                request_id: Some(request_id),
-                catalog_id: None,
-                code: "contextual_translation_not_ready".to_owned(),
-                message: "contextual block translation is not initialized".to_owned(),
-                retryable: false,
-            })?;
-        }
+        TranslationWorkerCommand::TranslateBlocks {
+            request_id,
+            base_revision,
+            blocks,
+            context,
+            source_language,
+            target_language,
+            language_policy,
+        } => coordinator.submit(
+            state,
+            writer.clone(),
+            Asked::Blocks {
+                request_id,
+                base_revision,
+                blocks,
+                context,
+                source_language,
+                target_language,
+                language_policy,
+                glossary: glossary.clone(),
+            },
+        )?,
         TranslationWorkerCommand::SaveGlossaryEntry {
             operation_id,
             request_id,
@@ -1132,14 +1151,34 @@ fn choose_initial_tier(
 /// The four of them travel together through the coordinator and into the
 /// request, which is clearer than four more parameters on two signatures that
 /// already carry a state, a list and a writer.
-struct Asked {
-    request_id: RequestId,
-    text: String,
-    /// `None` for either language means "read it from the text", which is what
-    /// the desktop sends for every selection.
-    source_language: Option<TranslationLanguage>,
-    target_language: Option<TranslationLanguage>,
-    language_policy: TranslationLanguagePolicy,
+enum Asked {
+    Text {
+        request_id: RequestId,
+        text: String,
+        /// `None` for either language means "read it from the text", which is what
+        /// the desktop sends for every selection.
+        source_language: Option<TranslationLanguage>,
+        target_language: Option<TranslationLanguage>,
+        language_policy: TranslationLanguagePolicy,
+    },
+    Blocks {
+        request_id: RequestId,
+        base_revision: u64,
+        blocks: Vec<ScreenTextBlock>,
+        context: SourceContext,
+        source_language: Option<TranslationLanguage>,
+        target_language: Option<TranslationLanguage>,
+        language_policy: TranslationLanguagePolicy,
+        glossary: GlossaryActor,
+    },
+}
+
+impl Asked {
+    fn request_id(&self) -> RequestId {
+        match self {
+            Self::Text { request_id, .. } | Self::Blocks { request_id, .. } => *request_id,
+        }
+    }
 }
 
 /// The direction one request will actually be translated in.
@@ -1172,13 +1211,62 @@ fn translate_request(
     asked: Asked,
     is_current: impl Fn() -> bool,
 ) -> Result<()> {
-    let Asked {
-        request_id,
-        text,
-        source_language,
-        target_language,
-        language_policy,
-    } = asked;
+    match asked {
+        Asked::Text {
+            request_id,
+            text,
+            source_language,
+            target_language,
+            language_policy,
+        } => translate_text_request(
+            state,
+            providers,
+            writer,
+            request_id,
+            text,
+            source_language,
+            target_language,
+            language_policy,
+            is_current,
+        ),
+        Asked::Blocks {
+            request_id,
+            base_revision,
+            blocks,
+            context,
+            source_language,
+            target_language,
+            language_policy,
+            glossary,
+        } => translate_blocks_request(
+            state,
+            providers,
+            writer,
+            request_id,
+            base_revision,
+            blocks,
+            context,
+            source_language,
+            target_language,
+            language_policy,
+            &glossary,
+            is_current,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn translate_text_request(
+    state: &Arc<Mutex<WorkerState>>,
+    providers: Option<&mut providers::ProvidersSnapshot>,
+    writer: &EventWriter,
+    request_id: RequestId,
+    text: String,
+    source_language: Option<TranslationLanguage>,
+    target_language: Option<TranslationLanguage>,
+    language_policy: TranslationLanguagePolicy,
+    is_current: impl Fn() -> bool,
+) -> Result<()> {
     let started = Instant::now();
     // One direction, worked out once, used by whichever path takes the request.
     //
@@ -1380,6 +1468,178 @@ fn translate_request(
         chunk_count: output.chunk_count,
     };
     finish(state, writer, result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn translate_blocks_request(
+    state: &Arc<Mutex<WorkerState>>,
+    providers: Option<&mut providers::ProvidersSnapshot>,
+    writer: &EventWriter,
+    request_id: RequestId,
+    base_revision: u64,
+    blocks: Vec<ScreenTextBlock>,
+    context: SourceContext,
+    source_language: Option<TranslationLanguage>,
+    target_language: Option<TranslationLanguage>,
+    language_policy: TranslationLanguagePolicy,
+    glossary: &GlossaryActor,
+    is_current: impl Fn() -> bool,
+) -> Result<()> {
+    let started = Instant::now();
+    let combined = blocks
+        .iter()
+        .map(|block| block.source_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (source, target) =
+        resolve_direction(&combined, source_language, target_language, language_policy).map_err(
+            |error| {
+                request_failure(
+                    TranslationFailureKind::UnsupportedRequest,
+                    format!("{error:#}"),
+                    Vec::new(),
+                )
+            },
+        )?;
+    if !is_current() {
+        return Err(TranslationCancelled.into());
+    }
+
+    let mut glossary_matches = Vec::new();
+    let mut glossary_ids = HashSet::new();
+    for block in &blocks {
+        for entry in glossary.lookup(
+            block.source_text.clone(),
+            source,
+            target,
+            context.clone(),
+            8,
+        )? {
+            if glossary_ids.insert(entry.entry_id.clone()) {
+                glossary_matches.push(entry);
+            }
+        }
+    }
+
+    if let Some(snapshot) = providers {
+        let plan = BlockTranslationPlan::new(
+            blocks.clone(),
+            context.clone(),
+            Vec::new(),
+            TranslationBackendCapabilities::limited(),
+        )?;
+        let mut translated = Vec::with_capacity(blocks.len());
+        let mut use_local = false;
+        for block in &blocks {
+            if !is_current() {
+                return Err(TranslationCancelled.into());
+            }
+            match snapshot.translate_started(
+                &block.source_text,
+                Some(source.code()),
+                target.code(),
+                started,
+                &is_current,
+            ) {
+                Routed::Translated { text, .. } => translated.push(TranslatedScreenBlock {
+                    block_id: block.block_id.clone(),
+                    translated_text: text,
+                    completion: BlockCompletion::Completed,
+                    failure_message: None,
+                }),
+                Routed::UseLocalEngine { .. } => {
+                    use_local = true;
+                    break;
+                }
+                Routed::Cancelled => return Err(TranslationCancelled.into()),
+                Routed::Exhausted { failure } => {
+                    return Err(TranslationRequestFailure(failure).into());
+                }
+            }
+        }
+        if !use_local {
+            let translated = validate_completed_blocks(&plan, translated)?;
+            publish_screen_blocks(
+                writer,
+                request_id,
+                base_revision,
+                translated,
+                plan.backend_capabilities,
+                started,
+                &is_current,
+            )?;
+            return Ok(());
+        }
+    }
+
+    let state = &mut *recover_lock(state);
+    let _tier = state.ensure_engine(writer, source, target)?;
+    let plan = BlockTranslationPlan::new(
+        blocks,
+        context,
+        glossary_matches,
+        TranslationBackendCapabilities::structured(),
+    )?;
+    let output = state
+        .engine
+        .as_mut()
+        .ok_or_else(|| anyhow!("translation engine failed to initialize"))?
+        .translate_blocks(
+            &plan.blocks,
+            &plan.context,
+            &plan.glossary_matches,
+            Some(source),
+            Some(target),
+            &is_current,
+        )?;
+    let translated = validate_completed_blocks(&plan, output.blocks)?;
+    publish_screen_blocks(
+        writer,
+        request_id,
+        base_revision,
+        translated,
+        output.capabilities,
+        started,
+        &is_current,
+    )?;
+    if !state.keep_warm {
+        state.engine = None;
+    }
+    Ok(())
+}
+
+fn publish_screen_blocks(
+    writer: &EventWriter,
+    request_id: RequestId,
+    base_revision: u64,
+    blocks: Vec<TranslatedScreenBlock>,
+    capabilities: TranslationBackendCapabilities,
+    started: Instant,
+    is_current: &impl Fn() -> bool,
+) -> Result<()> {
+    if !is_current() {
+        return Err(TranslationCancelled.into());
+    }
+    for block in &blocks {
+        if block.completion == BlockCompletion::Completed {
+            writer.send(&TranslationWorkerEvent::ScreenBlockPartial {
+                request_id,
+                base_revision,
+                block_id: block.block_id.clone(),
+                translated_text: block.translated_text.clone(),
+            })?;
+        }
+    }
+    if !is_current() {
+        return Err(TranslationCancelled.into());
+    }
+    writer.send(&TranslationWorkerEvent::ScreenBlocksCompleted {
+        request_id,
+        base_revision,
+        blocks,
+        capabilities,
+        processing_duration_ms: elapsed_ms(started),
+    })
 }
 
 /// Records a finished translation and tells the desktop about it.

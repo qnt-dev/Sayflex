@@ -152,7 +152,7 @@ impl ProviderActorHandle {
         writer: EventWriter,
         asked: Asked,
     ) -> Result<()> {
-        let request_id = asked.request_id;
+        let request_id = asked.request_id();
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         *recover_lock(&self.current_request) = Some(request_id);
         self.commands
@@ -283,7 +283,7 @@ fn control_loop(
                 let mut queue = recover_lock(lock);
                 if queue.shutdown {
                     let _ = writer.send(&TranslationWorkerEvent::Cancelled {
-                        request_id: asked.request_id,
+                        request_id: asked.request_id(),
                     });
                     continue;
                 }
@@ -295,7 +295,7 @@ fn control_loop(
                     generation,
                 }) {
                     let _ = replaced.writer.send(&TranslationWorkerEvent::Cancelled {
-                        request_id: replaced.asked.request_id,
+                        request_id: replaced.asked.request_id(),
                     });
                 }
                 wake.notify_one();
@@ -306,7 +306,7 @@ fn control_loop(
                 if queue
                     .pending
                     .as_ref()
-                    .is_some_and(|job| job.asked.request_id == request_id)
+                    .is_some_and(|job| job.asked.request_id() == request_id)
                     && let Some(job) = queue.take_pending()
                 {
                     let _ = job
@@ -318,7 +318,7 @@ fn control_loop(
                 let (lock, _) = &*queue;
                 if let Some(job) = recover_lock(lock).take_pending() {
                     let _ = job.writer.send(&TranslationWorkerEvent::Cancelled {
-                        request_id: job.asked.request_id,
+                        request_id: job.asked.request_id(),
                     });
                 }
             }
@@ -352,7 +352,7 @@ fn control_loop(
                 queue.shutdown = true;
                 if let Some(job) = queue.take_pending() {
                     let _ = job.writer.send(&TranslationWorkerEvent::Cancelled {
-                        request_id: job.asked.request_id,
+                        request_id: job.asked.request_id(),
                     });
                 }
                 wake.notify_one();
@@ -415,7 +415,7 @@ fn run_job(
         asked,
         generation: job_generation,
     } = job;
-    let request_id = asked.request_id;
+    let request_id = asked.request_id();
     let result = translate_request(&state, providers.as_mut(), &writer, asked, || {
         generation_is_current(generation, job_generation)
     });

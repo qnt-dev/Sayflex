@@ -1077,6 +1077,36 @@ pub enum BlockCompletion {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationBackendCapabilities {
+    #[serde(default)]
+    pub structured_blocks: bool,
+    #[serde(default)]
+    pub context_instructions: bool,
+    #[serde(default)]
+    pub glossary_guidance: bool,
+}
+
+impl TranslationBackendCapabilities {
+    #[must_use]
+    pub const fn structured() -> Self {
+        Self {
+            structured_blocks: true,
+            context_instructions: true,
+            glossary_guidance: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn limited() -> Self {
+        Self {
+            structured_blocks: false,
+            context_instructions: false,
+            glossary_guidance: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranslatedScreenBlock {
     pub block_id: ScreenBlockId,
@@ -1531,6 +1561,8 @@ pub enum TranslationWorkerEvent {
         request_id: RequestId,
         base_revision: u64,
         blocks: Vec<TranslatedScreenBlock>,
+        #[serde(default)]
+        capabilities: TranslationBackendCapabilities,
         processing_duration_ms: u64,
     },
     GlossaryList {
@@ -2557,6 +2589,7 @@ mod wire_schema_tests {
                     completion: BlockCompletion::Completed,
                     failure_message: Some(String::new()),
                 }],
+                capabilities: TranslationBackendCapabilities::structured(),
                 processing_duration_ms: 0,
             },
             TranslationWorkerEvent::GlossaryList {
@@ -2666,8 +2699,9 @@ request_id:string,tokenize_duration_ms:number,translated_text:string)",
                 "screen_block_partial(base_revision:number,block_id:string,request_id:string,\
 translated_text:string)",
                 "screen_blocks_completed(base_revision:number,blocks[].block_id:string,\
-blocks[].completion:string,blocks[].failure_message:string,blocks[].translated_text:string,\
-processing_duration_ms:number,request_id:string)",
+ blocks[].completion:string,blocks[].failure_message:string,blocks[].translated_text:string,\
+ capabilities.context_instructions:bool,capabilities.glossary_guidance:bool,\
+ capabilities.structured_blocks:bool,processing_duration_ms:number,request_id:string)",
                 "translation_providers(statuses[])",
             ]
         );
@@ -3276,6 +3310,7 @@ mod complete_wire_schema_tests {
                     completion: BlockCompletion::Completed,
                     failure_message: Some("message".to_owned()),
                 }],
+                capabilities: TranslationBackendCapabilities::structured(),
                 processing_duration_ms: 1,
             },
             TranslationWorkerEvent::GlossaryList {
@@ -3653,6 +3688,16 @@ mod complete_wire_schema_tests {
     }
 
     #[test]
+    fn screen_block_capabilities_default_for_older_worker_events() {
+        let json = r#"{"type":"screen_blocks_completed","payload":{"request_id":"00000000-0000-0000-0000-000000000001","base_revision":7,"blocks":[],"processing_duration_ms":1}}"#;
+        let event: TranslationWorkerEvent = serde_json::from_str(json).unwrap();
+        let TranslationWorkerEvent::ScreenBlocksCompleted { capabilities, .. } = event else {
+            panic!("wrong event variant");
+        };
+        assert_eq!(capabilities, TranslationBackendCapabilities::default());
+    }
+
+    #[test]
     fn every_process_direction_and_variant_has_a_versioned_wire_shape() {
         let input_events = input_events();
         let input_commands = input_commands();
@@ -3691,7 +3736,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x7289_70e6_10ad_8620,
+            0xb7f9_6875_d55f_2b90,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );
