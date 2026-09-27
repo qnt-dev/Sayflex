@@ -413,6 +413,9 @@
 - Modify: `rust-app/apps/desktop/src/settings_document.rs`
 - Modify: `rust-app/apps/desktop/src/main.rs`
 - Modify: `rust-app/apps/desktop/Cargo.toml`
+- Create: `rust-app/crates/platform-windows/src/private_directory.rs`
+- Modify: `rust-app/crates/platform-windows/src/lib.rs`
+- Modify: `rust-app/Cargo.toml`
 
 **Interfaces:**
 - Produces: `ScreenshotRetention { enabled: bool, ttl: Duration, max_bytes: u64 }` defaulting to enabled, 24 hours, and 500 MiB.
@@ -420,31 +423,31 @@
 - Produces: metadata records with request ID, dimensions, block geometry/translations, created/expiry time, and relative crop filename; no composited result bitmap.
 - Consumes: Task 7 canonical documents; stores tightly bounded PNG only for the selected crop.
 
-- [ ] **Step 1: Add failing storage tests**
+- [x] **Step 1: Add failing storage tests**
 
   Test atomic crop/metadata write, no full-frame API, expiry at 24 hours, oldest-first 500 MiB eviction, startup orphan cleanup, disabled retention, delete-now, pinned/open expiry releasing pixels, permanent Save file, restrictive directory ACLs, and cleanup failure not blocking the caller.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation screenshot_store -- --nocapture`
   Run: `cargo test -p sayflex-desktop --features screen-translation settings_document -- --nocapture`
   Expected: FAIL because storage/settings fields do not exist.
 
-- [ ] **Step 3: Implement per-user atomic storage**
+- [x] **Step 3: Implement per-user atomic storage**
 
   Use `%LOCALAPPDATA%\SayFlex\screen-translations`, create a protected DACL for the current user plus Windows system/administrators, use temporary file plus atomic replace, checked dimensions/byte limits, relative filenames, and content-free diagnostics. Never accept a full `DesktopCapture`; accept only the selected `RgbaFrame`.
 
-- [ ] **Step 4: Wire startup/runtime cleanup and settings migration**
+- [x] **Step 4: Wire startup/runtime cleanup and settings migration**
 
   Add missing-field defaults without changing settings schema meaning. Run cleanup on startup and a bounded timer; update active documents when their files expire. Disabling future history stops new writes and offers explicit deletion separately.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation screenshot_store -- --nocapture`
   Run: `cargo test -p sayflex-desktop --features screen-translation settings_document -- --nocapture`
   Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   `git commit -m "feat(screen): retain selected crops with bounded cleanup"`
 

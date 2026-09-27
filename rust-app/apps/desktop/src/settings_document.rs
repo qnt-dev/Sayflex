@@ -171,6 +171,8 @@ impl SettingsStorage {
 /// fields are ignored on read and missing fields fall back to their default,
 /// so pure additions stay compatible in both directions.
 pub(crate) const SETTINGS_SCHEMA_VERSION: u32 = 1;
+pub(crate) const DEFAULT_SCREENSHOT_RETENTION_HOURS: u32 = 24;
+pub(crate) const DEFAULT_SCREENSHOT_RETENTION_BYTES: u64 = 500 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct SavedSettings {
@@ -199,6 +201,9 @@ pub(crate) struct SavedSettings {
     pub(crate) text_action_mode: TextActionMode,
     pub(crate) translation_delivery: TranslationDelivery,
     pub(crate) history_enabled: bool,
+    pub(crate) screenshot_retention_enabled: bool,
+    pub(crate) screenshot_retention_hours: u32,
+    pub(crate) screenshot_retention_max_bytes: u64,
     pub(crate) hotkeys: HotkeyBindings,
     /// The user's ordered transcription list. Empty means "never configured",
     /// and the worker keeps its own default of the local engine first.
@@ -234,6 +239,9 @@ impl Default for SavedSettings {
             text_action_mode: TextActionMode::default(),
             translation_delivery: TranslationDelivery::default(),
             history_enabled: true,
+            screenshot_retention_enabled: true,
+            screenshot_retention_hours: DEFAULT_SCREENSHOT_RETENTION_HOURS,
+            screenshot_retention_max_bytes: DEFAULT_SCREENSHOT_RETENTION_BYTES,
             hotkeys: HotkeyBindings::default(),
             transcription_providers: Vec::new(),
             translation_providers: Vec::new(),
@@ -369,6 +377,21 @@ impl<'de> Deserialize<'de> for SavedSettings {
             &mut settings.translation_delivery,
         );
         read(&document, "history_enabled", &mut settings.history_enabled);
+        read(
+            &document,
+            "screenshot_retention_enabled",
+            &mut settings.screenshot_retention_enabled,
+        );
+        read(
+            &document,
+            "screenshot_retention_hours",
+            &mut settings.screenshot_retention_hours,
+        );
+        read(
+            &document,
+            "screenshot_retention_max_bytes",
+            &mut settings.screenshot_retention_max_bytes,
+        );
         let has_hotkeys = document.contains_key("hotkeys");
         read(&document, "hotkeys", &mut settings.hotkeys);
         if !has_hotkeys {
@@ -417,6 +440,9 @@ impl SavedSettings {
             text_action_mode: state.text_action_mode,
             translation_delivery: state.translation_delivery,
             history_enabled: state.history_enabled,
+            screenshot_retention_enabled: state.screenshot_retention_enabled,
+            screenshot_retention_hours: state.screenshot_retention_hours,
+            screenshot_retention_max_bytes: state.screenshot_retention_max_bytes,
             hotkeys: state.hotkeys.clone(),
             transcription_providers: state.transcription_chain.clone(),
             translation_providers: state.translation_chain.clone(),
@@ -430,6 +456,8 @@ impl SavedSettings {
         self.translation_blur_radius = self
             .translation_blur_radius
             .min(MAX_TRANSLATION_BLUR_RADIUS);
+        self.screenshot_retention_hours = self.screenshot_retention_hours.max(1);
+        self.screenshot_retention_max_bytes = self.screenshot_retention_max_bytes.max(1);
         self.selected_model_id = self
             .selected_model_id
             .filter(|identifier| !identifier.trim().is_empty());
@@ -519,7 +547,8 @@ mod settings_document_tests {
     use tempfile::tempdir;
 
     use super::{
-        AppState, BroadcastMicPalette, FirstRunChoice, MAX_TRANSLATION_BLUR_RADIUS,
+        AppState, BroadcastMicPalette, DEFAULT_SCREENSHOT_RETENTION_BYTES,
+        DEFAULT_SCREENSHOT_RETENTION_HOURS, FirstRunChoice, MAX_TRANSLATION_BLUR_RADIUS,
         SETTINGS_SCHEMA_VERSION, SavedSettings, SettingsStorage, TextActionMode, VisualizerStyle,
         apply_first_run_choice, parse_settings,
     };
@@ -597,6 +626,18 @@ mod settings_document_tests {
             defaults.broadcast_mic_palette
         );
         assert_eq!(settings.pulse_matrix_palette, defaults.pulse_matrix_palette);
+        assert_eq!(
+            settings.screenshot_retention_enabled,
+            defaults.screenshot_retention_enabled
+        );
+        assert_eq!(
+            settings.screenshot_retention_hours,
+            DEFAULT_SCREENSHOT_RETENTION_HOURS
+        );
+        assert_eq!(
+            settings.screenshot_retention_max_bytes,
+            DEFAULT_SCREENSHOT_RETENTION_BYTES
+        );
         assert_eq!(
             settings.writing_slate_surface,
             defaults.writing_slate_surface
@@ -697,6 +738,9 @@ mod settings_document_tests {
             broadcast_mic_palette: BroadcastMicPalette::Red,
             pulse_matrix_palette: PulseMatrixPalette::RedAmber,
             text_action_mode: TextActionMode::default(),
+            screenshot_retention_enabled: false,
+            screenshot_retention_hours: 48,
+            screenshot_retention_max_bytes: 128 * 1024 * 1024,
             ..SavedSettings::default()
         };
 

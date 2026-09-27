@@ -16,6 +16,8 @@ mod overlay;
 #[cfg(windows)]
 mod popup_dismiss;
 #[cfg(windows)]
+mod private_directory;
+#[cfg(windows)]
 mod process_exit;
 #[cfg(windows)]
 mod process_resources;
@@ -51,6 +53,8 @@ pub use popup_dismiss::{
     PopupDismissMonitor, activate_popup_dismiss, deactivate_all_popup_dismiss,
     deactivate_popup_dismiss, set_popup_pinned,
 };
+#[cfg(windows)]
+pub use private_directory::protect_private_directory;
 #[cfg(windows)]
 pub use process_exit::watch_process_exit;
 #[cfg(windows)]

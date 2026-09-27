@@ -5776,6 +5776,7 @@ dependencies = [
  "pet_orb",
  "pet_particles",
  "pet_render",
+ "png",
  "qrcode",
  "rqrr",
  "rust-app-core",
@@ -5788,6 +5789,7 @@ dependencies = [
  "slint",
  "slint-build",
  "tempfile",
+ "thiserror 2.0.19",
  "unicode-segmentation",
  "winresource",
 ]

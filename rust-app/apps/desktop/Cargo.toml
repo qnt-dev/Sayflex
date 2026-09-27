@@ -17,9 +17,11 @@ rust-platform-windows = { version = "0.8.0", path = "../../crates/platform-windo
 rust-protocol = { version = "0.8.0", path = "../../crates/protocol" }
 rust-ocr-engine = { version = "0.8.0", path = "../../crates/ocr-engine", optional = true }
 qrcode = { version = "0.14.1", default-features = false }
+png = "0.18.1"
 serde.workspace = true
 serde_json.workspace = true
 slint.workspace = true
+thiserror.workspace = true
 unicode-segmentation.workspace = true
 
 [build-dependencies]

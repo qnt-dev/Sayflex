@@ -52,8 +52,7 @@ use rust_protocol::{
 };
 #[cfg(feature = "screen-translation")]
 use screen_result::{
-    DEFAULT_SCREENSHOT_RETENTION_MS, MIN_ADMITTED_OCR_CONFIDENCE_MILLI, ScreenTranslationDocument,
-    screen_blocks_from_ocr,
+    MIN_ADMITTED_OCR_CONFIDENCE_MILLI, ScreenTranslationDocument, screen_blocks_from_ocr,
 };
 #[cfg(feature = "screen-translation")]
 use screen_translation::SelectionFailure;
@@ -62,6 +61,8 @@ use screen_translation::{
     ScreenTranslationBegin, ScreenTranslationCancellation, ScreenTranslationFlow,
     SelectionTerminal,
 };
+#[cfg(feature = "screen-translation")]
+use screenshot_store::{ScreenshotMetadata, ScreenshotRetention, ScreenshotStore};
 use serde::{Deserialize, Serialize};
 use settings_document::{
     SavedSettings, apply_first_run_choice, data_root, load_settings, save_first_run_settings,
@@ -112,6 +113,8 @@ mod resource_view;
 #[cfg(feature = "screen-translation")]
 mod screen_result;
 mod screen_translation;
+#[cfg(feature = "screen-translation")]
+mod screenshot_store;
 mod settings_document;
 mod settings_preview;
 mod settings_projection;
@@ -319,6 +322,8 @@ struct RuntimeUi {
     #[cfg(feature = "screen-translation")]
     screen_capture_backend:
         Arc<rust_platform_windows::screen_capture::WindowsDesktopCaptureBackend>,
+    #[cfg(feature = "screen-translation")]
+    screenshot_store: Option<Arc<ScreenshotStore>>,
 }
 
 /// The recording HUD deliberately owns two native windows. A Winit/DWM
@@ -748,6 +753,9 @@ struct AppState {
     text_action_mode: TextActionMode,
     translation_delivery: TranslationDelivery,
     history_enabled: bool,
+    screenshot_retention_enabled: bool,
+    screenshot_retention_hours: u32,
+    screenshot_retention_max_bytes: u64,
     ui_locale: UiLocale,
     pending_text_action: Option<PendingTextAction>,
     pending_selection_captures: HashMap<RequestId, u64>,
@@ -905,6 +913,9 @@ impl AppState {
             pending_credentials: HashMap::new(),
             provider_drafts: ProviderDraftStore::default(),
             history_enabled: saved_settings.history_enabled,
+            screenshot_retention_enabled: saved_settings.screenshot_retention_enabled,
+            screenshot_retention_hours: saved_settings.screenshot_retention_hours,
+            screenshot_retention_max_bytes: saved_settings.screenshot_retention_max_bytes,
             ui_locale: saved_settings.ui_locale,
         }
     }
@@ -1170,6 +1181,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     support_action::configure_support_window(&support)?;
     let loaded_settings = load_settings();
     let mut saved_settings = loaded_settings.settings;
+    #[cfg(feature = "screen-translation")]
+    let screenshot_store = {
+        let retention = ScreenshotRetention {
+            enabled: saved_settings.screenshot_retention_enabled,
+            ttl: std::time::Duration::from_secs(
+                u64::from(saved_settings.screenshot_retention_hours).saturating_mul(60 * 60),
+            ),
+            max_bytes: saved_settings.screenshot_retention_max_bytes,
+        };
+        match ScreenshotStore::open_default(retention) {
+            Ok(store) => {
+                let store = Arc::new(store);
+                let cleanup_store = Arc::clone(&store);
+                let _ = std::thread::Builder::new()
+                    .name("screen-snapshot-cleanup".to_owned())
+                    .spawn(move || {
+                        let report = cleanup_store.cleanup(unix_ms());
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "screen_snapshot_cleanup removed_entries={} removed_orphans={} errors={}",
+                            report.removed_entries, report.removed_orphans, report.error_count
+                        ));
+                    });
+                Some(store)
+            }
+            Err(error) => {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "screen_snapshot_store result=unavailable error={error}"
+                ));
+                None
+            }
+        }
+    };
     let system_locale = rust_platform_windows::user_locale_name();
     slint::select_bundled_translation(saved_settings.ui_locale.resolved_code(&system_locale))?;
     if loaded_settings.needs_first_run_choice {
@@ -1460,6 +1503,45 @@ fn main() -> Result<(), Box<dyn Error>> {
     )));
     let screen_translation = Rc::new(RefCell::new(ScreenTranslationFlow::default()));
     #[cfg(feature = "screen-translation")]
+    let screenshot_cleanup_timer = {
+        let timer = Timer::default();
+        let cleanup_store = screenshot_store.clone();
+        let cleanup_state = Rc::clone(&state);
+        let cleanup_running = Arc::new(AtomicBool::new(false));
+        timer.start(
+            TimerMode::Repeated,
+            std::time::Duration::from_secs(15 * 60),
+            move || {
+                let now = unix_ms();
+                for document in cleanup_state.borrow_mut().screen_documents.values_mut() {
+                    document.expire_pixels(now);
+                }
+                let Some(store) = cleanup_store.as_ref().map(Arc::clone) else {
+                    return;
+                };
+                if cleanup_running.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                let running_for_thread = Arc::clone(&cleanup_running);
+                if std::thread::Builder::new()
+                    .name("screen-snapshot-cleanup".to_owned())
+                    .spawn(move || {
+                        let report = store.cleanup(now);
+                        rust_app_core::diagnostics::log_line(&format!(
+                            "screen_snapshot_cleanup removed_entries={} removed_orphans={} errors={}",
+                            report.removed_entries, report.removed_orphans, report.error_count
+                        ));
+                        running_for_thread.store(false, Ordering::Release);
+                    })
+                    .is_err()
+                {
+                    cleanup_running.store(false, Ordering::Release);
+                }
+            },
+        );
+        timer
+    };
+    #[cfg(feature = "screen-translation")]
     let screen_capture_backend =
         Arc::new(rust_platform_windows::screen_capture::WindowsDesktopCaptureBackend::default());
     install_runtime_handler(RuntimeUi {
@@ -1478,6 +1560,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         screen_translation,
         #[cfg(feature = "screen-translation")]
         screen_capture_backend,
+        #[cfg(feature = "screen-translation")]
+        screenshot_store: screenshot_store.clone(),
     });
     session_event_router.attach_runtime();
     let _popup_dismiss_monitor = match rust_platform_windows::PopupDismissMonitor::start(
@@ -1521,6 +1605,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     slint::run_event_loop()?;
     animation_timer.stop();
     resource_timer.stop();
+    #[cfg(feature = "screen-translation")]
+    screenshot_cleanup_timer.stop();
     UI_EVENT_HANDLER.with(|handler| {
         handler.borrow_mut().take();
     });
@@ -2753,13 +2839,16 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                         .pending_screen_contexts
                         .remove(&request_id)
                         .unwrap_or_default();
+                    let retained_crop = Arc::clone(&crop);
+                    let retention_ms = u64::from(runtime.state.borrow().screenshot_retention_hours)
+                        .saturating_mul(60 * 60 * 1_000);
                     let document = match ScreenTranslationDocument::new(
                         request_id,
                         crop,
                         blocks,
                         context,
                         created_unix_ms,
-                        created_unix_ms.saturating_add(DEFAULT_SCREENSHOT_RETENTION_MS),
+                        created_unix_ms.saturating_add(retention_ms),
                     ) {
                         Ok(document) => document,
                         Err(error) => {
@@ -2786,6 +2875,40 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                         document.context.partial,
                         document.created_unix_ms,
                     ));
+                    if let Some(store) = runtime.screenshot_store.as_ref() {
+                        let metadata = ScreenshotMetadata {
+                            request_id,
+                            crop_x: crop_rect.x,
+                            crop_y: crop_rect.y,
+                            width: crop_rect.width,
+                            height: crop_rect.height,
+                            blocks: document.source_blocks(),
+                            translations: Vec::new(),
+                            context: document.context.clone(),
+                            created_unix_ms: document.created_unix_ms,
+                            expires_unix_ms: document.expires_unix_ms,
+                            crop_filename: String::new(),
+                        };
+                        let store = Arc::clone(store);
+                        let _ = std::thread::Builder::new()
+                            .name("screen-snapshot-write".to_owned())
+                            .spawn(move || {
+                                let result = store.persist_crop(metadata, retained_crop.as_ref());
+                                match result {
+                                    Ok(_) => {
+                                        let report = store.cleanup(unix_ms());
+                                        rust_app_core::diagnostics::log_line(&format!(
+                                            "screen_snapshot request={request_id} result=stored cleanup_removed={} cleanup_errors={}",
+                                            report.removed_entries + report.removed_orphans,
+                                            report.error_count
+                                        ));
+                                    }
+                                    Err(error) => rust_app_core::diagnostics::log_line(&format!(
+                                        "screen_snapshot request={request_id} result=failed error={error}"
+                                    )),
+                                }
+                            });
+                    }
                     runtime
                         .state
                         .borrow_mut()
