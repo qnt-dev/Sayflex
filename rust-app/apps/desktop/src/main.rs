@@ -5273,6 +5273,17 @@ fn handle_translation_event(
                 ));
             }
         }
+        event @ (TranslationWorkerEvent::ScreenBlockPartial { .. }
+        | TranslationWorkerEvent::ScreenBlocksCompleted { .. }
+        | TranslationWorkerEvent::GlossaryList { .. }
+        | TranslationWorkerEvent::GlossarySaved { .. }
+        | TranslationWorkerEvent::GlossaryDeleted { .. }
+        | TranslationWorkerEvent::GlossaryFailed { .. }) => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_worker event={} stage=awaiting_feature_owner",
+                rust_protocol::translation_event_name(&event)
+            ));
+        }
         TranslationWorkerEvent::Completed {
             result,
             created_unix_ms,

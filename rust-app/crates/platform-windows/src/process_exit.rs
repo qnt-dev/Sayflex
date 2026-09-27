@@ -73,6 +73,7 @@ pub fn watch_process_exit(
 #[cfg(test)]
 mod tests {
     use std::{
+        os::windows::process::CommandExt,
         process::{Command, Stdio},
         sync::mpsc,
         time::{Duration, Instant},
@@ -82,13 +83,14 @@ mod tests {
 
     #[test]
     fn reports_the_real_process_exit_code() {
-        let mut child = Command::new("cmd.exe")
+        let mut command = Command::new("cmd.exe");
+        command
             .args(["/D", "/C", "exit 42"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .creation_flags(0x0800_0000);
+        let mut child = command.spawn().unwrap();
         let (sender, receiver) = mpsc::sync_channel(1);
         watch_process_exit(&child, Instant::now(), move |exit| {
             let _ = sender.send(exit);

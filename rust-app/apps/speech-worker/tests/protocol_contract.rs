@@ -16,6 +16,12 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 const WORKER: &str = env!("CARGO_BIN_EXE_sayflex-speech-worker");
 
 struct Worker {
@@ -26,12 +32,16 @@ struct Worker {
 
 impl Worker {
     fn start() -> Self {
-        let mut child = Command::new(WORKER)
+        let mut command = Command::new(WORKER);
+        command
             .arg("--protocol-smoke")
             .env("SAYFLEX_RUN_PROTOCOL_SMOKE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let mut child = command
             .spawn()
             .expect("the speech worker is built by cargo test");
         let input = child.stdin.take().expect("piped stdin");
@@ -152,11 +162,13 @@ fn shutdown_ends_the_process() {
 fn a_diagnostic_mode_is_refused_without_its_opt_in() {
     // The mode is present in a release build, so what keeps it out of the
     // ordinary lifecycle is the explicit environment opt-in.
-    let output = Command::new(WORKER)
+    let mut command = Command::new(WORKER);
+    command
         .arg("--protocol-smoke")
-        .env_remove("SAYFLEX_RUN_PROTOCOL_SMOKE")
-        .output()
-        .expect("the worker runs");
+        .env_remove("SAYFLEX_RUN_PROTOCOL_SMOKE");
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().expect("the worker runs");
 
     assert!(!output.status.success());
 }

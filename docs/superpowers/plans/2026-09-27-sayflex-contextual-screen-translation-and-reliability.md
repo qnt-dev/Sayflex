@@ -286,6 +286,9 @@
 - Modify: `rust-app/crates/protocol/src/lib.rs`
 - Modify: `rust-app/apps/speech-worker/tests/protocol_contract.rs`
 - Modify: `rust-app/crates/app-core/tests/worker_process_contract.rs`
+- Modify: `rust-app/apps/translation-worker/src/main.rs`
+- Modify: `rust-app/apps/desktop/src/main.rs`
+- Modify: `rust-app/crates/platform-windows/src/process_exit.rs`
 
 **Interfaces:**
 - Produces: `ScreenBlockId(String)` with non-empty bounded validation at consumers.
@@ -294,25 +297,25 @@
 - Produces: `BlockCompletion::{Completed, LimitReached, Cancelled, Failed}` and `TranslatedScreenBlock`.
 - Produces: `TranslationWorkerCommand::TranslateBlocks`, glossary CRUD/confirm commands, and corresponding partial/completed/list/saved/failed events; existing enum variants and JSON names remain compatible.
 
-- [ ] **Step 1: Add failing JSON round-trip and compatibility tests**
+- [x] **Step 1: Add failing JSON round-trip and compatibility tests**
 
   Assert exact JSON names, omitted optional context, negative physical origins, duplicate/empty ID rejection at the validation layer, four completion states, glossary origin, and successful decoding of every previously persisted command/event fixture.
 
-- [ ] **Step 2: Run protocol tests and verify RED**
+- [x] **Step 2: Run protocol tests and verify RED**
 
   Run: `cargo test -p rust-protocol -p rust-app-core worker_process_contract -- --nocapture`
   Expected: new contract tests fail because the types and variants do not exist.
 
-- [ ] **Step 3: Implement additive protocol types and size limits**
+- [x] **Step 3: Implement additive protocol types and size limits**
 
   Add the exact types above without image bytes. Bound block count, ID/text/context lengths at the worker command boundary; keep ordinary `Translate` and `TranslationResult` unchanged.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
   Run: `cargo test -p rust-protocol -p rust-app-core -- --nocapture`
   Expected: PASS, including old protocol fixture compatibility.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   `git commit -m "feat(protocol): add contextual screen block contracts"`
 

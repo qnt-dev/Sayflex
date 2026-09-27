@@ -562,6 +562,9 @@ fn main() -> Result<()> {
                 continue;
             }
         };
+        if reject_invalid_bounded_command(&command, &writer)? {
+            continue;
+        }
         if matches!(command, TranslationWorkerCommand::Shutdown) {
             break;
         }
@@ -598,6 +601,39 @@ fn main() -> Result<()> {
         drop(output_thread);
     }
     Ok(())
+}
+
+fn reject_invalid_bounded_command(
+    command: &TranslationWorkerCommand,
+    writer: &EventWriter,
+) -> Result<bool> {
+    let Err(error) = command.validate_limits() else {
+        return Ok(false);
+    };
+    match command {
+        TranslationWorkerCommand::SaveGlossaryEntry { operation_id, .. }
+        | TranslationWorkerCommand::ListGlossary { operation_id, .. }
+        | TranslationWorkerCommand::UpdateGlossaryEntry { operation_id, .. }
+        | TranslationWorkerCommand::DeleteGlossaryEntry { operation_id, .. } => {
+            writer.send(&TranslationWorkerEvent::GlossaryFailed {
+                operation_id: *operation_id,
+                code: "invalid_command".to_owned(),
+                message: error.to_string(),
+                retryable: false,
+            })?;
+        }
+        TranslationWorkerCommand::TranslateBlocks { request_id, .. } => {
+            writer.send(&TranslationWorkerEvent::Failed {
+                request_id: Some(*request_id),
+                catalog_id: None,
+                code: "invalid_command".to_owned(),
+                message: error.to_string(),
+                retryable: false,
+            })?;
+        }
+        _ => unreachable!("only bounded extension commands are validated"),
+    }
+    Ok(true)
 }
 
 fn handle_command(
@@ -667,6 +703,26 @@ fn handle_command(
                     language_policy,
                 },
             )?;
+        }
+        TranslationWorkerCommand::TranslateBlocks { request_id, .. } => {
+            writer.send(&TranslationWorkerEvent::Failed {
+                request_id: Some(request_id),
+                catalog_id: None,
+                code: "contextual_translation_not_ready".to_owned(),
+                message: "contextual block translation is not initialized".to_owned(),
+                retryable: false,
+            })?;
+        }
+        TranslationWorkerCommand::SaveGlossaryEntry { operation_id, .. }
+        | TranslationWorkerCommand::ListGlossary { operation_id, .. }
+        | TranslationWorkerCommand::UpdateGlossaryEntry { operation_id, .. }
+        | TranslationWorkerCommand::DeleteGlossaryEntry { operation_id, .. } => {
+            writer.send(&TranslationWorkerEvent::GlossaryFailed {
+                operation_id,
+                code: "glossary_not_ready".to_owned(),
+                message: "personal glossary storage is not initialized".to_owned(),
+                retryable: false,
+            })?;
         }
         TranslationWorkerCommand::Cancel { request_id } => {
             coordinator.cancel(request_id);

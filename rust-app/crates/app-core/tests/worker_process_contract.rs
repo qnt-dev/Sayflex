@@ -11,7 +11,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use rust_app_core::worker_stream::{JsonWriter, SendError, WORKER_COMMAND_QUEUE};
+use rust_protocol::{
+    PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext, TranslationLanguage,
+    TranslationLanguagePolicy, TranslationWorkerCommand,
+};
 
 const CONTRACT_WORKER: &str = env!("CARGO_BIN_EXE_contract_worker");
 
@@ -25,11 +32,15 @@ impl Drop for ChildGuard {
 }
 
 fn spawn(mode: &str) -> ChildGuard {
+    let mut command = Command::new(CONTRACT_WORKER);
+    command
+        .arg(mode)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
     ChildGuard(
-        Command::new(CONTRACT_WORKER)
-            .arg(mode)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+        command
             .spawn()
             .expect("the contract worker binary is built by cargo test"),
     )
@@ -95,5 +106,52 @@ fn a_worker_that_stops_reading_cannot_block_the_sender() {
         started.elapsed() < Duration::from_secs(10),
         "the sender must never wait on the pipe, took {:?}",
         started.elapsed()
+    );
+}
+
+#[test]
+fn contextual_screen_commands_cross_the_worker_pipe_whole() {
+    let mut worker = spawn("echo");
+    let stdin = worker.0.stdin.take().expect("piped stdin");
+    let stdout = worker.0.stdout.take().expect("piped stdout");
+    let writer = JsonWriter::start(stdin, "contextual-screen-contract").expect("writer thread");
+    let command = TranslationWorkerCommand::TranslateBlocks {
+        request_id: RequestId::new(),
+        base_revision: 19,
+        blocks: vec![ScreenTextBlock {
+            block_id: ScreenBlockId::from("column-2-line-3"),
+            source_text: "Open settings".to_owned(),
+            bounds: PhysicalRect {
+                x: -800,
+                y: 120,
+                width: 240,
+                height: 38,
+            },
+            confidence_milli: 944,
+        }],
+        context: SourceContext {
+            application_id: Some("org.example.game".to_owned()),
+            partial: false,
+            ..SourceContext::default()
+        },
+        source_language: Some(TranslationLanguage::English),
+        target_language: Some(TranslationLanguage::Russian),
+        language_policy: TranslationLanguagePolicy::default(),
+    };
+
+    writer.send(&command).expect("command is deliverable");
+    writer.send(&"shutdown").expect("shutdown is deliverable");
+
+    let line = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("one response")
+        .expect("valid response line");
+    let reply: serde_json::Value = serde_json::from_str(&line).expect("one JSON document");
+    let echoed = reply["echoed"].as_str().expect("serialized command");
+
+    assert_eq!(
+        serde_json::from_str::<TranslationWorkerCommand>(echoed).unwrap(),
+        command
     );
 }

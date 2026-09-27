@@ -8,6 +8,8 @@ use uuid::Uuid;
 // events, and per-action hotkey application failures.
 // Version 25 adds the screen-translation hotkey and local OCR worker protocol.
 // Version 26 adds explicit in-memory model release commands for Resources.
+// Version 30 adds contextual screen blocks, explicit block completion, and
+// personal-glossary commands/events without changing the legacy text path.
 // All packaged processes must agree on this schema before exchanging commands.
 /// The shape of every message in this file, as one number.
 ///
@@ -18,7 +20,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 29;
+pub const PROTOCOL_VERSION: u32 = 30;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -982,6 +984,185 @@ pub struct PhysicalRect {
     pub height: u32,
 }
 
+pub const MAX_SCREEN_BLOCKS: usize = 512;
+pub const MAX_SCREEN_BLOCK_ID_BYTES: usize = 128;
+pub const MAX_SCREEN_BLOCK_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_SCREEN_SOURCE_TEXT_BYTES: usize = 1024 * 1024;
+pub const MAX_SOURCE_CONTEXT_FIELD_BYTES: usize = 16 * 1024;
+pub const MAX_SOURCE_CONTEXT_NEARBY_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_GLOSSARY_FIELD_BYTES: usize = 16 * 1024;
+pub const MAX_GLOSSARY_EXAMPLES: usize = 32;
+pub const MAX_GLOSSARY_LIST_LIMIT: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ScreenBlockId(String);
+
+impl ScreenBlockId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ScreenBlockId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<String> for ScreenBlockId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GlossaryEntryId(String);
+
+impl GlossaryEntryId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for GlossaryEntryId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<String> for GlossaryEntryId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenTextBlock {
+    pub block_id: ScreenBlockId,
+    pub source_text: String,
+    pub bounds: PhysicalRect,
+    pub confidence_milli: u16,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nearby_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub partial: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockCompletion {
+    Completed,
+    LimitReached,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslatedScreenBlock {
+    pub block_id: ScreenBlockId,
+    pub translated_text: String,
+    pub completion: BlockCompletion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GlossaryOrigin {
+    Corrected,
+    Confirmed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlossaryEntryDraft {
+    pub source_phrase: String,
+    pub approved_translation: String,
+    pub source_language: TranslationLanguage,
+    pub target_language: TranslationLanguage,
+    pub example: String,
+    pub context: SourceContext,
+    pub origin: GlossaryOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlossaryEntry {
+    pub entry_id: GlossaryEntryId,
+    pub source_phrase: String,
+    pub approved_translation: String,
+    pub source_language: TranslationLanguage,
+    pub target_language: TranslationLanguage,
+    pub examples: Vec<String>,
+    pub context: SourceContext,
+    pub origin: GlossaryOrigin,
+    pub created_unix_ms: u64,
+    pub updated_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationCommandValidationError {
+    TooManyBlocks,
+    EmptyBlockId,
+    BlockIdTooLong,
+    DuplicateBlockId,
+    EmptyBlockText,
+    BlockTextTooLong,
+    TotalBlockTextTooLong,
+    InvalidBlockBounds,
+    InvalidConfidence,
+    ContextFieldTooLong,
+    EmptyGlossaryEntryId,
+    GlossaryEntryIdTooLong,
+    EmptyGlossaryField,
+    GlossaryFieldTooLong,
+    TooManyGlossaryExamples,
+    GlossaryListLimitTooLarge,
+}
+
+impl fmt::Display for TranslationCommandValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TooManyBlocks => "too many screen text blocks",
+            Self::EmptyBlockId => "screen block id is empty",
+            Self::BlockIdTooLong => "screen block id is too long",
+            Self::DuplicateBlockId => "screen block id is duplicated",
+            Self::EmptyBlockText => "screen block text is empty",
+            Self::BlockTextTooLong => "screen block text is too long",
+            Self::TotalBlockTextTooLong => "screen block text total is too long",
+            Self::InvalidBlockBounds => "screen block bounds are empty",
+            Self::InvalidConfidence => "screen block confidence is outside 0..=1000",
+            Self::ContextFieldTooLong => "source context field is too long",
+            Self::EmptyGlossaryEntryId => "glossary entry id is empty",
+            Self::GlossaryEntryIdTooLong => "glossary entry id is too long",
+            Self::EmptyGlossaryField => "required glossary field is empty",
+            Self::GlossaryFieldTooLong => "glossary field is too long",
+            Self::TooManyGlossaryExamples => "too many glossary examples",
+            Self::GlossaryListLimitTooLarge => "glossary list limit is too large",
+        })
+    }
+}
+
+impl std::error::Error for TranslationCommandValidationError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OcrLanguagePolicy {
@@ -1090,6 +1271,37 @@ pub enum TranslationWorkerCommand {
         target_language: Option<TranslationLanguage>,
         language_policy: TranslationLanguagePolicy,
     },
+    TranslateBlocks {
+        request_id: RequestId,
+        base_revision: u64,
+        blocks: Vec<ScreenTextBlock>,
+        context: SourceContext,
+        source_language: Option<TranslationLanguage>,
+        target_language: Option<TranslationLanguage>,
+        language_policy: TranslationLanguagePolicy,
+    },
+    SaveGlossaryEntry {
+        operation_id: RequestId,
+        request_id: RequestId,
+        block_id: ScreenBlockId,
+        expected_revision: u64,
+        entry: GlossaryEntryDraft,
+    },
+    ListGlossary {
+        operation_id: RequestId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        limit: usize,
+    },
+    UpdateGlossaryEntry {
+        operation_id: RequestId,
+        entry_id: GlossaryEntryId,
+        entry: GlossaryEntryDraft,
+    },
+    DeleteGlossaryEntry {
+        operation_id: RequestId,
+        entry_id: GlossaryEntryId,
+    },
     Cancel {
         request_id: RequestId,
     },
@@ -1115,6 +1327,141 @@ pub enum TranslationWorkerCommand {
     },
     ClearHistory,
     Shutdown,
+}
+
+impl TranslationWorkerCommand {
+    pub fn validate_limits(&self) -> Result<(), TranslationCommandValidationError> {
+        match self {
+            Self::TranslateBlocks {
+                blocks, context, ..
+            } => validate_screen_blocks(blocks, context),
+            Self::SaveGlossaryEntry {
+                block_id, entry, ..
+            } => {
+                validate_block_id(block_id)?;
+                validate_glossary_draft(entry)
+            }
+            Self::ListGlossary { query, limit, .. } => {
+                if *limit > MAX_GLOSSARY_LIST_LIMIT {
+                    return Err(TranslationCommandValidationError::GlossaryListLimitTooLarge);
+                }
+                if query
+                    .as_ref()
+                    .is_some_and(|value| value.len() > MAX_GLOSSARY_FIELD_BYTES)
+                {
+                    return Err(TranslationCommandValidationError::GlossaryFieldTooLong);
+                }
+                Ok(())
+            }
+            Self::UpdateGlossaryEntry {
+                entry_id, entry, ..
+            } => {
+                validate_glossary_entry_id(entry_id)?;
+                validate_glossary_draft(entry)
+            }
+            Self::DeleteGlossaryEntry { entry_id, .. } => validate_glossary_entry_id(entry_id),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn validate_screen_blocks(
+    blocks: &[ScreenTextBlock],
+    context: &SourceContext,
+) -> Result<(), TranslationCommandValidationError> {
+    if blocks.len() > MAX_SCREEN_BLOCKS {
+        return Err(TranslationCommandValidationError::TooManyBlocks);
+    }
+    let mut ids = std::collections::HashSet::with_capacity(blocks.len());
+    let mut total_text_bytes = 0_usize;
+    for block in blocks {
+        validate_block_id(&block.block_id)?;
+        if !ids.insert(block.block_id.as_str()) {
+            return Err(TranslationCommandValidationError::DuplicateBlockId);
+        }
+        if block.source_text.trim().is_empty() {
+            return Err(TranslationCommandValidationError::EmptyBlockText);
+        }
+        if block.source_text.len() > MAX_SCREEN_BLOCK_TEXT_BYTES {
+            return Err(TranslationCommandValidationError::BlockTextTooLong);
+        }
+        total_text_bytes = total_text_bytes.saturating_add(block.source_text.len());
+        if total_text_bytes > MAX_SCREEN_SOURCE_TEXT_BYTES {
+            return Err(TranslationCommandValidationError::TotalBlockTextTooLong);
+        }
+        if block.bounds.width == 0 || block.bounds.height == 0 {
+            return Err(TranslationCommandValidationError::InvalidBlockBounds);
+        }
+        if block.confidence_milli > 1_000 {
+            return Err(TranslationCommandValidationError::InvalidConfidence);
+        }
+    }
+    validate_source_context(context)
+}
+
+fn validate_block_id(block_id: &ScreenBlockId) -> Result<(), TranslationCommandValidationError> {
+    if block_id.as_str().trim().is_empty() {
+        return Err(TranslationCommandValidationError::EmptyBlockId);
+    }
+    if block_id.as_str().len() > MAX_SCREEN_BLOCK_ID_BYTES {
+        return Err(TranslationCommandValidationError::BlockIdTooLong);
+    }
+    Ok(())
+}
+
+fn validate_glossary_entry_id(
+    entry_id: &GlossaryEntryId,
+) -> Result<(), TranslationCommandValidationError> {
+    if entry_id.as_str().trim().is_empty() {
+        return Err(TranslationCommandValidationError::EmptyGlossaryEntryId);
+    }
+    if entry_id.as_str().len() > MAX_SCREEN_BLOCK_ID_BYTES {
+        return Err(TranslationCommandValidationError::GlossaryEntryIdTooLong);
+    }
+    Ok(())
+}
+
+fn validate_glossary_draft(
+    entry: &GlossaryEntryDraft,
+) -> Result<(), TranslationCommandValidationError> {
+    for value in [
+        entry.source_phrase.as_str(),
+        entry.approved_translation.as_str(),
+        entry.example.as_str(),
+    ] {
+        if value.trim().is_empty() {
+            return Err(TranslationCommandValidationError::EmptyGlossaryField);
+        }
+        if value.len() > MAX_GLOSSARY_FIELD_BYTES {
+            return Err(TranslationCommandValidationError::GlossaryFieldTooLong);
+        }
+    }
+    validate_source_context(&entry.context)
+}
+
+fn validate_source_context(
+    context: &SourceContext,
+) -> Result<(), TranslationCommandValidationError> {
+    let ordinary = [
+        &context.application_id,
+        &context.executable_name,
+        &context.window_title,
+        &context.site_url,
+        &context.document_name,
+        &context.domain,
+    ];
+    if ordinary
+        .into_iter()
+        .flatten()
+        .any(|value| value.len() > MAX_SOURCE_CONTEXT_FIELD_BYTES)
+        || context
+            .nearby_text
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_SOURCE_CONTEXT_NEARBY_TEXT_BYTES)
+    {
+        return Err(TranslationCommandValidationError::ContextFieldTooLong);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1173,6 +1520,36 @@ pub enum TranslationWorkerEvent {
         tokenize_duration_ms: u64,
         chunk_index: u32,
         chunk_count: u32,
+    },
+    ScreenBlockPartial {
+        request_id: RequestId,
+        base_revision: u64,
+        block_id: ScreenBlockId,
+        translated_text: String,
+    },
+    ScreenBlocksCompleted {
+        request_id: RequestId,
+        base_revision: u64,
+        blocks: Vec<TranslatedScreenBlock>,
+        processing_duration_ms: u64,
+    },
+    GlossaryList {
+        operation_id: RequestId,
+        entries: Vec<GlossaryEntry>,
+    },
+    GlossarySaved {
+        operation_id: RequestId,
+        entry: GlossaryEntry,
+    },
+    GlossaryDeleted {
+        operation_id: RequestId,
+        entry_id: GlossaryEntryId,
+    },
+    GlossaryFailed {
+        operation_id: RequestId,
+        code: String,
+        message: String,
+        retryable: bool,
     },
     Completed {
         result: TranslationResult,
@@ -1443,14 +1820,15 @@ pub enum CompanionRendererEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompanionRendererCommand, DictationCommand, DictationLanguage, HotkeyAction,
-        HotkeyBindings, HotkeyConfiguration, HotkeySpec, InputHostCommand, InputHostEvent,
-        InsertionDelivery, InsertionMethod, OcrLanguagePolicy, OcrPixelFormat, OcrWorkerCommand,
-        OcrWorkerEvent, RequestId, SelectionCaptureTiming, SessionId, SpeechWorkerCommand,
+        BlockCompletion, CompanionRendererCommand, DictationCommand, DictationLanguage,
+        GlossaryOrigin, HotkeyAction, HotkeyBindings, HotkeyConfiguration, HotkeySpec,
+        InputHostCommand, InputHostEvent, InsertionDelivery, InsertionMethod, OcrLanguagePolicy,
+        OcrPixelFormat, OcrWorkerCommand, OcrWorkerEvent, PhysicalRect, RequestId, ScreenBlockId,
+        ScreenTextBlock, SelectionCaptureTiming, SessionId, SourceContext, SpeechWorkerCommand,
         SpeechWorkerEvent, TargetSnapshot, TextActionIntent, Transcript, TranscriptionLatency,
-        TranslationAttemptReport, TranslationFailureKind, TranslationFailureReport,
-        TranslationLanguage, TranslationResult, TranslationTier, TranslationWorkerCommand,
-        TranslationWorkerEvent,
+        TranslationAttemptReport, TranslationCommandValidationError, TranslationFailureKind,
+        TranslationFailureReport, TranslationLanguage, TranslationLanguagePolicy,
+        TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
     };
 
     fn round_trip<T>(value: T)
@@ -1782,6 +2160,123 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn contextual_screen_command_has_bounded_stable_json() {
+        let request_id = RequestId::new();
+        let command = TranslationWorkerCommand::TranslateBlocks {
+            request_id,
+            base_revision: 7,
+            blocks: vec![ScreenTextBlock {
+                block_id: ScreenBlockId::from("block-1"),
+                source_text: "Cooldown 2s".to_owned(),
+                bounds: PhysicalRect {
+                    x: -120,
+                    y: 48,
+                    width: 320,
+                    height: 42,
+                },
+                confidence_milli: 987,
+            }],
+            context: SourceContext {
+                executable_name: Some("game.exe".to_owned()),
+                domain: Some("dota-2".to_owned()),
+                partial: true,
+                ..SourceContext::default()
+            },
+            source_language: Some(TranslationLanguage::English),
+            target_language: Some(TranslationLanguage::Russian),
+            language_policy: TranslationLanguagePolicy::default(),
+        };
+
+        command.validate_limits().unwrap();
+        let value = serde_json::to_value(&command).unwrap();
+        assert_eq!(value["type"], "translate_blocks");
+        assert_eq!(value["payload"]["blocks"][0]["block_id"], "block-1");
+        assert_eq!(value["payload"]["blocks"][0]["bounds"]["x"], -120);
+        assert_eq!(value["payload"]["context"]["partial"], true);
+        assert!(value["payload"]["context"].get("site_url").is_none());
+        assert!(value["payload"]["context"].get("nearby_text").is_none());
+        assert_eq!(
+            serde_json::from_value::<TranslationWorkerCommand>(value).unwrap(),
+            command
+        );
+    }
+
+    #[test]
+    fn contextual_screen_validation_rejects_empty_and_duplicate_ids() {
+        let block = |id: &str| ScreenTextBlock {
+            block_id: ScreenBlockId::from(id),
+            source_text: "text".to_owned(),
+            bounds: PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            confidence_milli: 900,
+        };
+        let command = |blocks| TranslationWorkerCommand::TranslateBlocks {
+            request_id: RequestId::new(),
+            base_revision: 0,
+            blocks,
+            context: SourceContext::default(),
+            source_language: None,
+            target_language: Some(TranslationLanguage::Russian),
+            language_policy: TranslationLanguagePolicy::default(),
+        };
+
+        assert_eq!(
+            command(vec![block("  ")]).validate_limits(),
+            Err(TranslationCommandValidationError::EmptyBlockId)
+        );
+        assert_eq!(
+            command(vec![block("same"), block("same")]).validate_limits(),
+            Err(TranslationCommandValidationError::DuplicateBlockId)
+        );
+    }
+
+    #[test]
+    fn block_completion_and_glossary_origin_have_exact_wire_names() {
+        for (completion, expected) in [
+            (BlockCompletion::Completed, "completed"),
+            (BlockCompletion::LimitReached, "limit_reached"),
+            (BlockCompletion::Cancelled, "cancelled"),
+            (BlockCompletion::Failed, "failed"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&completion).unwrap(),
+                format!("\"{expected}\"")
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&GlossaryOrigin::Corrected).unwrap(),
+            "\"corrected\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GlossaryOrigin::Confirmed).unwrap(),
+            "\"confirmed\""
+        );
+    }
+
+    #[test]
+    fn protocol_extension_still_decodes_the_previous_translate_fixture() {
+        let fixture = r#"{
+            "type":"translate",
+            "payload":{
+                "request_id":"00000000-0000-0000-0000-000000000001",
+                "text":"hello",
+                "source_language":"english",
+                "target_language":"russian",
+                "language_policy":{"primary":"english","secondary":"russian"}
+            }
+        }"#;
+
+        assert!(matches!(
+            serde_json::from_str::<TranslationWorkerCommand>(fixture).unwrap(),
+            TranslationWorkerCommand::Translate { text, .. } if text == "hello"
+        ));
+    }
 }
 
 /// The name every message carries on the wire, from an exhaustive match.
@@ -1801,6 +2296,12 @@ pub fn translation_event_name(event: &TranslationWorkerEvent) -> &'static str {
         TranslationWorkerEvent::LocalModelState { .. } => "local_model_state",
         TranslationWorkerEvent::ModelRemoved { .. } => "model_removed",
         TranslationWorkerEvent::Partial { .. } => "partial",
+        TranslationWorkerEvent::ScreenBlockPartial { .. } => "screen_block_partial",
+        TranslationWorkerEvent::ScreenBlocksCompleted { .. } => "screen_blocks_completed",
+        TranslationWorkerEvent::GlossaryList { .. } => "glossary_list",
+        TranslationWorkerEvent::GlossarySaved { .. } => "glossary_saved",
+        TranslationWorkerEvent::GlossaryDeleted { .. } => "glossary_deleted",
+        TranslationWorkerEvent::GlossaryFailed { .. } => "glossary_failed",
         TranslationWorkerEvent::Completed { .. } => "completed",
         TranslationWorkerEvent::Cancelled { .. } => "cancelled",
         TranslationWorkerEvent::History { .. } => "history",
@@ -1933,11 +2434,39 @@ mod wire_schema_tests {
         }
     }
 
+    fn source_context() -> SourceContext {
+        SourceContext {
+            application_id: Some(String::new()),
+            executable_name: Some(String::new()),
+            window_title: Some(String::new()),
+            site_url: Some(String::new()),
+            document_name: Some(String::new()),
+            nearby_text: Some(String::new()),
+            domain: Some(String::new()),
+            partial: false,
+        }
+    }
+
+    fn glossary_entry() -> GlossaryEntry {
+        GlossaryEntry {
+            entry_id: GlossaryEntryId::from("entry"),
+            source_phrase: String::new(),
+            approved_translation: String::new(),
+            source_language: TranslationLanguage::English,
+            target_language: TranslationLanguage::Russian,
+            examples: vec![String::new()],
+            context: source_context(),
+            origin: GlossaryOrigin::Confirmed,
+            created_unix_ms: 0,
+            updated_unix_ms: 0,
+        }
+    }
+
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 29,
-            "every fingerprint below was written for protocol 29: if a shape \
+            PROTOCOL_VERSION, 30,
+            "every fingerprint below was written for protocol 30: if a shape \
              changes, this number changes with it"
         );
     }
@@ -2013,6 +2542,41 @@ mod wire_schema_tests {
                 chunk_index: 0,
                 chunk_count: 0,
             },
+            TranslationWorkerEvent::ScreenBlockPartial {
+                request_id,
+                base_revision: 0,
+                block_id: ScreenBlockId::from("block"),
+                translated_text: String::new(),
+            },
+            TranslationWorkerEvent::ScreenBlocksCompleted {
+                request_id,
+                base_revision: 0,
+                blocks: vec![TranslatedScreenBlock {
+                    block_id: ScreenBlockId::from("block"),
+                    translated_text: String::new(),
+                    completion: BlockCompletion::Completed,
+                    failure_message: Some(String::new()),
+                }],
+                processing_duration_ms: 0,
+            },
+            TranslationWorkerEvent::GlossaryList {
+                operation_id: request_id,
+                entries: vec![glossary_entry()],
+            },
+            TranslationWorkerEvent::GlossarySaved {
+                operation_id: request_id,
+                entry: glossary_entry(),
+            },
+            TranslationWorkerEvent::GlossaryDeleted {
+                operation_id: request_id,
+                entry_id: GlossaryEntryId::from("entry"),
+            },
+            TranslationWorkerEvent::GlossaryFailed {
+                operation_id: request_id,
+                code: String::new(),
+                message: String::new(),
+                retryable: false,
+            },
             TranslationWorkerEvent::Completed {
                 result: translation_result(),
                 created_unix_ms: 0,
@@ -2068,6 +2632,24 @@ result.tier:string,result.tokenize_duration_ms:number,result.translated_text:str
                 "credential_saved(error:string,operation_id:string,provider_id:string)",
                 "failed(catalog_id:string,code:string,message:string,request_id:string,\
 retryable:bool)",
+                "glossary_deleted(entry_id:string,operation_id:string)",
+                "glossary_failed(code:string,message:string,operation_id:string,retryable:bool)",
+                "glossary_list(entries[].approved_translation:string,\
+entries[].context.application_id:string,entries[].context.document_name:string,\
+entries[].context.domain:string,entries[].context.executable_name:string,\
+entries[].context.nearby_text:string,entries[].context.partial:bool,\
+entries[].context.site_url:string,entries[].context.window_title:string,\
+entries[].created_unix_ms:number,entries[].entry_id:string,entries[].examples[]:string,\
+entries[].origin:string,entries[].source_language:string,entries[].source_phrase:string,\
+entries[].target_language:string,entries[].updated_unix_ms:number,operation_id:string)",
+                "glossary_saved(entry.approved_translation:string,\
+entry.context.application_id:string,entry.context.document_name:string,\
+entry.context.domain:string,entry.context.executable_name:string,\
+entry.context.nearby_text:string,entry.context.partial:bool,entry.context.site_url:string,\
+entry.context.window_title:string,entry.created_unix_ms:number,entry.entry_id:string,\
+entry.examples[]:string,entry.origin:string,entry.source_language:string,\
+entry.source_phrase:string,entry.target_language:string,entry.updated_unix_ms:number,\
+operation_id:string)",
                 "history(entries[])",
                 "model_download_progress(catalog_id:string,downloaded_bytes:number,\
 total_bytes:number)",
@@ -2081,6 +2663,11 @@ request_id:string,tokenize_duration_ms:number,translated_text:string)",
  failure.attempts[].provider_id:string,failure.attempts[].retry_after_ms:number,\
  failure.detail:string,failure.kind:string,failure.provider_id:string,\
  failure.required_catalog_id:string,failure.retry_after_ms:number,request_id:string)",
+                "screen_block_partial(base_revision:number,block_id:string,request_id:string,\
+translated_text:string)",
+                "screen_blocks_completed(base_revision:number,blocks[].block_id:string,\
+blocks[].completion:string,blocks[].failure_message:string,blocks[].translated_text:string,\
+processing_duration_ms:number,request_id:string)",
                 "translation_providers(statuses[])",
             ]
         );
@@ -2334,6 +2921,60 @@ mod complete_wire_schema_tests {
         }
     }
 
+    fn source_context() -> SourceContext {
+        SourceContext {
+            application_id: Some("application".to_owned()),
+            executable_name: Some("application.exe".to_owned()),
+            window_title: Some("window".to_owned()),
+            site_url: Some("https://example.invalid".to_owned()),
+            document_name: Some("document".to_owned()),
+            nearby_text: Some("nearby".to_owned()),
+            domain: Some("domain".to_owned()),
+            partial: true,
+        }
+    }
+
+    fn screen_block() -> ScreenTextBlock {
+        ScreenTextBlock {
+            block_id: ScreenBlockId::from("block"),
+            source_text: "source".to_owned(),
+            bounds: PhysicalRect {
+                x: -1,
+                y: 2,
+                width: 3,
+                height: 4,
+            },
+            confidence_milli: 900,
+        }
+    }
+
+    fn glossary_draft() -> GlossaryEntryDraft {
+        GlossaryEntryDraft {
+            source_phrase: "source".to_owned(),
+            approved_translation: "translated".to_owned(),
+            source_language: TranslationLanguage::English,
+            target_language: TranslationLanguage::Russian,
+            example: "example".to_owned(),
+            context: source_context(),
+            origin: GlossaryOrigin::Corrected,
+        }
+    }
+
+    fn glossary_entry() -> GlossaryEntry {
+        GlossaryEntry {
+            entry_id: GlossaryEntryId::from("entry"),
+            source_phrase: "source".to_owned(),
+            approved_translation: "translated".to_owned(),
+            source_language: TranslationLanguage::English,
+            target_language: TranslationLanguage::Russian,
+            examples: vec!["example".to_owned()],
+            context: source_context(),
+            origin: GlossaryOrigin::Corrected,
+            created_unix_ms: 1,
+            updated_unix_ms: 2,
+        }
+    }
+
     fn input_events() -> Vec<InputHostEvent> {
         let request_id = RequestId::new();
         let session_id = SessionId::new();
@@ -2525,6 +3166,36 @@ mod complete_wire_schema_tests {
                 target_language: Some(TranslationLanguage::Russian),
                 language_policy: TranslationLanguagePolicy::default(),
             },
+            TranslationWorkerCommand::TranslateBlocks {
+                request_id,
+                base_revision: 1,
+                blocks: vec![screen_block()],
+                context: source_context(),
+                source_language: Some(TranslationLanguage::English),
+                target_language: Some(TranslationLanguage::Russian),
+                language_policy: TranslationLanguagePolicy::default(),
+            },
+            TranslationWorkerCommand::SaveGlossaryEntry {
+                operation_id: request_id,
+                request_id,
+                block_id: ScreenBlockId::from("block"),
+                expected_revision: 1,
+                entry: glossary_draft(),
+            },
+            TranslationWorkerCommand::ListGlossary {
+                operation_id: request_id,
+                query: Some("query".to_owned()),
+                limit: 10,
+            },
+            TranslationWorkerCommand::UpdateGlossaryEntry {
+                operation_id: request_id,
+                entry_id: GlossaryEntryId::from("entry"),
+                entry: glossary_draft(),
+            },
+            TranslationWorkerCommand::DeleteGlossaryEntry {
+                operation_id: request_id,
+                entry_id: GlossaryEntryId::from("entry"),
+            },
             TranslationWorkerCommand::Cancel { request_id },
             TranslationWorkerCommand::SetTranslationProviders {
                 providers: vec![translation_entry()],
@@ -2589,6 +3260,41 @@ mod complete_wire_schema_tests {
                 tokenize_duration_ms: 2,
                 chunk_index: 3,
                 chunk_count: 4,
+            },
+            TranslationWorkerEvent::ScreenBlockPartial {
+                request_id,
+                base_revision: 1,
+                block_id: ScreenBlockId::from("block"),
+                translated_text: "translated".to_owned(),
+            },
+            TranslationWorkerEvent::ScreenBlocksCompleted {
+                request_id,
+                base_revision: 1,
+                blocks: vec![TranslatedScreenBlock {
+                    block_id: ScreenBlockId::from("block"),
+                    translated_text: "translated".to_owned(),
+                    completion: BlockCompletion::Completed,
+                    failure_message: Some("message".to_owned()),
+                }],
+                processing_duration_ms: 1,
+            },
+            TranslationWorkerEvent::GlossaryList {
+                operation_id: request_id,
+                entries: vec![glossary_entry()],
+            },
+            TranslationWorkerEvent::GlossarySaved {
+                operation_id: request_id,
+                entry: glossary_entry(),
+            },
+            TranslationWorkerEvent::GlossaryDeleted {
+                operation_id: request_id,
+                entry_id: GlossaryEntryId::from("entry"),
+            },
+            TranslationWorkerEvent::GlossaryFailed {
+                operation_id: request_id,
+                code: "code".to_owned(),
+                message: "message".to_owned(),
+                retryable: true,
             },
             TranslationWorkerEvent::Completed {
                 result: translation_result_full(),
@@ -2838,21 +3544,26 @@ mod complete_wire_schema_tests {
         TranslationWorkerCommand::Initialize { .. } => 0, TranslationWorkerCommand::EnsureModel { .. } => 1,
         TranslationWorkerCommand::RemoveModel { .. } => 2, TranslationWorkerCommand::CancelModelInstall => 3,
         TranslationWorkerCommand::SelectModel { .. } => 4, TranslationWorkerCommand::Translate { .. } => 5,
-        TranslationWorkerCommand::Cancel { .. } => 6, TranslationWorkerCommand::SetTranslationProviders { .. } => 7,
-        TranslationWorkerCommand::SetTranslationProviderCredential { .. } => 8, TranslationWorkerCommand::GetTranslationProviders => 9,
-        TranslationWorkerCommand::GetHistory { .. } => 10, TranslationWorkerCommand::SetHistoryEnabled { .. } => 11,
-        TranslationWorkerCommand::ClearHistory => 12, TranslationWorkerCommand::UnloadLocalModel => 13,
-        TranslationWorkerCommand::Shutdown => 14
+        TranslationWorkerCommand::TranslateBlocks { .. } => 6, TranslationWorkerCommand::SaveGlossaryEntry { .. } => 7,
+        TranslationWorkerCommand::ListGlossary { .. } => 8, TranslationWorkerCommand::UpdateGlossaryEntry { .. } => 9,
+        TranslationWorkerCommand::DeleteGlossaryEntry { .. } => 10, TranslationWorkerCommand::Cancel { .. } => 11,
+        TranslationWorkerCommand::SetTranslationProviders { .. } => 12, TranslationWorkerCommand::SetTranslationProviderCredential { .. } => 13,
+        TranslationWorkerCommand::GetTranslationProviders => 14, TranslationWorkerCommand::GetHistory { .. } => 15,
+        TranslationWorkerCommand::SetHistoryEnabled { .. } => 16, TranslationWorkerCommand::ClearHistory => 17,
+        TranslationWorkerCommand::UnloadLocalModel => 18, TranslationWorkerCommand::Shutdown => 19
     );
     index_fn!(translation_event_index, TranslationWorkerEvent,
         TranslationWorkerEvent::Ready { .. } => 0, TranslationWorkerEvent::ModelDownloadProgress { .. } => 1,
         TranslationWorkerEvent::ModelInstalled { .. } => 2, TranslationWorkerEvent::ModelReady { .. } => 3,
         TranslationWorkerEvent::ModelSelected { .. } => 4, TranslationWorkerEvent::LocalModelState { .. } => 5,
         TranslationWorkerEvent::ModelRemoved { .. } => 6, TranslationWorkerEvent::Partial { .. } => 7,
-        TranslationWorkerEvent::Completed { .. } => 8, TranslationWorkerEvent::Cancelled { .. } => 9,
-        TranslationWorkerEvent::History { .. } => 10, TranslationWorkerEvent::TranslationProviders { .. } => 11,
-        TranslationWorkerEvent::CredentialSaved { .. } => 12, TranslationWorkerEvent::RequestFailed { .. } => 13,
-        TranslationWorkerEvent::Failed { .. } => 14
+        TranslationWorkerEvent::ScreenBlockPartial { .. } => 8, TranslationWorkerEvent::ScreenBlocksCompleted { .. } => 9,
+        TranslationWorkerEvent::GlossaryList { .. } => 10, TranslationWorkerEvent::GlossarySaved { .. } => 11,
+        TranslationWorkerEvent::GlossaryDeleted { .. } => 12, TranslationWorkerEvent::GlossaryFailed { .. } => 13,
+        TranslationWorkerEvent::Completed { .. } => 14, TranslationWorkerEvent::Cancelled { .. } => 15,
+        TranslationWorkerEvent::History { .. } => 16, TranslationWorkerEvent::TranslationProviders { .. } => 17,
+        TranslationWorkerEvent::CredentialSaved { .. } => 18, TranslationWorkerEvent::RequestFailed { .. } => 19,
+        TranslationWorkerEvent::Failed { .. } => 20
     );
     index_fn!(speech_command_index, SpeechWorkerCommand,
         SpeechWorkerCommand::Initialize { .. } => 0, SpeechWorkerCommand::Begin { .. } => 1,
@@ -2958,8 +3669,8 @@ mod complete_wire_schema_tests {
         assert_complete(&input_commands, input_command_index, 8);
         assert_complete(&ocr_commands, ocr_command_index, 3);
         assert_complete(&ocr_events, ocr_event_index, 4);
-        assert_complete(&translation_commands, translation_command_index, 15);
-        assert_complete(&translation_events, translation_event_index, 15);
+        assert_complete(&translation_commands, translation_command_index, 20);
+        assert_complete(&translation_events, translation_event_index, 21);
         assert_complete(&speech_commands, speech_command_index, 19);
         assert_complete(&speech_events, speech_event_index, 17);
         assert_complete(&companion_commands, companion_command_index, 8);
@@ -2980,7 +3691,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0xe391_1501_394b_1786,
+            0x7289_70e6_10ad_8620,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );
