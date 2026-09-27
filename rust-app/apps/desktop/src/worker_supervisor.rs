@@ -1733,10 +1733,13 @@ mod ocr_supervision_tests {
 
     #[test]
     fn bounded_worker_stop_kills_and_reaps_a_process_that_ignores_the_grace_period() {
-        let mut child = Command::new("powershell.exe")
+        use std::os::windows::process::CommandExt;
+
+        let mut command = Command::new("powershell.exe");
+        command
             .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
-            .spawn()
-            .unwrap();
+            .creation_flags(super::CREATE_NO_WINDOW);
+        let mut child = command.spawn().unwrap();
 
         let forced = terminate_child_bounded(&mut child, Duration::from_millis(20)).unwrap();
 
