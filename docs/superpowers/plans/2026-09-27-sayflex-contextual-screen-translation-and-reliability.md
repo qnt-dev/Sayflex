@@ -548,7 +548,7 @@
 - Produces: ordinary text/DUAL projection derived from Task 7 document, preserving existing preview registry and pin behavior.
 - Consumes: Tasks 5 through 11.
 
-- [ ] **Step 1: Add failing end-to-end coordinator tests with fake boundaries**
+- [x] **Step 1: Add failing end-to-end coordinator tests with fake boundaries**
 
   Cover capture to OCR to block translation to text projection; supersede/cancel at each stage; missing URL; ambiguous source; OCR correction; persistence disabled/failure; late block result after edit; worker restart; and image expiry while pinned.
 
@@ -557,11 +557,11 @@
   Run: `cargo test -p sayflex-desktop --features screen-translation screen_translation -- --nocapture`
   Expected: new coordinator scenarios fail against the current `main.rs` orchestration.
 
-- [ ] **Step 3: Extract orchestration from `main.rs` and wire real workers**
+- [x] **Step 3: Extract orchestration from `main.rs` and wire real workers**
 
   Keep Slint callbacks/event dispatch in `main.rs`, but move request state/transitions to the coordinator. Do not remove old toolbar behavior. Plain translation requests continue through the existing path unchanged.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation -- --nocapture`
   Expected: PASS.

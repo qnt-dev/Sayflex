@@ -3,23 +3,34 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
+#[cfg(feature = "screen-translation")]
+use std::{collections::HashMap, sync::Arc};
 
 use rust_platform_windows::{
     region_selection::{MonitorRegion, PointerEvent, RegionSelectionMonitor},
     screen_capture::{CaptureError, DesktopCapture},
 };
 use rust_protocol::{InputHostCommand, PhysicalRect, RequestId};
+#[cfg(feature = "screen-translation")]
+use rust_protocol::{
+    ScreenBlockId, ScreenTextBlock, SourceContext, TranslatedScreenBlock,
+    TranslationBackendCapabilities,
+};
 use slint::winit_030::WinitWindowAccessor;
 use slint::{
     ComponentHandle, Image, PhysicalPosition, PhysicalSize, Rgba8Pixel, SharedPixelBuffer, Timer,
     TimerMode,
 };
 
+#[cfg(feature = "screen-translation")]
+use crate::screen_result::{DocumentError, ScreenTranslationDocument, UserTranslationEdit};
 use crate::{
     RuntimeEvent, ScreenRegionOverlay, dispatch_runtime_event,
     overlay_presenter::{OverlayContract, OverlayPresenter},
     worker_supervisor::Workers,
 };
+#[cfg(feature = "screen-translation")]
+use rust_platform_windows::{WindowInventory, screen_capture::RgbaFrame};
 
 const SELECTION_WATCHDOG_SECONDS: u64 = 15;
 const SURFACE_READY_DEADLINE: Duration = Duration::from_millis(2_500);
@@ -59,6 +70,280 @@ pub(crate) enum ScreenTranslationBegin {
 #[derive(Debug, Default)]
 pub(crate) struct ScreenTranslationFlow {
     active: Option<ActiveScreenTranslation>,
+}
+
+/// Canonical owner of the screen-translation request after the native
+/// selection surface has identified it.  Pixel buffers, captured-window
+/// evidence, OCR context, the editable document and partial translations all
+/// share the same request identity here, instead of being mirrored across
+/// `main.rs` maps.
+#[derive(Default)]
+pub(crate) struct ScreenTranslationCoordinator {
+    flow: ScreenTranslationFlow,
+    #[cfg(feature = "screen-translation")]
+    pending_crops: HashMap<RequestId, Arc<RgbaFrame>>,
+    #[cfg(feature = "screen-translation")]
+    pending_inventories: HashMap<RequestId, WindowInventory>,
+    #[cfg(feature = "screen-translation")]
+    pending_contexts: HashMap<RequestId, SourceContext>,
+    #[cfg(feature = "screen-translation")]
+    documents: HashMap<RequestId, ScreenTranslationDocument>,
+    #[cfg(feature = "screen-translation")]
+    partials: HashMap<RequestId, (u64, HashMap<ScreenBlockId, String>)>,
+    #[cfg(feature = "screen-translation")]
+    capabilities: HashMap<RequestId, TranslationBackendCapabilities>,
+}
+
+#[cfg_attr(not(feature = "screen-translation"), allow(dead_code))]
+impl ScreenTranslationCoordinator {
+    pub(crate) fn begin(&mut self, request_id: RequestId) -> ScreenTranslationBegin {
+        let result = self.flow.begin(request_id);
+        if let ScreenTranslationBegin::Started(Some(cancelled)) = result {
+            self.discard_request(cancelled.request_id());
+        }
+        result
+    }
+
+    pub(crate) fn selected(&mut self, request_id: RequestId, anchor: PhysicalRect) -> bool {
+        self.flow.selected(request_id, anchor)
+    }
+
+    pub(crate) fn recognized(&mut self, request_id: RequestId) -> Option<PhysicalRect> {
+        self.flow.recognized(request_id)
+    }
+
+    pub(crate) fn complete(&mut self, request_id: RequestId) -> Option<PhysicalRect> {
+        self.flow.complete(request_id)
+    }
+
+    pub(crate) fn anchor(&self, request_id: RequestId) -> Option<PhysicalRect> {
+        self.flow.anchor(request_id)
+    }
+
+    pub(crate) fn is_recognizing(&self, request_id: RequestId) -> bool {
+        self.flow.is_recognizing(request_id)
+    }
+
+    pub(crate) fn is_selecting(&self, request_id: RequestId) -> bool {
+        self.flow.is_selecting(request_id)
+    }
+
+    fn active_translation(&self) -> Option<(RequestId, PhysicalRect)> {
+        let active = self
+            .flow
+            .active
+            .filter(|active| active.stage == ScreenTranslationStage::Translating)?;
+        Some((active.request_id, active.anchor?))
+    }
+
+    pub(crate) fn close(&mut self, request_id: RequestId) -> Option<ScreenTranslationCancellation> {
+        let cancellation = self.flow.close(request_id);
+        self.discard_request(request_id);
+        cancellation
+    }
+
+    pub(crate) fn pin_completed(&mut self, request_id: RequestId) -> bool {
+        self.flow.pin_completed(request_id)
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn store_inventory(&mut self, request_id: RequestId, inventory: WindowInventory) {
+        self.pending_inventories.insert(request_id, inventory);
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn take_inventory(&mut self, request_id: RequestId) -> Option<WindowInventory> {
+        self.pending_inventories.remove(&request_id)
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn store_crop(&mut self, request_id: RequestId, crop: Arc<RgbaFrame>) {
+        self.pending_crops.insert(request_id, crop);
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn take_crop(&mut self, request_id: RequestId) -> Option<Arc<RgbaFrame>> {
+        self.pending_crops.remove(&request_id)
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn store_context(&mut self, request_id: RequestId, context: SourceContext) {
+        self.pending_contexts.insert(request_id, context);
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn take_context(&mut self, request_id: RequestId) -> SourceContext {
+        self.pending_contexts
+            .remove(&request_id)
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn insert_document(&mut self, document: ScreenTranslationDocument) {
+        self.documents.insert(document.request_id(), document);
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn source_text(&self, request_id: RequestId) -> Option<String> {
+        self.documents
+            .get(&request_id)
+            .map(ScreenTranslationDocument::source_text)
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn active_translation_source(&self) -> Option<(RequestId, PhysicalRect, String)> {
+        let (request_id, anchor) = self.active_translation()?;
+        Some((request_id, anchor, self.source_text(request_id)?))
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn translation_input(
+        &self,
+        request_id: RequestId,
+    ) -> Option<(u64, Vec<ScreenTextBlock>, SourceContext)> {
+        let document = self.documents.get(&request_id)?;
+        Some((
+            document.revision(),
+            document.source_blocks(),
+            document.context.clone(),
+        ))
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn apply_partial(
+        &mut self,
+        request_id: RequestId,
+        base_revision: u64,
+        block_id: ScreenBlockId,
+        translated_text: String,
+    ) -> Result<String, DocumentError> {
+        let document = self
+            .documents
+            .get(&request_id)
+            .ok_or(DocumentError::RequestMismatch)?;
+        if document.revision() != base_revision {
+            return Err(DocumentError::RevisionMismatch);
+        }
+        if document.block(&block_id).is_none() {
+            return Err(DocumentError::UnknownBlockId);
+        }
+        let (_, partials) = self
+            .partials
+            .entry(request_id)
+            .or_insert_with(|| (base_revision, HashMap::new()));
+        partials.insert(block_id, translated_text);
+        Ok(document
+            .source_blocks()
+            .iter()
+            .filter_map(|block| partials.get(&block.block_id).map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn apply_completed(
+        &mut self,
+        request_id: RequestId,
+        base_revision: u64,
+        blocks: Vec<TranslatedScreenBlock>,
+        capabilities: TranslationBackendCapabilities,
+    ) -> Result<ScreenTranslationProjection, DocumentError> {
+        let document = self
+            .documents
+            .get_mut(&request_id)
+            .ok_or(DocumentError::RequestMismatch)?;
+        document.apply_machine_blocks(request_id, base_revision, blocks)?;
+        let projection = ScreenTranslationProjection {
+            source_text: document.source_text(),
+            translated_text: document.copy_text()?,
+            revision: document.revision(),
+            capabilities,
+        };
+        self.partials.remove(&request_id);
+        self.capabilities.insert(request_id, capabilities);
+        Ok(projection)
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[allow(dead_code)] // Production correction callbacks are wired after visual approval in Task 14.
+    pub(crate) fn save_user_edit(
+        &mut self,
+        request_id: RequestId,
+        block_id: &ScreenBlockId,
+        expected_revision: u64,
+        text: String,
+    ) -> Result<u64, DocumentError> {
+        let document = self
+            .documents
+            .get_mut(&request_id)
+            .ok_or(DocumentError::RequestMismatch)?;
+        document.save_user_edit(block_id, expected_revision, UserTranslationEdit::new(text))?;
+        Ok(document.revision())
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[allow(dead_code)] // Production copy callbacks are wired after visual approval in Task 14.
+    pub(crate) fn copy_text(&self, request_id: RequestId) -> Result<String, DocumentError> {
+        self.documents
+            .get(&request_id)
+            .ok_or(DocumentError::RequestMismatch)?
+            .copy_text()
+    }
+
+    #[cfg(all(test, feature = "screen-translation"))]
+    fn document_has_pixels(&self, request_id: RequestId) -> bool {
+        self.documents
+            .get(&request_id)
+            .is_some_and(ScreenTranslationDocument::has_pixels)
+    }
+
+    #[cfg(all(test, feature = "screen-translation"))]
+    fn has_pending_crop(&self, request_id: RequestId) -> bool {
+        self.pending_crops.contains_key(&request_id)
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn expire_pixels(&mut self, now_unix_ms: u64) {
+        for document in self.documents.values_mut() {
+            let _ = document.expire_pixels(now_unix_ms);
+        }
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn discard_pending(&mut self, request_id: RequestId) {
+        self.pending_crops.remove(&request_id);
+        self.pending_inventories.remove(&request_id);
+        self.pending_contexts.remove(&request_id);
+        self.partials.remove(&request_id);
+    }
+
+    fn discard_request(&mut self, request_id: RequestId) {
+        #[cfg(feature = "screen-translation")]
+        {
+            self.discard_pending(request_id);
+            self.documents.remove(&request_id);
+            self.capabilities.remove(&request_id);
+        }
+        #[cfg(not(feature = "screen-translation"))]
+        let _ = request_id;
+    }
+}
+
+#[cfg(feature = "screen-translation")]
+pub(crate) struct ScreenTranslationProjection {
+    pub(crate) source_text: String,
+    pub(crate) translated_text: String,
+    pub(crate) revision: u64,
+    pub(crate) capabilities: TranslationBackendCapabilities,
+}
+
+#[cfg_attr(not(feature = "screen-translation"), allow(dead_code))]
+impl ScreenTranslationCancellation {
+    fn request_id(self) -> RequestId {
+        match self {
+            Self::Ocr(request_id) | Self::Translation(request_id) => request_id,
+        }
+    }
 }
 
 #[cfg_attr(not(feature = "screen-translation"), allow(dead_code))]
@@ -804,16 +1089,27 @@ fn intersect(first: PhysicalRect, second: PhysicalRect) -> Option<PhysicalRect> 
 #[cfg(test)]
 mod tests {
     use rust_platform_windows::region_selection::{MonitorRegion, PointerEvent};
+    #[cfg(feature = "screen-translation")]
+    use rust_platform_windows::screen_capture::RgbaFrame;
     use rust_platform_windows::screen_capture::{
         CaptureError, CapturedOutput, DesktopCapture, Rotation,
     };
+    #[cfg(feature = "screen-translation")]
+    use rust_protocol::{
+        BlockCompletion, ScreenBlockId, ScreenTextBlock, SourceContext, TranslatedScreenBlock,
+        TranslationBackendCapabilities,
+    };
     use rust_protocol::{PhysicalRect, RequestId};
+    #[cfg(feature = "screen-translation")]
+    use std::sync::Arc;
 
     use super::{
         ScreenSelectionCoordinator, ScreenTranslationBegin, ScreenTranslationCancellation,
-        ScreenTranslationFlow, SelectionEnvironment, SelectionTerminal, SurfacePresentation,
-        surface_regions_need_rebuild,
+        ScreenTranslationCoordinator, ScreenTranslationFlow, SelectionEnvironment,
+        SelectionTerminal, SurfacePresentation, surface_regions_need_rebuild,
     };
+    #[cfg(feature = "screen-translation")]
+    use crate::screen_result::ScreenTranslationDocument;
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {
         PhysicalRect {
@@ -848,6 +1144,48 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[cfg(feature = "screen-translation")]
+    fn document(request_id: RequestId) -> ScreenTranslationDocument {
+        let frame = Arc::new(
+            RgbaFrame::try_new(rect(0, 0, 2, 1), 8, vec![0, 0, 0, 255, 1, 1, 1, 255]).unwrap(),
+        );
+        ScreenTranslationDocument::new(
+            request_id,
+            frame,
+            vec![
+                ScreenTextBlock {
+                    block_id: ScreenBlockId::from("a"),
+                    source_text: "Damage 25".to_owned(),
+                    bounds: rect(0, 0, 100, 20),
+                    confidence_milli: 900,
+                },
+                ScreenTextBlock {
+                    block_id: ScreenBlockId::from("b"),
+                    source_text: "Cooldown".to_owned(),
+                    bounds: rect(0, 20, 100, 20),
+                    confidence_milli: 900,
+                },
+            ],
+            SourceContext {
+                domain: Some("dota2".to_owned()),
+                ..SourceContext::default()
+            },
+            100,
+            200,
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "screen-translation")]
+    fn translated(id: &str, text: &str) -> TranslatedScreenBlock {
+        TranslatedScreenBlock {
+            block_id: ScreenBlockId::from(id),
+            translated_text: text.to_owned(),
+            completion: BlockCompletion::Completed,
+            failure_message: None,
+        }
     }
 
     #[test]
@@ -1214,6 +1552,119 @@ mod tests {
                     .contains(&pixel_canary.to_ascii_lowercase())
             );
         }
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn canonical_coordinator_projects_blocks_and_preserves_a_user_edit_from_late_machine_work() {
+        let request_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        assert_eq!(
+            coordinator.begin(request_id),
+            ScreenTranslationBegin::Started(None)
+        );
+        assert!(coordinator.selected(request_id, rect(0, 0, 200, 80)));
+        assert_eq!(
+            coordinator.recognized(request_id),
+            Some(rect(0, 0, 200, 80))
+        );
+        coordinator.insert_document(document(request_id));
+
+        let (base_revision, blocks, context) = coordinator.translation_input(request_id).unwrap();
+        assert_eq!(base_revision, 0);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(context.domain.as_deref(), Some("dota2"));
+        assert_eq!(
+            coordinator
+                .apply_partial(
+                    request_id,
+                    0,
+                    ScreenBlockId::from("a"),
+                    "Урон 25".to_owned(),
+                )
+                .unwrap(),
+            "Урон 25"
+        );
+
+        assert_eq!(
+            coordinator
+                .save_user_edit(
+                    request_id,
+                    &ScreenBlockId::from("a"),
+                    0,
+                    "Исправленный урон 25".to_owned(),
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            coordinator
+                .apply_partial(
+                    request_id,
+                    0,
+                    ScreenBlockId::from("b"),
+                    "Поздний фрагмент".to_owned(),
+                )
+                .is_err()
+        );
+        let projection = coordinator
+            .apply_completed(
+                request_id,
+                0,
+                vec![
+                    translated("b", "Перезарядка"),
+                    translated("a", "Машинный урон 25"),
+                ],
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        assert_eq!(
+            projection.translated_text,
+            "Исправленный урон 25\n\nПерезарядка"
+        );
+        assert_eq!(
+            coordinator.copy_text(request_id).unwrap(),
+            projection.translated_text
+        );
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn supersede_and_pixel_expiry_release_only_request_owned_buffers() {
+        let first = RequestId::new();
+        let second = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.begin(first);
+        coordinator.selected(first, rect(0, 0, 20, 20));
+        let crop = Arc::new(RgbaFrame::try_new(rect(0, 0, 1, 1), 4, vec![0, 0, 0, 255]).unwrap());
+        coordinator.store_crop(first, crop);
+        assert!(coordinator.has_pending_crop(first));
+        assert_eq!(
+            coordinator.begin(second),
+            ScreenTranslationBegin::Started(Some(ScreenTranslationCancellation::Ocr(first)))
+        );
+        assert!(!coordinator.has_pending_crop(first));
+
+        coordinator.selected(second, rect(0, 0, 20, 20));
+        coordinator.recognized(second);
+        coordinator.insert_document(document(second));
+        coordinator
+            .apply_completed(
+                second,
+                0,
+                vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        coordinator.complete(second);
+        assert!(coordinator.pin_completed(second));
+        assert!(coordinator.document_has_pixels(second));
+        coordinator.expire_pixels(200);
+        assert!(!coordinator.document_has_pixels(second));
+        assert_eq!(
+            coordinator.copy_text(second).unwrap(),
+            "Урон 25\n\nПерезарядка"
+        );
     }
 
     #[test]
