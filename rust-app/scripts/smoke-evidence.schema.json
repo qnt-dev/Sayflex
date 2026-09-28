@@ -48,6 +48,18 @@
         "provider_fallback": { "$ref": "#/$defs/result" },
         "settings_wheel_touchpad_rail": { "$ref": "#/$defs/result" },
         "recording_visuals": { "$ref": "#/$defs/result" },
+        "screen_translation_capture": { "$ref": "#/$defs/result" },
+        "screen_translation_orig_dual": { "$ref": "#/$defs/result" },
+        "screen_translation_on_image": { "$ref": "#/$defs/result" },
+        "screen_translation_edit_save_retry": { "$ref": "#/$defs/result" },
+        "screen_translation_glossary_rules": { "$ref": "#/$defs/result" },
+        "screen_translation_context_fallback": { "$ref": "#/$defs/result" },
+        "screen_translation_retention": { "$ref": "#/$defs/result" },
+        "screen_translation_monitor_dpi": { "$ref": "#/$defs/result" },
+        "screen_translation_ocr_restart": { "$ref": "#/$defs/result" },
+        "resource_release_reload": { "$ref": "#/$defs/result" },
+        "resource_game_budget": { "$ref": "#/$defs/result" },
+        "gpu_counters_localized": { "$ref": "#/$defs/result" },
         "fresh_install": { "$ref": "#/$defs/result" },
         "upgrade_install": { "$ref": "#/$defs/result" }
       }

@@ -4,7 +4,7 @@ SayFlex is designed as a local desktop utility. Audio capture, speech
 recognition, layout conversion, and installed translation-model inference run
 on the user's machine, and that is what a fresh installation does.
 
-## Two things can be sent to a network service, and neither is by default
+## Two kinds of content can be sent to a network service, and neither is by default
 
 Settings holds two separate ordered lists of providers, and each is its own
 decision:
@@ -12,8 +12,9 @@ decision:
 - **Speech.** A recording can be transcribed by Groq, Cloudflare Workers AI,
   Azure Speech, Deepgram or a custom OpenAI-compatible endpoint instead of by
   the model on this machine.
-- **Text.** A selection can be translated by DeepL or Azure Translator instead
-  of by the engine on this machine.
+- **Text.** A selection or locally recognized screen-text block can be
+  translated by DeepL or Azure Translator instead of by the engine on this
+  machine. Screen pixels are not sent to these providers.
 
 They are deliberately not one list and not one switch. A key for Azure
 Translator is not a key for Azure Speech, the free allowances are counted
@@ -57,6 +58,27 @@ a service echoes back in an error is removed before that error reaches the log.
 - Dictation and translation history can be disabled and cleared in the
   application. Clear removes the primary, recovery, temporary, and quarantined
   history files.
+- Screen OCR runs locally on CPU. Full-monitor frames exist only in memory for
+  the active selection and are never written to disk, copied to the clipboard,
+  included in diagnostics, crash metadata, or sent to a cloud translation
+  provider. Only the selected crop can be persisted.
+- Temporary selected crops and their result metadata are kept by default for
+  up to 24 hours and 500 MB under the current user's SayFlex data directory.
+  Oldest-first size eviction can delete them sooner; pinning does not extend
+  their lifetime. Users can disable future retention, delete temporary crops
+  immediately, or explicitly save a permanent image file. Expiry removes the
+  pixels while leaving the text result and personal glossary independent.
+- Optional source context can include the source executable, visible window
+  title, application/game identity, document name, site URL when Windows or
+  the application exposes it, and nearby text. Ambiguous or unavailable
+  context is omitted. Temporary result metadata follows screenshot retention;
+  a context field saved with a user-approved glossary entry remains until that
+  entry is edited or deleted.
+- The personal glossary changes only when the user saves a correction or
+  explicitly confirms a translation. Machine completion, Copy, Pin, Close,
+  screenshot deletion, and history clearing do not add or remove glossary
+  records. Entries are stored separately and can be viewed, edited, or
+  deleted.
 - Native Win32 password edit controls are rejected before recording or selected
   text capture. Applications with custom web or GPU-rendered password controls
   remain responsible for exposing the field as protected; users should disable
@@ -70,6 +92,10 @@ a service echoes back in an error is removed before that error reaches the log.
 - Worker processes communicate through versioned JSON-lines protocols. Their
   standard output is reserved for protocol messages; diagnostics use standard
   error.
+- OCR text and source context are treated as untrusted structured data, not as
+  model instructions. Structured translation validates the exact block ID set
+  and protected values before accepting an answer. Compact and ordinary cloud
+  adapters do not receive glossary or instruction context they cannot enforce.
 - The low-level keyboard callback owns its physical-key state and performs no
   file, clipboard, UI, or blocking IPC work.
 - Synthetic input is tagged with a private marker and cannot trigger a command

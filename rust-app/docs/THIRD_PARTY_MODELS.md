@@ -31,6 +31,29 @@ extraction. llama.cpp is MIT-licensed.
 The exact URLs, compressed and installed sizes, and SHA-256 values used by the installer live in
 `crates/translation-engine/models/catalog.json`.
 
+## Screen OCR bundle
+
+Unlike optional translation packs, the ordinary SayFlex payload includes the
+CPU-only `screen-ocr-ppocrv5-mobile-v3.9.2` bundle: one PP-OCRv5 detector,
+seven script-family recognizers, and their dictionaries distributed by
+RapidOCR under Apache-2.0. Every artifact has an exact byte length and SHA-256
+in `crates/model-manager/src/ocr_catalog.rs`; publishing creates and validates
+`bundle.verified.json`. OCR does not enable DirectML or CUDA.
+
+The release benchmark drives the packaged `SayFlex.Ocr.exe` through the same
+versioned JSON protocol as the desktop. Current measurements and known small
+text, Hindi, and raw multi-column limitations are recorded in
+`../../docs/evidence/screen-translation-ocr-benchmark.md`.
+
+## Evaluated but not admitted
+
+HY-MT2-1.8B Q4_K_M remains an experiment, not a catalog entry. It used less
+memory and was faster than Qwen3.5 4B in the recorded probe, but lost a blank
+paragraph boundary and produced a Russian agreement error. The exact revision,
+hash, measurements, and rejection are recorded in
+`evidence/contextual-translation-resources.md`. No HY-MT2 files are bundled or
+retained.
+
 Before publishing a catalog update:
 
 1. Review the model card and license at the exact pinned revision.

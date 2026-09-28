@@ -2,7 +2,7 @@
 
 SayFlex is a local-first Windows utility for voice dictation, selected-text
 translation, and RU/EN keyboard-layout correction. The current Rust/Slint
-release candidate is version **0.8.0**.
+release candidate is version **0.8.3**.
 
 Audio, local speech recognition, layout correction, and installed translation
 models run on the user's computer by default. Optional cloud providers remain
@@ -13,6 +13,9 @@ off until the user supplies credentials and enables them.
 - Hold `Ctrl + Alt + Space` to dictate into the currently focused application.
 - Press `Ctrl + Alt + V` to insert the newest successful dictation.
 - Press `Ctrl + Alt + F` to translate selected text.
+- Press `Ctrl + Alt + G` to freeze the desktop, select a region, recognize its
+  text locally, and show the translation either as text or on the captured
+  image.
 - Press `Ctrl + Alt + K` to correct the keyboard layout of selected text.
 - Use the standalone Quick translation window for pasted text.
 - Choose verified local Whisper and Qwen model packs or configure optional
@@ -20,6 +23,10 @@ off until the user supplies credentials and enables them.
 - Remove installed local model packs from Settings to recover disk space.
 - Use CUDA, Vulkan, or CPU speech backends, with automatic verified fallback.
 - Keep dictation and translation history locally, or disable and clear it.
+- Correct or explicitly confirm screen translations to build a personal,
+  context-aware glossary. Ordinary translation and Copy never add entries.
+- Inspect aggregate and per-feature CPU, RAM, GPU and VRAM use on Resources;
+  resident engines can be released and load again automatically on next use.
 
 Global shortcuts are configurable in Settings. A conflicting replacement does
 not discard the previous working shortcut.
@@ -40,19 +47,19 @@ and trust-boundary description.
 
 ## Release status
 
-Version 0.8.0 is undergoing release hardening. A public installer is not ready
+Version 0.8.3 is undergoing release hardening. A public installer is not ready
 until the exact installed artifact passes the Windows interaction matrix and
 carries a valid Authenticode signature. Do not treat files from a local `dist`
 directory as an official release.
 
 The current release notes are in
-[rust-app/RELEASE_0.8.0.md](rust-app/RELEASE_0.8.0.md).
+[rust-app/RELEASE_0.8.3.md](rust-app/RELEASE_0.8.3.md).
 
 ## Build and test
 
 The maintained application lives in `rust-app`. The older C# implementation in
 the repository root is retained for history and is not a build dependency of
-SayFlex 0.8.0.
+SayFlex 0.8.3.
 
 ```powershell
 cd rust-app

@@ -6,7 +6,7 @@ build dependency of this workspace.
 
 ## Process architecture
 
-The release contains four failure-isolated process roles and five executables:
+The release contains six failure-isolated process roles and eight executables:
 
 - `SayFlex.exe` — Slint settings, tray, history, model selection and
   recording/selection overlays.
@@ -15,7 +15,11 @@ The release contains four failure-isolated process roles and five executables:
 - `SayFlex.Speech.*.exe` — CPAL microphone capture, verified model
   installation, CUDA/Vulkan/CPU `whisper.cpp` inference and durable history.
 - `SayFlex.Translation.exe` — verified Qwen3.5 model/runtime installation,
-  lifecycle-isolated local llama.cpp inference and translation history.
+  compact Firefox translation, lifecycle-isolated local llama.cpp inference,
+  translation history and the personal glossary.
+- `SayFlex.Ocr.exe` — CPU-only PP-OCRv5 screen-text recognition. It starts on
+  first use and can be released independently.
+- `SayFlex.Companion.exe` — the isolated optional Companion renderer.
 
 When translation is enabled, its worker owns one authenticated
 `llama-server.exe` sidecar from the verified optional Vulkan runtime. The
@@ -44,6 +48,17 @@ same-user threat model, are documented in [`SECURITY.md`](SECURITY.md).
   compact preview immediately. It translates on this machine unless a
   translation service has been put above the local engine in Settings →
   Providers, which is off by default and needs a key you supply.
+- `Ctrl + Alt + G` freezes the visible desktop, lets the user select a region,
+  recognizes text locally and opens the screen result in ORIG, DUAL, or ON
+  IMAGE mode. Escape or right-click cancels selection.
+
+Screen translation retains only the selected crop, never a full-monitor
+frame. Temporary crops are kept for up to 24 hours and 500 MB; the oldest can
+be removed earlier when the size limit is reached. Pinning does not extend the
+retention period. The result text and explicitly confirmed glossary entries
+remain available after the temporary image expires. Double-clicking a
+translated block opens its correction editor; Save or explicit Confirm writes
+the personal glossary, while ordinary translation, Copy, Pin and Close do not.
 
 Selected text is resolved through a bounded capability cascade: UI Automation
 `TextPattern`, synchronous `WM_COPY` for native edit controls, then the
@@ -78,11 +93,13 @@ Speech output remains in the detected language for the recommended
 model: upstream does not train it for that task. Direct speech-to-English mode
 is available only for compatible non-Turbo Whisper models.
 
-Selected-text translation and the full translator use a separate local
-Qwen3.5 engine through a pinned llama.cpp Vulkan runtime. No translation pack
-is preinstalled or downloaded automatically. Users can choose a 4B Fast model
-or a higher-quality 9B model; the system locale is used only to mark a
-recommendation. Translation can preview, copy or replace the selection.
+Translation offers lightweight Firefox language-pair packs and multilingual
+Qwen3.5 models through a pinned llama.cpp Vulkan runtime. Translation packs are
+not downloaded automatically. Users can install multiple compact language
+pairs or choose a 4B Fast / 9B Quality model; the system locale only marks a
+recommendation. Qwen supports structured screen blocks, automatic context and
+glossary guidance. Compact packs preserve block identity but intentionally
+advertise limited context/glossary capability.
 
 Translation and layout correction can be disabled independently.
 `Ctrl+Alt+F` translates the selected text immediately into a compact Acrylic
@@ -90,6 +107,13 @@ preview; `Ctrl+Alt+K` corrects keyboard layout. The translation worker can
 remain warm for the lowest latency or unload after every request to reduce
 memory. Voice and translation history can be disabled and cleared from
 Settings.
+
+Resources reports the aggregate SayFlex process tree and separate speech,
+translation, and OCR rows. Missing Windows counters are displayed as
+unavailable, not zero. Manual release never deletes installed files. OCR may
+be released after five idle minutes, speech after fifteen, and translation
+after fifteen when Keep warm is off; active work is never interrupted. The
+selected engine loads again automatically the next time its feature is used.
 
 The universal installer ships isolated CUDA, Vulkan and CPU speech workers.
 `Auto` tries CUDA, then Vulkan, then CPU, but accepts a backend only after the

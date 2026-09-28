@@ -48,16 +48,13 @@ and expanded form, and are not bundled in the SayFlex installer.
 - fxtranslate: <https://github.com/gregtatum/translations>
 - Firefox Translations: <https://github.com/mozilla/translations>
 
-SayFlex vendors the exact `fxtranslate 0.4.2` crate source and retains its
-MPL-2.0 license. The local patch only exposes whether each decoder segment
-ended at EOS or at its output-length limit; provenance, checksum, patch scope,
-and update steps are recorded in `vendor/fxtranslate/SAYFLEX_PATCH.md`.
-
 ## Screen translation OCR models
 
 Screen translation includes the PP-OCRv5 mobile ONNX detector, recognizers,
 and dictionaries distributed by RapidOCR. These model artifacts are licensed
-under Apache-2.0 and verified by size and SHA-256 before packaging.
+under Apache-2.0 and verified by size and SHA-256 before packaging. The shipped
+bundle identity is `screen-ocr-ppocrv5-mobile-v3.9.2`; recognition is CPU-only.
+HY-MT2 and other benchmark-only candidates are not shipped.
 
 - RapidOCR: <https://github.com/RapidAI/RapidOCR>
 - PaddleOCR: <https://github.com/PaddlePaddle/PaddleOCR>
@@ -274,7 +271,6 @@ under Apache-2.0 and verified by size and SHA-256 before packaging.
 | futures-sink | 0.3.33 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | futures-task | 0.3.33 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | futures-util | 0.3.33 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| fxtranslate | 0.4.2 | MPL-2.0 | vendored from crates.io; see vendor/fxtranslate/SAYFLEX_PATCH.md |
 | g2gen | 1.2.2 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | g2p | 1.2.2 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | g2poly | 1.2.2 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -850,4 +846,4 @@ under Apache-2.0 and verified by size and SHA-256 before packaging.
 | zvariant_derive | 5.13.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | zvariant_utils | 3.5.0 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 
-Generated from Cargo.lock; 783 registry or git package versions listed.
+Generated from Cargo.lock; 782 registry or git package versions listed.

@@ -2,16 +2,23 @@ mod metrics;
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Mutex, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
 use clap::Parser;
 use image::RgbImage;
 use metrics::{normalized_cer, paragraph_normalize};
 use oar_ocr::oarocr::{OAROCR, OAROCRBuilder};
+use rust_protocol::{
+    OcrFailureKind, OcrLanguagePolicy, OcrPixelFormat, OcrWorkerCommand, OcrWorkerEvent,
+    PROTOCOL_VERSION, RequestId,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -19,6 +26,8 @@ const PPOCR_SOURCE: &str =
     "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5";
 const TESSERACT_SOURCE: &str = "https://github.com/tesseract-ocr/tesseract";
 const WINDOWS_OCR_SOURCE: &str = "Windows.Media.Ocr (installed Windows language packs)";
+const SAYFLEX_WORKER_SOURCE: &str = "SayFlex.Ocr.exe JSON worker protocol";
+const WORKER_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Parser)]
 #[command(about = "Reproducible SayFlex screen OCR candidate benchmark")]
@@ -31,6 +40,10 @@ struct Args {
     model_artifacts: PathBuf,
     #[arg(long)]
     output_jsonl: PathBuf,
+    #[arg(long)]
+    ocr_worker: Option<PathBuf>,
+    #[arg(long)]
+    ocr_bundle: Option<PathBuf>,
     #[arg(long, default_value_t = 30)]
     iterations: u32,
     #[arg(long)]
@@ -78,6 +91,9 @@ struct BenchmarkRow<'a> {
     normalized_char_distance: Option<f64>,
     exact_match: Option<bool>,
     elapsed_ms: Option<f64>,
+    working_set_bytes: Option<u64>,
+    peak_working_set_bytes: Option<u64>,
+    worker_generation: Option<u32>,
     available: bool,
     failure: Option<String>,
     license: &'a str,
@@ -88,6 +104,8 @@ struct BenchmarkRow<'a> {
 struct Recognition {
     text: String,
     elapsed_ms: f64,
+    working_set_bytes: Option<u64>,
+    peak_working_set_bytes: Option<u64>,
 }
 
 trait Candidate {
@@ -95,6 +113,14 @@ trait Candidate {
     fn license(&self) -> &'static str;
     fn source(&self) -> &'static str;
     fn recognize(&self, fixture: &Fixture, image_path: &Path) -> Result<Recognition>;
+
+    fn restart_after_warmup(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn worker_generation(&self) -> Option<u32> {
+        None
+    }
 }
 
 fn main() -> Result<()> {
@@ -127,6 +153,12 @@ fn main() -> Result<()> {
     let ppocr = ensure_model_artifacts(&args.model_artifacts, &args.models)
         .and_then(|()| PpOcrCandidate::new(&args.models));
     let candidates: Vec<Box<dyn Candidate>> = vec![
+        candidate_or_unavailable(
+            "sayflex-ocr-worker-cpu",
+            "Apache-2.0",
+            SAYFLEX_WORKER_SOURCE,
+            WorkerCandidate::new(args.ocr_worker, args.ocr_bundle),
+        ),
         candidate_or_unavailable("ppocr-v5-onnx-cpu", "Apache-2.0", PPOCR_SOURCE, ppocr),
         candidate_or_unavailable(
             "tesseract-5",
@@ -148,6 +180,9 @@ fn main() -> Result<()> {
             let path = fixture_root.join(&fixture.file);
             let _ = candidate.recognize(fixture, &path);
         }
+        candidate
+            .restart_after_warmup()
+            .with_context(|| format!("restart {} after warmup", candidate.name()))?;
     }
 
     for iteration in 0..args.iterations {
@@ -169,6 +204,9 @@ fn main() -> Result<()> {
                             exact_match: Some(actual == expected),
                             recognized_text: actual,
                             elapsed_ms: Some(recognition.elapsed_ms),
+                            working_set_bytes: recognition.working_set_bytes,
+                            peak_working_set_bytes: recognition.peak_working_set_bytes,
+                            worker_generation: candidate.worker_generation(),
                             available: true,
                             failure: None,
                             license: candidate.license(),
@@ -186,6 +224,9 @@ fn main() -> Result<()> {
                         normalized_char_distance: None,
                         exact_match: None,
                         elapsed_ms: None,
+                        working_set_bytes: None,
+                        peak_working_set_bytes: None,
+                        worker_generation: candidate.worker_generation(),
                         available: false,
                         failure: Some(format!("{error:#}")),
                         license: candidate.license(),
@@ -199,6 +240,284 @@ fn main() -> Result<()> {
     }
     writer.flush()?;
     Ok(())
+}
+
+struct WorkerSession {
+    child: Child,
+    stdin: BufWriter<ChildStdin>,
+    events: mpsc::Receiver<Result<OcrWorkerEvent, String>>,
+}
+
+impl WorkerSession {
+    fn spawn(executable: &Path, bundle: &Path) -> Result<Self> {
+        require_file(executable)?;
+        require_file(&bundle.join("bundle.verified.json"))?;
+        let mut command = Command::new(executable);
+        command
+            .env("SAYFLEX_OCR_BUNDLE", bundle)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(directory) = executable.parent() {
+            command.current_dir(directory);
+        }
+        configure_hidden_process(&mut command);
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("start shipped OCR worker {}", executable.display()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("OCR worker stdin was not piped"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("OCR worker stdout was not piped"))?;
+        let (sender, events) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let event = line
+                    .map_err(|error| format!("read OCR worker event: {error}"))
+                    .and_then(|line| {
+                        serde_json::from_str::<OcrWorkerEvent>(&line)
+                            .map_err(|error| format!("parse OCR worker event: {error}"))
+                    });
+                if sender.send(event).is_err() {
+                    break;
+                }
+            }
+        });
+        let session = Self {
+            child,
+            stdin: BufWriter::new(stdin),
+            events,
+        };
+        match session.recv_event()? {
+            OcrWorkerEvent::Ready {
+                protocol_version,
+                engine,
+            } if protocol_version == PROTOCOL_VERSION && engine == "ppocrv5-cpu" => Ok(session),
+            OcrWorkerEvent::Ready {
+                protocol_version,
+                engine,
+            } => bail!("OCR worker is not ready: protocol={protocol_version}, engine={engine}"),
+            event => bail!("OCR worker emitted {event:?} before Ready"),
+        }
+    }
+
+    fn recv_event(&self) -> Result<OcrWorkerEvent> {
+        self.events
+            .recv_timeout(WORKER_EVENT_TIMEOUT)
+            .map_err(|error| anyhow!("wait for OCR worker event: {error}"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn recognize(&mut self, fixture: &Fixture, image_path: &Path) -> Result<Recognition> {
+        let image = image::open(image_path)
+            .with_context(|| format!("decode {}", image_path.display()))?
+            .to_rgba8();
+        let request_id = RequestId::new();
+        let language_policy = if fixture.language == "auto" {
+            OcrLanguagePolicy::Auto
+        } else {
+            OcrLanguagePolicy::Prefer(vec![fixture.language.clone()])
+        };
+        let command = OcrWorkerCommand::Recognize {
+            request_id,
+            width: image.width(),
+            height: image.height(),
+            stride: image.width().saturating_mul(4),
+            pixel_format: OcrPixelFormat::Rgba8,
+            language_policy,
+            rgba_base64: base64::engine::general_purpose::STANDARD.encode(image.as_raw()),
+        };
+        serde_json::to_writer(&mut self.stdin, &command)?;
+        self.stdin.write_all(b"\n")?;
+        self.stdin.flush()?;
+        let started = Instant::now();
+        let event = self.recv_event()?;
+        let mut recognition = worker_recognition(request_id, event, started.elapsed())?;
+        let (working_set, peak_working_set) = process_memory(self.child.id());
+        recognition.working_set_bytes = working_set;
+        recognition.peak_working_set_bytes = peak_working_set;
+        Ok(recognition)
+    }
+
+    fn shutdown(&mut self) {
+        if serde_json::to_writer(&mut self.stdin, &OcrWorkerCommand::Shutdown).is_ok() {
+            let _ = self.stdin.write_all(b"\n");
+            let _ = self.stdin.flush();
+        }
+        for _ in 0..40 {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for WorkerSession {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+struct WorkerCandidate {
+    executable: PathBuf,
+    bundle: PathBuf,
+    session: Mutex<WorkerSession>,
+    generation: std::sync::atomic::AtomicU32,
+}
+
+impl WorkerCandidate {
+    fn new(executable: Option<PathBuf>, bundle: Option<PathBuf>) -> Result<Self> {
+        let executable = executable.ok_or_else(|| anyhow!("--ocr-worker was not supplied"))?;
+        let bundle = bundle.ok_or_else(|| anyhow!("--ocr-bundle was not supplied"))?;
+        let session = WorkerSession::spawn(&executable, &bundle)?;
+        Ok(Self {
+            executable,
+            bundle,
+            session: Mutex::new(session),
+            generation: std::sync::atomic::AtomicU32::new(1),
+        })
+    }
+}
+
+impl Candidate for WorkerCandidate {
+    fn name(&self) -> &'static str {
+        "sayflex-ocr-worker-cpu"
+    }
+
+    fn license(&self) -> &'static str {
+        "Apache-2.0"
+    }
+
+    fn source(&self) -> &'static str {
+        SAYFLEX_WORKER_SOURCE
+    }
+
+    fn recognize(&self, fixture: &Fixture, image_path: &Path) -> Result<Recognition> {
+        self.session
+            .lock()
+            .map_err(|_| anyhow!("OCR worker session lock was poisoned"))?
+            .recognize(fixture, image_path)
+    }
+
+    fn restart_after_warmup(&self) -> Result<()> {
+        let replacement = WorkerSession::spawn(&self.executable, &self.bundle)?;
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("OCR worker session lock was poisoned"))?;
+        session.shutdown();
+        *session = replacement;
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn worker_generation(&self) -> Option<u32> {
+        Some(self.generation.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
+fn worker_recognition(
+    expected_request_id: RequestId,
+    event: OcrWorkerEvent,
+    wall_time: Duration,
+) -> Result<Recognition> {
+    let event_request_id = match &event {
+        OcrWorkerEvent::Recognized { request_id, .. }
+        | OcrWorkerEvent::Failed { request_id, .. }
+        | OcrWorkerEvent::Cancelled { request_id } => *request_id,
+        OcrWorkerEvent::Ready { .. } => bail!("unexpected OCR Ready event during recognition"),
+    };
+    if event_request_id != expected_request_id {
+        bail!("unexpected OCR request {event_request_id}; expected {expected_request_id}");
+    }
+    match event {
+        OcrWorkerEvent::Recognized {
+            lines,
+            processing_duration_ms,
+            ..
+        } => Ok(Recognition {
+            text: lines
+                .into_iter()
+                .map(|line| line.text)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            elapsed_ms: processing_duration_ms as f64,
+            working_set_bytes: None,
+            peak_working_set_bytes: None,
+        }),
+        OcrWorkerEvent::Failed {
+            kind: OcrFailureKind::NoText,
+            ..
+        } => Ok(Recognition {
+            text: String::new(),
+            elapsed_ms: wall_time.as_secs_f64() * 1000.0,
+            working_set_bytes: None,
+            peak_working_set_bytes: None,
+        }),
+        OcrWorkerEvent::Failed { kind, message, .. } => {
+            bail!("OCR worker failed ({kind:?}): {message}")
+        }
+        OcrWorkerEvent::Cancelled { .. } => bail!("OCR worker cancelled the benchmark request"),
+        OcrWorkerEvent::Ready { .. } => unreachable!(),
+    }
+}
+
+#[cfg(windows)]
+fn configure_hidden_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_hidden_process(_command: &mut Command) {}
+
+#[cfg(windows)]
+fn process_memory(pid: u32) -> (Option<u64>, Option<u64>) {
+    use std::mem::size_of;
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::{
+            ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+            Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+        },
+    };
+    // SAFETY: the handle is opened read-only and closed before returning; the
+    // counter pointer targets an initialized structure of the advertised size.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if process.is_null() {
+            return (None, None);
+        }
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let ok = K32GetProcessMemoryInfo(
+            process,
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        );
+        CloseHandle(process);
+        if ok == 0 {
+            (None, None)
+        } else {
+            (
+                Some(counters.WorkingSetSize as u64),
+                Some(counters.PeakWorkingSetSize as u64),
+            )
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn process_memory(_pid: u32) -> (Option<u64>, Option<u64>) {
+    (None, None)
 }
 
 fn ensure_model_artifacts(manifest_path: &Path, model_root: &Path) -> Result<()> {
@@ -431,6 +750,8 @@ impl Candidate for PpOcrCandidate {
         Ok(Recognition {
             text: postprocess_recognized_text(&fixture.language, &result.concatenated_text("\n")),
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            working_set_bytes: None,
+            peak_working_set_bytes: None,
         })
     }
 }
@@ -526,6 +847,8 @@ impl Candidate for TesseractCandidate {
         Ok(Recognition {
             text: String::from_utf8(output.stdout).context("Tesseract emitted non-UTF-8")?,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            working_set_bytes: None,
+            peak_working_set_bytes: None,
         })
     }
 }
@@ -588,6 +911,8 @@ impl Candidate for WindowsOcrCandidate {
         Ok(Recognition {
             text: result.Text()?.to_string(),
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            working_set_bytes: None,
+            peak_working_set_bytes: None,
         })
     }
 }
@@ -631,7 +956,11 @@ fn postprocess_recognized_text(language: &str, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::postprocess_recognized_text;
+    use std::time::Duration;
+
+    use rust_protocol::{OcrFailureKind, OcrLine, OcrWorkerEvent, PhysicalRect, RequestId};
+
+    use super::{postprocess_recognized_text, worker_recognition};
 
     #[test]
     fn arabic_visual_order_is_restored_per_line() {
@@ -644,5 +973,71 @@ mod tests {
     #[test]
     fn non_arabic_text_is_not_reordered() {
         assert_eq!(postprocess_recognized_text("ru", "Перевод"), "Перевод");
+    }
+
+    #[test]
+    fn shipped_worker_result_preserves_every_line_and_protocol_latency() {
+        let request_id = RequestId::new();
+        let event = OcrWorkerEvent::Recognized {
+            request_id,
+            lines: vec![
+                OcrLine {
+                    text: "Damage +25%".to_owned(),
+                    bounds: PhysicalRect {
+                        x: 8,
+                        y: 10,
+                        width: 140,
+                        height: 20,
+                    },
+                    confidence_milli: 991,
+                },
+                OcrLine {
+                    text: "12:45 / 99".to_owned(),
+                    bounds: PhysicalRect {
+                        x: 8,
+                        y: 36,
+                        width: 120,
+                        height: 20,
+                    },
+                    confidence_milli: 974,
+                },
+            ],
+            language: Some("en".to_owned()),
+            processing_duration_ms: 37,
+        };
+
+        let recognition = worker_recognition(request_id, event, Duration::from_millis(90))
+            .expect("the matching shipped-worker response must be accepted");
+
+        assert_eq!(recognition.text, "Damage +25%\n12:45 / 99");
+        assert_eq!(recognition.elapsed_ms, 37.0);
+    }
+
+    #[test]
+    fn shipped_worker_no_text_is_a_successful_empty_recognition() {
+        let request_id = RequestId::new();
+        let event = OcrWorkerEvent::Failed {
+            request_id,
+            kind: OcrFailureKind::NoText,
+            message: "No text was found.".to_owned(),
+        };
+
+        let recognition = worker_recognition(request_id, event, Duration::from_millis(11))
+            .expect("a blank fixture is a valid OCR result");
+
+        assert!(recognition.text.is_empty());
+        assert_eq!(recognition.elapsed_ms, 11.0);
+    }
+
+    #[test]
+    fn shipped_worker_rejects_a_response_for_another_request() {
+        let expected = RequestId::new();
+        let event = OcrWorkerEvent::Cancelled {
+            request_id: RequestId::new(),
+        };
+
+        let error = worker_recognition(expected, event, Duration::from_millis(1)).unwrap_err();
+
+        assert!(error.to_string().contains("unexpected OCR request"));
     }
 }

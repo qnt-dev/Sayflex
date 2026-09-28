@@ -10,7 +10,7 @@ Describe 'SayFlex public repository presentation' {
 
         $content | Should Match '(?m)^# SayFlex$'
         $content | Should Not Match '(?m)^# Keyboop for Windows$'
-        $content | Should Match '0\.8\.0'
+        $content | Should Match '0\.8\.3'
         $content | Should Match 'rust-app'
     }
 
@@ -20,6 +20,46 @@ Describe 'SayFlex public repository presentation' {
         $license | Should Match '(?m)^MIT License\r?$'
         $license | Should Match '(?m)^Copyright \(c\) 2026 Keyboop for Windows contributors\r?$'
         $license | Should Match '(?m)^Copyright \(c\) 2026 SayFlex contributors\r?$'
+    }
+
+    It 'keeps the 0.8.3 product version aligned across source installer and public notes' {
+        $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+        $repositoryReadme = Get-Content -LiteralPath (Join-Path $rustRoot '..\README.md') -Raw
+        $workspace = Get-Content -LiteralPath (Join-Path $rustRoot 'Cargo.toml') -Raw
+        $installer = Get-Content -LiteralPath (Join-Path $rustRoot 'installer\SayFlex.iss') -Raw
+        $releaseNotes = Join-Path $rustRoot 'RELEASE_0.8.3.md'
+
+        $workspace | Should Match '(?m)^version = "0\.8\.3"\r?$'
+        $installer | Should Match '(?m)^\s*#define AppVersion "0\.8\.3"\r?$'
+        $repositoryReadme | Should Match 'version \*\*0\.8\.3\*\*'
+        $repositoryReadme | Should Match 'rust-app/RELEASE_0\.8\.3\.md'
+        $releaseNotes | Should Exist
+    }
+
+    It 'documents the screen capture glossary and local OCR privacy boundaries' {
+        $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+        $readme = Get-Content -LiteralPath (Join-Path $rustRoot 'README.md') -Raw
+        $security = Get-Content -LiteralPath (Join-Path $rustRoot 'SECURITY.md') -Raw
+        $architecture = Get-Content -LiteralPath (
+            Join-Path $rustRoot 'docs\TRANSLATION_ARCHITECTURE.md'
+        ) -Raw
+
+        $readme | Should Match 'Ctrl \+ Alt \+ G'
+        $readme | Should Match '24 hours'
+        $security | Should Match 'selected crop'
+        $security | Should Match '500 MB'
+        $security | Should Match 'personal glossary'
+        $architecture | Should Match 'block_id'
+        $architecture | Should Match '(?s)compact.*limited'
+    }
+
+    It 'drives the OCR benchmark through the shipped worker protocol' {
+        $benchmark = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\benchmark-ocr.ps1') -Raw
+
+        $benchmark | Should Match 'SayFlex\.Ocr\.exe'
+        $benchmark | Should Match '--ocr-worker'
+        $benchmark | Should Match '--ocr-bundle'
+        $benchmark | Should Match 'Shipped PP-OCR worker path verified'
     }
 
     It 'keeps every repository-relative README link resolvable' {
@@ -105,12 +145,19 @@ Describe 'SayFlex public repository presentation' {
     It 'ships and validates the OCR worker in the ordinary release payload' {
         $publish = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\publish.ps1') -Raw
         $validator = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\validate-release.ps1') -Raw
+        $generator = Get-Content -LiteralPath (
+            Join-Path $PSScriptRoot '..\generate-third-party-notices.ps1'
+        ) -Raw
+        $notice = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\THIRD_PARTY_NOTICES.md') -Raw
 
         $publish | Should Match "'sayflex-ocr-worker\.exe'\s*=\s*'SayFlex\.Ocr\.exe'"
         $publish | Should Match "SayFlex\.Ocr\.exe'\)\s+--install-models"
         $validator | Should Match "'SayFlex\.Ocr\.exe'"
         $validator | Should Match "ocr-models\\screen-ocr-ppocrv5-mobile-v3\.9\.2\\bundle\.verified\.json"
         $validator | Should Match '(?s)Every process that speaks the protocol.*SayFlex\.Ocr\.exe'
+        $generator | Should Match 'screen-ocr-ppocrv5-mobile-v3\.9\.2'
+        $notice | Should Match 'screen-ocr-ppocrv5-mobile-v3\.9\.2'
+        $notice | Should Not Match '(?m)^## HY-MT2'
     }
 
     It 'pins every supported compact Firefox language pack without bundling another runtime' {
@@ -190,6 +237,18 @@ Describe 'SayFlex installed smoke contract' {
             'provider_fallback'
             'settings_wheel_touchpad_rail'
             'recording_visuals'
+            'screen_translation_capture'
+            'screen_translation_orig_dual'
+            'screen_translation_on_image'
+            'screen_translation_edit_save_retry'
+            'screen_translation_glossary_rules'
+            'screen_translation_context_fallback'
+            'screen_translation_retention'
+            'screen_translation_monitor_dpi'
+            'screen_translation_ocr_restart'
+            'resource_release_reload'
+            'resource_game_budget'
+            'gpu_counters_localized'
             'fresh_install'
             'upgrade_install'
         )

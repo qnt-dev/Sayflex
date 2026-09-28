@@ -20,6 +20,9 @@
 - `Ctrl+Alt+K` remains the dedicated keyboard-layout correction shortcut.
 - The full translator never needs access to another application's selection.
 - History and warm-engine retention are independent user settings.
+- `Ctrl+Alt+G` captures a user-selected screen region. OCR is local and
+  CPU-only; the text then follows the same ordered translation provider policy
+  as other text.
 
 ## Isolation
 
@@ -153,3 +156,72 @@ Benchmark gates record separately:
 
 Translation performance must not be mixed into the dictation release-to-insert
 latency metric.
+
+## Screen translation document
+
+The desktop owns one revisioned screen document per request. It contains the
+selected crop, physical-pixel coordinate system, stable `block_id` values, OCR
+text and confidence, block bounds, translated text, user corrections, source
+context, and image expiry. ORIG, DUAL, and ON IMAGE are projections of this
+same document; they are not separate copies that can drift.
+
+```text
+Ctrl+Alt+G
+  -> freeze visible monitor frames in memory
+  -> select and crop one region
+  -> SayFlex.Ocr.exe (CPU, coordinates + confidence)
+  -> capture optional visible-window context
+  -> TranslateScreenBlocks(block_id, text, context)
+  -> validate exact IDs and protected values
+  -> text projection / translated overlays on the selected crop
+```
+
+Window metadata is captured with the frozen frame. After selection, context is
+chosen only from actually visible, non-occluded window regions. A large window
+behind a smaller game therefore cannot win because of its hidden area. An
+ambiguous result continues without context. URL, document name and nearby text
+are optional; SayFlex does not synthesize Ctrl+L, replace the clipboard, or
+inject into another process to obtain them.
+
+The selected PNG and metadata use a 24-hour default lifetime and a 500 MiB
+oldest-first budget. Full-monitor frames never enter the store. Pinning does
+not extend pixel lifetime. Explicit Save file creates the only permanent image
+copy. Expiry or Delete now removes pixels while retaining translated text and
+approved glossary records.
+
+## Context, backend capabilities, and glossary
+
+Qwen receives immutable instructions separately from a typed JSON envelope of
+screen blocks, optional context, and ranked glossary matches. The reply must
+map each unique `block_id` exactly once; missing, duplicated, or unknown IDs,
+truncated output, and changed protected numbers/URLs/placeholders are rejected
+or retried within a bounded policy.
+
+Firefox compact packs and ordinary cloud APIs are limited adapters. They
+translate bounded blocks while preserving IDs, but report
+`context_instructions=false` and `glossary_guidance=false`; SayFlex never
+pretends that prepending service prose to source text implements either
+capability. Compact decoder completion is typed per fragment as completed,
+limit reached, cancelled, or failed. Anything not proven complete is excluded
+from automatic replacement.
+
+The personal glossary is actor-owned and independent of translation history
+and temporary screenshots. Save correction and explicit Confirm are the only
+write paths. Copy, Pin, Close, or an untouched machine result write nothing.
+Entries are keyed by normalized phrase, language pair, and domain/application
+scope; confirming again merges examples instead of creating a duplicate.
+Lookup ranks exact language, expression, and domain matches without blindly
+replacing substrings in generated text.
+
+## Resource residency
+
+Resources samples the desktop process and all descendants, then exposes an
+aggregate row plus speech, translation, and OCR rows. CPU, RAM, GPU, and VRAM
+remain distinct and missing GPU counters remain unavailable rather than zero.
+Manual or idle release removes only resident engines, never verified files or
+the selected model. The next operation reloads the selected engine.
+
+Active capture, OCR, translation, installation, cancellation, and queued work
+protect their engine from eviction. The current idle policy releases OCR after
+five minutes, speech after fifteen minutes, and translation after fifteen
+minutes only when Keep warm is disabled.
