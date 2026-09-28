@@ -1,5 +1,7 @@
 use rust_protocol::{OcrFailureKind, OcrLine};
 
+const MAX_DENSE_BLOCK_LINES: u64 = 6;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconstructedText {
     pub text: String,
@@ -147,19 +149,31 @@ fn reconstruct_column(lines: &[AcceptedLine<'_>], paragraph_gap: i64) -> Vec<Rec
     let mut blocks = Vec::new();
     let mut current: Option<ReconstructedBlockBuilder> = None;
     let mut previous: Option<AcceptedLine<'_>> = None;
-    for line in lines {
+    for (index, line) in lines.iter().enumerate() {
+        let lexical_continuation =
+            previous.is_some_and(|previous| lexical_hyphen_continuation(previous.text, line.text));
+        let begins_lexical_pair = lines
+            .get(index + 1)
+            .is_some_and(|next| lexical_hyphen_continuation(line.text, next.text));
         let starts_paragraph = previous.is_some_and(|previous| {
             let previous_bottom = i64::from(previous.source.bounds.y)
                 .saturating_add(i64::from(previous.source.bounds.height));
-            i64::from(line.source.bounds.y).saturating_sub(previous_bottom) > paragraph_gap
+            let vertical_gap =
+                i64::from(line.source.bounds.y).saturating_sub(previous_bottom) > paragraph_gap;
+            let explicit_list_item = starts_list_item(line.text);
+            let dense_block_limit = current.as_ref().is_some_and(|block| {
+                block.line_count >= MAX_DENSE_BLOCK_LINES
+                    || (begins_lexical_pair && block.line_count + 1 >= MAX_DENSE_BLOCK_LINES)
+            });
+            vertical_gap || explicit_list_item || dense_block_limit
         });
         if starts_paragraph && let Some(block) = current.take() {
             blocks.push(block.finish());
         }
         let new_block = current.is_none();
         let block = current.get_or_insert_with(|| ReconstructedBlockBuilder::new(*line));
-        if let Some(previous) = previous {
-            if lexical_hyphen_continuation(previous.text, line.text) {
+        if previous.is_some() {
+            if lexical_continuation {
                 block.text.pop();
             } else if !starts_paragraph {
                 block.text.push('\n');
@@ -175,6 +189,13 @@ fn reconstruct_column(lines: &[AcceptedLine<'_>], paragraph_gap: i64) -> Vec<Rec
         blocks.push(block.finish());
     }
     blocks
+}
+
+fn starts_list_item(text: &str) -> bool {
+    let text = text.trim_start();
+    ["- ", "• ", "‣ ", "◦ ", "▪ ", "– ", "— "]
+        .iter()
+        .any(|marker| text.starts_with(marker))
 }
 
 struct ReconstructedBlockBuilder {

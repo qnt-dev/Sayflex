@@ -11,9 +11,9 @@ import { Fact } from "parts.slint";
 import { MenuOption, RowAction } from "controls.slint";
 import { Sheet } from "sheet.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
-import { ScreenBlockOverlay, ScreenImageResult, ScreenTranslationPreviewWindow, TranslationCorrectionWindow } from "screen_translation.slint";
+import { ScreenBlockOverlay, ScreenImageResult, ScreenTranslationPreviewWindow } from "screen_translation.slint";
 
-export { Theme, SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, GlossaryRow, HotkeyRow, ResourceRow, Fact, MenuOption, SlateLine, ScreenBlockOverlay, ScreenTranslationPreviewWindow, TranslationCorrectionWindow }
+export { Theme, SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, GlossaryRow, HotkeyRow, ResourceRow, Fact, MenuOption, SlateLine, ScreenBlockOverlay, ScreenTranslationPreviewWindow }
 
 export struct TranslationPair {
     source: string,
@@ -502,7 +502,9 @@ export component TranslationPreview inherits Window {
     min-width: 252px;
     min-height: root.preferred-height;
     no-frame: true;
-    always-on-top: true;
+    // Native presentation owns z-order: compact text popups are transiently
+    // topmost, while screen results are ordinary windows until PIN is chosen.
+    always-on-top: false;
     background: transparent;
     default-font-family: "Segoe UI Variable Text";
 
@@ -546,6 +548,14 @@ export component TranslationPreview inherits Window {
     in-out property <bool> screen-saved: false;
     in-out property <bool> screen-save-error: false;
     in-out property <bool> screen-edit-hint-visible: true;
+    in-out property <string> screen-editor-original;
+    in-out property <string> screen-editor-context;
+    in-out property <string> screen-editor-direction;
+    in-out property <string> screen-editor-baseline;
+    in-out property <string> screen-editor-translation;
+    in-out property <bool> screen-editor-saving: false;
+    in-out property <float> screen-editor-panel-x: 8;
+    in-out property <float> screen-editor-panel-y: 8;
     in property <image> glass-backdrop;
     in-out property <float> original-card-height: 96;
     /// What the original actually needs, measured rather than estimated.
@@ -589,6 +599,11 @@ export component TranslationPreview inherits Window {
     callback screen-copy-text-requested();
     callback screen-save-file-requested();
     callback screen-delete-image-requested();
+    callback screen-close-requested();
+    callback screen-editor-save-requested();
+    callback screen-editor-confirm-requested();
+    callback screen-editor-cancel-requested();
+    callback screen-editor-retry-requested();
     reset-scroll => {
         result-scroll.viewport-y = 0px;
     }
@@ -643,7 +658,7 @@ export component TranslationPreview inherits Window {
         wrap: word-wrap;
     }
 
-    if root.screen-image-active: ScreenImageResult {
+    if root.screen-image-active: screen-result := ScreenImageResult {
         width: parent.width;
         height: parent.height;
         crop-image: root.screen-crop-image;
@@ -656,9 +671,18 @@ export component TranslationPreview inherits Window {
         save-error: root.screen-save-error;
         edit-hint-visible: root.screen-edit-hint-visible;
         dim-other-blocks: root.screen-editor-visible;
-        external-editor: true;
         use-fixture-blocks: false;
         blocks: root.screen-blocks;
+        editor-original: root.screen-editor-original;
+        editor-context: root.screen-editor-context;
+        editor-direction: root.screen-editor-direction;
+        editor-baseline: root.screen-editor-baseline;
+        editor-translation <=> root.screen-editor-translation;
+        editor-saving: root.screen-editor-saving;
+        editor-panel-x: root.screen-editor-panel-x;
+        editor-panel-y: root.screen-editor-panel-y;
+        begin-drag-requested => { root.begin-drag(); }
+        close-requested => { root.screen-close-requested(); }
         view-requested(mode) => { root.screen-view-mode = root.screen-view-mode == mode ? 0 : mode; }
         pin-requested => {
             if root.pin-enabled {
@@ -678,6 +702,10 @@ export component TranslationPreview inherits Window {
         copy-text-requested => { root.screen-copy-text-requested(); }
         save-file-requested => { root.screen-save-file-requested(); }
         delete-image-requested => { root.screen-delete-image-requested(); }
+        save-requested => { root.screen-editor-save-requested(); }
+        confirm-requested => { root.screen-editor-confirm-requested(); }
+        cancel-requested => { root.screen-editor-cancel-requested(); }
+        retry-requested => { root.screen-editor-retry-requested(); }
     }
 
     if !root.screen-image-active && root.view-mode == 1: original-card := Rectangle {

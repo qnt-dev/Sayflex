@@ -10,7 +10,7 @@ Describe 'SayFlex public repository presentation' {
 
         $content | Should Match '(?m)^# SayFlex$'
         $content | Should Not Match '(?m)^# Keyboop for Windows$'
-        $content | Should Match '0\.8\.3'
+        $content | Should Match '0\.8\.4'
         $content | Should Match 'rust-app'
     }
 
@@ -22,17 +22,17 @@ Describe 'SayFlex public repository presentation' {
         $license | Should Match '(?m)^Copyright \(c\) 2026 SayFlex contributors\r?$'
     }
 
-    It 'keeps the 0.8.3 product version aligned across source installer and public notes' {
+    It 'keeps the 0.8.4 product version aligned across source installer and public notes' {
         $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
         $repositoryReadme = Get-Content -LiteralPath (Join-Path $rustRoot '..\README.md') -Raw
         $workspace = Get-Content -LiteralPath (Join-Path $rustRoot 'Cargo.toml') -Raw
         $installer = Get-Content -LiteralPath (Join-Path $rustRoot 'installer\SayFlex.iss') -Raw
-        $releaseNotes = Join-Path $rustRoot 'RELEASE_0.8.3.md'
+        $releaseNotes = Join-Path $rustRoot 'RELEASE_0.8.4.md'
 
-        $workspace | Should Match '(?m)^version = "0\.8\.3"\r?$'
-        $installer | Should Match '(?m)^\s*#define AppVersion "0\.8\.3"\r?$'
-        $repositoryReadme | Should Match 'version \*\*0\.8\.3\*\*'
-        $repositoryReadme | Should Match 'rust-app/RELEASE_0\.8\.3\.md'
+        $workspace | Should Match '(?m)^version = "0\.8\.4"\r?$'
+        $installer | Should Match '(?m)^\s*#define AppVersion "0\.8\.4"\r?$'
+        $repositoryReadme | Should Match 'version \*\*0\.8\.4\*\*'
+        $repositoryReadme | Should Match 'rust-app/RELEASE_0\.8\.4\.md'
         $releaseNotes | Should Exist
     }
 

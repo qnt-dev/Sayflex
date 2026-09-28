@@ -406,9 +406,6 @@ msgstr "Anglais"
 msgid "English keys → Cyrillic layout"
 msgstr "Touches anglaises → disposition cyrillique"
 
-msgid "ENTER"
-msgstr "ENTER"
-
 msgid "Enter text to translate."
 msgstr "Saisissez le texte à traduire."
 
@@ -946,9 +943,6 @@ msgstr "Le remplacement a été envoyé à la fenêtre cible."
 msgid "Reset"
 msgstr "Réinitialiser"
 
-msgid "Retry translation"
-msgstr "Réessayer la traduction"
-
 msgid "Runs on this computer · nothing leaves it"
 msgstr "Fonctionne en local · aucune donnée n’est envoyée"
 
@@ -969,9 +963,6 @@ msgstr "Position de défilement"
 
 msgid "Secondary language"
 msgstr "Langue secondaire"
-
-msgid "SELECT A RESULT"
-msgstr "SÉLECTIONNER UN RÉSULTAT"
 
 msgid "Selected · unloaded"
 msgstr "Sélectionné · déchargé"
@@ -1099,9 +1090,6 @@ msgstr "Coucher de soleil"
 
 msgid "SURFACE"
 msgstr "SURFACE"
-
-msgid "Swap source and target languages"
-msgstr "Inverser les langues source et cible"
 
 msgid "Swap text"
 msgstr "Intervertir les textes"
@@ -1672,6 +1660,18 @@ msgstr "COPIER LE TEXTE"
 
 msgid "Saved to glossary"
 msgstr "Enregistré dans le glossaire"
+
+msgid "Confirm"
+msgstr "Confirmer"
+
+msgid "Correct translation"
+msgstr "Corriger la traduction"
+
+msgid "ORIGINAL"
+msgstr "TEXTE ORIGINAL"
+
+msgid "Save failed. Your correction is still here."
+msgstr "Échec de l’enregistrement. Votre correction est toujours présente."
 
 msgid "SayFlex total"
 msgstr "Total SayFlex"

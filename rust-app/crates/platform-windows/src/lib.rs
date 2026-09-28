@@ -40,17 +40,20 @@ pub use job::WorkerJob;
 #[cfg(windows)]
 pub use overlay::{
     capture_blurred_cloaked_overlay_backdrop, capture_blurred_overlay_backdrop,
-    cloak_overlay_window, conceal_overlay_window, configure_action_window,
-    configure_action_window_for_target, configure_blue_glass_overlay_window,
-    configure_overlay_window, configure_standard_window, configure_translation_window,
+    clear_screen_result_window_mode, cloak_overlay_window, conceal_overlay_window,
+    configure_action_window, configure_action_window_for_target,
+    configure_blue_glass_overlay_window, configure_overlay_window, configure_screen_result_window,
+    configure_standard_window, configure_translation_window,
     configure_translation_window_for_region, configure_translation_window_for_target,
     configure_transparent_overlay_window, disable_translation_live_backdrop,
-    enable_translation_live_backdrop, overlay_window_is_cloaked, prepare_action_window,
+    enable_translation_live_backdrop, overlay_window_is_cloaked,
+    position_screen_result_window_for_region, prepare_action_window,
     prepare_blue_glass_overlay_window, prepare_overlay_window, prepare_translation_window,
     prepare_transparent_overlay_window, primary_pointer_button_is_down,
     reconcile_interactive_overlay_window_contract, reconcile_overlay_window_contract,
     request_repaint, restore_target_if_our_action_window_activated, reveal_overlay_window,
-    verify_interactive_overlay_window_contract, verify_overlay_window_contract,
+    set_screen_result_window_pinned, verify_interactive_overlay_window_contract,
+    verify_overlay_window_contract,
 };
 #[cfg(windows)]
 pub use popup_dismiss::{
@@ -345,6 +348,14 @@ pub fn configure_translation_window_for_region(
 }
 
 #[cfg(not(windows))]
+pub fn position_screen_result_window_for_region(
+    _window_handle: u64,
+    _region: (i32, i32, i32, i32),
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn prepare_translation_window(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
@@ -465,6 +476,19 @@ pub fn deactivate_all_popup_dismiss() {}
 
 #[cfg(not(windows))]
 pub fn set_popup_pinned(_window_handle: u64, _pinned: bool) {}
+
+#[cfg(not(windows))]
+pub fn configure_screen_result_window(_window_handle: u64, _pinned: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn clear_screen_result_window_mode(_window_handle: u64) {}
+
+#[cfg(not(windows))]
+pub fn set_screen_result_window_pinned(_window_handle: u64, _pinned: bool) -> Result<(), String> {
+    Ok(())
+}
 
 #[cfg(all(test, windows))]
 mod tests {

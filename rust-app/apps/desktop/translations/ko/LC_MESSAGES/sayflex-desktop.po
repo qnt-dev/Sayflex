@@ -406,9 +406,6 @@ msgstr "영어"
 msgid "English keys → Cyrillic layout"
 msgstr "영어 키 → 키릴 문자 배열"
 
-msgid "ENTER"
-msgstr "ENTER"
-
 msgid "Enter text to translate."
 msgstr "번역할 텍스트를 입력하세요."
 
@@ -946,9 +943,6 @@ msgstr "대체 내용을 대상 창으로 보냈습니다."
 msgid "Reset"
 msgstr "초기화"
 
-msgid "Retry translation"
-msgstr "번역 다시 시도"
-
 msgid "Runs on this computer · nothing leaves it"
 msgstr "로컬에서 실행 · 데이터를 전송하지 않음"
 
@@ -969,9 +963,6 @@ msgstr "스크롤 위치"
 
 msgid "Secondary language"
 msgstr "보조 언어"
-
-msgid "SELECT A RESULT"
-msgstr "결과 선택"
 
 msgid "Selected · unloaded"
 msgstr "선택됨 · 메모리에서 해제됨"
@@ -1099,9 +1090,6 @@ msgstr "일몰"
 
 msgid "SURFACE"
 msgstr "표면"
-
-msgid "Swap source and target languages"
-msgstr "원본 언어와 대상 언어 바꾸기"
 
 msgid "Swap text"
 msgstr "텍스트 바꾸기"
@@ -1672,6 +1660,18 @@ msgstr "텍스트 복사"
 
 msgid "Saved to glossary"
 msgstr "용어집에 저장됨"
+
+msgid "Confirm"
+msgstr "확인"
+
+msgid "Correct translation"
+msgstr "번역 수정"
+
+msgid "ORIGINAL"
+msgstr "원문"
+
+msgid "Save failed. Your correction is still here."
+msgstr "저장하지 못했습니다. 수정 내용은 그대로 있습니다."
 
 msgid "SayFlex total"
 msgstr "SayFlex 전체"

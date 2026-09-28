@@ -18,6 +18,28 @@ pub(crate) enum ResultViewMode {
     OnImage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScreenResultWindowMode {
+    pinned: bool,
+}
+
+impl ScreenResultWindowMode {
+    pub(crate) fn new(pinned: bool) -> Self {
+        Self { pinned }
+    }
+
+    pub(crate) fn topmost(self) -> bool {
+        self.pinned
+    }
+}
+
+pub(crate) fn preserve_editor_on_snapshot_refresh(
+    editor_visible: bool,
+    image_available: bool,
+) -> bool {
+    editor_visible && image_available
+}
+
 impl ResultViewMode {
     fn from_ui(value: i32) -> Self {
         match value {
@@ -268,7 +290,7 @@ fn fitted_viewport(crop: PhysicalRect) -> (u32, u32) {
         .min(576.0 / crop.height as f32)
         .min(1.0);
     let minimum = (320.0 / crop.width as f32)
-        .max(200.0 / crop.height as f32)
+        .max(240.0 / crop.height as f32)
         .min((960.0 / crop.width as f32).min(576.0 / crop.height as f32));
     let scale = fit.max(minimum);
     (
@@ -311,7 +333,10 @@ fn frame_image(frame: &rust_platform_windows::screen_capture::RgbaFrame) -> Resu
 mod tests {
     use rust_protocol::{PhysicalRect, ScreenBlockId};
 
-    use super::{BlockLayoutInput, ResultViewMode, layout_blocks, visible_mode, visible_ui_mode};
+    use super::{
+        BlockLayoutInput, ResultViewMode, ScreenResultWindowMode, layout_blocks,
+        preserve_editor_on_snapshot_refresh, visible_mode, visible_ui_mode,
+    };
 
     #[test]
     fn block_geometry_scales_with_the_crop_and_long_text_uses_a_readable_callout() {
@@ -358,6 +383,22 @@ mod tests {
         assert_eq!(visible_ui_mode(1, false), 1);
         assert_eq!(visible_ui_mode(2, true), 2);
         assert_eq!(visible_ui_mode(99, true), 0);
+    }
+
+    #[test]
+    fn screen_result_window_is_ordinary_until_the_user_pins_it() {
+        let ordinary = ScreenResultWindowMode::new(false);
+        assert!(!ordinary.topmost());
+
+        let pinned = ScreenResultWindowMode::new(true);
+        assert!(pinned.topmost());
+    }
+
+    #[test]
+    fn snapshot_refresh_preserves_only_a_live_inline_editor() {
+        assert!(preserve_editor_on_snapshot_refresh(true, true));
+        assert!(!preserve_editor_on_snapshot_refresh(false, true));
+        assert!(!preserve_editor_on_snapshot_refresh(true, false));
     }
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {

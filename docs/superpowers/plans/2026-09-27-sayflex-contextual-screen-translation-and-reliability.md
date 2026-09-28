@@ -791,35 +791,35 @@
 - Produces: distinct close and delete-image actions, with host dismissal cancelling any active draft before the host is retired.
 - Consumes: the approved Task 13 inline editor and the canonical Task 12 screen-result snapshot.
 
-- [ ] **Step 1: Add failing OCR reconstruction tests**
+- [x] **Step 1: Add failing OCR reconstruction tests**
 
   Add a dense bullet-list case and a dense unbroken-column fallback case. Assert semantic list items remain separate, no reconstructed block exceeds six ordinary lines, geometry follows each block, and ordinary wrapped two-line paragraphs remain intact.
 
-- [ ] **Step 2: Run OCR tests and verify RED**
+- [x] **Step 2: Run OCR tests and verify RED**
 
   Run: `cargo test -p rust-ocr-engine --test reconstruct -- --nocapture`
   Expected: the new cases fail because `reconstruct_column` currently splits only on large vertical gaps.
 
-- [ ] **Step 3: Implement bounded semantic reconstruction and verify GREEN**
+- [x] **Step 3: Implement bounded semantic reconstruction and verify GREEN**
 
   Split at explicit list markers and cap a dense no-gap block at six lines without breaking lexical hyphen continuation. Re-run the focused OCR suite and the shipped OCR corpus.
 
-- [ ] **Step 4: Add failing production interaction tests**
+- [x] **Step 4: Add failing production interaction tests**
 
   Cover screen-result window mode ownership, unpinned versus pinned z-order intent, host-owned editor teardown, refresh preserving the active editor state, real close versus delete-image semantics, and direct drag routing for image results. Use component behavior tests for Slint state and pure Rust state-transition tests for lifecycle decisions.
 
-- [ ] **Step 5: Run interaction tests and verify RED**
+- [x] **Step 5: Run interaction tests and verify RED**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation screen_result_view -- --nocapture`
   Run: `cargo test -p sayflex-desktop --features screen-translation translation_editor -- --nocapture`
   Run: `cargo test -p sayflex-desktop --features screen-translation screen_translation_preview -- --nocapture`
   Expected: new tests fail against the external-editor, missing drag/close callbacks, hidden popup pin state, and unconditional editor visibility restoration.
 
-- [ ] **Step 6: Restore the approved production interaction**
+- [x] **Step 6: Restore the approved production interaction**
 
   Bind the approved inline editor to the canonical block draft, focus the host only after explicit edit, add an unobstructed header drag region and a real close button, rename the destructive image action, and retire the editor with its host. Screen results remain open in normal z-order when unpinned; Pin changes only z-order and does not switch backdrop/resizability or flash the compositor.
 
-- [ ] **Step 7: Verify focused GREEN and render the real dense fixture**
+- [x] **Step 7: Verify focused GREEN and render the real dense fixture**
 
   Run all focused tests above, `cargo fmt --all -- --check`, strict Clippy for the changed crates, and a headless screen-result render using the captured dense-text metadata. Inspect the result at 100%, 125%, and 200%.
 

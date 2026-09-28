@@ -116,6 +116,7 @@ export component TranslationCorrectionPanel inherits Rectangle {
     callback cancel-requested();
     callback retry-requested();
     forward-focus: input;
+    init => { input.focus(); }
 
     background: #16181cf7;
     border-radius: 9px;
@@ -207,49 +208,6 @@ export component TranslationCorrectionPanel inherits Rectangle {
     }
 }
 
-export component TranslationCorrectionWindow inherits Window {
-    title: @tr("Correct translation");
-    preferred-width: 330px;
-    preferred-height: 230px;
-    min-width: 330px;
-    min-height: 230px;
-    max-width: 330px;
-    max-height: 230px;
-    no-frame: true;
-    always-on-top: true;
-    background: transparent;
-    default-font-family: "Segoe UI Variable Text";
-
-    in-out property <string> original-text;
-    in-out property <string> context-text;
-    in-out property <string> baseline-translation;
-    in-out property <string> edited-translation;
-    in-out property <string> direction-text: "EN → RU";
-    in-out property <bool> save-error: false;
-    in-out property <bool> saving: false;
-    callback save-requested();
-    callback confirm-requested();
-    callback cancel-requested();
-    callback retry-requested();
-    forward-focus: panel;
-
-    panel := TranslationCorrectionPanel {
-        width: parent.width;
-        height: parent.height;
-        original-text: root.original-text;
-        context-text: root.context-text;
-        baseline-translation: root.baseline-translation;
-        direction-text: root.direction-text;
-        edited-translation <=> root.edited-translation;
-        save-error: root.save-error;
-        editor-focusable: !root.saving;
-        save-requested => { root.save-requested(); }
-        confirm-requested => { root.confirm-requested(); }
-        cancel-requested => { root.cancel-requested(); }
-        retry-requested => { root.retry-requested(); }
-    }
-}
-
 export component ScreenImageResult inherits Rectangle {
     in property <image> crop-image;
     in property <int> view-mode: 3;
@@ -262,12 +220,10 @@ export component ScreenImageResult inherits Rectangle {
     in property <bool> copied: false;
     in property <bool> edit-hint-visible: true;
     in property <bool> dim-other-blocks: false;
-    in property <bool> external-editor: false;
     in property <bool> use-fixture-blocks: true;
     in property <[ScreenBlockOverlay]> blocks;
     in property <float> editor-panel-x: 488;
     in property <float> editor-panel-y: 292;
-    in property <bool> result-non-activating: true;
     in property <length> minimum-overlay-font-size: 10px;
     in property <string> menu-translation: "Меню";
     in property <string> actions-translation: "Действия";
@@ -275,8 +231,13 @@ export component ScreenImageResult inherits Rectangle {
     in property <string> unit-translation: "Кочевник · быстрый, стойкий";
     in property <string> end-turn-translation: "Завершить ход";
     in property <string> editor-original: "End Turn";
+    in property <string> editor-context: "Battle for Wesnoth · game interface";
+    in property <string> editor-direction: "EN → RU";
     in property <string> editor-baseline: "Завершить ход";
     in-out property <string> editor-translation: "Завершить ход";
+    in property <bool> editor-saving: false;
+    callback begin-drag-requested();
+    callback close-requested();
     callback view-requested(int);
     callback pin-requested();
     callback block-selected(int);
@@ -313,12 +274,21 @@ export component ScreenImageResult inherits Rectangle {
         opacity: 0.07;
     }
 
+    TouchArea {
+        x: 0px; y: 0px; width: parent.width; height: 38px;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.begin-drag-requested();
+            }
+        }
+    }
     OverlayButton { x: 14px; y: 7px; width: 44px; label: "ORIG"; active: root.view-mode == 1; clicked => { root.view-requested(1); } }
     OverlayButton { x: 64px; y: 7px; width: 44px; label: "DUAL"; active: root.view-mode == 2; clicked => { root.view-requested(2); } }
     OverlayButton { x: 114px; y: 7px; width: 78px; label: "ON IMAGE"; active: root.view-mode == 3; clicked => { root.view-requested(3); } }
     OverlayButton { x: 198px; y: 7px; width: 32px; label: "↓"; accessible-name: @tr("Save file"); enabled: !root.image-expired; clicked => { root.save-file-requested(); } }
-    OverlayButton { x: 236px; y: 7px; width: 32px; label: "×"; accessible-name: @tr("Delete image"); enabled: !root.image-expired; clicked => { root.delete-image-requested(); } }
-    OverlayButton { x: parent.width - 52px; y: 7px; width: 44px; label: "PIN"; active: root.pinned; clicked => { root.pin-requested(); } }
+    OverlayButton { x: 236px; y: 7px; width: 38px; label: "DEL"; accessible-name: @tr("Delete image"); enabled: !root.image-expired; clicked => { root.delete-image-requested(); } }
+    OverlayButton { x: parent.width - 96px; y: 7px; width: 44px; label: "PIN"; active: root.pinned; clicked => { root.pin-requested(); } }
+    OverlayButton { x: parent.width - 46px; y: 7px; width: 38px; label: "×"; accessible-name: @tr("Close"); clicked => { root.close-requested(); } }
     if root.edit-hint-visible && root.view-mode != 1 && !root.editor-visible && root.width >= 610px: Rectangle {
         x: 282px; y: 8px; width: 226px; height: 22px;
         border-radius: 6px;
@@ -412,14 +382,18 @@ export component ScreenImageResult inherits Rectangle {
                 edit-requested => { root.block-edit-requested(index); }
             }
 
-            if root.editor-visible && !root.external-editor: inline-editor := TranslationCorrectionPanel {
+            if root.editor-visible: inline-editor := TranslationCorrectionPanel {
                 x: root.editor-panel-x * 1px;
                 y: root.editor-panel-y * 1px;
-                width: 330px; height: 230px;
+                width: min(330px, parent.width - 16px);
+                height: min(230px, parent.height - 16px);
                 original-text: root.editor-original;
+                context-text: root.editor-context;
+                direction-text: root.editor-direction;
                 baseline-translation: root.editor-baseline;
                 edited-translation <=> root.editor-translation;
                 save-error: root.save-error;
+                editor-focusable: !root.editor-saving;
                 save-requested => { root.save-requested(); }
                 confirm-requested => { root.confirm-requested(); }
                 cancel-requested => { root.cancel-requested(); }
@@ -479,9 +453,8 @@ export component ScreenTranslationPreviewWindow inherits Window {
     min-width: 960px;
     min-height: 614px;
     no-frame: true;
-    // A standalone design-review surface must behave like an ordinary window.
-    // The production translation result remains topmost through its own overlay
-    // contract; keeping the preview topmost only obstructs unrelated work.
+    // Screen results behave like ordinary windows until the user explicitly
+    // pins them. Native presentation applies the same contract in production.
     always-on-top: false;
     background: transparent;
     default-font-family: "Segoe UI Variable Text";
@@ -511,6 +484,9 @@ export component ScreenTranslationPreviewWindow inherits Window {
     in-out property <string> editor-original: "End Turn";
     in-out property <string> editor-baseline: "Завершить ход";
     in-out property <string> editor-translation: "Завершить ход";
+    out property <int> drag-request-count: 0;
+    out property <int> close-request-count: 0;
+    out property <int> delete-request-count: 0;
     callback choose-view(int);
     callback toggle-pin();
     callback select-block(int);
@@ -524,6 +500,9 @@ export component ScreenTranslationPreviewWindow inherits Window {
     callback copy-text();
     callback save-file();
     callback delete-image();
+    callback request-drag();
+    callback request-close();
+    callback request-delete-image();
 
     choose-view(mode) => { root.view-mode = root.view-mode == mode ? 0 : mode; root.editor-visible = false; }
     toggle-pin => { root.pinned = !root.pinned; }
@@ -582,6 +561,9 @@ export component ScreenTranslationPreviewWindow inherits Window {
     copy-text => { root.copied = true; }
     save-file => { }
     delete-image => { root.preview-state = 4; root.editor-visible = false; }
+    request-drag => { root.drag-request-count += 1; }
+    request-close => { root.close-request-count += 1; }
+    request-delete-image => { root.delete-request-count += 1; root.delete-image(); }
 
     keyboard := FocusScope {
         width: 960px;
@@ -626,6 +608,8 @@ export component ScreenTranslationPreviewWindow inherits Window {
             editor-original: root.editor-original;
             editor-baseline: root.editor-baseline;
             editor-translation <=> root.editor-translation;
+            begin-drag-requested => { root.request-drag(); }
+            close-requested => { root.request-close(); }
             view-requested(mode) => { root.choose-view(mode); }
             pin-requested => { root.toggle-pin(); }
             block-selected(block) => { root.select-block(block); }
@@ -636,7 +620,7 @@ export component ScreenTranslationPreviewWindow inherits Window {
             retry-requested => { root.retry-save(); }
             copy-text-requested => { root.copy-text(); }
             save-file-requested => { root.save-file(); }
-            delete-image-requested => { root.delete-image(); }
+            delete-image-requested => { root.request-delete-image(); }
         }
     }
 }

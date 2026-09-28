@@ -406,9 +406,6 @@ msgstr "Английский"
 msgid "English keys → Cyrillic layout"
 msgstr "Английские клавиши → Кириллическая раскладка"
 
-msgid "ENTER"
-msgstr "ENTER"
-
 msgid "Enter text to translate."
 msgstr "Введите текст для перевода."
 
@@ -946,9 +943,6 @@ msgstr "Замена отправлена в целевое окно."
 msgid "Reset"
 msgstr "Сброс"
 
-msgid "Retry translation"
-msgstr "Повторить перевод"
-
 msgid "Runs on this computer · nothing leaves it"
 msgstr "Работает локально · данные никуда не отправляются"
 
@@ -969,9 +963,6 @@ msgstr "Положение прокрутки"
 
 msgid "Secondary language"
 msgstr "Второй язык"
-
-msgid "SELECT A RESULT"
-msgstr "ВЫБЕРИТЕ РЕЗУЛЬТАТ"
 
 msgid "Selected · unloaded"
 msgstr "Выбрана · выгружена"
@@ -1099,9 +1090,6 @@ msgstr "Закат"
 
 msgid "SURFACE"
 msgstr "ПОВЕРХНОСТЬ"
-
-msgid "Swap source and target languages"
-msgstr "Поменять местами исходный и целевой языки"
 
 msgid "Swap text"
 msgstr "Поменять местами"
@@ -1672,6 +1660,18 @@ msgstr "КОПИРОВАТЬ ТЕКСТ"
 
 msgid "Saved to glossary"
 msgstr "Сохранено в словарь"
+
+msgid "Confirm"
+msgstr "Подтвердить"
+
+msgid "Correct translation"
+msgstr "Исправить перевод"
+
+msgid "ORIGINAL"
+msgstr "ИСХОДНЫЙ ТЕКСТ"
+
+msgid "Save failed. Your correction is still here."
+msgstr "Не удалось сохранить. Ваше исправление не потеряно."
 
 msgid "SayFlex total"
 msgstr "SayFlex — всего"

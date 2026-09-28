@@ -1,4 +1,11 @@
-use std::{ffi::c_void, mem::size_of, ptr::null_mut, slice, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    ffi::c_void,
+    mem::size_of,
+    ptr::null_mut,
+    slice,
+    sync::{Mutex, OnceLock},
+};
 
 use crate::BlurredBackdrop;
 
@@ -28,10 +35,10 @@ use windows_sys::Win32::{
             GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG,
             ICON_SMALL, IMAGE_ICON, IsWindowVisible, LR_DEFAULTCOLOR, LoadImageW, SM_CXICON,
             SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetClassLongPtrW,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetClassLongPtrW,
             SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_SETICON,
-            WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+            WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
@@ -503,6 +510,9 @@ pub fn verify_interactive_overlay_window_contract(
     window_handle: u64,
     expected_cloaked: bool,
 ) -> Result<(), String> {
+    if let Some(pinned) = screen_result_window_mode(window_handle) {
+        return verify_screen_result_window_contract(window_handle, expected_cloaked, pinned);
+    }
     verify_overlay_window_contract_impl(window_handle, expected_cloaked, false)
 }
 
@@ -519,7 +529,69 @@ pub fn reconcile_overlay_window_contract(window_handle: u64) -> Result<(), Strin
 
 /// Reassert the native styles for an interactive, non-activating overlay.
 pub fn reconcile_interactive_overlay_window_contract(window_handle: u64) -> Result<(), String> {
+    if let Some(pinned) = screen_result_window_mode(window_handle) {
+        return apply_screen_result_window_contract(window_handle as usize as HWND, pinned);
+    }
     reconcile_overlay_ex_style(window_handle, false)
+}
+
+fn screen_result_modes() -> &'static Mutex<HashMap<u64, bool>> {
+    static MODES: OnceLock<Mutex<HashMap<u64, bool>>> = OnceLock::new();
+    MODES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn screen_result_window_mode(window_handle: u64) -> Option<bool> {
+    screen_result_modes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&window_handle)
+        .copied()
+}
+
+fn remember_screen_result_window_mode(window_handle: u64, pinned: bool) {
+    screen_result_modes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(window_handle, pinned);
+}
+
+pub fn clear_screen_result_window_mode(window_handle: u64) {
+    screen_result_modes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&window_handle);
+}
+
+fn verify_screen_result_window_contract(
+    window_handle: u64,
+    expected_cloaked: bool,
+    pinned: bool,
+) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("screen-result window handle is not available".to_owned());
+    }
+    unsafe {
+        let extended_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let missing = WS_EX_TOOLWINDOW as isize & !extended_style;
+        let forbidden = (WS_EX_APPWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE) as isize;
+        let unexpected = extended_style & forbidden;
+        let actual_topmost = extended_style & WS_EX_TOPMOST as isize != 0;
+        if missing != 0 || unexpected != 0 || actual_topmost != pinned {
+            return Err(format!(
+                "screen-result ex-style contract mismatch: exstyle=0x{extended_style:X} \
+missing=0x{missing:X} unexpected=0x{unexpected:X} expected_topmost={pinned} \
+actual_topmost={actual_topmost}"
+            ));
+        }
+    }
+    let actual_cloaked = overlay_window_is_app_cloaked(window_handle)?;
+    if actual_cloaked != expected_cloaked {
+        return Err(format!(
+            "screen-result cloak contract mismatch: expected={expected_cloaked} actual={actual_cloaked}"
+        ));
+    }
+    Ok(())
 }
 
 fn reconcile_overlay_ex_style(window_handle: u64, click_through: bool) -> Result<(), String> {
@@ -723,6 +795,76 @@ pub fn configure_action_window(window_handle: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Turns a translated screenshot into an ordinary, focusable tool window.
+///
+/// Unlike the compact text popup it must be possible to place this surface
+/// behind other applications, drag it, and focus its inline correction field.
+/// It remains a tool window so the temporary result does not create a taskbar
+/// or Alt+Tab entry. Pinning changes only z-order; it never swaps compositor
+/// material or rewrites resizability.
+pub fn configure_screen_result_window(window_handle: u64, pinned: bool) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("screen-result window handle is not available".to_owned());
+    }
+    dress_icon(hwnd);
+    apply_screen_result_window_contract(hwnd, pinned)?;
+    remember_screen_result_window_mode(window_handle, pinned);
+    Ok(())
+}
+
+fn apply_screen_result_window_contract(hwnd: HWND, pinned: bool) -> Result<(), String> {
+    if hwnd.is_null() {
+        return Err("screen-result window handle is not available".to_owned());
+    }
+    unsafe {
+        let current_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let desired_style = (current_style
+            & !(WS_EX_APPWINDOW as isize)
+            & !(WS_EX_TRANSPARENT as isize)
+            & !(WS_EX_NOACTIVATE as isize))
+            | WS_EX_TOOLWINDOW as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_style);
+        apply_translation_window_contract(hwnd);
+        if SetWindowPos(
+            hwnd,
+            if pinned { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            return Err("SetWindowPos failed for screen-result window".to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub fn set_screen_result_window_pinned(window_handle: u64, pinned: bool) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("screen-result window handle is not available".to_owned());
+    }
+    unsafe {
+        if SetWindowPos(
+            hwnd,
+            if pinned { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        ) == 0
+        {
+            return Err("SetWindowPos failed while changing screen-result pin".to_owned());
+        }
+    }
+    remember_screen_result_window_mode(window_handle, pinned);
+    Ok(())
+}
+
 pub fn configure_action_window_for_target(
     window_handle: u64,
     target_window_handle: u64,
@@ -840,6 +982,69 @@ pub fn configure_translation_window_for_region(
         ) == 0
         {
             return Err("SetWindowPos failed for screen-translation window".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Positions a translated-screenshot result without changing its z-order.
+/// The screen-result contract is established before presentation and remains
+/// authoritative through prepare, placement and reveal.
+pub fn position_screen_result_window_for_region(
+    window_handle: u64,
+    region: (i32, i32, i32, i32),
+) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("screen-result window handle is not available".to_owned());
+    }
+    let region = RECT {
+        left: region.0,
+        top: region.1,
+        right: region.2,
+        bottom: region.3,
+    };
+    if region.right <= region.left || region.bottom <= region.top {
+        return Ok(());
+    }
+    let anchor = POINT {
+        x: region.left.saturating_add((region.right - region.left) / 2),
+        y: region.top.saturating_add((region.bottom - region.top) / 2),
+    };
+    unsafe {
+        let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
+            return Ok(());
+        }
+        let mut monitor_info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        let mut window_rect = RECT::default();
+        if GetMonitorInfoW(monitor, &mut monitor_info) == 0
+            || GetWindowRect(hwnd, &mut window_rect) == 0
+        {
+            return Ok(());
+        }
+        let fitted = fit_window_for_region(
+            region,
+            window_rect.right - window_rect.left,
+            window_rect.bottom - window_rect.top,
+            monitor_info.rcWork,
+        );
+        if SetWindowPos(
+            hwnd,
+            null_mut(),
+            fitted.x,
+            fitted.y,
+            fitted.width,
+            fitted.height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            return Err("SetWindowPos failed while positioning screen-result window".to_owned());
         }
     }
     Ok(())
@@ -1738,5 +1943,89 @@ mod placement_tests {
             offer_position_for_region(edge, 400, 200, second_screen()),
             (7272, 42)
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod screen_result_contract_tests {
+    use std::ptr::null_mut;
+
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GetWindowLongPtrW, WS_EX_TOPMOST,
+        WS_OVERLAPPEDWINDOW,
+    };
+
+    use super::{
+        clear_screen_result_window_mode, configure_screen_result_window,
+        position_screen_result_window_for_region, reconcile_interactive_overlay_window_contract,
+        set_screen_result_window_pinned,
+    };
+
+    struct TestWindow(windows_sys::Win32::Foundation::HWND);
+
+    impl TestWindow {
+        fn create() -> Self {
+            let class = "STATIC\0".encode_utf16().collect::<Vec<_>>();
+            let title = "SayFlex screen result contract test\0"
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    title.as_ptr(),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    320,
+                    180,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                )
+            };
+            assert!(!hwnd.is_null());
+            Self(hwnd)
+        }
+
+        fn handle(&self) -> u64 {
+            self.0 as usize as u64
+        }
+
+        fn is_topmost(&self) -> bool {
+            unsafe { GetWindowLongPtrW(self.0, GWL_EXSTYLE) & WS_EX_TOPMOST as isize != 0 }
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            clear_screen_result_window_mode(self.handle());
+            unsafe {
+                DestroyWindow(self.0);
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_position_and_reconcile_never_promote_an_unpinned_result() {
+        let window = TestWindow::create();
+        configure_screen_result_window(window.handle(), false).unwrap();
+        assert!(!window.is_topmost());
+
+        reconcile_interactive_overlay_window_contract(window.handle()).unwrap();
+        assert!(!window.is_topmost());
+
+        position_screen_result_window_for_region(window.handle(), (20, 20, 200, 100)).unwrap();
+        assert!(!window.is_topmost());
+
+        set_screen_result_window_pinned(window.handle(), true).unwrap();
+        assert!(window.is_topmost());
+        position_screen_result_window_for_region(window.handle(), (30, 30, 210, 110)).unwrap();
+        assert!(window.is_topmost());
+
+        set_screen_result_window_pinned(window.handle(), false).unwrap();
+        reconcile_interactive_overlay_window_contract(window.handle()).unwrap();
+        assert!(!window.is_topmost());
     }
 }

@@ -263,6 +263,18 @@ mod tests {
         assert_eq!(window.get_editor_translation(), "Меню");
         assert_eq!(window.get_editor_panel_x(), 164.0);
         assert_eq!(window.get_editor_panel_y(), 30.0);
+
+        assert_eq!(window.get_drag_request_count(), 0);
+        assert_eq!(window.get_close_request_count(), 0);
+        assert_eq!(window.get_delete_request_count(), 0);
+
+        window.invoke_request_drag();
+        window.invoke_request_close();
+        window.invoke_request_delete_image();
+
+        assert_eq!(window.get_drag_request_count(), 1);
+        assert_eq!(window.get_close_request_count(), 1);
+        assert_eq!(window.get_delete_request_count(), 1);
     }
 
     #[test]
@@ -304,7 +316,9 @@ mod tests {
             "retry-requested => { root.retry-save(); }",
             "copy-text-requested => { root.copy-text(); }",
             "save-file-requested => { root.save-file(); }",
-            "delete-image-requested => { root.delete-image(); }",
+            "begin-drag-requested => { root.request-drag(); }",
+            "close-requested => { root.request-close(); }",
+            "delete-image-requested => { root.request-delete-image(); }",
         ] {
             assert!(
                 SOURCE.contains(wiring),
@@ -340,17 +354,23 @@ mod tests {
         assert!(SOURCE.contains("inline-editor := TranslationCorrectionPanel"));
         assert!(SOURCE.contains("double-clicked => { root.edit-requested(); }"));
         assert!(
+            SOURCE.contains("init => { input.focus(); }"),
+            "the in-image editor must accept typing immediately after double-click"
+        );
+        assert!(
             !SOURCE.contains("label: \"Correct\""),
             "editing must be opened by double-clicking the translated text, not a floating button"
         );
     }
 
     #[test]
-    fn editor_and_non_activating_result_remain_separate_components() {
+    fn editor_is_embedded_in_the_screen_result_without_a_parallel_window() {
         assert!(SOURCE.contains("export component ScreenImageResult"));
         assert!(SOURCE.contains("export component TranslationCorrectionPanel"));
-        assert!(SOURCE.contains("result-non-activating"));
         assert!(SOURCE.contains("editor-focusable"));
+        assert!(SOURCE.contains("inline-editor := TranslationCorrectionPanel"));
+        assert!(!SOURCE.contains("TranslationCorrectionWindow"));
+        assert!(!SOURCE.contains("external-editor"));
     }
 
     #[test]

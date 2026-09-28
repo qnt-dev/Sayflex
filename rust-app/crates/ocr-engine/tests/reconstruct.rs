@@ -96,3 +96,132 @@ fn whitespace_only_regions_are_not_text() {
         Err(OcrFailureKind::NoText)
     );
 }
+
+#[test]
+fn dense_list_items_become_separate_semantic_blocks() {
+    let lines = vec![
+        line("- First item begins here", 10, 10, 480, 990),
+        line("and continues on the next rendered line.", 10, 30, 500, 980),
+        line(
+            "- Second item begins without a paragraph gap",
+            10,
+            50,
+            520,
+            970,
+        ),
+        line("and also wraps onto a second line.", 10, 70, 430, 960),
+        line("• Third item uses a round bullet", 10, 90, 410, 950),
+        line("with its own continuation.", 10, 110, 350, 940),
+    ];
+
+    let reconstructed = reconstruct_text(&lines, 650).unwrap();
+
+    assert_eq!(reconstructed.blocks.len(), 3);
+    assert_eq!(
+        reconstructed.blocks[0].text,
+        "- First item begins here\nand continues on the next rendered line."
+    );
+    assert_eq!(
+        reconstructed.blocks[0].bounds,
+        PhysicalRect {
+            x: 10,
+            y: 10,
+            width: 500,
+            height: 38,
+        }
+    );
+    assert_eq!(
+        reconstructed.blocks[1].text,
+        "- Second item begins without a paragraph gap\nand also wraps onto a second line."
+    );
+    assert_eq!(reconstructed.blocks[1].bounds.y, 50);
+    assert_eq!(
+        reconstructed.blocks[2].text,
+        "• Third item uses a round bullet\nwith its own continuation."
+    );
+}
+
+#[test]
+fn dense_column_is_bounded_without_splitting_a_wrapped_pair() {
+    let lines = (0..14)
+        .map(|index| {
+            line(
+                &format!("Dense rendered line {index}"),
+                10,
+                10 + index * 20,
+                420,
+                990,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let reconstructed = reconstruct_text(&lines, 650).unwrap();
+
+    assert_eq!(
+        reconstructed
+            .blocks
+            .iter()
+            .map(|block| block.text.lines().count())
+            .collect::<Vec<_>>(),
+        vec![6, 6, 2]
+    );
+    assert_eq!(reconstructed.blocks[0].bounds.y, 10);
+    assert_eq!(reconstructed.blocks[1].bounds.y, 130);
+    assert_eq!(reconstructed.blocks[2].bounds.y, 250);
+}
+
+#[test]
+fn lexical_hyphen_pair_never_pushes_a_dense_block_past_the_limit() {
+    let lines = vec![
+        line("Dense rendered line 0", 10, 10, 420, 990),
+        line("Dense rendered line 1", 10, 30, 420, 990),
+        line("Dense rendered line 2", 10, 50, 420, 990),
+        line("Dense rendered line 3", 10, 70, 420, 990),
+        line("Dense rendered line 4", 10, 90, 420, 990),
+        line("trans-", 10, 110, 420, 990),
+        line("lation", 10, 130, 420, 990),
+        line("Dense rendered line 7", 10, 150, 420, 990),
+    ];
+
+    let reconstructed = reconstruct_text(&lines, 650).unwrap();
+
+    assert!(
+        reconstructed
+            .blocks
+            .iter()
+            .all(|block| block.text.lines().count() <= 6)
+    );
+    assert!(
+        reconstructed
+            .blocks
+            .iter()
+            .any(|block| block.text.contains("translation"))
+    );
+    assert_eq!(reconstructed.blocks.len(), 2);
+    assert_eq!(
+        reconstructed.blocks[0].text,
+        (0..5)
+            .map(|index| format!("Dense rendered line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(reconstructed.blocks[1].text.starts_with("translation"));
+}
+
+#[test]
+fn ordinary_wrapped_paragraph_remains_one_block() {
+    let reconstructed = reconstruct_text(
+        &[
+            line("A sentence wraps naturally", 10, 10, 260, 990),
+            line("onto one following line.", 10, 30, 230, 990),
+        ],
+        650,
+    )
+    .unwrap();
+
+    assert_eq!(reconstructed.blocks.len(), 1);
+    assert_eq!(
+        reconstructed.blocks[0].text,
+        "A sentence wraps naturally\nonto one following line."
+    );
+}

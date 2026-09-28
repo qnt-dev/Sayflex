@@ -1740,6 +1740,34 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn closing_a_pinned_completed_result_discards_its_document_and_pixels() {
+        let request_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.begin(request_id);
+        coordinator.selected(request_id, rect(0, 0, 20, 20));
+        coordinator.recognized(request_id);
+        coordinator.insert_document(document(request_id));
+        coordinator
+            .apply_completed(
+                request_id,
+                0,
+                vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        coordinator.complete(request_id);
+        assert!(coordinator.pin_completed(request_id));
+        assert!(coordinator.document_has_pixels(request_id));
+
+        assert_eq!(coordinator.close(request_id), None);
+        assert!(!coordinator.document_has_pixels(request_id));
+        assert!(coordinator.copy_text(request_id).is_err());
+    }
+
     #[test]
     fn structured_failure_keeps_anchor_until_user_dismisses_it() {
         let request_id = RequestId::new();

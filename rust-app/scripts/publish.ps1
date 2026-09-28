@@ -338,8 +338,8 @@ finally {
     $env:CMAKE_CUDA_ARCHITECTURES = $previousCudaArchitectures
     $env:LIBCLANG_PATH = $previousLibclangPath
     $env:CMAKE_GENERATOR_INSTANCE = $previousGeneratorInstance
-        $env:SAYFLEX_BUILD_COMMIT = $previousBuildCommit
-        $env:SAYFLEX_OCR_BUNDLE = $previousOcrBundle
+    $env:SAYFLEX_BUILD_COMMIT = $previousBuildCommit
+    $env:SAYFLEX_OCR_BUNDLE = $previousOcrBundle
     if (-not $KeepBuildArtifacts) {
         foreach ($target in $temporaryTargets) {
             if (Test-Path -LiteralPath $target) {

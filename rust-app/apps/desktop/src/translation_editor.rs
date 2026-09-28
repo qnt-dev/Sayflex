@@ -117,11 +117,18 @@ impl TranslationEditorState {
     }
 }
 
+pub(crate) fn host_editor_should_close(
+    active_host_window: Option<u64>,
+    retiring_host_window: u64,
+) -> bool {
+    active_host_window == Some(retiring_host_window)
+}
+
 #[cfg(test)]
 mod tests {
     use rust_protocol::{RequestId, ScreenBlockId};
 
-    use super::{EditorDraftKey, EditorPhase, TranslationEditorState};
+    use super::{EditorDraftKey, EditorPhase, TranslationEditorState, host_editor_should_close};
 
     #[test]
     fn failed_save_preserves_the_draft_and_is_retryable() {
@@ -169,5 +176,12 @@ mod tests {
         );
         assert!(!editor.succeed(stale));
         assert_eq!(editor.phase(), EditorPhase::Editing);
+    }
+
+    #[test]
+    fn only_the_editor_owned_by_a_retiring_host_is_closed() {
+        assert!(host_editor_should_close(Some(42), 42));
+        assert!(!host_editor_should_close(Some(42), 77));
+        assert!(!host_editor_should_close(None, 42));
     }
 }

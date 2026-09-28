@@ -406,9 +406,6 @@ msgstr "Англійська"
 msgid "English keys → Cyrillic layout"
 msgstr "Англійські клавіші → Кирилична розкладка"
 
-msgid "ENTER"
-msgstr "ENTER"
-
 msgid "Enter text to translate."
 msgstr "Введіть текст для перекладу."
 
@@ -946,9 +943,6 @@ msgstr "Заміну надіслано до цільового вікна."
 msgid "Reset"
 msgstr "Скинути"
 
-msgid "Retry translation"
-msgstr "Повторити переклад"
-
 msgid "Runs on this computer · nothing leaves it"
 msgstr "Працює локально · дані нікуди не надсилаються"
 
@@ -969,9 +963,6 @@ msgstr "Положення прокручування"
 
 msgid "Secondary language"
 msgstr "Додаткова мова"
-
-msgid "SELECT A RESULT"
-msgstr "ВИБРАТИ РЕЗУЛЬТАТ"
 
 msgid "Selected · unloaded"
 msgstr "Вибрано · вивантажено"
@@ -1099,9 +1090,6 @@ msgstr "Захід сонця"
 
 msgid "SURFACE"
 msgstr "ПОВЕРХНЯ"
-
-msgid "Swap source and target languages"
-msgstr "Поміняти місцями вихідну та цільову мови"
 
 msgid "Swap text"
 msgstr "Поміняти місцями"
@@ -1672,6 +1660,18 @@ msgstr "КОПІЮВАТИ ТЕКСТ"
 
 msgid "Saved to glossary"
 msgstr "Збережено до глосарія"
+
+msgid "Confirm"
+msgstr "Підтвердити"
+
+msgid "Correct translation"
+msgstr "Виправити переклад"
+
+msgid "ORIGINAL"
+msgstr "ОРИГІНАЛ"
+
+msgid "Save failed. Your correction is still here."
+msgstr "Не вдалося зберегти. Ваше виправлення не втрачено."
 
 msgid "SayFlex total"
 msgstr "SayFlex — усього"
