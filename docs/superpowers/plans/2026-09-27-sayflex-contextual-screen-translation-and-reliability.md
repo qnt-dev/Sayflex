@@ -769,3 +769,64 @@
 - [x] **Step 8: Commit**
 
   `git commit -m "chore(release): validate contextual screen translation update"`
+
+### Task 17: Recover the production screen-result interaction and dense-text layout
+
+**Files:**
+- Modify: `rust-app/crates/ocr-engine/src/reconstruct.rs`
+- Modify: `rust-app/crates/ocr-engine/tests/reconstruct.rs`
+- Modify: `rust-app/apps/desktop/ui/screen_translation.slint`
+- Modify: `rust-app/apps/desktop/ui/app.slint`
+- Modify: `rust-app/apps/desktop/src/screen_result_view.rs`
+- Modify: `rust-app/apps/desktop/src/translation_view.rs`
+- Modify: `rust-app/apps/desktop/src/main.rs`
+- Modify: `rust-app/crates/platform-windows/src/overlay.rs`
+- Modify: `rust-app/crates/platform-windows/src/lib.rs`
+- Modify: release/version manifests and `rust-app/docs/RELEASE_0.8.4.md`
+
+**Interfaces:**
+- Produces: list-aware and bounded OCR reconstruction that cannot collapse a dense page into one full-image block.
+- Produces: one inline correction surface owned by its screen-result host; no independent correction window is shown.
+- Produces: a draggable, focusable screen-result window that is ordinary z-order while unpinned and topmost only while pinned.
+- Produces: distinct close and delete-image actions, with host dismissal cancelling any active draft before the host is retired.
+- Consumes: the approved Task 13 inline editor and the canonical Task 12 screen-result snapshot.
+
+- [ ] **Step 1: Add failing OCR reconstruction tests**
+
+  Add a dense bullet-list case and a dense unbroken-column fallback case. Assert semantic list items remain separate, no reconstructed block exceeds six ordinary lines, geometry follows each block, and ordinary wrapped two-line paragraphs remain intact.
+
+- [ ] **Step 2: Run OCR tests and verify RED**
+
+  Run: `cargo test -p rust-ocr-engine --test reconstruct -- --nocapture`
+  Expected: the new cases fail because `reconstruct_column` currently splits only on large vertical gaps.
+
+- [ ] **Step 3: Implement bounded semantic reconstruction and verify GREEN**
+
+  Split at explicit list markers and cap a dense no-gap block at six lines without breaking lexical hyphen continuation. Re-run the focused OCR suite and the shipped OCR corpus.
+
+- [ ] **Step 4: Add failing production interaction tests**
+
+  Cover screen-result window mode ownership, unpinned versus pinned z-order intent, host-owned editor teardown, refresh preserving the active editor state, real close versus delete-image semantics, and direct drag routing for image results. Use component behavior tests for Slint state and pure Rust state-transition tests for lifecycle decisions.
+
+- [ ] **Step 5: Run interaction tests and verify RED**
+
+  Run: `cargo test -p sayflex-desktop --features screen-translation screen_result_view -- --nocapture`
+  Run: `cargo test -p sayflex-desktop --features screen-translation translation_editor -- --nocapture`
+  Run: `cargo test -p sayflex-desktop --features screen-translation screen_translation_preview -- --nocapture`
+  Expected: new tests fail against the external-editor, missing drag/close callbacks, hidden popup pin state, and unconditional editor visibility restoration.
+
+- [ ] **Step 6: Restore the approved production interaction**
+
+  Bind the approved inline editor to the canonical block draft, focus the host only after explicit edit, add an unobstructed header drag region and a real close button, rename the destructive image action, and retire the editor with its host. Screen results remain open in normal z-order when unpinned; Pin changes only z-order and does not switch backdrop/resizability or flash the compositor.
+
+- [ ] **Step 7: Verify focused GREEN and render the real dense fixture**
+
+  Run all focused tests above, `cargo fmt --all -- --check`, strict Clippy for the changed crates, and a headless screen-result render using the captured dense-text metadata. Inspect the result at 100%, 125%, and 200%.
+
+- [ ] **Step 8: Build, install, and verify SayFlex 0.8.4**
+
+  Build the pinned release matrix and installer, upgrade the existing standard-path installation in place, verify installed hashes/version and one running instance, then exercise capture, drag, inline edit, Close, Delete image, and Pin/unpin without visible helper consoles.
+
+- [ ] **Step 9: Commit**
+
+  `git commit -m "fix(screen): restore production result interactions"`
