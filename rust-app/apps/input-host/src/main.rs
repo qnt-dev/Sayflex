@@ -128,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let hook_thread_id = unsafe { GetCurrentThreadId() };
     let mut registered_hotkeys = hotkeys::RegisteredHotkeys::register_for_current_thread(
-        HotkeyConfiguration::default().bindings,
+        hotkeys::dormant_startup_bindings(),
     )?;
     let module = unsafe { GetModuleHandleW(ptr::null()) };
     let hook =

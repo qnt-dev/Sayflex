@@ -425,6 +425,14 @@ pub struct RegisteredHotkeys {
     bindings: HotkeyBindings,
 }
 
+pub fn dormant_startup_bindings() -> HotkeyBindings {
+    let mut bindings = HotkeyBindings::default();
+    for action in HotkeyAction::ALL {
+        bindings.binding_mut(action).enabled = false;
+    }
+    bindings
+}
+
 impl RegisteredHotkeys {
     pub fn register_for_current_thread(bindings: HotkeyBindings) -> Result<Self, HotkeyApplyError> {
         rust_app_core::hotkeys::validate(&bindings).map_err(validation_error)?;
@@ -1723,8 +1731,8 @@ mod tests {
         EndReason, EventOrigin, GestureState, HOTKEY_ID_CORRECT_LAYOUT, HOTKEY_ID_INSERT_LAST,
         HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_F, INPUT_K,
         INPUT_V, PhysicalKeys, RegisteredHotkeys, RegistrationBackend, classify_event,
-        monotonic_us, registered_hotkey_action, screen_capture_key_event, selection_chord_mask,
-        set_screen_capture_mode, wait_for_mask_clear_using,
+        dormant_startup_bindings, monotonic_us, registered_hotkey_action, screen_capture_key_event,
+        selection_chord_mask, set_screen_capture_mode, wait_for_mask_clear_using,
     };
 
     use crate::inject::SYNTHETIC_MARKER;
@@ -1740,6 +1748,17 @@ mod tests {
     struct FakeRegistrationBackend {
         active: Rc<RefCell<HashMap<i32, HotkeySpec>>>,
         fail_spec: Rc<Cell<Option<HotkeySpec>>>,
+    }
+
+    #[test]
+    fn startup_owns_no_shortcut_before_the_persisted_configuration_arrives() {
+        let bindings = dormant_startup_bindings();
+
+        assert!(
+            HotkeyAction::ALL
+                .into_iter()
+                .all(|action| !bindings.binding(action).enabled)
+        );
     }
 
     #[test]
