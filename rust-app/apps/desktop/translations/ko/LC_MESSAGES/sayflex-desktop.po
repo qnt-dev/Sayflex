@@ -1672,3 +1672,9 @@ msgstr "텍스트 복사"
 
 msgid "Saved to glossary"
 msgstr "용어집에 저장됨"
+
+msgid "SayFlex total"
+msgstr "SayFlex 전체"
+
+msgid "SayFlex may unload idle engines to protect system resources. Active work is never interrupted."
+msgstr "SayFlex는 시스템 리소스를 보호하기 위해 유휴 엔진을 메모리에서 해제할 수 있습니다. 진행 중인 작업은 절대 중단되지 않습니다."

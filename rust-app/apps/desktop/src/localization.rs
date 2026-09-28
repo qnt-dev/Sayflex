@@ -1040,7 +1040,11 @@ mod tests {
 
     #[test]
     fn resources_page_explains_that_unloaded_models_return_automatically_in_every_locale() {
-        let source = "Unloading only frees working memory. The selected models remain installed. The next time you use a function, SayFlex loads its model automatically and the function continues normally.";
+        let sources = [
+            "SayFlex total",
+            "Unloading only frees working memory. The selected models remain installed. The next time you use a function, SayFlex loads its model automatically and the function continues normally.",
+            "SayFlex may unload idle engines to protect system resources. Active work is never interrupted.",
+        ];
         for (locale, po) in [
             (
                 "ru",
@@ -1076,11 +1080,19 @@ mod tests {
             ),
         ] {
             let entries = catalog(po);
-            let translated = entries
-                .get(source)
-                .unwrap_or_else(|| panic!("{locale}: missing resources-page explanation"));
-            assert!(!translated.trim().is_empty(), "{locale}: empty explanation");
-            assert_ne!(translated, source, "{locale}: explanation is not localized");
+            for source in sources {
+                let translated = entries
+                    .get(source)
+                    .unwrap_or_else(|| panic!("{locale}: missing resources-page copy: {source}"));
+                assert!(
+                    !translated.trim().is_empty(),
+                    "{locale}: empty copy: {source}"
+                );
+                assert_ne!(
+                    translated, source,
+                    "{locale}: copy is not localized: {source}"
+                );
+            }
         }
     }
 

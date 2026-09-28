@@ -1672,3 +1672,9 @@ msgstr "TEXT KOPIEREN"
 
 msgid "Saved to glossary"
 msgstr "Im Glossar gespeichert"
+
+msgid "SayFlex total"
+msgstr "SayFlex gesamt"
+
+msgid "SayFlex may unload idle engines to protect system resources. Active work is never interrupted."
+msgstr "SayFlex kann inaktive Engines entladen, um Systemressourcen zu schonen. Laufende Vorgänge werden niemals unterbrochen."

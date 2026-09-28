@@ -619,7 +619,8 @@ export component ResourcesPage inherits VerticalLayout {
                 alignment: center;
                 spacing: 5px;
                 Text {
-                    text: row.id == "speech" ? @tr("Dictation")
+                    text: row.id == "total" ? @tr("SayFlex total")
+                        : row.id == "speech" ? @tr("Dictation")
                         : row.id == "translation" ? @tr("Translation")
                         : @tr("Screen translation");
                     color: Sheet.ink;
@@ -667,6 +668,13 @@ export component ResourcesPage inherits VerticalLayout {
 
     Note {
         text: @tr("Unloading only frees working memory. The selected models remain installed. The next time you use a function, SayFlex loads its model automatically and the function continues normally.");
+        action: "";
+    }
+
+    Rectangle { height: 8px; }
+
+    Note {
+        text: @tr("SayFlex may unload idle engines to protect system resources. Active work is never interrupted.");
         action: "";
     }
 

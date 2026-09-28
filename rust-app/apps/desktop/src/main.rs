@@ -1577,7 +1577,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         settings.set_screenshot_retention_enabled(saved_settings.screenshot_retention_enabled);
         settings_view::sync_glossary(&settings.as_weak(), &glossary_view.borrow());
     }
-    let resource_timer = resource_view::wire_resources(&settings, &state, &workers);
     wire_tray(&tray, &settings, &translator, &state, &workers);
     wire_chooser(&chooser, &chooser_presenter, &state, &workers);
     wire_action_palette(
@@ -1596,6 +1595,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         DesktopSelectionEnvironment::new(Rc::clone(&workers)),
     )));
     let screen_translation = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+    let resource_timer =
+        resource_view::wire_resources(&settings, &state, &workers, &screen_translation);
     #[cfg(feature = "screen-translation")]
     let screenshot_cleanup_timer = {
         let timer = Timer::default();

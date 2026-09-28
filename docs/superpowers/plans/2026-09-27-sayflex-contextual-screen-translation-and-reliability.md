@@ -675,18 +675,18 @@
 - Produces: idle eviction decisions that never unload an active operation and explain automatic reload.
 - Consumes: corrected Task 4 telemetry and existing unload commands.
 
-- [ ] **Step 1: Add failing aggregate-policy tests**
+- [x] **Step 1: Add failing aggregate-policy tests**
 
   Test descendant-process aggregation, late llama-server/OCR appearance, unavailable GPU data, active-operation protection, manual unload, idle unload, and automatic reload on next use.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
   Run: `cargo test -p sayflex-desktop resource_view -- --nocapture`
   Expected: aggregate/policy tests fail where only current per-worker sampling exists.
   Run: `cargo test -p rust-platform-windows process_resources -- --nocapture`
   Expected: late-instance and unavailable-vs-zero telemetry tests fail.
 
-- [ ] **Step 3: Implement aggregate residency policy and localized explanations**
+- [x] **Step 3: Implement aggregate residency policy and localized explanations**
 
   Report CPU, RAM, GPU, and VRAM separately; never label unavailable as zero. Keep OCR lazy and CPU-only. Protect active operations from unload and reload selected engines automatically on demand.
 
@@ -694,7 +694,7 @@
 
   Measure Qwen 4B plus speech plus OCR cold/warm/idle/peak RAM, private bytes, GPU, VRAM, latency, unload/reload, and game frame impact. Fail the gate above 10 GB VRAM; record whether the 8 GB target is met.
 
-- [ ] **Step 5: Benchmark HY-MT2 without blocking the core release**
+- [x] **Step 5: Benchmark HY-MT2 without blocking the core release**
 
   Verify official GGUF hash/license/template/runtime compatibility, then compare RU to EN and EN to RU quality, glossary adherence, protected values, latency, RAM/VRAM, and cancellation with Qwen 4B. Add it to the catalog only if admitted; otherwise record it as deferred with evidence.
 

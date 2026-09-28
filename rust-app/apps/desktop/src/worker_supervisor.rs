@@ -372,7 +372,7 @@ impl Workers {
     }
 
     #[cfg(feature = "screen-translation")]
-    pub(crate) fn unload_ocr(&self) -> Result<bool, String> {
+    pub(crate) fn unload_ocr(&self, cause: &'static str) -> Result<bool, String> {
         if self.ocr_request.borrow().active.is_some() {
             return Err("OCR is processing a screen translation".to_owned());
         }
@@ -403,14 +403,14 @@ impl Workers {
         self.ocr_child.borrow_mut().take();
         self.ocr_request.borrow_mut().active.take();
         rust_app_core::diagnostics::log_line(&format!(
-            "ocr_worker lifecycle=unloaded_by_user forced={forced} shutdown_send_failed={}",
+            "ocr_worker lifecycle=unloaded cause={cause} forced={forced} shutdown_send_failed={}",
             send_error.is_some()
         ));
         Ok(true)
     }
 
     #[cfg(not(feature = "screen-translation"))]
-    pub(crate) fn unload_ocr(&self) -> Result<bool, String> {
+    pub(crate) fn unload_ocr(&self, _cause: &'static str) -> Result<bool, String> {
         Ok(false)
     }
 

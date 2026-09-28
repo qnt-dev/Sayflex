@@ -138,6 +138,12 @@ impl ScreenTranslationCoordinator {
         self.flow.is_selecting(request_id)
     }
 
+    pub(crate) fn has_active_work(&self) -> bool {
+        self.flow
+            .active
+            .is_some_and(|active| active.stage != ScreenTranslationStage::Complete)
+    }
+
     fn active_translation(&self) -> Option<(RequestId, PhysicalRect)> {
         let active = self
             .flow
@@ -1556,6 +1562,22 @@ mod tests {
         );
         assert!(flow.is_selecting(first));
         assert!(!flow.is_selecting(repeated));
+    }
+
+    #[test]
+    fn resource_policy_sees_screen_work_until_completion() {
+        let request_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+
+        assert!(!coordinator.has_active_work());
+        coordinator.begin(request_id);
+        assert!(coordinator.has_active_work());
+        coordinator.selected(request_id, rect(0, 0, 100, 80));
+        assert!(coordinator.has_active_work());
+        coordinator.recognized(request_id);
+        assert!(coordinator.has_active_work());
+        coordinator.complete(request_id);
+        assert!(!coordinator.has_active_work());
     }
 
     #[test]
