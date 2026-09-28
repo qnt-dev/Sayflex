@@ -1,6 +1,6 @@
 # Screen translation OCR benchmark
 
-- Generated (UTC): 2026-09-28T15:02:43Z
+- Generated (UTC): 2026-09-28T15:44:10Z
 - Decision: **Shipped PP-OCR worker path verified**
 - `screen_translation_packaging=true`
 - Iterations per fixture and candidate: 30
@@ -16,8 +16,8 @@ The release gate is the shipped `SayFlex.Ocr.exe` plus its verified bundle, driv
 
 | Engine | All rows available | Aggregate CER | Exact rate | p50 ms | p95 ms | Normal p95 ms | Max working set bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| sayflex-ocr-worker-cpu | True | 0.046 | 0.824 | 29.000 | 90.000 | 32.000 | 387948544.000 |
-| ppocr-v5-onnx-cpu | True | 0.032 | 0.882 | 28.630 | 46.984 | 31.107 | n/a |
+| sayflex-ocr-worker-cpu | True | 0.046 | 0.824 | 29.000 | 91.000 | 33.000 | 387854336.000 |
+| ppocr-v5-onnx-cpu | True | 0.032 | 0.882 | 28.749 | 46.122 | 32.647 | n/a |
 | tesseract-5 | False | n/a | n/a | n/a | n/a | n/a | n/a |
 | windows-media-ocr | False | n/a | n/a | n/a | n/a | n/a | n/a |
 
@@ -29,7 +29,7 @@ Worker restart generation at measurement: **2** (expected at least 2): **True**
 
 Normal-crop p95 below 500 ms: **True**
 
-Peak worker working set observed: **399478784.000 bytes**
+Peak worker working set observed: **399384576.000 bytes**
 
 Direct PP-OCR lower aggregate CER than Tesseract when both comparators were available: **False**
 
@@ -83,7 +83,7 @@ License: Apache-2.0 (PaddleOCR / RapidOCR). Published ONNX hashes are retained v
 
 The shipped worker contains the ONNX Runtime CPU path used by SayFlex. `DirectML.dll` may be copied by the upstream `ort` build bundle, but no DirectML execution provider is enabled or selected by the OCR worker.
 
-- `SayFlex.Ocr.exe`: `8686e968e482a89ad6a7bbd28e3fb594dbd7fef8a6e42824baf9635594ff5e86`
+- `SayFlex.Ocr.exe`: `5949f510e397b213e7a62bd4e32142e4b5292b40fb6ebfd250afea32c1922f4f`
 - `sayflex-ocr-benchmark.exe`: `2aa9e6675665ef8607744496dbfceb32431c3cbcd8c8e6516525ff0b45294498`
 - `DirectML.dll`: `9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1`
 

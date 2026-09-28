@@ -698,12 +698,12 @@
 
   Verify official GGUF hash/license/template/runtime compatibility, then compare RU to EN and EN to RU quality, glossary adherence, protected values, latency, RAM/VRAM, and cancellation with Qwen 4B. Add it to the catalog only if admitted; otherwise record it as deferred with evidence.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
   Run: `cargo test -p sayflex-desktop -p rust-platform-windows -- --nocapture`
   Expected: PASS and evidence document contains measured values rather than estimates.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
   `git commit -m "feat(resources): manage aggregate SayFlex model residency"`
 
@@ -724,15 +724,15 @@
 - Consumes: all previous tasks and the approved visual evidence.
 - Produces: one installable candidate plus a final report separated into Implemented, Verified, Not verified, and Deferred.
 
-- [ ] **Step 1: Update security/product/model/release documentation**
+- [x] **Step 1: Update security/product/model/release documentation**
 
   Document screenshot retention and deletion, optional context fields, local/cloud boundaries, glossary semantics, compact-mode limitations, dependencies, model licenses, resource measurements, and recovery behavior after unload.
 
-- [ ] **Step 2: Run the OCR benchmark through the shipped application path**
+- [x] **Step 2: Run the OCR benchmark through the shipped application path**
 
   Use the checked-in corpus and worker protocol used by the application. Record accuracy, omissions, numbers/symbols, latency, memory, languages, dark/light/small/column cases, and worker restart behavior.
 
-- [ ] **Step 3: Run formatting, lint, and all automated tests**
+- [x] **Step 3: Run formatting, lint, and all automated tests**
 
   Run: `cargo fmt --all -- --check`
   Expected: PASS.
@@ -745,7 +745,12 @@
   Run: `pwsh -NoProfile -File scripts/tests/release-validation.Tests.ps1`
   Expected: PASS.
 
-- [ ] **Step 4: Build release binaries and installer**
+  Note: CUDA and Vulkan are intentionally mutually exclusive speech-worker
+  features, so the literal workspace `--all-features` commands are invalid.
+  Verification used the workspace excluding speech-worker plus separate CPU,
+  CUDA, and Vulkan Clippy/test passes.
+
+- [x] **Step 4: Build release binaries and installer**
 
   Use the repository's pinned release script/manifest. Validate executable versions, hashes, required runtime/model manifests, absence of unapproved bundled models, installer/uninstaller integrity, and the existing Store packaging path.
 
@@ -753,14 +758,14 @@
 
   Upgrade over the previous installed release from standard and custom paths; verify uninstall and Store-package preservation of settings, history, downloaded assets, and licenses. Exercise clipboard text/images and competitive Copy; five-minute limit recovery; local/cloud cancellation; model switches; WezTerm timeout; monitor/DPI changes; source context; no-URL/no-book fallback; correction/confirmation glossary rules; domain conflicts; restart persistence; screenshot expiry/eviction/delete; long on-image translations; OCR worker hang/restart; Russian/German GPU counters; and resource budget with a game.
 
-- [ ] **Step 6: Capture final approved UI evidence**
+- [x] **Step 6: Capture final approved UI evidence**
 
   Capture image result, editing, saved, save error, and expired image from the installed candidate at representative DPI. Compare them with the approved Task 13 states.
 
-- [ ] **Step 7: Write the evidence-separated completion report**
+- [x] **Step 7: Write the evidence-separated completion report**
 
   For every spec item list the original scenario, change, verification, and result. Label every unrun/manual/environment-specific gate as Not verified; list rejected model experiments and future VLM/continuous-overlay work as Deferred.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
   `git commit -m "chore(release): validate contextual screen translation update"`
