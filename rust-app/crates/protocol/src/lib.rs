@@ -20,7 +20,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -78,6 +78,11 @@ impl RequestId {
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Uuid::parse_str(value).ok().map(Self)
     }
 }
 
@@ -1561,6 +1566,8 @@ pub enum TranslationWorkerEvent {
         request_id: RequestId,
         base_revision: u64,
         blocks: Vec<TranslatedScreenBlock>,
+        source_language: TranslationLanguage,
+        target_language: TranslationLanguage,
         #[serde(default)]
         capabilities: TranslationBackendCapabilities,
         processing_duration_ms: u64,
@@ -2497,7 +2504,7 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 30,
+            PROTOCOL_VERSION, 31,
             "every fingerprint below was written for protocol 30: if a shape \
              changes, this number changes with it"
         );
@@ -2589,6 +2596,8 @@ mod wire_schema_tests {
                     completion: BlockCompletion::Completed,
                     failure_message: Some(String::new()),
                 }],
+                source_language: TranslationLanguage::English,
+                target_language: TranslationLanguage::Russian,
                 capabilities: TranslationBackendCapabilities::structured(),
                 processing_duration_ms: 0,
             },
@@ -2701,7 +2710,8 @@ translated_text:string)",
                 "screen_blocks_completed(base_revision:number,blocks[].block_id:string,\
  blocks[].completion:string,blocks[].failure_message:string,blocks[].translated_text:string,\
  capabilities.context_instructions:bool,capabilities.glossary_guidance:bool,\
- capabilities.structured_blocks:bool,processing_duration_ms:number,request_id:string)",
+ capabilities.structured_blocks:bool,processing_duration_ms:number,request_id:string,\
+ source_language:string,target_language:string)",
                 "translation_providers(statuses[])",
             ]
         );
@@ -3310,6 +3320,8 @@ mod complete_wire_schema_tests {
                     completion: BlockCompletion::Completed,
                     failure_message: Some("message".to_owned()),
                 }],
+                source_language: TranslationLanguage::English,
+                target_language: TranslationLanguage::Russian,
                 capabilities: TranslationBackendCapabilities::structured(),
                 processing_duration_ms: 1,
             },
@@ -3689,7 +3701,7 @@ mod complete_wire_schema_tests {
 
     #[test]
     fn screen_block_capabilities_default_for_older_worker_events() {
-        let json = r#"{"type":"screen_blocks_completed","payload":{"request_id":"00000000-0000-0000-0000-000000000001","base_revision":7,"blocks":[],"processing_duration_ms":1}}"#;
+        let json = r#"{"type":"screen_blocks_completed","payload":{"request_id":"00000000-0000-0000-0000-000000000001","base_revision":7,"blocks":[],"source_language":"english","target_language":"russian","processing_duration_ms":1}}"#;
         let event: TranslationWorkerEvent = serde_json::from_str(json).unwrap();
         let TranslationWorkerEvent::ScreenBlocksCompleted { capabilities, .. } = event else {
             panic!("wrong event variant");
@@ -3736,7 +3748,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0xb7f9_6875_d55f_2b90,
+            0x1100_16b2_a075_ee02,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

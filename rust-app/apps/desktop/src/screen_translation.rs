@@ -23,7 +23,9 @@ use slint::{
 };
 
 #[cfg(feature = "screen-translation")]
-use crate::screen_result::{DocumentError, ScreenTranslationDocument, UserTranslationEdit};
+use crate::screen_result::{
+    DocumentError, ScreenResultSnapshot, ScreenTranslationDocument, UserTranslationEdit,
+};
 use crate::{
     RuntimeEvent, ScreenRegionOverlay, dispatch_runtime_event,
     overlay_presenter::{OverlayContract, OverlayPresenter},
@@ -92,6 +94,14 @@ pub(crate) struct ScreenTranslationCoordinator {
     partials: HashMap<RequestId, (u64, HashMap<ScreenBlockId, String>)>,
     #[cfg(feature = "screen-translation")]
     capabilities: HashMap<RequestId, TranslationBackendCapabilities>,
+    #[cfg(feature = "screen-translation")]
+    languages: HashMap<
+        RequestId,
+        (
+            rust_protocol::TranslationLanguage,
+            rust_protocol::TranslationLanguage,
+        ),
+    >,
 }
 
 #[cfg_attr(not(feature = "screen-translation"), allow(dead_code))]
@@ -246,6 +256,8 @@ impl ScreenTranslationCoordinator {
         request_id: RequestId,
         base_revision: u64,
         blocks: Vec<TranslatedScreenBlock>,
+        source_language: rust_protocol::TranslationLanguage,
+        target_language: rust_protocol::TranslationLanguage,
         capabilities: TranslationBackendCapabilities,
     ) -> Result<ScreenTranslationProjection, DocumentError> {
         let document = self
@@ -261,6 +273,8 @@ impl ScreenTranslationCoordinator {
         };
         self.partials.remove(&request_id);
         self.capabilities.insert(request_id, capabilities);
+        self.languages
+            .insert(request_id, (source_language, target_language));
         Ok(projection)
     }
 
@@ -290,6 +304,30 @@ impl ScreenTranslationCoordinator {
             .copy_text()
     }
 
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn result_snapshot(
+        &self,
+        request_id: RequestId,
+    ) -> Result<
+        (
+            ScreenResultSnapshot,
+            rust_protocol::TranslationLanguage,
+            rust_protocol::TranslationLanguage,
+        ),
+        DocumentError,
+    > {
+        let document = self
+            .documents
+            .get(&request_id)
+            .ok_or(DocumentError::RequestMismatch)?;
+        let (source, target) = self
+            .languages
+            .get(&request_id)
+            .copied()
+            .ok_or(DocumentError::IncompleteBlock)?;
+        Ok((document.result_snapshot()?, source, target))
+    }
+
     #[cfg(all(test, feature = "screen-translation"))]
     fn document_has_pixels(&self, request_id: RequestId) -> bool {
         self.documents
@@ -310,6 +348,14 @@ impl ScreenTranslationCoordinator {
     }
 
     #[cfg(feature = "screen-translation")]
+    pub(crate) fn expire_request_pixels(&mut self, request_id: RequestId) -> bool {
+        self.documents
+            .get_mut(&request_id)
+            .and_then(|document| document.expire_pixels(u64::MAX))
+            .is_some()
+    }
+
+    #[cfg(feature = "screen-translation")]
     pub(crate) fn discard_pending(&mut self, request_id: RequestId) {
         self.pending_crops.remove(&request_id);
         self.pending_inventories.remove(&request_id);
@@ -323,6 +369,7 @@ impl ScreenTranslationCoordinator {
             self.discard_pending(request_id);
             self.documents.remove(&request_id);
             self.capabilities.remove(&request_id);
+            self.languages.remove(&request_id);
         }
         #[cfg(not(feature = "screen-translation"))]
         let _ = request_id;
@@ -1097,7 +1144,7 @@ mod tests {
     #[cfg(feature = "screen-translation")]
     use rust_protocol::{
         BlockCompletion, ScreenBlockId, ScreenTextBlock, SourceContext, TranslatedScreenBlock,
-        TranslationBackendCapabilities,
+        TranslationBackendCapabilities, TranslationLanguage,
     };
     use rust_protocol::{PhysicalRect, RequestId};
     #[cfg(feature = "screen-translation")]
@@ -1615,6 +1662,8 @@ mod tests {
                     translated("b", "Перезарядка"),
                     translated("a", "Машинный урон 25"),
                 ],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
                 TranslationBackendCapabilities::structured(),
             )
             .unwrap();
@@ -1653,6 +1702,8 @@ mod tests {
                 second,
                 0,
                 vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
                 TranslationBackendCapabilities::structured(),
             )
             .unwrap();

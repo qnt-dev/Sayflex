@@ -14,6 +14,8 @@ use rust_app_core::{
     LayoutDirection, build_layout_candidates,
     hotkeys::{format_hotkey, validate as validate_hotkeys},
 };
+#[cfg(feature = "screen-translation")]
+use rust_protocol::GlossaryOrigin;
 use rust_protocol::{
     CompanionRendererCommand, DictationLanguage, HistoryEntry, HotkeyAction, HotkeyBindings,
     HotkeyConfiguration, HotkeyModifiers, HotkeyRejection, HotkeySpec, InputHostCommand, RequestId,
@@ -66,6 +68,84 @@ use crate::{
     },
     worker_supervisor::Workers,
 };
+#[cfg(feature = "screen-translation")]
+use crate::{GlossaryRow, glossary_view::GlossaryViewState};
+
+#[cfg(feature = "screen-translation")]
+pub(crate) fn wire_contextual_translation_settings(settings: &SettingsWindow) {
+    settings.on_search_glossary(|query| {
+        dispatch_runtime_event(RuntimeEvent::GlossarySearchRequested(query.to_string()));
+    });
+    settings.on_save_glossary_entry(|entry_id, source, translation| {
+        dispatch_runtime_event(RuntimeEvent::GlossarySaveRequested {
+            entry_id: entry_id.to_string(),
+            source: source.to_string(),
+            translation: translation.to_string(),
+        });
+    });
+    settings.on_delete_glossary_entry(|entry_id| {
+        dispatch_runtime_event(RuntimeEvent::GlossaryDeleteRequested(entry_id.to_string()));
+    });
+    settings.on_retry_glossary_action(|| {
+        dispatch_runtime_event(RuntimeEvent::GlossaryRetryRequested);
+    });
+    settings.on_set_screenshot_retention_enabled(|enabled| {
+        dispatch_runtime_event(RuntimeEvent::ScreenshotRetentionChanged(enabled));
+    });
+    settings.on_delete_screenshots_now(|| {
+        dispatch_runtime_event(RuntimeEvent::DeleteStoredScreenshots);
+    });
+}
+
+#[cfg(feature = "screen-translation")]
+pub(crate) fn sync_glossary(settings: &slint::Weak<SettingsWindow>, view: &GlossaryViewState) {
+    let Some(settings) = settings.upgrade() else {
+        return;
+    };
+    let rows = view
+        .entries()
+        .iter()
+        .map(|entry| GlossaryRow {
+            entry_id: entry.entry_id.as_str().into(),
+            source: entry.source_phrase.as_str().into(),
+            translation: entry.approved_translation.as_str().into(),
+            languages: format!(
+                "{} → {}",
+                entry.source_language.code().to_ascii_uppercase(),
+                entry.target_language.code().to_ascii_uppercase()
+            )
+            .into(),
+            context: glossary_context_label(&entry.context).into(),
+            example: entry.examples.first().map_or("", String::as_str).into(),
+            origin: match entry.origin {
+                GlossaryOrigin::Corrected => "corrected",
+                GlossaryOrigin::Confirmed => "confirmed",
+            }
+            .into(),
+            updated: entry.updated_unix_ms.to_string().into(),
+        })
+        .collect::<Vec<_>>();
+    settings.set_glossary_rows(ModelRc::new(VecModel::from(rows)));
+    settings.set_glossary_problem(view.error().unwrap_or_default().into());
+    settings.set_glossary_can_retry(view.can_retry());
+}
+
+#[cfg(feature = "screen-translation")]
+fn glossary_context_label(context: &rust_protocol::SourceContext) -> String {
+    [
+        context.domain.as_deref(),
+        context.application_id.as_deref(),
+        context.document_name.as_deref(),
+        context.window_title.as_deref(),
+        context.site_url.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .unwrap_or_default()
+    .to_owned()
+}
 
 #[derive(Clone, Copy)]
 struct SettingsScrollMetrics {
@@ -97,6 +177,12 @@ fn settings_scroll_metrics(settings: &SettingsWindow) -> SettingsScrollMetrics {
             SettingsWindow::set_history_scroll_y,
         ),
         7 => (
+            settings.get_glossary_scroll_y(),
+            settings.get_glossary_scroll_content_height(),
+            settings.get_glossary_scroll_shown_height(),
+            SettingsWindow::set_glossary_scroll_y,
+        ),
+        8 => (
             settings.get_hotkeys_scroll_y(),
             settings.get_hotkeys_scroll_content_height(),
             settings.get_hotkeys_scroll_shown_height(),

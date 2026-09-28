@@ -248,6 +248,53 @@ pub(crate) fn wire_translation_preview(preview: &TranslationPreview, presenter: 
     preview.on_download_model(|| {
         dispatch_runtime_event(RuntimeEvent::ConfirmQueuedModelInstall);
     });
+    #[cfg(feature = "screen-translation")]
+    {
+        let preview_weak = preview.as_weak();
+        preview.on_screen_block_edit_requested(move |block_index| {
+            if let Some(preview) = preview_weak.upgrade()
+                && let Some(window_handle) = slint_window_handle(preview.window())
+            {
+                dispatch_runtime_event(RuntimeEvent::ScreenBlockEditRequested {
+                    window_handle,
+                    block_index,
+                });
+            }
+        });
+    }
+    #[cfg(feature = "screen-translation")]
+    {
+        let preview_weak = preview.as_weak();
+        preview.on_screen_copy_text_requested(move || {
+            if let Some(preview) = preview_weak.upgrade()
+                && let Some(window_handle) = slint_window_handle(preview.window())
+            {
+                dispatch_runtime_event(RuntimeEvent::ScreenCopyTextRequested { window_handle });
+            }
+        });
+    }
+    #[cfg(feature = "screen-translation")]
+    {
+        let preview_weak = preview.as_weak();
+        preview.on_screen_save_file_requested(move || {
+            if let Some(preview) = preview_weak.upgrade()
+                && let Some(window_handle) = slint_window_handle(preview.window())
+            {
+                dispatch_runtime_event(RuntimeEvent::ScreenSaveFileRequested { window_handle });
+            }
+        });
+    }
+    #[cfg(feature = "screen-translation")]
+    {
+        let preview_weak = preview.as_weak();
+        preview.on_screen_delete_image_requested(move || {
+            if let Some(preview) = preview_weak.upgrade()
+                && let Some(window_handle) = slint_window_handle(preview.window())
+            {
+                dispatch_runtime_event(RuntimeEvent::ScreenDeleteImageRequested { window_handle });
+            }
+        });
+    }
     {
         let preview_weak = preview.as_weak();
         preview.on_pin_state_changed(move |pinned| {
@@ -425,6 +472,8 @@ pub(crate) fn retire_translation_preview(slot: &TranslationPreviewSlot, reason: 
 }
 
 fn clear_translation_preview_content(preview: &TranslationPreview) {
+    #[cfg(feature = "screen-translation")]
+    crate::screen_result_view::clear_snapshot(preview);
     preview.set_source_text("".into());
     preview.set_translated_text("".into());
     preview.set_translated_paragraphs(slint::ModelRc::new(slint::VecModel::from(Vec::<

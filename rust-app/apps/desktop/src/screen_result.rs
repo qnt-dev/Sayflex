@@ -79,6 +79,27 @@ pub(crate) struct ScreenBlockState {
     warnings: Vec<PreservationWarning>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ScreenResultBlockSnapshot {
+    pub(crate) block_id: ScreenBlockId,
+    pub(crate) source: String,
+    pub(crate) translation: String,
+    pub(crate) bounds: PhysicalRect,
+    pub(crate) confidence_milli: u16,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScreenResultSnapshot {
+    pub(crate) request_id: RequestId,
+    pub(crate) revision: u64,
+    pub(crate) crop: Option<Arc<RgbaFrame>>,
+    pub(crate) crop_rect: PhysicalRect,
+    pub(crate) blocks: Vec<ScreenResultBlockSnapshot>,
+    pub(crate) context: SourceContext,
+    pub(crate) created_unix_ms: u64,
+    pub(crate) expires_unix_ms: u64,
+}
+
 impl ScreenBlockState {
     pub(crate) fn low_confidence(&self) -> bool {
         self.confidence_milli < LOW_CONFIDENCE_MILLI
@@ -318,6 +339,36 @@ impl ScreenTranslationDocument {
         (now_unix_ms >= self.expires_unix_ms)
             .then(|| self.crop.take())
             .flatten()
+    }
+
+    pub(crate) fn result_snapshot(&self) -> Result<ScreenResultSnapshot, DocumentError> {
+        let mut blocks = Vec::with_capacity(self.reading_order.len());
+        for block_id in &self.reading_order {
+            let state = self
+                .blocks
+                .get(block_id)
+                .ok_or(DocumentError::UnknownBlockId)?;
+            blocks.push(ScreenResultBlockSnapshot {
+                block_id: block_id.clone(),
+                source: state.source.clone(),
+                translation: state
+                    .effective_translation()
+                    .ok_or(DocumentError::IncompleteBlock)?
+                    .to_owned(),
+                bounds: state.bounds,
+                confidence_milli: state.confidence_milli,
+            });
+        }
+        Ok(ScreenResultSnapshot {
+            request_id: self.request_id,
+            revision: self.revision,
+            crop: self.crop.clone(),
+            crop_rect: self.crop_rect,
+            blocks,
+            context: self.context.clone(),
+            created_unix_ms: self.created_unix_ms,
+            expires_unix_ms: self.expires_unix_ms,
+        })
     }
 }
 

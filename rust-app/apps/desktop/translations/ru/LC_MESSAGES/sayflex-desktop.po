@@ -1573,3 +1573,102 @@ msgstr "Скачайте {model} ({size}), чтобы переводить эт�
 
 msgid "Download model"
 msgstr "Скачать модель"
+
+msgid "APPROVED TRANSLATION"
+msgstr "УТВЕРЖДЁННЫЙ ПЕРЕВОД"
+
+msgid "Delete"
+msgstr "Удалить"
+
+msgid "Delete every temporary screen capture?"
+msgstr "Удалить все временные снимки экрана?"
+
+msgid "Delete now"
+msgstr "Удалить сейчас"
+
+msgid "Delete this glossary entry?"
+msgstr "Удалить эту запись словаря?"
+
+msgid "Deletes temporary images now. Text translations and personal glossary entries remain available."
+msgstr "Временные изображения будут удалены сейчас. Текстовые переводы и записи личного словаря сохранятся."
+
+msgid "Do not keep"
+msgstr "Не хранить"
+
+msgid "Double-click translated text on a screen result, then save a correction or confirm the existing translation."
+msgstr "Дважды щёлкните по переведённому тексту на снимке, затем сохраните исправление или подтвердите текущий перевод."
+
+msgid "Edit"
+msgstr "Изменить"
+
+msgid "Glossary"
+msgstr "Словарь"
+
+msgid "Keep temporarily"
+msgstr "Хранить временно"
+
+msgid "No approved translations yet"
+msgstr "Утверждённых переводов пока нет"
+
+msgid "Only translations you corrected and saved or explicitly confirmed appear here. Rules remain separate for different languages and contexts."
+msgstr "Здесь появляются только переводы, которые вы исправили и сохранили или явно подтвердили. Правила для разных языков и контекстов хранятся отдельно."
+
+msgid "Personal glossary"
+msgstr "Личный словарь"
+
+msgid "Retry"
+msgstr "Повторить"
+
+msgid "SOURCE PHRASE"
+msgstr "ИСХОДНАЯ ФРАЗА"
+
+msgid "Screen capture history"
+msgstr "История снимков экрана"
+
+msgid "Search"
+msgstr "Поиск"
+
+msgid "Search words, translations, or context"
+msgstr "Искать слова, переводы или контекст"
+
+msgid "Stored on this device"
+msgstr "Хранится на этом устройстве"
+
+msgid "Stored screen captures"
+msgstr "Сохранённые снимки экрана"
+
+msgid "Temporary screen captures are kept for up to 24 hours and 500 MB. The size limit can remove older captures sooner."
+msgstr "Временные снимки экрана хранятся до 24 часов и занимают не более 500 МБ. При достижении лимита старые снимки могут быть удалены раньше."
+
+msgid "Save file"
+msgstr "Сохранить файл"
+
+msgid "Delete image"
+msgstr "Удалить изображение"
+
+msgid "Confirmed"
+msgstr "Подтверждено"
+
+msgid "Corrected"
+msgstr "Исправлено"
+
+msgid "Editable translated image text"
+msgstr "Редактируемый текст перевода на изображении"
+
+msgid "Double-click a translation to edit"
+msgstr "Дважды щёлкните по переводу, чтобы изменить его"
+
+msgid "Image expired"
+msgstr "Срок хранения изображения истёк"
+
+msgid "The temporary screenshot was removed. Your text translation remains available."
+msgstr "Временный снимок удалён. Текстовый перевод по-прежнему доступен."
+
+msgid "COPIED"
+msgstr "СКОПИРОВАНО"
+
+msgid "COPY TEXT"
+msgstr "КОПИРОВАТЬ ТЕКСТ"
+
+msgid "Saved to glossary"
+msgstr "Сохранено в словарь"

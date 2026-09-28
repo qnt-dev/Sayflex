@@ -10,6 +10,8 @@ pub struct BlurredBackdrop {
 
 #[cfg(windows)]
 pub mod credentials;
+#[cfg(windows)]
+mod file_dialog;
 mod job;
 #[cfg(windows)]
 mod overlay;
@@ -31,6 +33,8 @@ mod single_instance;
 #[cfg(windows)]
 mod window_snapshot;
 
+#[cfg(windows)]
+pub use file_dialog::choose_png_save_path;
 #[cfg(windows)]
 pub use job::WorkerJob;
 #[cfg(windows)]

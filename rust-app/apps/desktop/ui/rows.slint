@@ -72,6 +72,19 @@ export struct HistoryRow {
     origin: string,
 }
 
+// One user-approved translation rule. Machine output never appears here until
+// the user has corrected or explicitly confirmed it.
+export struct GlossaryRow {
+    entry-id: string,
+    source: string,
+    translation: string,
+    languages: string,
+    context: string,
+    example: string,
+    origin: string,
+    updated: string,
+}
+
 // One command SayFlex registers.
 export struct HotkeyRow {
     action: string,

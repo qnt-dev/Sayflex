@@ -1573,3 +1573,102 @@ msgstr "Завантажте {model} ({size}), щоб перекладати ц�
 
 msgid "Download model"
 msgstr "Завантажити модель"
+
+msgid "APPROVED TRANSLATION"
+msgstr "ЗАТВЕРДЖЕНИЙ ПЕРЕКЛАД"
+
+msgid "Delete"
+msgstr "Видалити"
+
+msgid "Delete every temporary screen capture?"
+msgstr "Видалити всі тимчасові знімки екрана?"
+
+msgid "Delete now"
+msgstr "Видалити зараз"
+
+msgid "Delete this glossary entry?"
+msgstr "Видалити цей запис глосарія?"
+
+msgid "Deletes temporary images now. Text translations and personal glossary entries remain available."
+msgstr "Тимчасові зображення буде видалено зараз. Текстові переклади та записи особистого глосарія залишаться доступними."
+
+msgid "Do not keep"
+msgstr "Не зберігати"
+
+msgid "Double-click translated text on a screen result, then save a correction or confirm the existing translation."
+msgstr "Двічі клацніть перекладений текст на знімку, потім збережіть виправлення або підтвердьте поточний переклад."
+
+msgid "Edit"
+msgstr "Змінити"
+
+msgid "Glossary"
+msgstr "Глосарій"
+
+msgid "Keep temporarily"
+msgstr "Зберігати тимчасово"
+
+msgid "No approved translations yet"
+msgstr "Затверджених перекладів ще немає"
+
+msgid "Only translations you corrected and saved or explicitly confirmed appear here. Rules remain separate for different languages and contexts."
+msgstr "Тут з’являються лише переклади, які ви виправили й зберегли або явно підтвердили. Правила для різних мов і контекстів зберігаються окремо."
+
+msgid "Personal glossary"
+msgstr "Особистий глосарій"
+
+msgid "Retry"
+msgstr "Повторити"
+
+msgid "SOURCE PHRASE"
+msgstr "ВИХІДНА ФРАЗА"
+
+msgid "Screen capture history"
+msgstr "Історія знімків екрана"
+
+msgid "Search"
+msgstr "Пошук"
+
+msgid "Search words, translations, or context"
+msgstr "Шукати слова, переклади або контекст"
+
+msgid "Stored on this device"
+msgstr "Зберігається на цьому пристрої"
+
+msgid "Stored screen captures"
+msgstr "Збережені знімки екрана"
+
+msgid "Temporary screen captures are kept for up to 24 hours and 500 MB. The size limit can remove older captures sooner."
+msgstr "Тимчасові знімки екрана зберігаються до 24 годин і займають не більше 500 МБ. Через обмеження розміру старі знімки можуть видалятися раніше."
+
+msgid "Save file"
+msgstr "Зберегти файл"
+
+msgid "Delete image"
+msgstr "Видалити зображення"
+
+msgid "Confirmed"
+msgstr "Підтверджено"
+
+msgid "Corrected"
+msgstr "Виправлено"
+
+msgid "Editable translated image text"
+msgstr "Редагований текст перекладу на зображенні"
+
+msgid "Double-click a translation to edit"
+msgstr "Двічі клацніть переклад, щоб змінити його"
+
+msgid "Image expired"
+msgstr "Термін зберігання зображення минув"
+
+msgid "The temporary screenshot was removed. Your text translation remains available."
+msgstr "Тимчасовий знімок видалено. Текстовий переклад залишається доступним."
+
+msgid "COPIED"
+msgstr "СКОПІЙОВАНО"
+
+msgid "COPY TEXT"
+msgstr "КОПІЮВАТИ ТЕКСТ"
+
+msgid "Saved to glossary"
+msgstr "Збережено до глосарія"

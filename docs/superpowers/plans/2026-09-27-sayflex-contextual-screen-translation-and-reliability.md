@@ -628,11 +628,11 @@
 - Produces: editor draft key `(request_id, block_id, revision)` and focus-transfer/restore contract.
 - Consumes: Tasks 9, 10, 12, and the visually approved Task 13 components.
 
-- [ ] **Step 1: Add failing interaction and localization tests**
+- [x] **Step 1: Add failing interaction and localization tests**
 
   Test `Ctrl+Enter`, Escape, outside click preservation, late result after edit, failed glossary write retry, corrected Copy, no retroactive external edit, full glossary CRUD, screenshot disclosure/delete, expiry fallback, and complete strings in all `UiLocale::ALL` locales.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation translation_editor -- --nocapture`
   Run: `cargo test -p sayflex-desktop --features screen-translation glossary_view -- --nocapture`
@@ -640,22 +640,22 @@
   Run: `cargo test -p sayflex-desktop --features screen-translation localization -- --nocapture`
   Expected: FAIL because the corresponding production bindings do not exist.
 
-- [ ] **Step 3: Wire approved result/editor components**
+- [x] **Step 3: Wire approved result/editor components**
 
   Keep result windows non-activating. Create a focusable editor only after an explicit double-click or Enter on a selected translation block, preserve the external target snapshot, and apply saved revisions to document/text/image projections. Keep `ORIG`, `DUAL`, copy, and pin behavior intact.
 
-- [ ] **Step 4: Add glossary and screenshot-history settings surfaces**
+- [x] **Step 4: Add glossary and screenshot-history settings surfaces**
 
   Use existing Sheet list/form patterns with search, edit, delete, expiry explanation, 24-hour/500-MiB defaults, Disable future storage, Delete now, and Save file. Do not combine screenshot retention with dictation/translation history retention.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
   Run: `cargo test -p sayflex-desktop --features screen-translation -- --nocapture`
   Expected: PASS.
   Run: `pwsh -NoProfile -File scripts/tests/ui-translations.Tests.ps1`
   Expected: PASS for every shipped locale.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   `git commit -m "feat(ui): edit glossary and render translation on images"`
 

@@ -7,9 +7,9 @@
 
 import { Sheet } from "sheet.slint";
 import { Fact } from "parts.slint";
-import { ModelRow, ProviderRow, HistoryRow, HotkeyRow, ResourceRow } from "rows.slint";
+import { ModelRow, ProviderRow, HistoryRow, GlossaryRow, HotkeyRow, ResourceRow } from "rows.slint";
 import { RowAction, ScrollRail } from "controls.slint";
-import { ModelsPage, ProvidersPage, HistoryPage } from "pages_lists.slint";
+import { ModelsPage, ProvidersPage, HistoryPage, GlossaryPage } from "pages_lists.slint";
 import { TranslationPage, HotkeysPage } from "pages_forms.slint";
 import { OverviewPage, DictationPage, VisualsPage, ResourcesPage, AboutPage } from "pages_instruments.slint";
 import { SlateLine } from "recording_visual.slint";
@@ -98,9 +98,10 @@ component SettingsNavigation inherits VerticalLayout {
     NavItem { label: @tr("Providers"); active: root.active-page == 4; clicked => { root.select-page(4); } }
     NavItem { label: @tr("Visuals"); active: root.active-page == 5; clicked => { root.select-page(5); } }
     NavItem { label: @tr("History"); active: root.active-page == 6; clicked => { root.select-page(6); } }
-    NavItem { label: @tr("Hotkeys"); active: root.active-page == 7; clicked => { root.select-page(7); } }
-    NavItem { label: @tr("Resources"); active: root.active-page == 8; clicked => { root.select-page(8); } }
-    NavItem { label: @tr("About"); active: root.active-page == 9; clicked => { root.select-page(9); } }
+    NavItem { label: @tr("Glossary"); active: root.active-page == 7; clicked => { root.select-page(7); } }
+    NavItem { label: @tr("Hotkeys"); active: root.active-page == 8; clicked => { root.select-page(8); } }
+    NavItem { label: @tr("Resources"); active: root.active-page == 9; clicked => { root.select-page(9); } }
+    NavItem { label: @tr("About"); active: root.active-page == 10; clicked => { root.select-page(10); } }
 
     Rectangle { vertical-stretch: 1; }
 }
@@ -200,6 +201,8 @@ export component SettingsWindow inherits Window {
     in property <string> translation-note: "";
     in property <string> translation-note-action: "";
     in property <bool> translation-note-signal: false;
+    in-out property <bool> screenshot-retention-enabled: true;
+    in property <string> screenshot-retention-summary: @tr("Temporary screen captures are kept for up to 24 hours and 500 MB. The size limit can remove older captures sooner.");
 
     // ── the lists ──
     // Speech models then the translator, in one list: the page is about
@@ -210,6 +213,13 @@ export component SettingsWindow inherits Window {
     in property <string> provider-claim: "";
     in property <[HistoryRow]> history-rows;
     in property <string> history-scope: "";
+    in property <[GlossaryRow]> glossary-rows;
+    in-out property <string> glossary-query: "";
+    in-out property <string> glossary-editing-id: "";
+    in-out property <string> glossary-draft-source: "";
+    in-out property <string> glossary-draft-translation: "";
+    in property <string> glossary-problem: "";
+    in property <bool> glossary-can-retry: false;
     in property <[HotkeyRow]> hotkey-rows;
     in-out property <length> models-scroll-y: 0px;
     in-out property <length> models-scroll-content-height: 0px;
@@ -220,6 +230,9 @@ export component SettingsWindow inherits Window {
     in-out property <length> history-scroll-y: 0px;
     in-out property <length> history-scroll-content-height: 0px;
     in-out property <length> history-scroll-shown-height: 0px;
+    in-out property <length> glossary-scroll-y: 0px;
+    in-out property <length> glossary-scroll-content-height: 0px;
+    in-out property <length> glossary-scroll-shown-height: 0px;
     in-out property <length> hotkeys-scroll-y: 0px;
     in-out property <length> hotkeys-scroll-content-height: 0px;
     in-out property <length> hotkeys-scroll-shown-height: 0px;
@@ -290,6 +303,12 @@ export component SettingsWindow inherits Window {
     callback set-translation-blur(int);
     callback set-translation-primary-language(string);
     callback set-translation-secondary-language(string);
+    callback set-screenshot-retention-enabled(bool);
+    callback delete-screenshots-now();
+    callback search-glossary(string);
+    callback save-glossary-entry(string, string, string);
+    callback delete-glossary-entry(string);
+    callback retry-glossary-action();
     callback open-translator();
     callback open-support();
     callback set-hotkey-enabled(int, bool);
@@ -376,7 +395,8 @@ export component SettingsWindow inherits Window {
             property <bool> page-owns-scroll: root.active-page == 3
                 || root.active-page == 4
                 || root.active-page == 6
-                || root.active-page == 7;
+                || root.active-page == 7
+                || root.active-page == 8;
             // The fixed floor only describes the smallest page. Form pages can
             // grow when settings are added (Translation now does), so the
             // scroll extent must come from the active page's actual layout.
@@ -477,6 +497,8 @@ export component SettingsWindow inherits Window {
                     note-text: root.translation-note;
                     note-action: root.translation-note-action;
                     note-signal: root.translation-note-signal;
+                    screenshot-retention-enabled: root.screenshot-retention-enabled;
+                    screenshot-retention-summary: root.screenshot-retention-summary;
                     set-enabled(next) => { root.set-translation-enabled(next); }
                     set-delivery(value) => { root.set-translation-delivery(value); }
                     set-text-action(value) => { root.set-text-action-mode(value); }
@@ -484,6 +506,8 @@ export component SettingsWindow inherits Window {
                     set-blur(value) => { root.set-translation-blur(value); }
                     set-primary-language(value) => { root.set-translation-primary-language(value); }
                     set-secondary-language(value) => { root.set-translation-secondary-language(value); }
+                    set-screenshot-retention-enabled(next) => { root.set-screenshot-retention-enabled(next); }
+                    delete-screenshots-now => { root.delete-screenshots-now(); }
                     open-translator => { root.open-translator(); }
                     note-acted => { root.active-page = 3; }
                 }
@@ -574,7 +598,22 @@ export component SettingsWindow inherits Window {
                     copy-history(index) => { root.copy-history(index); }
                 }
 
-                if root.active-page == 7 && !work.page-owns-scroll : HotkeysPage {
+                if root.active-page == 7 && !work.page-owns-scroll : GlossaryPage {
+                    rail-overhang: Sheet.rail-overhang;
+                    rows: root.glossary-rows;
+                    query <=> root.glossary-query;
+                    editing-id <=> root.glossary-editing-id;
+                    draft-source <=> root.glossary-draft-source;
+                    draft-translation <=> root.glossary-draft-translation;
+                    problem: root.glossary-problem;
+                    can-retry: root.glossary-can-retry;
+                    search(query) => { root.search-glossary(query); }
+                    save-entry(id, source, translation) => { root.save-glossary-entry(id, source, translation); }
+                    delete-entry(id) => { root.delete-glossary-entry(id); }
+                    retry => { root.retry-glossary-action(); }
+                }
+
+                if root.active-page == 8 && !work.page-owns-scroll : HotkeysPage {
                     // The rail belongs at the window edge, not beside the text.
                     rail-overhang: Sheet.rail-overhang;
                     rows: root.hotkey-rows;
@@ -592,14 +631,14 @@ export component SettingsWindow inherits Window {
                     set-mode(menu, value) => { root.set-text-action-mode(value); }
                 }
 
-                if root.active-page == 8 : ResourcesPage {
+                if root.active-page == 9 : ResourcesPage {
                     rows: root.resource-rows;
                     can-unload-all: root.resources-can-unload;
                     unload(id) => { root.unload-resource(id); }
                     unload-all => { root.unload-all-resources(); }
                 }
 
-                if root.active-page == 9 : AboutPage {
+                if root.active-page == 10 : AboutPage {
                     version: root.app-version;
                     ui-locale <=> root.ui-locale;
                     ui-locale-label: root.ui-locale-label;
@@ -710,7 +749,29 @@ export component SettingsWindow inherits Window {
                             copy-history(index) => { root.copy-history(index); }
                         }
 
-                        if root.active-page == 7 : hotkeys-list-page := HotkeysPage {
+                        if root.active-page == 7 : glossary-list-page := GlossaryPage {
+                            rail-overhang: Sheet.rail-overhang;
+                            scroll-y <=> root.glossary-scroll-y;
+                            scroll-content-height <=> root.glossary-scroll-content-height;
+                            changed scroll-shown-height => {
+                                if (root.glossary-scroll-shown-height != self.scroll-shown-height) {
+                                    root.glossary-scroll-shown-height = self.scroll-shown-height;
+                                }
+                            }
+                            rows: root.glossary-rows;
+                            query <=> root.glossary-query;
+                            editing-id <=> root.glossary-editing-id;
+                            draft-source <=> root.glossary-draft-source;
+                            draft-translation <=> root.glossary-draft-translation;
+                            problem: root.glossary-problem;
+                            can-retry: root.glossary-can-retry;
+                            search(query) => { root.search-glossary(query); }
+                            save-entry(id, source, translation) => { root.save-glossary-entry(id, source, translation); }
+                            delete-entry(id) => { root.delete-glossary-entry(id); }
+                            retry => { root.retry-glossary-action(); }
+                        }
+
+                        if root.active-page == 8 : hotkeys-list-page := HotkeysPage {
                             rail-overhang: Sheet.rail-overhang;
                             scroll-y <=> root.hotkeys-scroll-y;
                             scroll-content-height <=> root.hotkeys-scroll-content-height;

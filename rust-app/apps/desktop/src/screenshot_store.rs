@@ -80,7 +80,7 @@ pub(crate) enum ScreenshotStoreError {
 
 pub(crate) struct ScreenshotStore {
     root: PathBuf,
-    retention: ScreenshotRetention,
+    retention: Mutex<ScreenshotRetention>,
     deleted: Mutex<HashSet<RequestId>>,
 }
 
@@ -108,7 +108,7 @@ impl ScreenshotStore {
         rust_platform_windows::protect_private_directory(&root)?;
         Ok(Self {
             root,
-            retention,
+            retention: Mutex::new(retention),
             deleted: Mutex::new(HashSet::new()),
         })
     }
@@ -133,20 +133,20 @@ impl ScreenshotStore {
         if deleted.contains(&metadata.request_id) {
             return Ok(None);
         }
-        if !self.retention.enabled {
+        let retention = *self
+            .retention
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !retention.enabled {
             return Ok(None);
         }
         metadata.crop_x = crop.rect.x;
         metadata.crop_y = crop.rect.y;
         metadata.width = crop.rect.width;
         metadata.height = crop.rect.height;
-        let retention_expiry = metadata.created_unix_ms.saturating_add(
-            self.retention
-                .ttl
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
-        );
+        let retention_expiry = metadata
+            .created_unix_ms
+            .saturating_add(retention.ttl.as_millis().try_into().unwrap_or(u64::MAX));
         metadata.expires_unix_ms = if metadata.expires_unix_ms == 0 {
             retention_expiry
         } else {
@@ -186,6 +186,13 @@ impl ScreenshotStore {
         let _ = fs::remove_file(image_previous);
         let _ = fs::remove_file(document_previous);
         Ok(Some(document))
+    }
+
+    pub(crate) fn set_retention(&self, retention: ScreenshotRetention) {
+        *self
+            .retention
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = retention;
     }
 
     #[allow(dead_code)] // Public module contract; wired to history in Task 14.
@@ -240,6 +247,38 @@ impl ScreenshotStore {
         Ok(())
     }
 
+    pub(crate) fn delete_all(&self) -> Result<usize, ScreenshotStoreError> {
+        let mut deleted = self
+            .deleted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let paths = fs::read_dir(&self.root)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        let mut request_ids = HashSet::new();
+        for path in &paths {
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(path)
+                && let Ok(metadata) = serde_json::from_slice::<ScreenshotMetadata>(&bytes)
+            {
+                request_ids.insert(metadata.request_id);
+            }
+        }
+        deleted.extend(request_ids.iter().copied());
+        for path in paths {
+            if matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("json" | "png" | "tmp" | "previous" | "rollback")
+            ) {
+                remove_if_present(&path)?;
+            }
+        }
+        Ok(request_ids.len())
+    }
+
     #[allow(dead_code)] // Public module contract; wired to history in Task 14.
     pub(crate) fn save_permanent(
         &self,
@@ -272,6 +311,10 @@ impl ScreenshotStore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let mut report = CleanupReport::default();
+        let retention = *self
+            .retention
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let Ok(directory) = fs::read_dir(&self.root) else {
             report.error_count += 1;
             return report;
@@ -353,7 +396,7 @@ impl ScreenshotStore {
         entries.sort_by_key(|entry| entry.created_unix_ms);
         let mut total = entries.iter().map(|entry| entry.bytes).sum::<u64>();
         for entry in entries {
-            if total <= self.retention.max_bytes {
+            if total <= retention.max_bytes {
                 break;
             }
             if remove_pair(&entry.document, &entry.image).is_err() {
@@ -394,6 +437,18 @@ fn write_png(path: &Path, crop: &RgbaFrame) -> Result<(), ScreenshotStoreError> 
     writer
         .finish()
         .map_err(|error| ScreenshotStoreError::Png(error.to_string()))?;
+    Ok(())
+}
+
+pub(crate) fn save_frame_permanent(
+    crop: &RgbaFrame,
+    destination: &Path,
+) -> Result<(), ScreenshotStoreError> {
+    let temporary = destination.with_extension("png.tmp");
+    let previous = destination.with_extension("png.previous");
+    write_png(&temporary, crop)?;
+    rust_platform_windows::replace_file_atomically(destination, &temporary, &previous)?;
+    let _ = fs::remove_file(previous);
     Ok(())
 }
 
@@ -483,7 +538,7 @@ mod tests {
     use rust_protocol::{PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext};
     use tempfile::tempdir;
 
-    use super::{ScreenshotMetadata, ScreenshotRetention, ScreenshotStore};
+    use super::{ScreenshotMetadata, ScreenshotRetention, ScreenshotStore, save_frame_permanent};
 
     fn frame(color: u8) -> RgbaFrame {
         RgbaFrame::try_new(
@@ -551,6 +606,32 @@ mod tests {
     }
 
     #[test]
+    fn explicit_file_save_works_when_temporary_retention_is_disabled() {
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("permanent.png");
+        let store = ScreenshotStore::open_at(
+            directory.path().join("temporary"),
+            ScreenshotRetention {
+                enabled: false,
+                ..ScreenshotRetention::default()
+            },
+        )
+        .unwrap();
+        let request_id = RequestId::new();
+        assert!(
+            store
+                .persist_crop(metadata(request_id, 100, 200), &frame(7))
+                .unwrap()
+                .is_none()
+        );
+
+        save_frame_permanent(&frame(7), &destination).unwrap();
+
+        assert!(destination.is_file());
+        assert!(!destination.with_extension("png.tmp").exists());
+    }
+
+    #[test]
     fn default_retention_caps_expiry_at_twenty_four_hours() {
         let directory = tempdir().unwrap();
         let store =
@@ -584,6 +665,25 @@ mod tests {
             },
         )
         .unwrap();
+
+        assert!(
+            store
+                .persist_crop(metadata(RequestId::new(), 100, 200), &frame(1))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn changing_retention_applies_to_future_writes_without_reopening_the_store() {
+        let directory = tempdir().unwrap();
+        let store =
+            ScreenshotStore::open_at(directory.path(), ScreenshotRetention::default()).unwrap();
+        store.set_retention(ScreenshotRetention {
+            enabled: false,
+            ..ScreenshotRetention::default()
+        });
 
         assert!(
             store
@@ -705,5 +805,29 @@ mod tests {
                 .is_none()
         );
         assert!(store.load_crop(request_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_all_removes_every_temporary_crop_and_blocks_their_late_recreation() {
+        let directory = tempdir().unwrap();
+        let store =
+            ScreenshotStore::open_at(directory.path(), ScreenshotRetention::default()).unwrap();
+        let first = RequestId::new();
+        let second = RequestId::new();
+        store
+            .persist_crop(metadata(first, 100, 200), &frame(1))
+            .unwrap();
+        store
+            .persist_crop(metadata(second, 101, 201), &frame(2))
+            .unwrap();
+
+        assert_eq!(store.delete_all().unwrap(), 2);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert!(
+            store
+                .persist_crop(metadata(first, 100, 200), &frame(1))
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -106,10 +106,10 @@ mod tests {
     const DRIVER: &str = include_str!("screen_translation_preview.rs");
 
     #[test]
-    fn preview_window_uses_the_current_frameless_overlay_contract() {
+    fn preview_window_is_frameless_but_does_not_stay_above_other_apps() {
         for contract in [
             "no-frame: true",
-            "always-on-top: true",
+            "always-on-top: false",
             "background: transparent",
             "in-out property <int> view-mode",
             "in-out property <bool> pinned",
@@ -303,6 +303,8 @@ mod tests {
             "cancel-requested => { root.cancel-edit(); }",
             "retry-requested => { root.retry-save(); }",
             "copy-text-requested => { root.copy-text(); }",
+            "save-file-requested => { root.save-file(); }",
+            "delete-image-requested => { root.delete-image(); }",
         ] {
             assert!(
                 SOURCE.contains(wiring),
@@ -318,6 +320,8 @@ mod tests {
             "DUAL",
             "ON IMAGE",
             "PIN",
+            "Save file",
+            "Delete image",
             "Save",
             "Confirm",
             "Retry",

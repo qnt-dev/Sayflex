@@ -1573,3 +1573,102 @@ msgstr "이 언어 쌍을 번역하려면 {model}({size})을 다운로드하세�
 
 msgid "Download model"
 msgstr "모델 다운로드"
+
+msgid "APPROVED TRANSLATION"
+msgstr "승인된 번역"
+
+msgid "Delete"
+msgstr "삭제"
+
+msgid "Delete every temporary screen capture?"
+msgstr "모든 임시 화면 캡처를 삭제할까요?"
+
+msgid "Delete now"
+msgstr "지금 삭제"
+
+msgid "Delete this glossary entry?"
+msgstr "이 용어집 항목을 삭제할까요?"
+
+msgid "Deletes temporary images now. Text translations and personal glossary entries remain available."
+msgstr "임시 이미지를 지금 삭제합니다. 텍스트 번역과 개인 용어집 항목은 계속 사용할 수 있습니다."
+
+msgid "Do not keep"
+msgstr "보관하지 않음"
+
+msgid "Double-click translated text on a screen result, then save a correction or confirm the existing translation."
+msgstr "화면 결과의 번역된 텍스트를 두 번 클릭한 다음 수정 내용을 저장하거나 기존 번역을 확인하세요."
+
+msgid "Edit"
+msgstr "편집"
+
+msgid "Glossary"
+msgstr "용어집"
+
+msgid "Keep temporarily"
+msgstr "임시 보관"
+
+msgid "No approved translations yet"
+msgstr "아직 승인된 번역이 없습니다"
+
+msgid "Only translations you corrected and saved or explicitly confirmed appear here. Rules remain separate for different languages and contexts."
+msgstr "직접 수정하여 저장했거나 명시적으로 확인한 번역만 여기에 표시됩니다. 언어와 문맥이 다르면 규칙도 별도로 유지됩니다."
+
+msgid "Personal glossary"
+msgstr "개인 용어집"
+
+msgid "Retry"
+msgstr "다시 시도"
+
+msgid "SOURCE PHRASE"
+msgstr "원문 구문"
+
+msgid "Screen capture history"
+msgstr "화면 캡처 기록"
+
+msgid "Search"
+msgstr "검색"
+
+msgid "Search words, translations, or context"
+msgstr "단어, 번역 또는 문맥 검색"
+
+msgid "Stored on this device"
+msgstr "이 장치에 저장됨"
+
+msgid "Stored screen captures"
+msgstr "저장된 화면 캡처"
+
+msgid "Temporary screen captures are kept for up to 24 hours and 500 MB. The size limit can remove older captures sooner."
+msgstr "임시 화면 캡처는 최대 24시간, 총 500MB까지 보관됩니다. 용량 제한에 따라 오래된 캡처가 더 일찍 삭제될 수 있습니다."
+
+msgid "Save file"
+msgstr "파일 저장"
+
+msgid "Delete image"
+msgstr "이미지 삭제"
+
+msgid "Confirmed"
+msgstr "확인됨"
+
+msgid "Corrected"
+msgstr "수정됨"
+
+msgid "Editable translated image text"
+msgstr "이미지에서 편집 가능한 번역 텍스트"
+
+msgid "Double-click a translation to edit"
+msgstr "번역을 편집하려면 두 번 클릭하세요"
+
+msgid "Image expired"
+msgstr "이미지 보관 기간 만료"
+
+msgid "The temporary screenshot was removed. Your text translation remains available."
+msgstr "임시 화면 캡처가 삭제되었습니다. 텍스트 번역은 계속 사용할 수 있습니다."
+
+msgid "COPIED"
+msgstr "복사됨"
+
+msgid "COPY TEXT"
+msgstr "텍스트 복사"
+
+msgid "Saved to glossary"
+msgstr "용어집에 저장됨"

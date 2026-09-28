@@ -1002,7 +1002,7 @@ mod tests {
             "the global header must not carry an application setting"
         );
 
-        settings.set_active_page(9);
+        settings.set_active_page(10);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
         assert!(
             ElementHandle::find_by_accessible_label(&settings, "System language")
@@ -1014,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn every_settings_page_reports_the_real_ten_page_count() {
+    fn every_settings_page_reports_the_real_eleven_page_count() {
         use i_slint_backend_testing::ElementHandle;
         use slint::ComponentHandle;
 
@@ -1024,10 +1024,10 @@ mod tests {
         let settings = crate::SettingsWindow::new().expect("settings surface");
         settings.show().expect("show headless settings surface");
 
-        for page in 0..10 {
+        for page in 0..11 {
             settings.set_active_page(page);
             i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
-            let expected = format!("{:02} / 10", page + 1);
+            let expected = format!("{:02} / 11", page + 1);
             assert!(
                 ElementHandle::find_by_accessible_label(&settings, &expected)
                     .next()
@@ -1991,7 +1991,7 @@ mod tests {
             let saved_from_callback = Rc::clone(&saved);
             settings.on_save_hotkey_capture(move || saved_from_callback.set(true));
             settings.show().expect("show headless settings surface");
-            settings.set_active_page(7);
+            settings.set_active_page(8);
             i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
             let cancel = ElementHandle::find_by_accessible_label(&settings, &entries["Cancel"])
@@ -2065,7 +2065,7 @@ mod tests {
             mode_key: "adaptive".into(),
         }])));
         settings.show().expect("show headless settings surface");
-        settings.set_active_page(7);
+        settings.set_active_page(8);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
         let mode = ElementHandle::find_by_accessible_label(&settings, "Decide from the text")
@@ -2095,7 +2095,7 @@ mod tests {
             settings.show().expect("show headless settings surface");
             let surface = settings.root_element().size();
 
-            for page in 0..10 {
+            for page in 0..11 {
                 settings.set_active_page(page);
                 i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
                 let controls = ElementQuery::from_root(&settings)
@@ -2149,7 +2149,7 @@ mod tests {
             settings.show().expect("show headless settings surface");
             let surface = settings.root_element().size();
 
-            for page in 0..10 {
+            for page in 0..11 {
                 settings.set_active_page(page);
                 i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
                 let labelled = ElementQuery::from_root(&settings)
@@ -2328,7 +2328,7 @@ mod tests {
         slint::select_bundled_translation("en").expect("select English bundle");
         let settings = crate::SettingsWindow::new().expect("settings surface");
         settings.show().expect("show headless settings surface");
-        settings.set_active_page(9);
+        settings.set_active_page(10);
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
         let selected = Rc::new(RefCell::new(String::new()));
@@ -2583,7 +2583,7 @@ mod tests {
             slint::select_bundled_translation(locale).expect("select translated bundle");
             let entries = catalog(source);
             let settings = crate::SettingsWindow::new().expect("settings surface");
-            settings.set_active_page(8);
+            settings.set_active_page(9);
             settings.show().expect("show headless settings surface");
             i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 
@@ -2628,7 +2628,7 @@ mod tests {
             "../translations/ru/LC_MESSAGES/sayflex-desktop.po"
         ));
         let settings = crate::SettingsWindow::new().expect("settings surface");
-        settings.set_active_page(8);
+        settings.set_active_page(9);
         settings.show().expect("show headless settings surface");
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
 

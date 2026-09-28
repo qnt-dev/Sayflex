@@ -1573,3 +1573,102 @@ msgstr "Descarga {model} ({size}) para traducir este par de idiomas."
 
 msgid "Download model"
 msgstr "Descargar modelo"
+
+msgid "APPROVED TRANSLATION"
+msgstr "TRADUCCIÓN APROBADA"
+
+msgid "Delete"
+msgstr "Eliminar"
+
+msgid "Delete every temporary screen capture?"
+msgstr "¿Eliminar todas las capturas de pantalla temporales?"
+
+msgid "Delete now"
+msgstr "Eliminar ahora"
+
+msgid "Delete this glossary entry?"
+msgstr "¿Eliminar esta entrada del glosario?"
+
+msgid "Deletes temporary images now. Text translations and personal glossary entries remain available."
+msgstr "Elimina ahora las imágenes temporales. Las traducciones de texto y las entradas del glosario personal seguirán disponibles."
+
+msgid "Do not keep"
+msgstr "No conservar"
+
+msgid "Double-click translated text on a screen result, then save a correction or confirm the existing translation."
+msgstr "Haz doble clic en el texto traducido de una captura y guarda la corrección o confirma la traducción actual."
+
+msgid "Edit"
+msgstr "Editar"
+
+msgid "Glossary"
+msgstr "Glosario"
+
+msgid "Keep temporarily"
+msgstr "Conservar temporalmente"
+
+msgid "No approved translations yet"
+msgstr "Aún no hay traducciones aprobadas"
+
+msgid "Only translations you corrected and saved or explicitly confirmed appear here. Rules remain separate for different languages and contexts."
+msgstr "Aquí solo aparecen las traducciones que corregiste y guardaste o que confirmaste expresamente. Las reglas se mantienen separadas para cada idioma y contexto."
+
+msgid "Personal glossary"
+msgstr "Glosario personal"
+
+msgid "Retry"
+msgstr "Reintentar"
+
+msgid "SOURCE PHRASE"
+msgstr "FRASE ORIGINAL"
+
+msgid "Screen capture history"
+msgstr "Historial de capturas de pantalla"
+
+msgid "Search"
+msgstr "Buscar"
+
+msgid "Search words, translations, or context"
+msgstr "Buscar palabras, traducciones o contexto"
+
+msgid "Stored on this device"
+msgstr "Guardado en este dispositivo"
+
+msgid "Stored screen captures"
+msgstr "Capturas de pantalla guardadas"
+
+msgid "Temporary screen captures are kept for up to 24 hours and 500 MB. The size limit can remove older captures sooner."
+msgstr "Las capturas temporales se conservan hasta 24 horas y un máximo de 500 MB. El límite de tamaño puede eliminar antes las capturas más antiguas."
+
+msgid "Save file"
+msgstr "Guardar archivo"
+
+msgid "Delete image"
+msgstr "Eliminar imagen"
+
+msgid "Confirmed"
+msgstr "Confirmada"
+
+msgid "Corrected"
+msgstr "Corregida"
+
+msgid "Editable translated image text"
+msgstr "Texto traducido editable en la imagen"
+
+msgid "Double-click a translation to edit"
+msgstr "Haz doble clic en una traducción para editarla"
+
+msgid "Image expired"
+msgstr "La imagen ha caducado"
+
+msgid "The temporary screenshot was removed. Your text translation remains available."
+msgstr "Se eliminó la captura temporal. La traducción de texto sigue disponible."
+
+msgid "COPIED"
+msgstr "COPIADO"
+
+msgid "COPY TEXT"
+msgstr "COPIAR TEXTO"
+
+msgid "Saved to glossary"
+msgstr "Guardado en el glosario"
