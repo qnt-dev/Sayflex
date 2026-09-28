@@ -27,3 +27,22 @@ glossary stored outside the program directory.
 This candidate remains unsigned until the public signing workflow is complete.
 Automated and installed-artifact checks establish technical consistency, not a
 claim about every external game, monitor layout, or protected-content surface.
+
+## Final artifact evidence
+
+- Source commit: `51764cb662814e10883c67911617ff8997e55208`.
+- Installer: `SayFlex-0.8.4-win-x64-setup.exe`, 568,267,136 bytes,
+  SHA-256 `9C44B821D2090BF5FCC8E15D415B5EC60E14D80B909E5CA6873C5FA7D7B8636D`.
+- Standard-path in-place installation completed without a restart. Installed
+  files matched staging byte-for-byte, and release validation confirmed the
+  file set, build manifest, Cargo.lock, binary build identity, versions,
+  protocol 31, installer checksum, installed hashes, and uninstall
+  registration.
+- The installed desktop, InputHost, CUDA speech worker, and translation worker
+  remained alive after startup. CUDA speech and the selected Qwen translation
+  model reached ready state. A system-level conflict for `Ctrl+Alt+P` was
+  reported as a typed per-action rejection without terminating InputHost.
+- The generated installed-smoke receipt records `PASS=1`, `FAIL=0`, and 39
+  honest `NOT_RUN` interaction/environment checks. Live capture, drag, inline
+  edit, Close, Delete image, and Pin/unpin were not witnessed by the current
+  automation surface and remain pending user verification.

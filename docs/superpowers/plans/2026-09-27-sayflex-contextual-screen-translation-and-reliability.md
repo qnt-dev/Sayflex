@@ -823,10 +823,21 @@
 
   Run all focused tests above, `cargo fmt --all -- --check`, strict Clippy for the changed crates, and a headless screen-result render using the captured dense-text metadata. Inspect the result at 100%, 125%, and 200%.
 
-- [ ] **Step 8: Build, install, and verify SayFlex 0.8.4**
+- [x] **Step 8: Build, install, and verify SayFlex 0.8.4**
 
   Build the pinned release matrix and installer, upgrade the existing standard-path installation in place, verify installed hashes/version and one running instance, then exercise capture, drag, inline edit, Close, Delete image, and Pin/unpin without visible helper consoles.
 
-- [ ] **Step 9: Commit**
+  Evidence (2026-09-29): the CPU/CUDA/Vulkan matrix and installer were built
+  from `51764cb662814e10883c67911617ff8997e55208`. The standard-path in-place
+  installation passed file-set, manifest, Cargo.lock, binary-identity,
+  version, protocol-31, installer-checksum, installed-hash, and uninstall
+  registration validation. The installed desktop, InputHost, CUDA speech
+  worker, and translation worker remained alive after startup; the previous
+  pre-handshake InputHost failure was absent. The installed smoke receipt is
+  `PASS=1`, `FAIL=0`, `NOT_RUN=39`: native capture/drag/edit/Close/Delete/Pin
+  interaction was not witnessed in this automation environment and remains
+  explicitly pending user verification rather than being reported as passed.
+
+- [x] **Step 9: Commit**
 
   `git commit -m "fix(screen): restore production result interactions"`
