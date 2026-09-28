@@ -1822,7 +1822,10 @@ fn update_glossary_entry(
         origin: existing.origin,
     };
     send_glossary_action(
-        glossary_view::GlossaryAction::Update { entry_id, draft },
+        glossary_view::GlossaryAction::Update {
+            entry_id,
+            draft: Box::new(draft),
+        },
         runtime,
     );
 }
@@ -1863,7 +1866,7 @@ fn dispatch_glossary_action(
             TranslationWorkerCommand::UpdateGlossaryEntry {
                 operation_id,
                 entry_id,
-                entry: draft,
+                entry: *draft,
             }
         }
         glossary_view::GlossaryAction::Delete(entry_id) => {
@@ -2935,7 +2938,11 @@ fn refresh_screen_result_preview(request_id: RequestId, selected_block: i32, run
         ));
         return;
     }
-    slot.preview.set_screen_view_mode(mode);
+    slot.preview
+        .set_screen_view_mode(screen_result_view::visible_ui_mode(
+            mode,
+            snapshot.crop.is_some(),
+        ));
     slot.preview.set_screen_selected_block(selected_block);
     slot.preview.set_screen_edit_hint_visible(hint);
     slot.preview.set_screen_editor_visible(true);
@@ -2956,7 +2963,7 @@ fn source_context_label(context: &SourceContext) -> String {
     .flatten()
     {
         let value = value.trim();
-        if !value.is_empty() && !parts.iter().any(|part| *part == value) {
+        if !value.is_empty() && !parts.contains(&value) {
             parts.push(value);
         }
         if parts.len() == 2 {

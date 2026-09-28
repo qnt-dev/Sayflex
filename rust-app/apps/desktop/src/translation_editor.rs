@@ -50,10 +50,6 @@ impl TranslationEditorState {
         &self.source
     }
 
-    pub(crate) fn baseline(&self) -> &str {
-        &self.baseline
-    }
-
     pub(crate) fn translation(&self) -> &str {
         &self.translation
     }
@@ -69,10 +65,6 @@ impl TranslationEditorState {
 
     pub(crate) fn phase(&self) -> EditorPhase {
         self.phase
-    }
-
-    pub(crate) fn error(&self) -> Option<&str> {
-        self.error.as_deref()
     }
 
     pub(crate) fn changed(&self) -> bool {
@@ -123,10 +115,6 @@ impl TranslationEditorState {
         self.pending_operation = None;
         self.phase = EditorPhase::Cancelled;
     }
-
-    pub(crate) fn outside_click(&mut self) {
-        // Deliberately inert. An outside click must not save or destroy a draft.
-    }
 }
 
 #[cfg(test)]
@@ -136,7 +124,7 @@ mod tests {
     use super::{EditorDraftKey, EditorPhase, TranslationEditorState};
 
     #[test]
-    fn outside_click_preserves_the_draft_and_failed_save_is_retryable() {
+    fn failed_save_preserves_the_draft_and_is_retryable() {
         let key = EditorDraftKey {
             request_id: RequestId::new(),
             block_id: ScreenBlockId::from("block"),
@@ -145,7 +133,6 @@ mod tests {
         let mut editor =
             TranslationEditorState::begin(key.clone(), "source".to_owned(), "machine".to_owned());
         editor.set_translation("corrected".to_owned());
-        editor.outside_click();
         assert_eq!(editor.phase(), EditorPhase::Editing);
         assert_eq!(editor.translation(), "corrected");
 

@@ -18,12 +18,36 @@ pub(crate) enum ResultViewMode {
     OnImage,
 }
 
+impl ResultViewMode {
+    fn from_ui(value: i32) -> Self {
+        match value {
+            1 => Self::Original,
+            2 => Self::Dual,
+            3 => Self::OnImage,
+            _ => Self::Translation,
+        }
+    }
+
+    fn as_ui(self) -> i32 {
+        match self {
+            Self::Translation => 0,
+            Self::Original => 1,
+            Self::Dual => 2,
+            Self::OnImage => 3,
+        }
+    }
+}
+
 pub(crate) fn visible_mode(requested: ResultViewMode, pixels_available: bool) -> ResultViewMode {
     if requested == ResultViewMode::OnImage && !pixels_available {
         ResultViewMode::Translation
     } else {
         requested
     }
+}
+
+pub(crate) fn visible_ui_mode(requested: i32, pixels_available: bool) -> i32 {
+    visible_mode(ResultViewMode::from_ui(requested), pixels_available).as_ui()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,14 +235,7 @@ pub(crate) fn apply_snapshot(
     preview.set_screen_content_width(viewport_width as f32);
     preview.set_screen_content_height(viewport_height as f32);
     preview.set_screen_image_expired(snapshot.crop.is_none());
-    preview.set_screen_view_mode(
-        match visible_mode(ResultViewMode::OnImage, snapshot.crop.is_some()) {
-            ResultViewMode::Translation => 0,
-            ResultViewMode::Original => 1,
-            ResultViewMode::Dual => 2,
-            ResultViewMode::OnImage => 3,
-        },
-    );
+    preview.set_screen_view_mode(visible_ui_mode(3, snapshot.crop.is_some()));
     preview.set_screen_selected_block(-1);
     preview.set_screen_editor_visible(false);
     preview.set_screen_save_error(false);
@@ -294,7 +311,7 @@ fn frame_image(frame: &rust_platform_windows::screen_capture::RgbaFrame) -> Resu
 mod tests {
     use rust_protocol::{PhysicalRect, ScreenBlockId};
 
-    use super::{BlockLayoutInput, ResultViewMode, layout_blocks, visible_mode};
+    use super::{BlockLayoutInput, ResultViewMode, layout_blocks, visible_mode, visible_ui_mode};
 
     #[test]
     fn block_geometry_scales_with_the_crop_and_long_text_uses_a_readable_callout() {
@@ -337,6 +354,10 @@ mod tests {
             visible_mode(ResultViewMode::Dual, true),
             ResultViewMode::Dual
         );
+        assert_eq!(visible_ui_mode(3, false), 0);
+        assert_eq!(visible_ui_mode(1, false), 1);
+        assert_eq!(visible_ui_mode(2, true), 2);
+        assert_eq!(visible_ui_mode(99, true), 0);
     }
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {

@@ -4,7 +4,7 @@ use rust_protocol::{GlossaryEntry, GlossaryEntryDraft, GlossaryEntryId, RequestI
 pub(crate) enum GlossaryAction {
     Update {
         entry_id: GlossaryEntryId,
-        draft: GlossaryEntryDraft,
+        draft: Box<GlossaryEntryDraft>,
     },
     Delete(GlossaryEntryId),
 }
@@ -162,7 +162,7 @@ mod tests {
 
         let update = view.begin_action(GlossaryAction::Update {
             entry_id: GlossaryEntryId::from("entry"),
-            draft: draft(),
+            draft: Box::new(draft()),
         });
         assert!(view.apply_saved(update, entry("entry")));
         let delete = view.begin_action(GlossaryAction::Delete(GlossaryEntryId::from("entry")));
@@ -187,14 +187,14 @@ mod tests {
         let expected = draft();
         let operation = view.begin_action(GlossaryAction::Update {
             entry_id: GlossaryEntryId::from("entry"),
-            draft: expected.clone(),
+            draft: Box::new(expected.clone()),
         });
         assert!(view.apply_failure(operation, "try again".to_owned(), true));
 
         let retry = view.retry().expect("retry action");
         assert!(matches!(
             retry.action,
-            GlossaryAction::Update { ref draft, .. } if draft == &expected
+            GlossaryAction::Update { ref draft, .. } if draft.as_ref() == &expected
         ));
     }
 

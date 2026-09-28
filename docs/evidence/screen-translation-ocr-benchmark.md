@@ -1,31 +1,39 @@
 # Screen translation OCR benchmark
 
-- Generated (UTC): 2026-09-20T12:56:15Z
-- Decision: **No engine admitted**
-- `screen_translation_packaging=false`
+- Generated (UTC): 2026-09-28T15:02:43Z
+- Decision: **Shipped PP-OCR worker path verified**
+- `screen_translation_packaging=true`
 - Iterations per fixture and candidate: 30
 - Corpus: 17 immutable PNG fixtures covering all 14 SayFlex source languages plus small mixed text, two columns, and blank input
 - CPU: Intel(R) Core(TM) Ultra 7 270K Plus
 - Windows: Microsoft Windows 11 Pro build 26200
 - Rust: rustc 1.95.0 (59807616e 2026-04-14)
-- OCR runtime: `oar-ocr 0.9.2` + `ort 2.0.0-rc.13` on CPU
+- OCR runtime: shipped `SayFlex.Ocr.exe` JSON worker protocol, `oar-ocr 0.9.2` + `ort 2.0.0-rc.13` on CPU
 
 ## Admission rule
 
-The production candidate must use the same portable runtime for direct and MSIX identities, remain OSS-compatible, beat Tesseract aggregate CER, and keep normal light/dark crop p95 below 500 ms. Missing comparators fail closed; Windows Media OCR is never substituted as the public engine.
+The release gate is the shipped `SayFlex.Ocr.exe` plus its verified bundle, driven through the same JSON protocol as the desktop application. It must complete every fixture after a real worker restart and keep normal light/dark crop p95 below 500 ms. Direct PP-OCR, Tesseract, and Windows Media OCR are diagnostic comparators; a missing comparator does not negate a successful shipped-path measurement.
 
-| Engine | All rows available | Aggregate CER | Exact rate | p50 ms | p95 ms | Normal p95 ms |
-|---|---:|---:|---:|---:|---:|---:|
-| ppocr-v5-onnx-cpu | True | 0.032 | 0.882 | 24.443 | 38.671 | 26.931 |
-| tesseract-5 | False | n/a | n/a | n/a | n/a | n/a |
-| windows-media-ocr | False | n/a | n/a | n/a | n/a | n/a |
+| Engine | All rows available | Aggregate CER | Exact rate | p50 ms | p95 ms | Normal p95 ms | Max working set bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| sayflex-ocr-worker-cpu | True | 0.046 | 0.824 | 29.000 | 90.000 | 32.000 | 387948544.000 |
+| ppocr-v5-onnx-cpu | True | 0.032 | 0.882 | 28.630 | 46.984 | 31.107 | n/a |
+| tesseract-5 | False | n/a | n/a | n/a | n/a | n/a | n/a |
+| windows-media-ocr | False | n/a | n/a | n/a | n/a | n/a | n/a |
 
-Identity-independent CPU runtime suitable for direct/MSIX staging: **True** (installed identity validation remains a Task 9 gate)  
-OSS-compatible runtime and model license: **True**  
-Lower aggregate CER than Tesseract: **False**  
+Shipped worker completed every row: **True**
+
+OSS-compatible runtime and model license: **True**
+
+Worker restart generation at measurement: **2** (expected at least 2): **True**
+
 Normal-crop p95 below 500 ms: **True**
 
-## PP-OCR CER by category
+Peak worker working set observed: **399478784.000 bytes**
+
+Direct PP-OCR lower aggregate CER than Tesseract when both comparators were available: **False**
+
+## Shipped worker CER by category
 
 | Category | Mean CER | Rows |
 |---|---:|---:|
@@ -33,10 +41,11 @@ Normal-crop p95 below 500 ms: **True**
 | columns | 0.395 | 30 |
 | dark | 0.000 | 210 |
 | light | 0.021 | 210 |
-| small | 0.000 | 30 |
+| small | 0.240 | 30 |
 
 ## Failures and unavailable candidates
 
+- **sayflex-ocr-worker-cpu:** none
 - **ppocr-v5-onnx-cpu:** none
 - **tesseract-5:** --tesseract-exe was not supplied
 - **windows-media-ocr:** benchmark process has no Windows package identity
@@ -44,6 +53,7 @@ Normal-crop p95 below 500 ms: **True**
 ## Observed quality limitations
 
 - `light-hi.png` (CER 0.147): expected 'चुने हुए स्क्रीन क्षेत्र का अनुवाद'; recognized 'चुनेहुए स्क्ी क्े्र का अनुवाद'.
+- `small-mixed.png` (CER 0.240): expected 'Status: готово — build 42'; recognized 'Status: rotoBo — build 42'.
 - `two-columns.png` (CER 0.395): expected 'Left one / Left two /  / Right one / Right two'; recognized 'Left one / Right one / Left two / Right two'.
 
 The two-column divergence is intentionally retained for the geometry-based reading-order stage; raw detector order is not treated as final paragraph order. The Hindi divergence is a recognizer-quality limitation and is not hidden by normalization.
@@ -71,9 +81,10 @@ License: Apache-2.0 (PaddleOCR / RapidOCR). Published ONNX hashes are retained v
 
 ## Runtime artifact hashes
 
-The benchmark executable contains the statically linked ONNX Runtime CPU library. `DirectML.dll` is copied by the upstream `ort` build bundle but no DirectML execution provider is enabled or selected by this benchmark.
+The shipped worker contains the ONNX Runtime CPU path used by SayFlex. `DirectML.dll` may be copied by the upstream `ort` build bundle, but no DirectML execution provider is enabled or selected by the OCR worker.
 
-- `sayflex-ocr-benchmark.exe`: `50aeccb43518598d58acd6842e141e5a69b77816bfc6057824689b986efd38cd`
+- `SayFlex.Ocr.exe`: `8686e968e482a89ad6a7bbd28e3fb594dbd7fef8a6e42824baf9635594ff5e86`
+- `sayflex-ocr-benchmark.exe`: `2aa9e6675665ef8607744496dbfceb32431c3cbcd8c8e6516525ff0b45294498`
 - `DirectML.dll`: `9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1`
 
 ## Immutable fixture hashes
@@ -98,4 +109,4 @@ The benchmark executable contains the statically linked ONNX Runtime CPU library
 
 ## Raw data
 
-Machine-readable JSON Lines are generated at `rust-app/target/ocr-benchmark-results.jsonl`. Expected and recognized strings are fixture-only data; no user capture is read or retained by this benchmark.
+Machine-readable JSON Lines are generated at `rust-app/target/ocr-benchmark-results.jsonl`. Each shipped-worker row includes protocol latency, working-set observations, and the worker generation proving the post-warmup restart path. Expected and recognized strings are fixture-only data; no user capture is read or retained by this benchmark.

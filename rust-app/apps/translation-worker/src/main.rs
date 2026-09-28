@@ -1561,13 +1561,15 @@ fn translate_blocks_request(
             let translated = validate_completed_blocks(&plan, translated)?;
             publish_screen_blocks(
                 writer,
-                request_id,
-                base_revision,
+                ScreenBlockPublicationContext {
+                    request_id,
+                    base_revision,
+                    source_language: source,
+                    target_language: target,
+                    started,
+                },
                 translated,
-                source,
-                target,
                 plan.backend_capabilities,
-                started,
                 &is_current,
             )?;
             return Ok(());
@@ -1597,13 +1599,15 @@ fn translate_blocks_request(
     let translated = validate_completed_blocks(&plan, output.blocks)?;
     publish_screen_blocks(
         writer,
-        request_id,
-        base_revision,
+        ScreenBlockPublicationContext {
+            request_id,
+            base_revision,
+            source_language: source,
+            target_language: target,
+            started,
+        },
         translated,
-        source,
-        target,
         output.capabilities,
-        started,
         &is_current,
     )?;
     if !state.keep_warm {
@@ -1612,15 +1616,20 @@ fn translate_blocks_request(
     Ok(())
 }
 
-fn publish_screen_blocks(
-    writer: &EventWriter,
+#[derive(Debug, Clone, Copy)]
+struct ScreenBlockPublicationContext {
     request_id: RequestId,
     base_revision: u64,
-    blocks: Vec<TranslatedScreenBlock>,
     source_language: TranslationLanguage,
     target_language: TranslationLanguage,
-    capabilities: TranslationBackendCapabilities,
     started: Instant,
+}
+
+fn publish_screen_blocks(
+    writer: &EventWriter,
+    context: ScreenBlockPublicationContext,
+    blocks: Vec<TranslatedScreenBlock>,
+    capabilities: TranslationBackendCapabilities,
     is_current: &impl Fn() -> bool,
 ) -> Result<()> {
     if !is_current() {
@@ -1629,8 +1638,8 @@ fn publish_screen_blocks(
     for block in &blocks {
         if block.completion == BlockCompletion::Completed {
             writer.send(&TranslationWorkerEvent::ScreenBlockPartial {
-                request_id,
-                base_revision,
+                request_id: context.request_id,
+                base_revision: context.base_revision,
                 block_id: block.block_id.clone(),
                 translated_text: block.translated_text.clone(),
             })?;
@@ -1640,13 +1649,13 @@ fn publish_screen_blocks(
         return Err(TranslationCancelled.into());
     }
     writer.send(&TranslationWorkerEvent::ScreenBlocksCompleted {
-        request_id,
-        base_revision,
+        request_id: context.request_id,
+        base_revision: context.base_revision,
         blocks,
-        source_language,
-        target_language,
+        source_language: context.source_language,
+        target_language: context.target_language,
         capabilities,
-        processing_duration_ms: elapsed_ms(started),
+        processing_duration_ms: elapsed_ms(context.started),
     })
 }
 
