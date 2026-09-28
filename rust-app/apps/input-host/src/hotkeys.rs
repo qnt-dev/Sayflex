@@ -425,7 +425,7 @@ pub struct RegisteredHotkeys {
     bindings: HotkeyBindings,
 }
 
-pub fn dormant_startup_bindings() -> HotkeyBindings {
+fn dormant_startup_bindings() -> HotkeyBindings {
     let mut bindings = HotkeyBindings::default();
     for action in HotkeyAction::ALL {
         bindings.binding_mut(action).enabled = false;
@@ -434,41 +434,26 @@ pub fn dormant_startup_bindings() -> HotkeyBindings {
 }
 
 impl RegisteredHotkeys {
-    pub fn register_for_current_thread(bindings: HotkeyBindings) -> Result<Self, HotkeyApplyError> {
-        rust_app_core::hotkeys::validate(&bindings).map_err(validation_error)?;
-        let mut registered = Self {
-            backend: Box::new(Win32RegistrationBackend),
+    pub fn dormant_for_current_thread() -> Result<Self, HotkeyApplyError> {
+        Self::dormant_with_backend(Box::new(Win32RegistrationBackend))
+    }
+
+    fn dormant_with_backend(
+        backend: Box<dyn RegistrationBackend>,
+    ) -> Result<Self, HotkeyApplyError> {
+        // This is a private protocol state, not a user configuration.  In
+        // particular, it intentionally leaves the mandatory recovery chord
+        // unregistered until the desktop submits the persisted bindings.
+        // User-supplied configurations still pass through `apply` and the
+        // normal strict validator.
+        let bindings = dormant_startup_bindings();
+        let registered = Self {
+            backend,
             registrations: Vec::new(),
             bindings: bindings.clone(),
         };
-        // A conflicting auxiliary shortcut must not kill dictation startup.
-        // The desktop submits the persisted set after the protocol handshake
-        // and receives a typed rejection for anything Windows will not accept.
-        for action in registered_actions() {
-            let binding = bindings.binding(action);
-            if !binding.enabled {
-                continue;
-            }
-            let id = hotkey_id(action, false);
-            match registered.backend.register(id, binding.spec) {
-                Ok(()) => registered.registrations.push((action, id, binding.spec)),
-                Err(code) => crate::diagnostic_line(&format!(
-                    "hotkey startup=unavailable action={action:?} error={code}"
-                )),
-            }
-        }
-        for action in registered_actions() {
-            if bindings.binding(action).enabled
-                && !registered
-                    .registrations
-                    .iter()
-                    .any(|(registered_action, _, _)| *registered_action == action)
-            {
-                registered.bindings.binding_mut(action).enabled = false;
-            }
-        }
         refresh_registered_command_mask(&registered.registrations);
-        set_hook_bindings(registered.bindings.clone())?;
+        set_hook_bindings(bindings)?;
         Ok(registered)
     }
 
@@ -1731,8 +1716,8 @@ mod tests {
         EndReason, EventOrigin, GestureState, HOTKEY_ID_CORRECT_LAYOUT, HOTKEY_ID_INSERT_LAST,
         HOTKEY_ID_TRANSLATE, HookAction, HotkeyState, INPUT_ALT, INPUT_CONTROL, INPUT_F, INPUT_K,
         INPUT_V, PhysicalKeys, RegisteredHotkeys, RegistrationBackend, classify_event,
-        dormant_startup_bindings, monotonic_us, registered_hotkey_action, screen_capture_key_event,
-        selection_chord_mask, set_screen_capture_mode, wait_for_mask_clear_using,
+        monotonic_us, registered_hotkey_action, screen_capture_key_event, selection_chord_mask,
+        set_screen_capture_mode, wait_for_mask_clear_using,
     };
 
     use crate::inject::SYNTHETIC_MARKER;
@@ -1751,13 +1736,23 @@ mod tests {
     }
 
     #[test]
-    fn startup_owns_no_shortcut_before_the_persisted_configuration_arrives() {
-        let bindings = dormant_startup_bindings();
+    fn dormant_startup_registers_nothing_then_accepts_the_persisted_configuration() {
+        let backend = FakeRegistrationBackend::default();
+        let observer = backend.clone();
+        let mut registered = RegisteredHotkeys::dormant_with_backend(Box::new(backend)).unwrap();
 
+        assert!(observer.active.borrow().is_empty());
+
+        let outcome = registered.apply(HotkeyBindings::default()).unwrap();
+
+        assert!(outcome.failures.is_empty());
+        assert_eq!(observer.active.borrow().len(), 4);
         assert!(
-            HotkeyAction::ALL
-                .into_iter()
-                .all(|action| !bindings.binding(action).enabled)
+            observer
+                .active
+                .borrow()
+                .values()
+                .any(|spec| *spec == HotkeySpec::control_alt(u16::from(b'P')))
         );
     }
 
