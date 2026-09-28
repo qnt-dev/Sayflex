@@ -1,4 +1,5 @@
 import { ListView } from "std-widgets.slint";
+import { Theme } from "overlay_theme.slint";
 
 // The settings window is a document and is drawn as one; the overlays below sit
 // on top of other people's applications and keep their own material. Splitting
@@ -10,42 +11,13 @@ import { Fact } from "parts.slint";
 import { MenuOption, RowAction } from "controls.slint";
 import { Sheet } from "sheet.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
+import { ScreenTranslationPreviewWindow } from "screen_translation.slint";
 
-export { SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, HotkeyRow, ResourceRow, Fact, MenuOption, SlateLine }
+export { Theme, SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, HotkeyRow, ResourceRow, Fact, MenuOption, SlateLine, ScreenTranslationPreviewWindow }
 
 export struct TranslationPair {
     source: string,
     translation: string,
-}
-
-global Theme {
-    out property <brush> ink: #101114;
-    out property <brush> sidebar: #0c0d10;
-    out property <brush> panel: #16181c;
-    out property <brush> panel-raised: #1d2025;
-    out property <brush> line: #2b2e34;
-    out property <brush> line-soft: #22252a;
-    out property <brush> text: #f3f3f4;
-    out property <brush> text-muted: #a3a6ad;
-    out property <brush> text-faint: #747881;
-    out property <brush> orange: #e39952;
-    out property <brush> orange-soft: #e399521c;
-    out property <brush> red: #d85c5c;
-    out property <brush> red-soft: #d85c5c1c;
-    out property <brush> acrylic: #101114e8;
-    out property <brush> glass: #0c0e12c4;
-
-    // ── the trace, and the one accent ──
-    //
-    // The overlay was drawn in #FFD400 from before the redesign, which is the
-    // one colour the rest of the product no longer has anywhere. The mark sets
-    // the rule the overlay now follows: on a dark ground the waveform is the
-    // same off-white as the bars in the icon, and the single warm accent is
-    // reserved for the one element that reports state — the disc — which is the
-    // corner square of the mark doing the same job.
-    out property <brush> trace: #f5f5f2;
-    out property <brush> trace-highlight: #ffffff;
-    out property <brush> signal: #b8501c;
 }
 
 component ActionButton inherits Rectangle {

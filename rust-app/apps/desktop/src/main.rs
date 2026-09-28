@@ -54,9 +54,9 @@ use screen_result::{
     MIN_ADMITTED_OCR_CONFIDENCE_MILLI, ScreenTranslationDocument, screen_blocks_from_ocr,
 };
 #[cfg(feature = "screen-translation")]
-use screen_translation::SelectionFailure;
-#[cfg(feature = "screen-translation")]
 use screen_translation::ScreenTranslationBegin;
+#[cfg(feature = "screen-translation")]
+use screen_translation::SelectionFailure;
 use screen_translation::{
     DesktopScreenSelectionCoordinator, DesktopSelectionEnvironment, ScreenSelectionCoordinator,
     ScreenTranslationCancellation, ScreenTranslationCoordinator, SelectionTerminal,
@@ -113,6 +113,7 @@ mod resource_view;
 #[cfg(feature = "screen-translation")]
 mod screen_result;
 mod screen_translation;
+mod screen_translation_preview;
 #[cfg(feature = "screen-translation")]
 mod screenshot_store;
 mod settings_document;
@@ -1149,6 +1150,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if settings_preview::requested_translator_state().is_some() {
         return settings_preview::run_translator_preview();
+    }
+    if settings_preview::requested_screen_translation_preview_state().is_some() {
+        return settings_preview::run_screen_translation_preview();
     }
 
     if let Err(error) = rust_app_core::product::migrate_legacy_data_root() {

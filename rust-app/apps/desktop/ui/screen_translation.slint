@@ -1,0 +1,539 @@
+import { Theme } from "overlay_theme.slint";
+
+component OverlayButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 24px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.active ? Theme.red : #d7d3cc48;
+    background: root.active
+        ? Theme.red
+        : touch.has-hover ? Theme.red-soft : #0c0f1450;
+    opacity: root.enabled ? 1 : 0.28;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    Text {
+        text: root.label;
+        color: root.active ? #0b0e13 : #dedad3;
+        opacity: root.active ? 1 : (touch.has-hover ? 0.92 : 0.62);
+        font-size: root.label == "ON IMAGE" ? 9px : 10px;
+        font-weight: 680;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component TranslatedLabel inherits Rectangle {
+    in property <string> source-text;
+    in property <string> translated-text;
+    in property <bool> dual: false;
+    in property <bool> selected-label: false;
+    in property <bool> dimmed: false;
+    in property <length> text-size: 10px;
+    callback selected();
+    callback edit-requested();
+
+    border-radius: 3px;
+    forward-focus: key-focus;
+    border-width: root.selected-label || touch.has-hover ? 1px : 0px;
+    border-color: root.selected-label ? Theme.red : #f3e9cf80;
+    background: touch.has-hover ? #25170ff2 : #120e09ee;
+    opacity: root.dimmed ? 0.38 : 1;
+    accessible-role: button;
+    accessible-label: "Editable translated image text";
+    accessible-action-default => { root.edit-requested(); }
+
+    Text {
+        x: 4px;
+        y: 2px;
+        width: parent.width - 8px;
+        height: parent.height - 4px;
+        text: root.dual
+            ? root.source-text + "\n" + root.translated-text
+            : root.translated-text;
+        color: #f3e9cf;
+        font-size: root.dual ? max(7px, root.text-size - 2px) : root.text-size;
+        font-weight: 570;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { key-focus.focus(); root.selected(); }
+        double-clicked => { root.edit-requested(); }
+    }
+    key-focus := FocusScope {
+        x: 0px; y: 0px; width: 0px; height: 0px;
+        key-pressed(event) => {
+            if event.text == Key.Return {
+                root.edit-requested();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component TranslationCorrectionPanel inherits Rectangle {
+    in property <string> original-text: "End Turn";
+    in property <string> context-text: "Battle for Wesnoth · game interface";
+    in property <string> baseline-translation: "Завершить ход";
+    in property <bool> save-error: false;
+    in property <bool> editor-focusable: true;
+    in-out property <string> edited-translation: "Завершить ход";
+    callback save-requested();
+    callback confirm-requested();
+    callback cancel-requested();
+    callback retry-requested();
+
+    background: #16181cf7;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: Theme.line;
+    clip: true;
+
+    Text {
+        x: 14px; y: 12px;
+        text: "Correct translation";
+        color: Theme.text;
+        font-size: 14px;
+        font-weight: 620;
+    }
+    Text {
+        x: parent.width - 66px; y: 15px; width: 52px;
+        text: "EN → RU";
+        color: Theme.text-faint;
+        font-size: 9px;
+        font-weight: 650;
+        horizontal-alignment: right;
+    }
+    Rectangle { x: 14px; y: 39px; width: parent.width - 28px; height: 1px; background: Theme.line; }
+
+    Text { x: 14px; y: 50px; text: "ORIGINAL"; color: Theme.text-faint; font-size: 8px; font-weight: 680; letter-spacing: 0.6px; }
+    Text { x: 14px; y: 67px; text: root.original-text; color: Theme.text; font-size: 12px; font-weight: 560; }
+
+    input-frame := Rectangle {
+        x: 14px; y: 91px; width: parent.width - 28px; height: 48px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.red : #3a3d43;
+        background: #0f1115;
+        input := TextInput {
+            x: 9px; y: 7px; width: parent.width - 18px; height: parent.height - 14px;
+            text <=> root.edited-translation;
+            color: Theme.text;
+            selection-background-color: #d85c5c60;
+            font-size: 12px;
+            wrap: word-wrap;
+            enabled: root.editor-focusable;
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.cancel-requested();
+                    return accept;
+                }
+                if event.modifiers.control && event.text == Key.Return {
+                    if root.save-error { root.retry-requested(); }
+                    else if root.edited-translation == root.baseline-translation { root.confirm-requested(); }
+                    else { root.save-requested(); }
+                    return accept;
+                }
+                reject
+            }
+        }
+    }
+
+    Text {
+        x: 14px; y: 148px; width: parent.width - 28px;
+        text: root.context-text;
+        color: Theme.text-muted;
+        font-size: 9px;
+        overflow: elide;
+    }
+    if root.save-error: Text {
+        x: 14px; y: 168px; width: parent.width - 28px;
+        text: "Save failed. Your correction is still here.";
+        color: #e3a0a0;
+        font-size: 9px;
+    }
+
+    HorizontalLayout {
+        x: 14px; y: parent.height - 38px; width: parent.width - 28px; height: 24px;
+        spacing: 7px;
+        alignment: end;
+        OverlayButton { width: 62px; label: "Cancel"; clicked => { root.cancel-requested(); } }
+        OverlayButton {
+            width: root.save-error ? 64px : 70px;
+            label: root.save-error
+                ? "Retry"
+                : root.edited-translation == root.baseline-translation ? "Confirm" : "Save";
+            active: true;
+            clicked => {
+                if root.save-error { root.retry-requested(); }
+                else if root.edited-translation == root.baseline-translation { root.confirm-requested(); }
+                else { root.save-requested(); }
+            }
+        }
+    }
+}
+
+export component ScreenImageResult inherits Rectangle {
+    in property <image> crop-image;
+    in property <int> view-mode: 3;
+    in property <bool> pinned: false;
+    in property <int> selected-block: 4;
+    in property <bool> editor-visible: false;
+    in property <bool> image-expired: false;
+    in property <bool> saved: false;
+    in property <bool> save-error: false;
+    in property <bool> copied: false;
+    in property <bool> edit-hint-visible: true;
+    in property <bool> dim-other-blocks: false;
+    in property <float> editor-panel-x: 488;
+    in property <float> editor-panel-y: 292;
+    in property <bool> result-non-activating: true;
+    in property <length> minimum-overlay-font-size: 10px;
+    in property <string> menu-translation: "Меню";
+    in property <string> actions-translation: "Действия";
+    in property <string> encampment-translation: "Лагерь (Замок)";
+    in property <string> unit-translation: "Кочевник · быстрый, стойкий";
+    in property <string> end-turn-translation: "Завершить ход";
+    in property <string> editor-original: "End Turn";
+    in property <string> editor-baseline: "Завершить ход";
+    in-out property <string> editor-translation: "Завершить ход";
+    callback view-requested(int);
+    callback pin-requested();
+    callback block-selected(int);
+    callback block-edit-requested(int);
+    callback save-requested();
+    callback confirm-requested();
+    callback cancel-requested();
+    callback retry-requested();
+    callback copy-text-requested();
+
+    border-radius: 9px;
+    border-width: 0px;
+    background: @linear-gradient(145deg,
+        rgba(65, 150, 196, 0.075) 0%,
+        rgba(8, 24, 39, 0.16) 48%,
+        rgba(58, 148, 195, 0.06) 100%);
+    clip: true;
+
+    Rectangle { width: parent.width; height: parent.height; background: Theme.glass; }
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("../assets/slate-blue-glass-wash.svg");
+        image-fit: fill;
+        opacity: 0.16;
+    }
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("../assets/slate-matte-grain.svg");
+        image-fit: fill;
+        opacity: 0.07;
+    }
+
+    OverlayButton { x: 14px; y: 7px; width: 44px; label: "ORIG"; active: root.view-mode == 1; clicked => { root.view-requested(1); } }
+    OverlayButton { x: 64px; y: 7px; width: 44px; label: "DUAL"; active: root.view-mode == 2; clicked => { root.view-requested(2); } }
+    OverlayButton { x: 114px; y: 7px; width: 78px; label: "ON IMAGE"; active: root.view-mode == 3; clicked => { root.view-requested(3); } }
+    OverlayButton { x: parent.width - 52px; y: 7px; width: 44px; label: "PIN"; active: root.pinned; clicked => { root.pin-requested(); } }
+    if root.edit-hint-visible && root.view-mode != 1 && !root.editor-visible: Rectangle {
+        x: 205px; y: 8px; width: 226px; height: 22px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.line;
+        background: #11141ac7;
+        Text {
+            text: "Double-click a translation to edit";
+            color: Theme.text-muted;
+            font-size: 9px;
+            font-weight: 520;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    content := Rectangle {
+        x: 0px; y: 38px;
+        width: parent.width;
+        height: parent.height - 38px;
+        background: #0b0d11;
+        clip: true;
+
+        if root.view-mode != 0 && !root.image-expired: image-content := Rectangle {
+            width: parent.width;
+            height: parent.height;
+            clip: true;
+            Image { width: parent.width; height: parent.height; source: root.crop-image; image-fit: fill; }
+
+            if root.view-mode != 1: TranslatedLabel {
+                x: 3px; y: 1px; width: 75px; height: root.view-mode == 2 ? 28px : 18px;
+                source-text: "Menu"; translated-text: root.menu-translation; dual: root.view-mode == 2; text-size: 10px;
+                selected-label: root.selected-block == 0;
+                dimmed: root.dim-other-blocks && root.selected-block != 0;
+                selected => { root.block-selected(0); }
+                edit-requested => { root.block-edit-requested(0); }
+            }
+            if root.view-mode != 1: TranslatedLabel {
+                x: 80px; y: 1px; width: 76px; height: root.view-mode == 2 ? 28px : 18px;
+                source-text: "Actions"; translated-text: root.actions-translation; dual: root.view-mode == 2; text-size: 9px;
+                selected-label: root.selected-block == 1;
+                dimmed: root.dim-other-blocks && root.selected-block != 1;
+                selected => { root.block-selected(1); }
+                edit-requested => { root.block-edit-requested(1); }
+            }
+            if root.view-mode != 1: TranslatedLabel {
+                x: 830px; y: 216px; width: 126px; height: root.view-mode == 2 ? 34px : 19px;
+                source-text: "Encampment (Castle)"; translated-text: root.encampment-translation; dual: root.view-mode == 2; text-size: 9px;
+                selected-label: root.selected-block == 2;
+                dimmed: root.dim-other-blocks && root.selected-block != 2;
+                selected => { root.block-selected(2); }
+                edit-requested => { root.block-edit-requested(2); }
+            }
+            if root.view-mode != 1: TranslatedLabel {
+                x: 830px; y: 379px; width: 126px; height: root.view-mode == 2 ? 54px : 40px;
+                source-text: "Khalifate Human · quick, resilient";
+                translated-text: root.unit-translation;
+                dual: root.view-mode == 2;
+                selected-label: root.selected-block == 3;
+                dimmed: root.dim-other-blocks && root.selected-block != 3;
+                text-size: 9px;
+                selected => { root.block-selected(3); }
+                edit-requested => { root.block-edit-requested(3); }
+            }
+            if root.view-mode != 1: end-turn := TranslatedLabel {
+                x: 832px; y: 538px; width: 123px; height: root.view-mode == 2 ? 36px : 31px;
+                source-text: "End Turn";
+                translated-text: root.end-turn-translation;
+                dual: root.view-mode == 2;
+                selected-label: root.selected-block == 4;
+                dimmed: root.dim-other-blocks && root.selected-block != 4;
+                text-size: 10px;
+                selected => { root.block-selected(4); }
+                edit-requested => { root.block-edit-requested(4); }
+            }
+
+            if root.editor-visible: inline-editor := TranslationCorrectionPanel {
+                x: root.editor-panel-x * 1px;
+                y: root.editor-panel-y * 1px;
+                width: 330px; height: 230px;
+                original-text: root.editor-original;
+                baseline-translation: root.editor-baseline;
+                edited-translation <=> root.editor-translation;
+                save-error: root.save-error;
+                save-requested => { root.save-requested(); }
+                confirm-requested => { root.confirm-requested(); }
+                cancel-requested => { root.cancel-requested(); }
+                retry-requested => { root.retry-requested(); }
+            }
+        }
+
+        if root.view-mode == 0: Rectangle {
+            x: 18px; y: 18px; width: parent.width - 36px; height: parent.height - 36px;
+            background: transparent;
+            VerticalLayout {
+                width: parent.width;
+                spacing: 12px;
+                Text { text: root.menu-translation + " · " + root.actions-translation + " · " + root.encampment-translation; color: Theme.text; font-size: 14px; font-weight: 470; }
+                Text { text: root.unit-translation; color: Theme.text; font-size: 14px; font-weight: 470; }
+                Text { text: root.end-turn-translation; color: Theme.text; font-size: 14px; font-weight: 470; }
+            }
+        }
+
+        if root.image-expired: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: #111318;
+            Text { x: 0px; y: 208px; width: parent.width; text: "Image expired"; color: Theme.text; font-size: 20px; font-weight: 620; horizontal-alignment: center; }
+            Text { x: 0px; y: 246px; width: parent.width; text: "The temporary screenshot was removed. Your text translation remains available."; color: Theme.text-muted; font-size: 12px; horizontal-alignment: center; }
+            OverlayButton {
+                x: (parent.width - 104px) / 2; y: 278px; width: 104px;
+                label: root.copied ? "COPIED" : "COPY TEXT";
+                active: root.copied;
+                clicked => { root.copy-text-requested(); }
+            }
+        }
+
+        if root.saved: Rectangle {
+            x: parent.width - 180px; y: 12px; width: 162px; height: 28px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #52675a;
+            background: #17211bed;
+            Text { text: "✓  Saved to glossary"; color: #c8decf; font-size: 10px; font-weight: 560; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+}
+
+export component ScreenTranslationPreviewWindow inherits Window {
+    title: "Screen translation visual preview";
+    preferred-width: 960px;
+    preferred-height: 614px;
+    min-width: 960px;
+    min-height: 614px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    default-font-family: "Segoe UI Variable Text";
+    forward-focus: keyboard;
+
+    in-out property <int> preview-state: 0;
+    in property <image> fixture-image: @image-url("../assets/battle-for-wesnoth-1.12-screen-translation-preview.jpg");
+    in-out property <int> view-mode: 3;
+    in-out property <bool> pinned: false;
+    in-out property <bool> editor-visible: false;
+    in-out property <int> selected-block: 4;
+    in-out property <bool> copied: false;
+    in-out property <bool> edit-hint-visible: true;
+    out property <bool> dim-other-blocks: root.editor-visible;
+    out property <bool> save-confirmation-visible: root.preview-state == 2;
+    out property <float> editor-panel-x: root.selected-block <= 1 ? 164 : 488;
+    out property <float> editor-panel-y: root.selected-block <= 1
+        ? 30
+        : root.selected-block == 2 ? 100
+        : root.selected-block == 3 ? 292
+        : 340;
+    in-out property <string> menu-translation: "Меню";
+    in-out property <string> actions-translation: "Действия";
+    in-out property <string> encampment-translation: "Лагерь (Замок)";
+    in-out property <string> unit-translation: "Кочевник · быстрый, стойкий";
+    in-out property <string> end-turn-translation: "Завершить ход";
+    in-out property <string> editor-original: "End Turn";
+    in-out property <string> editor-baseline: "Завершить ход";
+    in-out property <string> editor-translation: "Завершить ход";
+    callback choose-view(int);
+    callback toggle-pin();
+    callback select-block(int);
+    callback edit-block(int);
+    callback keyboard-edit-selected();
+    callback commit-edit();
+    callback save-edit();
+    callback confirm-edit();
+    callback cancel-edit();
+    callback retry-save();
+    callback copy-text();
+
+    choose-view(mode) => { root.view-mode = root.view-mode == mode ? 0 : mode; root.editor-visible = false; }
+    toggle-pin => { root.pinned = !root.pinned; }
+    select-block(block) => {
+        root.selected-block = block;
+        root.editor-visible = false;
+        root.preview-state = 0;
+    }
+    edit-block(block) => {
+        root.selected-block = block;
+        root.edit-hint-visible = false;
+        if block == 0 {
+            root.editor-original = "Menu";
+            root.editor-translation = root.menu-translation;
+        } else if block == 1 {
+            root.editor-original = "Actions";
+            root.editor-translation = root.actions-translation;
+        } else if block == 2 {
+            root.editor-original = "Encampment (Castle)";
+            root.editor-translation = root.encampment-translation;
+        } else if block == 3 {
+            root.editor-original = "Khalifate Human · quick, resilient";
+            root.editor-translation = root.unit-translation;
+        } else {
+            root.editor-original = "End Turn";
+            root.editor-translation = root.end-turn-translation;
+        }
+        root.editor-baseline = root.editor-translation;
+        root.editor-visible = true;
+        root.preview-state = 1;
+        keyboard.focus();
+    }
+    keyboard-edit-selected => {
+        if root.selected-block >= 0 && root.selected-block <= 4 && root.view-mode != 1 {
+            root.edit-block(root.selected-block);
+        }
+    }
+    commit-edit => {
+        if root.preview-state == 3 { root.retry-save(); }
+        else if root.editor-translation == root.editor-baseline { root.confirm-edit(); }
+        else { root.save-edit(); }
+    }
+    save-edit => {
+        if root.selected-block == 0 { root.menu-translation = root.editor-translation; }
+        else if root.selected-block == 1 { root.actions-translation = root.editor-translation; }
+        else if root.selected-block == 2 { root.encampment-translation = root.editor-translation; }
+        else if root.selected-block == 3 { root.unit-translation = root.editor-translation; }
+        else { root.end-turn-translation = root.editor-translation; }
+        root.editor-baseline = root.editor-translation;
+        root.preview-state = 2;
+        root.editor-visible = false;
+    }
+    confirm-edit => { root.preview-state = 2; root.editor-visible = false; }
+    cancel-edit => { root.preview-state = 0; root.editor-visible = false; }
+    retry-save => { root.save-edit(); }
+    copy-text => { root.copied = true; }
+
+    keyboard := FocusScope {
+        width: 960px;
+        height: 614px;
+
+        KeyBinding {
+            enabled: !root.editor-visible && root.view-mode != 1;
+            keys: @keys(Return);
+            activated => { root.keyboard-edit-selected(); }
+        }
+        KeyBinding {
+            enabled: root.editor-visible;
+            keys: @keys(Escape);
+            activated => { root.cancel-edit(); }
+        }
+        KeyBinding {
+            enabled: root.editor-visible;
+            keys: @keys(Control + Return);
+            activated => { root.commit-edit(); }
+        }
+
+        ScreenImageResult {
+            x: 0px; y: 0px; width: 960px; height: 614px;
+            crop-image: root.fixture-image;
+            view-mode: root.view-mode;
+            pinned: root.pinned;
+            selected-block: root.selected-block;
+            editor-visible: root.editor-visible;
+            image-expired: root.preview-state == 4;
+            saved: root.save-confirmation-visible;
+            save-error: root.preview-state == 3;
+            copied: root.copied;
+            edit-hint-visible: root.edit-hint-visible;
+            dim-other-blocks: root.dim-other-blocks;
+            editor-panel-x: root.editor-panel-x;
+            editor-panel-y: root.editor-panel-y;
+            menu-translation: root.menu-translation;
+            actions-translation: root.actions-translation;
+            encampment-translation: root.encampment-translation;
+            unit-translation: root.unit-translation;
+            end-turn-translation: root.end-turn-translation;
+            editor-original: root.editor-original;
+            editor-baseline: root.editor-baseline;
+            editor-translation <=> root.editor-translation;
+            view-requested(mode) => { root.choose-view(mode); }
+            pin-requested => { root.toggle-pin(); }
+            block-selected(block) => { root.select-block(block); }
+            block-edit-requested(block) => { root.edit-block(block); }
+            save-requested => { root.save-edit(); }
+            confirm-requested => { root.confirm-edit(); }
+            cancel-requested => { root.cancel-edit(); }
+            retry-requested => { root.retry-save(); }
+            copy-text-requested => { root.copy-text(); }
+        }
+    }
+}

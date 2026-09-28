@@ -582,28 +582,28 @@
 - Produces preview-only `ScreenImageResult`, `TranslationCorrectionPanel`, and deterministic fixtures for image result, editing, saved, save error, and expired image.
 - Consumes: current Theme/Sheet tokens and Task 7 document projection; preview mode registers no hotkeys and starts no workers.
 
-- [ ] **Step 1: Add failing structural UI tests**
+- [x] **Step 1: Add failing structural UI tests**
 
-  Assert the preview component exposes `ORIG`, `DUAL`, `ON IMAGE`, `PIN`, Correct, Save, Confirm, retryable save error, expiry copy, accessible labels, readable minimum font, callout fallback, and focusable editor/non-activating result separation.
+  Assert the preview component exposes `ORIG`, `DUAL`, `ON IMAGE`, `PIN`, double-click/Enter correction, Save, Confirm, retryable save error, expiry copy, accessible labels, readable minimum font, callout fallback, and focusable editor/non-activating result separation.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
   Run: `cargo test -p sayflex-desktop screen_translation_preview -- --nocapture`
   Expected: FAIL because components/fixtures do not exist.
 
-- [ ] **Step 3: Implement preview-only Slint states**
+- [x] **Step 3: Implement preview-only Slint states**
 
   Render the crop plus block overlays using `Image + Rectangle + Text`; wrap rather than shrinking below the readable minimum; create callouts for overflow; highlight the selected block; keep editor inside the work area; show corrected text in ordinary color.
 
-- [ ] **Step 4: Render screenshots at representative DPI and sizes**
+- [x] **Step 4: Render screenshots at representative DPI and sizes**
 
   Produce the five required screenshots at 100%, 125%, and 200% DPI, including long translation and low-confidence OCR. Inspect every artifact before presenting it.
 
-- [ ] **Step 5: HARD STOP — obtain user visual approval**
+- [x] **Step 5: HARD STOP — obtain user visual approval**
 
   Show the live preview/screenshots to the user. Do not wire the production callbacks in Task 14 until the user approves or requests revisions.
 
-- [ ] **Step 6: Verify approved preview and commit**
+- [x] **Step 6: Verify approved preview and commit**
 
   Run: `cargo test -p sayflex-desktop screen_translation_preview -- --nocapture`
   Expected: PASS after approved revisions.
@@ -624,7 +624,7 @@
 - Modify: every `rust-app/apps/desktop/translations/*/LC_MESSAGES/sayflex-desktop.po`
 
 **Interfaces:**
-- Produces: production callbacks for view mode, block selection, Correct, Save, Confirm, retry, Copy, Delete now, Save file, glossary list/edit/delete, and screenshot-retention settings.
+- Produces: production callbacks for view mode, block selection, double-click/Enter correction, Save, Confirm, retry, Copy, Delete now, Save file, glossary list/edit/delete, and screenshot-retention settings.
 - Produces: editor draft key `(request_id, block_id, revision)` and focus-transfer/restore contract.
 - Consumes: Tasks 9, 10, 12, and the visually approved Task 13 components.
 
@@ -642,7 +642,7 @@
 
 - [ ] **Step 3: Wire approved result/editor components**
 
-  Keep result windows non-activating. Create a focusable editor only after explicit Correct, preserve the external target snapshot, and apply saved revisions to document/text/image projections. Keep `ORIG`, `DUAL`, copy, and pin behavior intact.
+  Keep result windows non-activating. Create a focusable editor only after an explicit double-click or Enter on a selected translation block, preserve the external target snapshot, and apply saved revisions to document/text/image projections. Keep `ORIG`, `DUAL`, copy, and pin behavior intact.
 
 - [ ] **Step 4: Add glossary and screenshot-history settings surfaces**
 

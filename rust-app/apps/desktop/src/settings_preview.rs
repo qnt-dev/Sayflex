@@ -26,6 +26,15 @@ use crate::{
     },
 };
 
+pub(crate) fn requested_screen_translation_preview_state()
+-> Option<crate::screen_translation_preview::ScreenTranslationPreviewState> {
+    crate::screen_translation_preview::requested_state()
+}
+
+pub(crate) fn run_screen_translation_preview() -> Result<(), Box<dyn Error>> {
+    crate::screen_translation_preview::run_preview()
+}
+
 pub(crate) fn support_wallet_preview_requested() -> bool {
     std::env::args().any(|argument| argument == "--support-wallet-preview")
 }
