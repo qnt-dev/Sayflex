@@ -6,7 +6,6 @@ use crate::{ScreenBlockOverlay, ScreenMaskOverlay, ScreenTranslationWindow};
 
 const MIN_FONT_SIZE: f32 = 12.0;
 const FONT_SIZES: [f32; 3] = [14.0, 13.0, MIN_FONT_SIZE];
-const CALLOUT_GAP: f32 = 8.0;
 const TEXT_HORIZONTAL_PADDING: f32 = 8.0;
 const TEXT_VERTICAL_PADDING: f32 = 6.0;
 const MAX_IMAGE_SCALE: f32 = 1.75;
@@ -133,7 +132,6 @@ pub(crate) struct BlockLayout {
     pub(crate) source_y: f32,
     pub(crate) source_width: f32,
     pub(crate) source_height: f32,
-    pub(crate) callout: bool,
     pub(crate) low_confidence: bool,
     pub(crate) replace_source: bool,
     pub(crate) placed: bool,
@@ -231,6 +229,7 @@ pub(crate) fn layout_blocks(
     plan_screen_result_layout(
         crop,
         blocks,
+        ResultViewMode::OnImage,
         LogicalWorkArea {
             width: viewport_width as f32 + 32.0,
             height: viewport_height as f32 + 70.0,
@@ -243,6 +242,7 @@ pub(crate) fn layout_blocks(
 pub(crate) fn plan_screen_result_layout(
     crop: CropPixelSize,
     blocks: &[BlockLayoutInput],
+    projection: ResultViewMode,
     work_area: LogicalWorkArea,
     measurer: &dyn ScreenTextMeasurer,
 ) -> ScreenResultLayoutPlan {
@@ -307,7 +307,6 @@ pub(crate) fn plan_screen_result_layout(
                 source_y: source.1,
                 source_width: source.2,
                 source_height: source.3,
-                callout: false,
                 low_confidence: block.confidence_milli < 650,
                 replace_source,
                 placed: false,
@@ -333,50 +332,32 @@ pub(crate) fn plan_screen_result_layout(
             layouts[index].source_width,
             layouts[index].source_height,
         );
-        let candidate = direct_candidates(source, viewport)
-            .into_iter()
-            .flat_map(|rect| {
-                FONT_SIZES
-                    .into_iter()
-                    .map(move |font_size| (rect, font_size, false))
-            })
-            .chain(
-                callout_candidates(source, viewport)
-                    .into_iter()
-                    .flat_map(|rect| {
-                        FONT_SIZES
-                            .into_iter()
-                            .map(move |font_size| (rect, font_size, true))
-                    }),
-            )
-            .find_map(|(rect, font_size, callout)| {
-                measured_candidate(
-                    &layouts[index].translation,
-                    rect,
-                    font_size,
-                    measurer,
-                    viewport,
-                )
+        let measured_text = match projection {
+            ResultViewMode::Dual => {
+                format!("{}\n{}", layouts[index].source, layouts[index].translation)
+            }
+            _ => layouts[index].translation.clone(),
+        };
+        let candidate = FONT_SIZES.into_iter().find_map(|font_size| {
+            measured_candidate(&measured_text, source, font_size, measurer, viewport)
                 .filter(|candidate| {
                     let source_collision = occupied_source.iter().any(|(owner, occupied)| {
-                        let own_direct_fragment = !callout && *owner == index;
-                        !own_direct_fragment && rectangles_overlap(*candidate, *occupied)
+                        *owner != index && rectangles_overlap(*candidate, *occupied)
                     });
                     !source_collision
                         && !placed_rects
                             .iter()
                             .any(|occupied| rectangles_overlap(*candidate, *occupied))
                 })
-                .map(|candidate| (candidate, font_size, callout))
-            });
-        if let Some((candidate, font_size, callout)) = candidate {
+                .map(|candidate| (candidate, font_size))
+        });
+        if let Some((candidate, font_size)) = candidate {
             let row = &mut layouts[index];
             row.x = candidate.0;
             row.y = candidate.1;
             row.width = candidate.2;
             row.height = candidate.3;
             row.font_size = font_size;
-            row.callout = callout;
             row.placed = true;
             placed_rects.push(candidate);
             masks.extend(scaled_fragments[index].iter().map(|fragment| MaskLayout {
@@ -419,73 +400,6 @@ fn scale_rect(
     (x, y, width, height)
 }
 
-fn direct_candidates(
-    source: (f32, f32, f32, f32),
-    viewport: (f32, f32),
-) -> Vec<(f32, f32, f32, f32)> {
-    let mut candidates = Vec::new();
-    let widths = [
-        source.2,
-        (source.2 * 1.35).max(120.0),
-        (source.2 * 1.75).max(180.0),
-        240.0,
-        320.0,
-    ];
-    for width in widths {
-        let width = width.min(viewport.0);
-        for x in [
-            source.0,
-            source.0 + source.2 - width,
-            source.0 + (source.2 - width) / 2.0,
-        ] {
-            candidates.push((
-                x.clamp(0.0, (viewport.0 - width).max(0.0)),
-                source.1,
-                width,
-                source.3,
-            ));
-        }
-    }
-    deduplicate_rects(candidates)
-}
-
-fn callout_candidates(
-    source: (f32, f32, f32, f32),
-    viewport: (f32, f32),
-) -> Vec<(f32, f32, f32, f32)> {
-    let mut candidates = Vec::new();
-    for width in [180.0_f32, 240.0, 320.0, viewport.0 * 0.45] {
-        let width = width.min(viewport.0);
-        for x in [
-            source.0 + source.2 + CALLOUT_GAP,
-            source.0 - width - CALLOUT_GAP,
-            source.0,
-            (viewport.0 - width).max(0.0),
-        ] {
-            for y in [
-                source.1,
-                source.1 + source.3 + CALLOUT_GAP,
-                source.1 - 48.0 - CALLOUT_GAP,
-                0.0,
-            ] {
-                candidates.push((
-                    x.clamp(0.0, (viewport.0 - width).max(0.0)),
-                    y.clamp(0.0, viewport.1),
-                    width,
-                    viewport.1,
-                ));
-            }
-        }
-        let mut y = 0.0;
-        while y < viewport.1 {
-            candidates.push((0.0, y, width, viewport.1));
-            candidates.push(((viewport.0 - width).max(0.0), y, width, viewport.1));
-            y += 24.0;
-        }
-    }
-    deduplicate_rects(candidates)
-}
-
 fn measured_candidate(
     text: &str,
     candidate: (f32, f32, f32, f32),
@@ -500,27 +414,14 @@ fn measured_candidate(
     }
     let width = candidate.2.max(measured.width + TEXT_HORIZONTAL_PADDING);
     let height = measured.height + TEXT_VERTICAL_PADDING;
-    let y = candidate.1.clamp(0.0, (viewport.1 - height).max(0.0));
+    let y = candidate.1;
     (width <= viewport.0
         && height <= viewport.1
+        && width <= candidate.2 + 0.5
+        && height <= candidate.3 + 0.5
         && candidate.0 + width <= viewport.0 + 0.5
         && y + height <= viewport.1 + 0.5)
         .then_some((candidate.0, y, width, height))
-}
-
-fn deduplicate_rects(candidates: Vec<(f32, f32, f32, f32)>) -> Vec<(f32, f32, f32, f32)> {
-    let mut unique = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let duplicate = unique.iter().any(|existing: &(f32, f32, f32, f32)| {
-            (existing.0 - candidate.0).abs() < 0.5
-                && (existing.1 - candidate.1).abs() < 0.5
-                && (existing.2 - candidate.2).abs() < 0.5
-        });
-        if !duplicate {
-            unique.push(candidate);
-        }
-    }
-    unique
 }
 
 fn rectangles_overlap(left: (f32, f32, f32, f32), right: (f32, f32, f32, f32)) -> bool {
@@ -534,6 +435,7 @@ pub(crate) fn apply_snapshot(
     preview: &ScreenTranslationWindow,
     snapshot: &ScreenResultSnapshot,
 ) -> Result<Vec<BlockLayout>, String> {
+    let requested_mode = preview.get_screen_view_mode();
     let crop_size = CropPixelSize::from_screen_rect(snapshot.crop_rect);
     let inputs = snapshot
         .blocks
@@ -568,6 +470,7 @@ pub(crate) fn apply_snapshot(
     let plan = plan_screen_result_layout(
         crop_size,
         &inputs,
+        ResultViewMode::from_ui(requested_mode),
         work_area,
         &SlintScreenTextMeasurer { window: preview },
     );
@@ -586,7 +489,6 @@ pub(crate) fn apply_snapshot(
             source_y: block.source_y,
             source_width: block.source_width,
             source_height: block.source_height,
-            callout: block.callout,
             low_confidence: block.low_confidence,
             replace_source: block.replace_source,
             placed: block.placed,
@@ -611,7 +513,7 @@ pub(crate) fn apply_snapshot(
     preview.set_screen_content_width(plan.content_width as f32);
     preview.set_screen_content_height(plan.image_height as f32);
     preview.set_screen_image_expired(snapshot.crop.is_none());
-    preview.set_screen_view_mode(visible_ui_mode(3, snapshot.crop.is_some()));
+    preview.set_screen_view_mode(visible_ui_mode(requested_mode, snapshot.crop.is_some()));
     preview.set_screen_selected_block(-1);
     preview.set_screen_editor_visible(false);
     preview.set_screen_save_error(false);
@@ -691,6 +593,8 @@ fn frame_image(frame: &rust_platform_windows::screen_capture::RgbaFrame) -> Resu
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use rust_protocol::ScreenBlockId;
 
     use super::{
@@ -723,8 +627,88 @@ mod tests {
         }
     }
 
+    struct RecordingMeasurer {
+        measured: RefCell<Vec<String>>,
+    }
+
+    impl ScreenTextMeasurer for RecordingMeasurer {
+        fn measure(&self, text: &str, width: f32, font_size: f32) -> LogicalTextSize {
+            self.measured.borrow_mut().push(text.to_owned());
+            FakeMeasurer {
+                height_multiplier: 1.0,
+            }
+            .measure(text, width, font_size)
+        }
+    }
+
     #[test]
-    fn block_geometry_scales_with_the_crop_and_long_text_uses_a_readable_callout() {
+    fn dual_mode_measures_the_actual_source_and_translation_projection() {
+        let block = BlockLayoutInput {
+            block_id: ScreenBlockId::from("dual"),
+            source: "Cooldown".to_owned(),
+            translation: "Перезарядка".to_owned(),
+            bounds: local_rect(10, 10, 220, 60),
+            fragments: vec![local_rect(10, 10, 220, 60)],
+            complete: true,
+            confidence_milli: 980,
+        };
+        let measurer = RecordingMeasurer {
+            measured: RefCell::new(Vec::new()),
+        };
+
+        let plan = plan_screen_result_layout(
+            crop_size(300, 120),
+            &[block],
+            ResultViewMode::Dual,
+            LogicalWorkArea {
+                width: 557.0,
+                height: 280.0,
+            },
+            &measurer,
+        );
+
+        assert!(plan.blocks[0].placed);
+        assert!(
+            measurer
+                .measured
+                .borrow()
+                .iter()
+                .any(|text| text == "Cooldown\nПерезарядка")
+        );
+    }
+
+    #[test]
+    fn placements_never_leave_their_own_safe_source_region() {
+        let long = "A translation that needs more room than its source region can safely provide"
+            .repeat(4);
+        let block = BlockLayoutInput {
+            block_id: ScreenBlockId::from("safe"),
+            source: "Short".to_owned(),
+            translation: long,
+            bounds: local_rect(40, 40, 80, 24),
+            fragments: vec![local_rect(40, 40, 80, 24)],
+            complete: true,
+            confidence_milli: 980,
+        };
+
+        let plan = plan_screen_result_layout(
+            crop_size(400, 200),
+            &[block],
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 432.0,
+                height: 270.0,
+            },
+            &normal_measurer(),
+        );
+
+        let row = &plan.blocks[0];
+        assert!(row.not_placeable);
+        assert!(plan.masks.is_empty());
+    }
+
+    #[test]
+    fn block_geometry_scales_and_unsafe_long_text_remains_unmasked() {
         let blocks = vec![
             BlockLayoutInput {
                 block_id: ScreenBlockId::from("short"),
@@ -756,10 +740,7 @@ mod tests {
         );
         assert_eq!(laid_out[0].width, 100.0);
         assert!(laid_out[0].height >= MIN_FONT_SIZE);
-        assert!(!laid_out[0].callout);
-        assert!(laid_out[1].placed);
-        assert!(laid_out[1].font_size >= MIN_FONT_SIZE);
-        assert!(laid_out[1].x + laid_out[1].width <= 500.0);
+        assert!(laid_out[1].not_placeable);
         assert!(laid_out[1].low_confidence);
     }
 
@@ -896,6 +877,7 @@ mod tests {
         let plan = plan_screen_result_layout(
             crop_size(440, 320),
             &blocks,
+            ResultViewMode::OnImage,
             LogicalWorkArea {
                 width: 472.0,
                 height: 390.0,
@@ -1041,6 +1023,7 @@ mod tests {
         let plan = plan_screen_result_layout(
             crop_size(682, 466),
             &inputs,
+            ResultViewMode::OnImage,
             LogicalWorkArea {
                 width: 1280.0,
                 height: 900.0,
@@ -1087,6 +1070,7 @@ mod tests {
         let plan = plan_screen_result_layout(
             crop_size(682, 466),
             &nimbus_layout_inputs(),
+            ResultViewMode::OnImage,
             LogicalWorkArea {
                 width: 740.0,
                 height: 540.0,
@@ -1111,6 +1095,7 @@ mod tests {
         let plan = plan_screen_result_layout(
             crop_size(682, 466),
             &nimbus_layout_inputs(),
+            ResultViewMode::OnImage,
             LogicalWorkArea {
                 width: 360.0,
                 height: 280.0,

@@ -362,6 +362,19 @@ fn wire_screen_result_window(window: &ScreenTranslationWindow) {
     });
     {
         let weak = window.as_weak();
+        window.on_screen_view_state_changed(move |mode| {
+            if let Some(window) = weak.upgrade()
+                && let Some(window_handle) = slint_window_handle(window.window())
+            {
+                dispatch_runtime_event(RuntimeEvent::ScreenViewModeChanged {
+                    window_handle,
+                    mode,
+                });
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
         window.on_screen_block_edit_requested(move |block_index| {
             if let Some(window) = weak.upgrade()
                 && let Some(window_handle) = slint_window_handle(window.window())

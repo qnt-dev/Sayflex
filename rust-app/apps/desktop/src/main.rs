@@ -266,6 +266,11 @@ enum RuntimeEvent {
         block_index: i32,
     },
     #[cfg(feature = "screen-translation")]
+    ScreenViewModeChanged {
+        window_handle: u64,
+        mode: i32,
+    },
+    #[cfg(feature = "screen-translation")]
     ScreenCopyTextRequested {
         window_handle: u64,
     },
@@ -2415,6 +2420,11 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             block_index,
         } => open_screen_translation_editor(window_handle, block_index, runtime),
         #[cfg(feature = "screen-translation")]
+        RuntimeEvent::ScreenViewModeChanged {
+            window_handle,
+            mode,
+        } => reflow_screen_result_view(window_handle, mode, runtime),
+        #[cfg(feature = "screen-translation")]
         RuntimeEvent::ScreenCopyTextRequested { window_handle } => {
             copy_screen_translation(window_handle, runtime);
         }
@@ -3099,6 +3109,53 @@ fn refresh_screen_result_preview(request_id: RequestId, selected_block: i32, run
             editor_visible,
             snapshot.crop.is_some(),
         ));
+    slot.window.window().request_redraw();
+}
+
+#[cfg(feature = "screen-translation")]
+fn reflow_screen_result_view(window_handle: u64, requested_mode: i32, runtime: &RuntimeUi) {
+    let Some(slot) = runtime
+        .screen_result_windows
+        .borrow()
+        .slot_by_handle(window_handle)
+    else {
+        return;
+    };
+    let request_id = slot.request_id();
+    let Ok((snapshot, _, _)) = runtime
+        .screen_translation
+        .borrow()
+        .result_snapshot(request_id)
+    else {
+        return;
+    };
+    let selected_block = slot.window.get_screen_selected_block();
+    let editor_visible = slot.window.get_screen_editor_visible();
+    slot.window
+        .set_screen_view_mode(screen_result_view::visible_ui_mode(
+            requested_mode,
+            snapshot.crop.is_some(),
+        ));
+    if let Err(error) = screen_result_view::apply_snapshot(&slot.window, &snapshot) {
+        rust_app_core::diagnostics::log_line(&format!(
+            "screen_translation request={request_id} stage=view_reflow result=failed error={error}"
+        ));
+        return;
+    }
+    slot.window.set_screen_selected_block(selected_block);
+    slot.window
+        .set_screen_editor_visible(screen_result_view::preserve_editor_on_snapshot_refresh(
+            editor_visible,
+            snapshot.crop.is_some(),
+        ));
+    if editor_visible
+        && selected_block >= 0
+        && let Some((x, y)) =
+            screen_result_view::editor_position(&slot.window, selected_block as usize)
+    {
+        slot.window.set_screen_editor_panel_x(x);
+        slot.window.set_screen_editor_panel_y(y);
+    }
     slot.window.window().request_redraw();
 }
 
