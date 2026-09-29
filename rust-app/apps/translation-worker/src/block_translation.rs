@@ -171,6 +171,7 @@ mod tests {
                 width: 100,
                 height: 20,
             },
+            fragments: Vec::new(),
             confidence_milli: 900,
         }
     }

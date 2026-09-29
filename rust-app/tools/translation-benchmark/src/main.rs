@@ -436,6 +436,7 @@ fn structured_probe(engine: &mut TranslationEngine) -> Result<StructuredResult> 
             width: 480,
             height: 48,
         },
+        fragments: Vec::new(),
         confidence_milli: 1_000,
     };
     let context = SourceContext {

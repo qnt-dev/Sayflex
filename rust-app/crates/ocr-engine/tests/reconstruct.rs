@@ -1,4 +1,4 @@
-use rust_ocr_engine::reconstruct_text;
+use rust_ocr_engine::{ReconstructedElement, reconstruct_text, reconstruct_visual_rows};
 use rust_protocol::{OcrFailureKind, OcrLine, PhysicalRect};
 
 fn line(text: &str, x: i32, y: i32, width: u32, confidence_milli: u16) -> OcrLine {
@@ -25,6 +25,90 @@ fn two_columns_shuffled() -> Vec<OcrLine> {
 
 fn hyphenated(first: &str, second: &str) -> Vec<OcrLine> {
     vec![line(first, 10, 10, 80, 950), line(second, 10, 30, 80, 950)]
+}
+
+fn element(
+    text: &str,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    confidence_milli: u16,
+) -> ReconstructedElement {
+    ReconstructedElement {
+        text: text.to_owned(),
+        bounds: PhysicalRect {
+            x,
+            y,
+            width,
+            height,
+        },
+        confidence_milli,
+    }
+}
+
+#[test]
+fn same_baseline_fragments_form_one_visual_row_with_both_masks() {
+    let damage_type = element("DAMAGE TYPE:I", 30, 180, 112, 21, 990);
+    let magical = element("Magical", 135, 185, 51, 14, 980);
+
+    let rows = reconstruct_visual_rows(&[damage_type.clone(), magical.clone()]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "DAMAGE TYPE:I Magical");
+    assert_eq!(rows[0].fragments, vec![damage_type.bounds, magical.bounds]);
+    assert_eq!(
+        rows[0].bounds,
+        PhysicalRect {
+            x: 30,
+            y: 180,
+            width: 156,
+            height: 21,
+        }
+    );
+}
+
+#[test]
+fn distant_icon_counters_never_merge_into_one_visual_row() {
+    let forty_five = element("45", 54, 366, 24, 18, 995);
+    let two_seventy_five = element("275", 610, 366, 38, 18, 995);
+
+    let rows = reconstruct_visual_rows(&[forty_five.clone(), two_seventy_five.clone()]);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].fragments, vec![forty_five.bounds]);
+    assert_eq!(rows[1].fragments, vec![two_seventy_five.bounds]);
+}
+
+#[test]
+fn low_confidence_symbol_is_not_absorbed_into_a_label() {
+    let label = element("DAMAGE TYPE", 30, 180, 100, 21, 990);
+    let uncertain_symbol = element("&", 133, 184, 9, 15, 420);
+
+    let rows = reconstruct_visual_rows(&[label.clone(), uncertain_symbol.clone()]);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].fragments, vec![label.bounds]);
+    assert_eq!(rows[1].fragments, vec![uncertain_symbol.bounds]);
+}
+
+#[test]
+fn semantic_paragraphs_do_not_replace_visual_row_geometry() {
+    let reconstructed = reconstruct_text(
+        &[
+            line("A sentence wraps naturally", 10, 10, 260, 990),
+            line("onto one following line.", 10, 30, 230, 980),
+        ],
+        650,
+    )
+    .unwrap();
+
+    let rows = reconstruct_visual_rows(&reconstructed.elements);
+
+    assert_eq!(reconstructed.blocks.len(), 1);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].fragments, vec![reconstructed.elements[0].bounds]);
+    assert_eq!(rows[1].fragments, vec![reconstructed.elements[1].bounds]);
 }
 
 #[test]

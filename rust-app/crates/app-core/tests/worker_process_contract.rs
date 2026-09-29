@@ -127,6 +127,7 @@ fn contextual_screen_commands_cross_the_worker_pipe_whole() {
                 width: 240,
                 height: 38,
             },
+            fragments: Vec::new(),
             confidence_milli: 944,
         }],
         context: SourceContext {

@@ -28,6 +28,159 @@ pub struct ReconstructedElement {
     pub confidence_milli: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconstructedVisualRow {
+    pub text: String,
+    pub bounds: rust_protocol::PhysicalRect,
+    pub fragments: Vec<rust_protocol::PhysicalRect>,
+    pub confidence_milli: u16,
+}
+
+pub fn reconstruct_visual_rows(elements: &[ReconstructedElement]) -> Vec<ReconstructedVisualRow> {
+    let mut rows: Vec<VisualRowBuilder> = Vec::new();
+    for element in elements {
+        let target = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.accepts(element))
+            .min_by_key(|(_, row)| row.baseline_distance(element))
+            .map(|(index, _)| index);
+        if let Some(index) = target {
+            rows[index].push(element);
+        } else {
+            rows.push(VisualRowBuilder::new(element));
+        }
+    }
+    rows.into_iter().map(VisualRowBuilder::finish).collect()
+}
+
+struct VisualRowBuilder {
+    text: String,
+    bounds: rust_protocol::PhysicalRect,
+    fragments: Vec<rust_protocol::PhysicalRect>,
+    confidence_total: u64,
+    fragment_count: u64,
+    contains_unmergeable_noise: bool,
+}
+
+impl VisualRowBuilder {
+    fn new(element: &ReconstructedElement) -> Self {
+        Self {
+            text: element.text.clone(),
+            bounds: element.bounds,
+            fragments: vec![element.bounds],
+            confidence_total: u64::from(element.confidence_milli),
+            fragment_count: 1,
+            contains_unmergeable_noise: is_unmergeable_noise(element),
+        }
+    }
+
+    fn accepts(&self, element: &ReconstructedElement) -> bool {
+        if self.contains_unmergeable_noise || is_unmergeable_noise(element) {
+            return false;
+        }
+        let row_top = i64::from(self.bounds.y);
+        let row_bottom = row_top.saturating_add(i64::from(self.bounds.height));
+        let element_top = i64::from(element.bounds.y);
+        let element_bottom = element_top.saturating_add(i64::from(element.bounds.height));
+        let vertical_intersection = row_bottom
+            .min(element_bottom)
+            .saturating_sub(row_top.max(element_top));
+        let smaller_height = i64::from(self.bounds.height.min(element.bounds.height).max(1));
+        if vertical_intersection.saturating_mul(100) < smaller_height.saturating_mul(45) {
+            return false;
+        }
+
+        let row_left = i64::from(self.bounds.x);
+        let row_right = row_left.saturating_add(i64::from(self.bounds.width));
+        let element_left = i64::from(element.bounds.x);
+        let element_right = element_left.saturating_add(i64::from(element.bounds.width));
+        let horizontal_gap = if row_right < element_left {
+            element_left.saturating_sub(row_right)
+        } else if element_right < row_left {
+            row_left.saturating_sub(element_right)
+        } else {
+            0
+        };
+        let maximum_gap = 12_i64.max(smaller_height.saturating_mul(3) / 2);
+        horizontal_gap <= maximum_gap
+    }
+
+    fn baseline_distance(&self, element: &ReconstructedElement) -> u64 {
+        let row_baseline = i64::from(self.bounds.y).saturating_add(i64::from(self.bounds.height));
+        let element_baseline =
+            i64::from(element.bounds.y).saturating_add(i64::from(element.bounds.height));
+        row_baseline.abs_diff(element_baseline)
+    }
+
+    fn push(&mut self, element: &ReconstructedElement) {
+        append_visual_fragment(&mut self.text, &element.text);
+        self.fragments.push(element.bounds);
+        self.bounds = union_rect(self.bounds, element.bounds);
+        self.confidence_total = self
+            .confidence_total
+            .saturating_add(u64::from(element.confidence_milli));
+        self.fragment_count = self.fragment_count.saturating_add(1);
+    }
+
+    fn finish(self) -> ReconstructedVisualRow {
+        ReconstructedVisualRow {
+            text: self.text,
+            bounds: self.bounds,
+            fragments: self.fragments,
+            confidence_milli: u16::try_from(self.confidence_total / self.fragment_count.max(1))
+                .unwrap_or(u16::MAX),
+        }
+    }
+}
+
+fn is_unmergeable_noise(element: &ReconstructedElement) -> bool {
+    element.confidence_milli < 650 && !element.text.chars().any(char::is_alphabetic)
+}
+
+fn append_visual_fragment(row: &mut String, fragment: &str) {
+    let fragment = fragment.trim();
+    if fragment.is_empty() {
+        return;
+    }
+    let fragment_starts_with_closing_punctuation = fragment
+        .chars()
+        .next()
+        .is_some_and(|character| ",.;:!?)]}".contains(character));
+    let row_ends_with_opening_punctuation = row
+        .chars()
+        .next_back()
+        .is_some_and(|character| "([{«".contains(character));
+    if !row.is_empty()
+        && !row.ends_with(char::is_whitespace)
+        && !fragment_starts_with_closing_punctuation
+        && !row_ends_with_opening_punctuation
+    {
+        row.push(' ');
+    }
+    row.push_str(fragment);
+}
+
+fn union_rect(
+    left: rust_protocol::PhysicalRect,
+    right: rust_protocol::PhysicalRect,
+) -> rust_protocol::PhysicalRect {
+    let union_left = i64::from(left.x).min(i64::from(right.x));
+    let union_top = i64::from(left.y).min(i64::from(right.y));
+    let union_right = i64::from(left.x)
+        .saturating_add(i64::from(left.width))
+        .max(i64::from(right.x).saturating_add(i64::from(right.width)));
+    let union_bottom = i64::from(left.y)
+        .saturating_add(i64::from(left.height))
+        .max(i64::from(right.y).saturating_add(i64::from(right.height)));
+    rust_protocol::PhysicalRect {
+        x: i32::try_from(union_left).unwrap_or(i32::MIN),
+        y: i32::try_from(union_top).unwrap_or(i32::MIN),
+        width: u32::try_from(union_right.saturating_sub(union_left)).unwrap_or(u32::MAX),
+        height: u32::try_from(union_bottom.saturating_sub(union_top)).unwrap_or(u32::MAX),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct AcceptedLine<'a> {
     index: usize,

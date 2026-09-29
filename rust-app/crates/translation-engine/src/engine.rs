@@ -2098,6 +2098,7 @@ mod tests {
                 width: 100,
                 height: 20,
             },
+            fragments: Vec::new(),
             confidence_milli: 900,
         }];
         let context = SourceContext {
@@ -2145,6 +2146,7 @@ mod tests {
                     width: 100,
                     height: 20,
                 },
+                fragments: Vec::new(),
                 confidence_milli: 900,
             })
             .collect::<Vec<_>>();
@@ -2167,6 +2169,7 @@ mod tests {
                     width: 100,
                     height: 20,
                 },
+                fragments: Vec::new(),
                 confidence_milli: 900,
             })
             .collect::<Vec<_>>();
@@ -2198,6 +2201,7 @@ mod tests {
                     width: 100,
                     height: 20,
                 },
+                fragments: Vec::new(),
                 confidence_milli: 900,
             },
             ScreenTextBlock {
@@ -2209,6 +2213,7 @@ mod tests {
                     width: 100,
                     height: 20,
                 },
+                fragments: Vec::new(),
                 confidence_milli: 900,
             },
         ];
@@ -2237,6 +2242,7 @@ mod tests {
                 width: 100,
                 height: 20,
             },
+            fragments: Vec::new(),
             confidence_milli: 900,
         }];
 

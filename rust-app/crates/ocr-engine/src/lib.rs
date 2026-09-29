@@ -11,7 +11,8 @@ use thiserror::Error;
 mod reconstruct;
 
 pub use reconstruct::{
-    ReconstructedBlock, ReconstructedElement, ReconstructedText, reconstruct_text,
+    ReconstructedBlock, ReconstructedElement, ReconstructedText, ReconstructedVisualRow,
+    reconstruct_text, reconstruct_visual_rows,
 };
 
 #[cfg(feature = "ppocr")]

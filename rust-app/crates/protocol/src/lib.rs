@@ -20,7 +20,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -1050,6 +1050,8 @@ pub struct ScreenTextBlock {
     pub block_id: ScreenBlockId,
     pub source_text: String,
     pub bounds: PhysicalRect,
+    #[serde(default)]
+    pub fragments: Vec<PhysicalRect>,
     pub confidence_milli: u16,
 }
 
@@ -1427,11 +1429,33 @@ fn validate_screen_blocks(
         if block.bounds.width == 0 || block.bounds.height == 0 {
             return Err(TranslationCommandValidationError::InvalidBlockBounds);
         }
+        if block.fragments.iter().any(|fragment| {
+            fragment.width == 0
+                || fragment.height == 0
+                || !physical_rect_contains(block.bounds, *fragment)
+        }) {
+            return Err(TranslationCommandValidationError::InvalidBlockBounds);
+        }
         if block.confidence_milli > 1_000 {
             return Err(TranslationCommandValidationError::InvalidConfidence);
         }
     }
     validate_source_context(context)
+}
+
+fn physical_rect_contains(outer: PhysicalRect, inner: PhysicalRect) -> bool {
+    let outer_left = i64::from(outer.x);
+    let outer_top = i64::from(outer.y);
+    let outer_right = outer_left.saturating_add(i64::from(outer.width));
+    let outer_bottom = outer_top.saturating_add(i64::from(outer.height));
+    let inner_left = i64::from(inner.x);
+    let inner_top = i64::from(inner.y);
+    let inner_right = inner_left.saturating_add(i64::from(inner.width));
+    let inner_bottom = inner_top.saturating_add(i64::from(inner.height));
+    inner_left >= outer_left
+        && inner_top >= outer_top
+        && inner_right <= outer_right
+        && inner_bottom <= outer_bottom
 }
 
 fn validate_block_id(block_id: &ScreenBlockId) -> Result<(), TranslationCommandValidationError> {
@@ -2215,6 +2239,12 @@ mod tests {
                     width: 320,
                     height: 42,
                 },
+                fragments: vec![PhysicalRect {
+                    x: -120,
+                    y: 48,
+                    width: 320,
+                    height: 42,
+                }],
                 confidence_milli: 987,
             }],
             context: SourceContext {
@@ -2243,6 +2273,68 @@ mod tests {
     }
 
     #[test]
+    fn screen_block_fragments_round_trip_and_legacy_payloads_default_empty() {
+        let value = serde_json::json!({
+            "block_id": "screen-block-0000",
+            "source_text": "DAMAGE TYPE: Magical",
+            "bounds": { "x": 30, "y": 180, "width": 156, "height": 21 },
+            "fragments": [
+                { "x": 30, "y": 180, "width": 112, "height": 21 },
+                { "x": 135, "y": 185, "width": 51, "height": 14 }
+            ],
+            "confidence_milli": 985
+        });
+        let block: ScreenTextBlock = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(block.fragments.len(), 2);
+        assert_eq!(block.fragments[1].x, 135);
+        assert_eq!(serde_json::to_value(&block).unwrap(), value);
+
+        let legacy: ScreenTextBlock = serde_json::from_value(serde_json::json!({
+            "block_id": "screen-block-0000",
+            "source_text": "legacy",
+            "bounds": { "x": 4, "y": 5, "width": 6, "height": 7 },
+            "confidence_milli": 900
+        }))
+        .unwrap();
+        assert!(legacy.fragments.is_empty());
+    }
+
+    #[test]
+    fn screen_block_validation_rejects_fragments_outside_the_row_bounds() {
+        let command = TranslationWorkerCommand::TranslateBlocks {
+            request_id: RequestId::new(),
+            base_revision: 0,
+            blocks: vec![ScreenTextBlock {
+                block_id: ScreenBlockId::from("screen-block-0000"),
+                source_text: "Damage".to_owned(),
+                bounds: PhysicalRect {
+                    x: 10,
+                    y: 20,
+                    width: 100,
+                    height: 20,
+                },
+                fragments: vec![PhysicalRect {
+                    x: 200,
+                    y: 20,
+                    width: 10,
+                    height: 10,
+                }],
+                confidence_milli: 900,
+            }],
+            context: SourceContext::default(),
+            source_language: None,
+            target_language: Some(TranslationLanguage::Russian),
+            language_policy: TranslationLanguagePolicy::default(),
+        };
+
+        assert_eq!(
+            command.validate_limits(),
+            Err(TranslationCommandValidationError::InvalidBlockBounds)
+        );
+    }
+
+    #[test]
     fn contextual_screen_validation_rejects_empty_and_duplicate_ids() {
         let block = |id: &str| ScreenTextBlock {
             block_id: ScreenBlockId::from(id),
@@ -2253,6 +2345,7 @@ mod tests {
                 width: 10,
                 height: 10,
             },
+            fragments: Vec::new(),
             confidence_milli: 900,
         };
         let command = |blocks| TranslationWorkerCommand::TranslateBlocks {
@@ -2504,8 +2597,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 31,
-            "every fingerprint below was written for protocol 30: if a shape \
+            PROTOCOL_VERSION, 32,
+            "every fingerprint below was written for protocol 32: if a shape \
              changes, this number changes with it"
         );
     }
@@ -2988,6 +3081,12 @@ mod complete_wire_schema_tests {
                 width: 3,
                 height: 4,
             },
+            fragments: vec![PhysicalRect {
+                x: -1,
+                y: 2,
+                width: 3,
+                height: 4,
+            }],
             confidence_milli: 900,
         }
     }
@@ -3748,7 +3847,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x1100_16b2_a075_ee02,
+            0x455a_83b8_d340_12ec,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

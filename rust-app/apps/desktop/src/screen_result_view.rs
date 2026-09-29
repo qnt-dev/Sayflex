@@ -978,6 +978,12 @@ mod tests {
                         width: input.bounds.width,
                         height: input.bounds.height,
                     },
+                    fragments: vec![PhysicalRect {
+                        x: input.bounds.x,
+                        y: input.bounds.y,
+                        width: input.bounds.width,
+                        height: input.bounds.height,
+                    }],
                     confidence_milli: input.confidence_milli,
                 })
                 .collect(),

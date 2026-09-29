@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use rust_ocr_engine::ReconstructedElement;
+use rust_ocr_engine::{ReconstructedElement, reconstruct_visual_rows};
 use rust_platform_windows::screen_capture::RgbaFrame;
 use rust_protocol::{
     BlockCompletion, PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext,
@@ -18,14 +18,15 @@ pub(crate) const MIN_ADMITTED_OCR_CONFIDENCE_MILLI: u16 = 350;
 pub(crate) const DEFAULT_SCREENSHOT_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 pub(crate) fn screen_blocks_from_ocr(elements: Vec<ReconstructedElement>) -> Vec<ScreenTextBlock> {
-    elements
+    reconstruct_visual_rows(&elements)
         .into_iter()
         .enumerate()
-        .map(|(index, element)| ScreenTextBlock {
+        .map(|(index, row)| ScreenTextBlock {
             block_id: ScreenBlockId::from(format!("screen-block-{index:04}")),
-            source_text: element.text,
-            bounds: element.bounds,
-            confidence_milli: element.confidence_milli,
+            source_text: row.text,
+            bounds: row.bounds,
+            fragments: row.fragments,
+            confidence_milli: row.confidence_milli,
         })
         .collect()
 }
@@ -35,6 +36,7 @@ pub(crate) enum DocumentError {
     EmptyDocument,
     EmptyBlockId,
     DuplicateBlockId,
+    InvalidBlockBounds,
     UnknownBlockId,
     MissingBlockId,
     RequestMismatch,
@@ -73,6 +75,7 @@ impl UserTranslationEdit {
 pub(crate) struct ScreenBlockState {
     pub(crate) source: String,
     pub(crate) bounds: PhysicalRect,
+    pub(crate) fragments: Vec<PhysicalRect>,
     pub(crate) confidence_milli: u16,
     pub(crate) machine: Option<TranslatedScreenBlock>,
     pub(crate) user_edit: Option<UserTranslationEdit>,
@@ -87,6 +90,7 @@ pub(crate) struct ScreenResultBlockSnapshot {
     pub(crate) completion: BlockCompletion,
     pub(crate) failure_message: Option<String>,
     pub(crate) bounds: PhysicalRect,
+    pub(crate) fragments: Vec<PhysicalRect>,
     pub(crate) confidence_milli: u16,
 }
 
@@ -178,12 +182,25 @@ impl ScreenTranslationDocument {
         }
         let mut reading_order = Vec::with_capacity(blocks.len());
         let mut states = HashMap::with_capacity(blocks.len());
-        for block in blocks {
+        for mut block in blocks {
             if block.block_id.as_str().trim().is_empty() {
                 return Err(DocumentError::EmptyBlockId);
             }
             if states.contains_key(&block.block_id) {
                 return Err(DocumentError::DuplicateBlockId);
+            }
+            if block.bounds.width == 0 || block.bounds.height == 0 {
+                return Err(DocumentError::InvalidBlockBounds);
+            }
+            if block.fragments.is_empty() {
+                block.fragments.push(block.bounds);
+            }
+            if block.fragments.iter().any(|fragment| {
+                fragment.width == 0
+                    || fragment.height == 0
+                    || !physical_rect_contains(block.bounds, *fragment)
+            }) {
+                return Err(DocumentError::InvalidBlockBounds);
             }
             reading_order.push(block.block_id.clone());
             states.insert(
@@ -191,6 +208,7 @@ impl ScreenTranslationDocument {
                 ScreenBlockState {
                     source: block.source_text,
                     bounds: block.bounds,
+                    fragments: block.fragments,
                     confidence_milli: block.confidence_milli,
                     machine: None,
                     user_edit: None,
@@ -259,6 +277,7 @@ impl ScreenTranslationDocument {
                     block_id: block_id.clone(),
                     source_text: state.source.clone(),
                     bounds: state.bounds,
+                    fragments: state.fragments.clone(),
                     confidence_milli: state.confidence_milli,
                 })
             })
@@ -396,6 +415,7 @@ impl ScreenTranslationDocument {
                 completion,
                 failure_message,
                 bounds: state.bounds,
+                fragments: state.fragments.clone(),
                 confidence_milli: state.confidence_milli,
             });
         }
@@ -410,6 +430,21 @@ impl ScreenTranslationDocument {
             expires_unix_ms: self.expires_unix_ms,
         })
     }
+}
+
+fn physical_rect_contains(outer: PhysicalRect, inner: PhysicalRect) -> bool {
+    let outer_left = i64::from(outer.x);
+    let outer_top = i64::from(outer.y);
+    let outer_right = outer_left.saturating_add(i64::from(outer.width));
+    let outer_bottom = outer_top.saturating_add(i64::from(outer.height));
+    let inner_left = i64::from(inner.x);
+    let inner_top = i64::from(inner.y);
+    let inner_right = inner_left.saturating_add(i64::from(inner.width));
+    let inner_bottom = inner_top.saturating_add(i64::from(inner.height));
+    inner_left >= outer_left
+        && inner_top >= outer_top
+        && inner_right <= outer_right
+        && inner_bottom <= outer_bottom
 }
 
 fn preservation_warnings(source: &str, translation: &str) -> Vec<PreservationWarning> {
@@ -561,6 +596,7 @@ mod tests {
                 width: 240,
                 height: 32,
             },
+            fragments: Vec::new(),
             confidence_milli,
         }
     }
@@ -639,7 +675,7 @@ mod tests {
                 text: "second".to_owned(),
                 bounds: PhysicalRect {
                     x: 20,
-                    y: 0,
+                    y: 30,
                     width: 10,
                     height: 10,
                 },
@@ -651,6 +687,105 @@ mod tests {
         assert_eq!(blocks[1].block_id.as_str(), "screen-block-0001");
         assert_eq!(blocks[1].source_text, "second");
         assert_eq!(blocks[1].bounds.x, 20);
+        assert_eq!(blocks[1].bounds.y, 30);
+    }
+
+    #[test]
+    fn merged_visual_row_keeps_stable_id_fragments_and_late_edit_target() {
+        let damage_type = rust_ocr_engine::ReconstructedElement {
+            text: "DAMAGE TYPE:I".to_owned(),
+            bounds: PhysicalRect {
+                x: 30,
+                y: 180,
+                width: 112,
+                height: 21,
+            },
+            confidence_milli: 990,
+        };
+        let magical = rust_ocr_engine::ReconstructedElement {
+            text: "Magical".to_owned(),
+            bounds: PhysicalRect {
+                x: 135,
+                y: 185,
+                width: 51,
+                height: 14,
+            },
+            confidence_milli: 980,
+        };
+        let blocks = screen_blocks_from_ocr(vec![damage_type.clone(), magical.clone()]);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_id.as_str(), "screen-block-0000");
+        assert_eq!(blocks[0].source_text, "DAMAGE TYPE:I Magical");
+        assert_eq!(
+            blocks[0].fragments,
+            vec![damage_type.bounds, magical.bounds]
+        );
+
+        let request_id = RequestId::new();
+        let block_id = blocks[0].block_id.clone();
+        let mut document = ScreenTranslationDocument::new(
+            request_id,
+            crop(),
+            blocks,
+            SourceContext::default(),
+            1_000,
+            2_000,
+        )
+        .unwrap();
+        document
+            .save_user_edit(
+                &block_id,
+                0,
+                UserTranslationEdit::new("ТИП УРОНА: Магический"),
+            )
+            .unwrap();
+        document
+            .apply_machine_blocks(
+                request_id,
+                0,
+                vec![translated(&block_id.as_str(), "Машинный перевод")],
+            )
+            .unwrap();
+
+        assert_eq!(
+            document.effective_translation(&block_id),
+            Some("ТИП УРОНА: Магический")
+        );
+        assert_eq!(document.source_blocks()[0].fragments.len(), 2);
+    }
+
+    #[test]
+    fn merged_visual_row_counts_each_numeric_fragment_once() {
+        let blocks = screen_blocks_from_ocr(vec![
+            rust_ocr_engine::ReconstructedElement {
+                text: "DAMAGE".to_owned(),
+                bounds: PhysicalRect {
+                    x: 30,
+                    y: 180,
+                    width: 70,
+                    height: 20,
+                },
+                confidence_milli: 990,
+            },
+            rust_ocr_engine::ReconstructedElement {
+                text: "25".to_owned(),
+                bounds: PhysicalRect {
+                    x: 105,
+                    y: 182,
+                    width: 20,
+                    height: 16,
+                },
+                confidence_milli: 990,
+            },
+        ]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].source_text, "DAMAGE 25");
+        assert!(
+            preservation_warnings(&blocks[0].source_text, "УРОН 25")
+                .into_iter()
+                .all(|warning| warning.kind != PreservationKind::Number)
+        );
     }
 
     #[test]

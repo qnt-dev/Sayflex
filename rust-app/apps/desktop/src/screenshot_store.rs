@@ -251,6 +251,7 @@ impl ScreenshotStore {
                         block_id: block.block_id.clone(),
                         source_text: block.source.clone(),
                         bounds: block.bounds,
+                        fragments: block.fragments.clone(),
                         confidence_milli: block.confidence_milli,
                     })
                     .collect(),
@@ -769,6 +770,7 @@ mod tests {
                     width: 2,
                     height: 1,
                 },
+                fragments: Vec::new(),
                 confidence_milli: 900,
             }],
             translations: Vec::new(),
@@ -832,6 +834,7 @@ mod tests {
                     width: 2,
                     height: 1,
                 },
+                fragments: Vec::new(),
                 confidence_milli: 900,
             }],
             SourceContext::default(),
@@ -873,6 +876,31 @@ mod tests {
         assert_eq!(target, TranslationLanguage::Russian);
         assert_eq!(restored.revision(), 1);
         assert_eq!(restored.copy_text().unwrap(), "перезарядка");
+    }
+
+    #[test]
+    fn legacy_metadata_without_fragments_restores_bounds_as_one_fragment() {
+        let request_id = RequestId::new();
+        let mut value = serde_json::to_value(metadata(request_id, 100, 200)).unwrap();
+        value["blocks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("fragments");
+        let legacy: ScreenshotMetadata = serde_json::from_value(value).unwrap();
+        assert!(legacy.blocks[0].fragments.is_empty());
+
+        let document = ScreenTranslationDocument::new(
+            request_id,
+            std::sync::Arc::new(frame(4)),
+            legacy.blocks,
+            SourceContext::default(),
+            100,
+            200,
+        )
+        .unwrap();
+        let restored = document.source_blocks();
+
+        assert_eq!(restored[0].fragments, vec![restored[0].bounds]);
     }
 
     #[test]
@@ -927,6 +955,7 @@ mod tests {
                     width: 2,
                     height: 1,
                 },
+                fragments: Vec::new(),
                 confidence_milli: 900,
             }],
             SourceContext::default(),
