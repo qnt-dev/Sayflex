@@ -164,8 +164,12 @@ frozen capture
 One request-scoped result owns:
 
 - request identity and monotonically increasing revision;
-- selected crop, pixel dimensions, coordinate system, creation/expiry times,
-  and current image availability;
+- selected crop, pixel dimensions, creation/expiry times, and current image
+  availability;
+- two explicit coordinate spaces: the selected crop has a physical-screen
+  rectangle, while OCR block rectangles are crop-local. Crop-local rectangles
+  are the only input to image-overlay layout; conversion to or from physical
+  screen coordinates is explicit and never inferred from raw integers;
 - stable block IDs, source text, OCR rectangles, reading-order relationships,
   and confidence;
 - machine translation, user correction, and correction revision for each block;
@@ -281,10 +285,11 @@ dark `Theme` surfaces, light text, and the warm accent; ordinary windows use
 
 The correction flow is:
 
-1. select a translated block or phrase and invoke the nearby **Correct** action;
+1. double-click a translated block to invoke correction; no separate
+   **Correct** button is rendered over the image;
 2. open a compact editor adjacent to the selection;
-3. show the source expression, editable translation, example sentence, detected
-   domain, and language direction;
+3. show an editable source expression (initially the whole OCR block), editable
+   translation, example sentence, detected domain, and language direction;
 4. **Save** applies a changed translation and writes the glossary entry;
 5. **Confirm** stores an unchanged translation;
 6. show a restrained **Saved to glossary** confirmation after persistence.
@@ -293,8 +298,9 @@ Word correspondence is never inferred from DUAL sentence ordering. The user can
 select or amend the source expression in the editor. Correcting an entire block
 stores a phrase pair rather than inventing word-level pairs.
 
-The ordinary result card remains non-activating. Only an explicit Correct action
-opens a focusable editor while preserving the original insertion target identity.
+The ordinary result card remains non-activating. Only an explicit double-click
+or keyboard edit action opens a focusable editor while preserving the original
+insertion target identity.
 `Ctrl+Enter` saves; `Escape` cancels. An outside click neither silently saves nor
 silently destroys the draft. Draft identity includes request, block, and revision.
 
@@ -318,10 +324,13 @@ conversion for image scale and monitor DPI.
 
 - A calm opaque or nearly opaque theme surface covers original glyphs so source
   and translation do not overlap.
-- Font size is derived from available geometry and actual translated length but
-  never reduced below the readable product minimum.
+- Font size and wrapping use actual UI text measurement. Overlay text is never
+  reduced below 12 logical pixels.
 - Long text wraps. When the source rectangle cannot hold readable text, a nearby
   callout is placed inside the viewport and linked to the source rectangle.
+- Layout resolves collisions between translated blocks and callouts. A compact
+  result is at least 440 logical pixels wide, and its leading and trailing header
+  controls never overlap at any supported DPI.
 - Selected blocks receive a thin accent outline and expose correction.
 - Pan/scroll/scale changes preserve exact block alignment.
 - Missing or expired pixels degrade to the normal text result; translation and
@@ -355,6 +364,12 @@ and never enters diagnostics, crash metadata, clipboard, or cloud requests.
 Disabling screenshot history prevents future disk writes. Open or pinned windows
 do not silently extend expiry; after deletion they retain text but release image
 memory. Cleanup failures are logged without paths/content and do not block the UI.
+
+One serialized persistence owner writes a crop's immutable pixels once and applies
+later metadata revisions in monotonically increasing order. A stale initial write
+cannot overwrite a completed translation or user correction. Every open or pinned
+view observes image invalidation caused by explicit deletion, expiry, size-budget
+eviction, disabling storage, or delete-all.
 
 ## 10. Models and aggregate resources
 

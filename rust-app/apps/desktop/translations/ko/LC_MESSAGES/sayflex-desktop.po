@@ -1577,8 +1577,11 @@ msgstr "지금 삭제"
 msgid "Delete this glossary entry?"
 msgstr "이 용어집 항목을 삭제할까요?"
 
-msgid "Deletes temporary images now. Text translations and personal glossary entries remain available."
-msgstr "임시 이미지를 지금 삭제합니다. 텍스트 번역과 개인 용어집 항목은 계속 사용할 수 있습니다."
+msgid "Open the latest saved screen translation, or delete temporary images. Text translations and personal glossary entries remain available."
+msgstr "최근 저장된 화면 번역을 열거나 임시 이미지를 삭제합니다. 텍스트 번역과 개인 용어집 항목은 계속 사용할 수 있습니다."
+
+msgid "Open latest"
+msgstr "최근 항목 열기"
 
 msgid "Do not keep"
 msgstr "보관하지 않음"
@@ -1667,9 +1670,6 @@ msgstr "확인"
 msgid "Correct translation"
 msgstr "번역 수정"
 
-msgid "ORIGINAL"
-msgstr "원문"
-
 msgid "Save failed. Your correction is still here."
 msgstr "저장하지 못했습니다. 수정 내용은 그대로 있습니다."
 
@@ -1678,3 +1678,6 @@ msgstr "SayFlex 전체"
 
 msgid "SayFlex may unload idle engines to protect system resources. Active work is never interrupted."
 msgstr "SayFlex는 시스템 리소스를 보호하기 위해 유휴 엔진을 메모리에서 해제할 수 있습니다. 진행 중인 작업은 절대 중단되지 않습니다."
+
+msgid "The saved screen translation could not be restored."
+msgstr "저장된 화면 번역을 복원하지 못했습니다."

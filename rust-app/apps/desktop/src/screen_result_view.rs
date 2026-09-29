@@ -6,7 +6,10 @@ use crate::{ScreenBlockOverlay, TranslationPair, TranslationPreview};
 
 const MIN_CALLOUT_WIDTH: f32 = 180.0;
 const MAX_CALLOUT_WIDTH: f32 = 320.0;
-const MIN_READABLE_LINE_HEIGHT: f32 = 14.0;
+// 12 logical pixels is the smallest overlay font admitted by the Slint view.
+// Reserve a full 18 pixels per wrapped line so measured glyphs and line
+// spacing cannot spill into the next callout on high-DPI displays.
+const MIN_READABLE_LINE_HEIGHT: f32 = 18.0;
 const APPROXIMATE_GLYPH_WIDTH: f32 = 7.0;
 const CALLOUT_GAP: f32 = 8.0;
 
@@ -77,8 +80,42 @@ pub(crate) struct BlockLayoutInput {
     pub(crate) block_id: ScreenBlockId,
     pub(crate) source: String,
     pub(crate) translation: String,
-    pub(crate) bounds: PhysicalRect,
+    pub(crate) bounds: CropLocalRect,
     pub(crate) confidence_milli: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CropPixelSize {
+    width: u32,
+    height: u32,
+}
+
+impl CropPixelSize {
+    pub(crate) fn from_screen_rect(rect: PhysicalRect) -> Self {
+        Self {
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CropLocalRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl CropLocalRect {
+    pub(crate) fn from_ocr_bounds(bounds: PhysicalRect) -> Self {
+        Self {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,11 +132,14 @@ pub(crate) struct BlockLayout {
     pub(crate) source_width: f32,
     pub(crate) source_height: f32,
     pub(crate) callout: bool,
+    pub(crate) overflow_panel: bool,
+    pub(crate) panel_order: i32,
+    pub(crate) panel_left: bool,
     pub(crate) low_confidence: bool,
 }
 
 pub(crate) fn layout_blocks(
-    crop: PhysicalRect,
+    crop: CropPixelSize,
     viewport_width: u32,
     viewport_height: u32,
     blocks: &[BlockLayoutInput],
@@ -112,13 +152,11 @@ pub(crate) fn layout_blocks(
     let viewport_width = viewport_width as f32;
     let viewport_height = viewport_height as f32;
 
-    blocks
+    let mut layouts = blocks
         .iter()
         .map(|block| {
-            let source_x = ((i64::from(block.bounds.x) - i64::from(crop.x)) as f32 * scale_x)
-                .clamp(0.0, viewport_width);
-            let source_y = ((i64::from(block.bounds.y) - i64::from(crop.y)) as f32 * scale_y)
-                .clamp(0.0, viewport_height);
+            let source_x = (block.bounds.x as f32 * scale_x).clamp(0.0, viewport_width);
+            let source_y = (block.bounds.y as f32 * scale_y).clamp(0.0, viewport_height);
             let source_width = (block.bounds.width as f32 * scale_x)
                 .max(1.0)
                 .min(viewport_width.saturating_sub(source_x));
@@ -169,10 +207,182 @@ pub(crate) fn layout_blocks(
                 source_width,
                 source_height,
                 callout,
+                overflow_panel: false,
+                panel_order: -1,
+                panel_left: false,
                 low_confidence: block.confidence_milli < 650,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    resolve_callout_collisions(&mut layouts, viewport_width, viewport_height);
+    layouts
+}
+
+fn resolve_callout_collisions(
+    layouts: &mut [BlockLayout],
+    viewport_width: f32,
+    viewport_height: f32,
+) {
+    let source_rects = layouts
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            (
+                index,
+                block.source_x,
+                block.source_y,
+                block.source_width,
+                block.source_height,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut placed_callouts: Vec<(f32, f32, f32, f32)> = Vec::new();
+    let mut callout_order = layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.callout)
+        .map(|(index, block)| (index, block.source_y, block.source_x))
+        .collect::<Vec<_>>();
+    callout_order.sort_by(|left, right| {
+        left.1
+            .total_cmp(&right.1)
+            .then_with(|| left.2.total_cmp(&right.2))
+    });
+
+    for (index, _, _) in callout_order {
+        let block = &layouts[index];
+        let right = block.source_x + block.source_width + CALLOUT_GAP;
+        let left = block.source_x - block.width - CALLOUT_GAP;
+        let mut x_candidates = vec![block.x];
+        if right + block.width <= viewport_width {
+            x_candidates.push(right);
+        }
+        if left >= 0.0 {
+            x_candidates.push(left);
+        }
+        x_candidates.push((viewport_width - block.width).max(0.0));
+        x_candidates.sort_by(f32::total_cmp);
+        x_candidates.dedup_by(|left, right| (*left - *right).abs() < 0.5);
+
+        let mut y_candidates = vec![
+            block
+                .source_y
+                .min((viewport_height - block.height).max(0.0)),
+            0.0,
+            (viewport_height - block.height).max(0.0),
+        ];
+        for (_, _, y, _, height) in &source_rects {
+            y_candidates
+                .push((y + height + CALLOUT_GAP).min((viewport_height - block.height).max(0.0)));
+            y_candidates.push((y - block.height - CALLOUT_GAP).max(0.0));
+        }
+        for (_, y, _, height) in &placed_callouts {
+            y_candidates
+                .push((y + height + CALLOUT_GAP).min((viewport_height - block.height).max(0.0)));
+            y_candidates.push((y - block.height - CALLOUT_GAP).max(0.0));
+        }
+        y_candidates.sort_by(f32::total_cmp);
+        y_candidates.dedup_by(|left, right| (*left - *right).abs() < 0.5);
+
+        let best = x_candidates
+            .iter()
+            .flat_map(|x| y_candidates.iter().map(move |y| (*x, *y)))
+            .filter(|(x, y)| {
+                let candidate = (*x, *y, block.width, block.height);
+                !source_rects
+                    .iter()
+                    .filter(|(source_index, ..)| *source_index != index)
+                    .any(|(_, x, y, width, height)| {
+                        rectangles_overlap(candidate, (*x, *y, *width, *height))
+                    })
+                    && !placed_callouts
+                        .iter()
+                        .any(|occupied| rectangles_overlap(candidate, *occupied))
+            })
+            .min_by(|left, right| {
+                let left_distance =
+                    (left.0 - block.source_x).abs() + (left.1 - block.source_y).abs();
+                let right_distance =
+                    (right.0 - block.source_x).abs() + (right.1 - block.source_y).abs();
+                left_distance.total_cmp(&right_distance)
+            });
+        if let Some((x, y)) = best {
+            layouts[index].x = x;
+            layouts[index].y = y;
+            placed_callouts.push((x, y, layouts[index].width, layouts[index].height));
+        } else {
+            // There is no collision-free callout arrangement in the image.
+            // Do not silently accept overlaps: the complete result will use
+            // one measured, scrollable side panel instead.
+            assign_overflow_panel(layouts, viewport_width, viewport_height);
+            return;
+        }
+    }
+}
+
+fn assign_overflow_panel(layouts: &mut [BlockLayout], viewport_width: f32, viewport_height: f32) {
+    let panel_width = (viewport_width * 0.48)
+        .clamp(MIN_CALLOUT_WIDTH, MAX_CALLOUT_WIDTH)
+        .min(viewport_width);
+    let right_x = (viewport_width - panel_width - CALLOUT_GAP).max(0.0);
+    let left_rect = (
+        CALLOUT_GAP.min(viewport_width),
+        0.0,
+        panel_width,
+        viewport_height,
+    );
+    let right_rect = (right_x, 0.0, panel_width, viewport_height);
+    let overlap = |panel: (f32, f32, f32, f32)| {
+        layouts
+            .iter()
+            .map(|block| {
+                rectangle_intersection_area(
+                    panel,
+                    (
+                        block.source_x,
+                        block.source_y,
+                        block.source_width,
+                        block.source_height,
+                    ),
+                )
+            })
+            .sum::<f32>()
+    };
+    let panel_left = overlap(left_rect) < overlap(right_rect);
+    let panel_x = if panel_left {
+        left_rect.0
+    } else {
+        right_rect.0
+    };
+    let mut order = (0..layouts.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        layouts[*left]
+            .source_y
+            .total_cmp(&layouts[*right].source_y)
+            .then_with(|| layouts[*left].source_x.total_cmp(&layouts[*right].source_x))
+    });
+    for (panel_order, index) in order.into_iter().enumerate() {
+        let block = &mut layouts[index];
+        block.overflow_panel = true;
+        block.panel_order = i32::try_from(panel_order).unwrap_or(i32::MAX);
+        block.panel_left = panel_left;
+        block.x = panel_x;
+        block.y = block.source_y;
+        block.width = panel_width;
+    }
+}
+
+fn rectangles_overlap(left: (f32, f32, f32, f32), right: (f32, f32, f32, f32)) -> bool {
+    left.0 < right.0 + right.2
+        && right.0 < left.0 + left.2
+        && left.1 < right.1 + right.3
+        && right.1 < left.1 + left.3
+}
+
+fn rectangle_intersection_area(left: (f32, f32, f32, f32), right: (f32, f32, f32, f32)) -> f32 {
+    let width = (left.0 + left.2).min(right.0 + right.2) - left.0.max(right.0);
+    let height = (left.1 + left.3).min(right.1 + right.3) - left.1.max(right.1);
+    width.max(0.0) * height.max(0.0)
 }
 
 trait SaturatingSubF32 {
@@ -189,7 +399,8 @@ pub(crate) fn apply_snapshot(
     preview: &TranslationPreview,
     snapshot: &ScreenResultSnapshot,
 ) -> Result<Vec<BlockLayout>, String> {
-    let (viewport_width, viewport_height) = fitted_viewport(snapshot.crop_rect);
+    let crop_size = CropPixelSize::from_screen_rect(snapshot.crop_rect);
+    let (viewport_width, viewport_height) = fitted_viewport(crop_size);
     let inputs = snapshot
         .blocks
         .iter()
@@ -197,11 +408,11 @@ pub(crate) fn apply_snapshot(
             block_id: block.block_id.clone(),
             source: block.source.clone(),
             translation: block.translation.clone(),
-            bounds: block.bounds,
+            bounds: CropLocalRect::from_ocr_bounds(block.bounds),
             confidence_milli: block.confidence_milli,
         })
         .collect::<Vec<_>>();
-    let layouts = layout_blocks(snapshot.crop_rect, viewport_width, viewport_height, &inputs);
+    let layouts = layout_blocks(crop_size, viewport_width, viewport_height, &inputs);
     let rows = layouts
         .iter()
         .map(|block| ScreenBlockOverlay {
@@ -217,6 +428,9 @@ pub(crate) fn apply_snapshot(
             source_width: block.source_width,
             source_height: block.source_height,
             callout: block.callout,
+            overflow_panel: block.overflow_panel,
+            panel_order: block.panel_order,
+            panel_left: block.panel_left,
             low_confidence: block.low_confidence,
         })
         .collect::<Vec<_>>();
@@ -254,6 +468,13 @@ pub(crate) fn apply_snapshot(
     preview.set_translated_paragraphs(ModelRc::new(VecModel::from(translations)));
     preview.set_dual_pairs(ModelRc::new(VecModel::from(pairs)));
     preview.set_screen_blocks(ModelRc::new(VecModel::from(rows)));
+    preview.set_screen_dense_panel_active(layouts.iter().any(|block| block.overflow_panel));
+    preview.set_screen_dense_panel_left(
+        layouts
+            .iter()
+            .find(|block| block.overflow_panel)
+            .is_some_and(|block| block.panel_left),
+    );
     preview.set_screen_content_width(viewport_width as f32);
     preview.set_screen_content_height(viewport_height as f32);
     preview.set_screen_image_expired(snapshot.crop.is_none());
@@ -275,6 +496,8 @@ pub(crate) fn clear_snapshot(preview: &TranslationPreview) {
     preview.set_screen_blocks(ModelRc::new(VecModel::from(
         Vec::<ScreenBlockOverlay>::new(),
     )));
+    preview.set_screen_dense_panel_active(false);
+    preview.set_screen_dense_panel_left(false);
     preview.set_screen_editor_visible(false);
     preview.set_screen_image_expired(false);
     preview.set_screen_saved(false);
@@ -282,15 +505,15 @@ pub(crate) fn clear_snapshot(preview: &TranslationPreview) {
     preview.set_screen_selected_block(-1);
 }
 
-fn fitted_viewport(crop: PhysicalRect) -> (u32, u32) {
+fn fitted_viewport(crop: CropPixelSize) -> (u32, u32) {
     if crop.width == 0 || crop.height == 0 {
         return (320, 200);
     }
     let fit = (960.0 / crop.width as f32)
         .min(576.0 / crop.height as f32)
         .min(1.0);
-    let minimum = (320.0 / crop.width as f32)
-        .max(240.0 / crop.height as f32)
+    let minimum = (440.0 / crop.width as f32)
+        .max(320.0 / crop.height as f32)
         .min((960.0 / crop.width as f32).min(576.0 / crop.height as f32));
     let scale = fit.max(minimum);
     (
@@ -331,11 +554,12 @@ fn frame_image(frame: &rust_platform_windows::screen_capture::RgbaFrame) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use rust_protocol::{PhysicalRect, ScreenBlockId};
+    use rust_protocol::ScreenBlockId;
 
     use super::{
-        BlockLayoutInput, ResultViewMode, ScreenResultWindowMode, layout_blocks,
-        preserve_editor_on_snapshot_refresh, visible_mode, visible_ui_mode,
+        BlockLayoutInput, CropLocalRect, CropPixelSize, ResultViewMode, ScreenResultWindowMode,
+        fitted_viewport, layout_blocks, preserve_editor_on_snapshot_refresh, visible_mode,
+        visible_ui_mode,
     };
 
     #[test]
@@ -345,7 +569,7 @@ mod tests {
                 block_id: ScreenBlockId::from("short"),
                 source: "Menu".to_owned(),
                 translation: "Меню".to_owned(),
-                bounds: rect(100, 50, 200, 80),
+                bounds: local_rect(100, 50, 200, 80),
                 confidence_milli: 900,
             },
             BlockLayoutInput {
@@ -354,12 +578,12 @@ mod tests {
                 translation:
                     "Очень длинный перевод, который нельзя уменьшать до нечитаемого размера"
                         .to_owned(),
-                bounds: rect(700, 400, 80, 24),
+                bounds: local_rect(700, 400, 80, 24),
                 confidence_milli: 500,
             },
         ];
 
-        let laid_out = layout_blocks(rect(0, 0, 1_000, 500), 500, 250, &blocks);
+        let laid_out = layout_blocks(crop_size(1_000, 500), 500, 250, &blocks);
         assert_eq!((laid_out[0].x, laid_out[0].y), (50.0, 25.0));
         assert_eq!((laid_out[0].width, laid_out[0].height), (100.0, 40.0));
         assert!(!laid_out[0].callout);
@@ -367,6 +591,104 @@ mod tests {
         assert!(laid_out[1].width >= 180.0);
         assert!(laid_out[1].x + laid_out[1].width <= 500.0);
         assert!(laid_out[1].low_confidence);
+    }
+
+    #[test]
+    fn crop_local_blocks_do_not_subtract_the_physical_screen_origin() {
+        let blocks = vec![
+            BlockLayoutInput {
+                block_id: ScreenBlockId::from("first"),
+                source: "Focused source contracts: 61 pass, 1 Windows symlink EPERM skip"
+                    .to_owned(),
+                translation: "Сфокусированные исходные контракты: 61 прошли, 1 Windows symlink EPERM пропуск. Восстановление продукта, копирование и проверка только для чтения."
+                    .to_owned(),
+                bounds: local_rect(30, 13, 240, 120),
+                confidence_milli: 900,
+            },
+            BlockLayoutInput {
+                block_id: ScreenBlockId::from("second"),
+                source: "revalidated exact v3 lineage and its installed tree".to_owned(),
+                translation: "Перепроверено точное происхождение v3, установленное дерево и пакет времени выполнения. Старый и новый контент остаются отдельной обязательной проверкой."
+                    .to_owned(),
+                bounds: local_rect(30, 133, 251, 117),
+                confidence_milli: 900,
+            },
+        ];
+
+        let laid_out = layout_blocks(crop_size(305, 255), 305, 255, &blocks);
+
+        assert_eq!((laid_out[0].source_x, laid_out[0].source_y), (30.0, 13.0));
+        assert_eq!((laid_out[1].source_x, laid_out[1].source_y), (30.0, 133.0));
+        assert!(laid_out[0].source_y + laid_out[0].source_height <= laid_out[1].source_y);
+        assert!(!overlaps(&laid_out[0], &laid_out[1]));
+    }
+
+    #[test]
+    fn compact_results_are_wide_enough_for_the_complete_header() {
+        let (width, height) = fitted_viewport(crop_size(305, 255));
+
+        assert!(width >= 440);
+        assert!(height >= 320);
+    }
+
+    #[test]
+    fn adjacent_long_translations_receive_non_overlapping_callouts() {
+        let long =
+            "A translated paragraph that needs a readable callout instead of tiny text ".repeat(4);
+        let blocks = vec![
+            BlockLayoutInput {
+                block_id: ScreenBlockId::from("first"),
+                source: "first".to_owned(),
+                translation: long.clone(),
+                bounds: local_rect(20, 20, 70, 20),
+                confidence_milli: 900,
+            },
+            BlockLayoutInput {
+                block_id: ScreenBlockId::from("second"),
+                source: "second".to_owned(),
+                translation: long,
+                bounds: local_rect(20, 45, 70, 20),
+                confidence_milli: 900,
+            },
+        ];
+
+        let laid_out = layout_blocks(crop_size(440, 320), 440, 320, &blocks);
+
+        assert!(laid_out.iter().all(|block| block.callout));
+        assert!(!overlaps(&laid_out[0], &laid_out[1]));
+    }
+
+    #[test]
+    fn dense_results_fall_back_to_one_ordered_scroll_panel() {
+        let long = "A translated paragraph that cannot fit inside its source rectangle ".repeat(5);
+        let blocks = (0..8)
+            .map(|index| BlockLayoutInput {
+                block_id: ScreenBlockId::from(format!("block-{index}")),
+                source: format!("source {index}"),
+                translation: long.clone(),
+                bounds: local_rect(0, index * 40, 440, 36),
+                confidence_milli: 900,
+            })
+            .collect::<Vec<_>>();
+
+        let laid_out = layout_blocks(crop_size(440, 320), 440, 320, &blocks);
+
+        assert!(laid_out.iter().all(|block| block.overflow_panel));
+        assert_eq!(
+            laid_out
+                .iter()
+                .map(|block| block.panel_order)
+                .collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+        assert!(laid_out.iter().all(|block| block.width >= 180.0));
+    }
+
+    fn overlaps(left: &super::BlockLayout, right: &super::BlockLayout) -> bool {
+        left.x < right.x + right.width
+            && right.x < left.x + left.width
+            && left.y < right.y + right.height
+            && right.y < left.y + left.height
     }
 
     #[test]
@@ -401,12 +723,16 @@ mod tests {
         assert!(!preserve_editor_on_snapshot_refresh(true, false));
     }
 
-    fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {
-        PhysicalRect {
+    fn local_rect(x: i32, y: i32, width: u32, height: u32) -> CropLocalRect {
+        CropLocalRect {
             x,
             y,
             width,
             height,
         }
+    }
+
+    fn crop_size(width: u32, height: u32) -> CropPixelSize {
+        CropPixelSize { width, height }
     }
 }

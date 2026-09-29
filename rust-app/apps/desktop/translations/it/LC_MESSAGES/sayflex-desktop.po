@@ -1577,8 +1577,11 @@ msgstr "Elimina ora"
 msgid "Delete this glossary entry?"
 msgstr "Eliminare questa voce del glossario?"
 
-msgid "Deletes temporary images now. Text translations and personal glossary entries remain available."
-msgstr "Elimina ora le immagini temporanee. Le traduzioni testuali e le voci del glossario personale restano disponibili."
+msgid "Open the latest saved screen translation, or delete temporary images. Text translations and personal glossary entries remain available."
+msgstr "Apre l’ultima traduzione dello schermo salvata o elimina le immagini temporanee. Le traduzioni testuali e le voci del glossario personale restano disponibili."
+
+msgid "Open latest"
+msgstr "Apri l’ultima"
 
 msgid "Do not keep"
 msgstr "Non conservare"
@@ -1667,9 +1670,6 @@ msgstr "Conferma"
 msgid "Correct translation"
 msgstr "Correggi traduzione"
 
-msgid "ORIGINAL"
-msgstr "TESTO ORIGINALE"
-
 msgid "Save failed. Your correction is still here."
 msgstr "Salvataggio non riuscito. La correzione è ancora presente."
 
@@ -1678,3 +1678,6 @@ msgstr "Totale SayFlex"
 
 msgid "SayFlex may unload idle engines to protect system resources. Active work is never interrupted."
 msgstr "SayFlex può scaricare i motori inattivi per proteggere le risorse di sistema. Il lavoro attivo non viene mai interrotto."
+
+msgid "The saved screen translation could not be restored."
+msgstr "Impossibile ripristinare la traduzione dello schermo salvata."

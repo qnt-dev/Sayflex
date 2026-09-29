@@ -47,12 +47,13 @@ use rust_protocol::{
 };
 #[cfg(feature = "screen-translation")]
 use rust_protocol::{
-    BlockCompletion, GlossaryEntryDraft, GlossaryOrigin, OcrFailureKind, OcrLanguagePolicy,
-    OcrPixelFormat, OcrWorkerCommand, OcrWorkerEvent, SourceContext, TranslatedScreenBlock,
+    GlossaryEntryDraft, GlossaryOrigin, OcrFailureKind, OcrLanguagePolicy, OcrPixelFormat,
+    OcrWorkerCommand, OcrWorkerEvent, SourceContext,
 };
 #[cfg(feature = "screen-translation")]
 use screen_result::{
-    MIN_ADMITTED_OCR_CONFIDENCE_MILLI, ScreenTranslationDocument, screen_blocks_from_ocr,
+    DocumentError, MIN_ADMITTED_OCR_CONFIDENCE_MILLI, ScreenTranslationDocument,
+    screen_blocks_from_ocr,
 };
 #[cfg(feature = "screen-translation")]
 use screen_translation::ScreenTranslationBegin;
@@ -300,6 +301,23 @@ enum RuntimeEvent {
     DeleteStoredScreenshots,
     #[cfg(feature = "screen-translation")]
     StoredScreenshotsDeleted(Result<usize, String>),
+    #[cfg(feature = "screen-translation")]
+    OpenLatestScreenTranslation,
+    #[cfg(feature = "screen-translation")]
+    LatestScreenTranslationLoaded(
+        Result<
+            Option<(
+                ScreenTranslationDocument,
+                TranslationLanguage,
+                TranslationLanguage,
+            )>,
+            String,
+        >,
+    ),
+    #[cfg(feature = "screen-translation")]
+    ScreenPixelsExpired {
+        request_id: RequestId,
+    },
     ConfirmQueuedModelInstall,
     ScreenSelectionPointer(rust_platform_windows::region_selection::PointerEvent),
     ScreenSelectionWatchdog {
@@ -1578,7 +1596,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             std::time::Duration::from_secs(15 * 60),
             move || {
                 let now = unix_ms();
-                cleanup_screen_translation.borrow_mut().expire_pixels(now);
+                expire_screen_translation_pixels(
+                    &cleanup_screen_translation,
+                    now,
+                    |request_id| {
+                        dispatch_runtime_event(RuntimeEvent::ScreenPixelsExpired { request_id });
+                    },
+                );
                 let Some(store) = cleanup_store.as_ref().map(Arc::clone) else {
                     return;
                 };
@@ -1594,6 +1618,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             "screen_snapshot_cleanup removed_entries={} removed_orphans={} errors={}",
                             report.removed_entries, report.removed_orphans, report.error_count
                         ));
+                        for request_id in report.removed_request_ids {
+                            dispatch_runtime_event(RuntimeEvent::ScreenPixelsExpired { request_id });
+                        }
                         running_for_thread.store(false, Ordering::Release);
                     })
                     .is_err()
@@ -1899,10 +1926,9 @@ fn delete_stored_screenshots(runtime: &RuntimeUi) {
 fn finish_delete_stored_screenshots(result: Result<usize, String>, runtime: &RuntimeUi) {
     match result {
         Ok(removed) => {
-            runtime
-                .screen_translation
-                .borrow_mut()
-                .expire_pixels(u64::MAX);
+            expire_screen_translation_pixels(&runtime.screen_translation, u64::MAX, |request_id| {
+                invalidate_screen_result_pixels(request_id, runtime)
+            });
             rust_app_core::diagnostics::log_line(&format!(
                 "screen_snapshot_delete_all removed={removed}"
             ));
@@ -2407,6 +2433,18 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
         RuntimeEvent::StoredScreenshotsDeleted(result) => {
             finish_delete_stored_screenshots(result, runtime);
         }
+        #[cfg(feature = "screen-translation")]
+        RuntimeEvent::OpenLatestScreenTranslation => {
+            open_latest_screen_translation(runtime);
+        }
+        #[cfg(feature = "screen-translation")]
+        RuntimeEvent::LatestScreenTranslationLoaded(result) => {
+            finish_open_latest_screen_translation(result, runtime);
+        }
+        #[cfg(feature = "screen-translation")]
+        RuntimeEvent::ScreenPixelsExpired { request_id } => {
+            invalidate_screen_result_pixels(request_id, runtime);
+        }
         RuntimeEvent::ConfirmQueuedModelInstall => {
             confirm_queued_model_install(runtime);
         }
@@ -2617,14 +2655,14 @@ fn screen_translation_editor_position(
             block_id: block.block_id.clone(),
             source: block.source.clone(),
             translation: block.translation.clone(),
-            bounds: block.bounds,
+            bounds: screen_result_view::CropLocalRect::from_ocr_bounds(block.bounds),
             confidence_milli: block.confidence_milli,
         })
         .collect::<Vec<_>>();
     let viewport_width = slot.preview.get_screen_content_width().max(1.0) as u32;
     let viewport_height = slot.preview.get_screen_content_height().max(1.0) as u32;
     let block = screen_result_view::layout_blocks(
-        snapshot.crop_rect,
+        screen_result_view::CropPixelSize::from_screen_rect(snapshot.crop_rect),
         viewport_width,
         viewport_height,
         &inputs,
@@ -2632,7 +2670,7 @@ fn screen_translation_editor_position(
     .get(block_index)
     .cloned()?;
     let editor_width = 330.0_f32.min((viewport_width as f32 - 16.0).max(1.0));
-    let editor_height = 230.0_f32.min((viewport_height as f32 - 16.0).max(1.0));
+    let editor_height = 282.0_f32.min((viewport_height as f32 - 16.0).max(1.0));
     let right_candidate = block.x + block.width + 8.0;
     let left_candidate = block.x - editor_width - 8.0;
     let x = if right_candidate + editor_width <= viewport_width as f32 {
@@ -2645,6 +2683,33 @@ fn screen_translation_editor_position(
         .y
         .clamp(8.0, (viewport_height as f32 - editor_height - 8.0).max(8.0));
     Some((x, y))
+}
+
+#[cfg(feature = "screen-translation")]
+fn save_screen_translation_edit(
+    coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
+    request_id: RequestId,
+    block_id: &rust_protocol::ScreenBlockId,
+    expected_revision: u64,
+    text: String,
+) -> Result<u64, DocumentError> {
+    coordinator
+        .borrow_mut()
+        .save_user_edit(request_id, block_id, expected_revision, text)
+}
+
+#[cfg(feature = "screen-translation")]
+fn expire_screen_translation_pixels(
+    coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
+    now_unix_ms: u64,
+    mut on_released: impl FnMut(RequestId),
+) -> usize {
+    let released = coordinator.borrow_mut().expire_pixels(now_unix_ms);
+    let count = released.len();
+    for request_id in released {
+        on_released(request_id);
+    }
+    count
 }
 
 #[cfg(feature = "screen-translation")]
@@ -2665,7 +2730,8 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
         .get_screen_editor_translation()
         .trim()
         .to_owned();
-    if edited.is_empty() {
+    let source_phrase = slot.preview.get_screen_editor_original().trim().to_owned();
+    if edited.is_empty() || source_phrase.is_empty() {
         slot.preview.set_screen_save_error(true);
         slot.preview.set_screen_editor_saving(false);
         *runtime.active_screen_editor.borrow_mut() = Some(active);
@@ -2688,7 +2754,8 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
     };
 
     if edited != active.last_applied_translation {
-        match runtime.screen_translation.borrow_mut().save_user_edit(
+        match save_screen_translation_edit(
+            &runtime.screen_translation,
             active.state.key().request_id,
             &active.state.key().block_id,
             active.canonical_revision,
@@ -2697,11 +2764,25 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
             Ok(revision) => {
                 active.canonical_revision = revision;
                 active.last_applied_translation.clone_from(&edited);
+                let persisted_snapshot = runtime
+                    .screen_translation
+                    .borrow()
+                    .result_snapshot(active.state.key().request_id)
+                    .ok()
+                    .map(|(snapshot, _, _)| snapshot);
                 refresh_screen_result_preview(
                     active.state.key().request_id,
                     active.block_index,
                     runtime,
                 );
+                if let Some(snapshot) = persisted_snapshot.as_ref() {
+                    persist_completed_screen_snapshot(
+                        snapshot,
+                        active.source_language,
+                        active.target_language,
+                        runtime.screenshot_store.as_ref(),
+                    );
+                }
             }
             Err(error) => {
                 active.state.fail(operation_id, format!("{error:?}"), true);
@@ -2713,14 +2794,12 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
         }
     }
 
-    let example = active
-        .context
-        .nearby_text
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| active.state.source().to_owned());
+    // The editable phrase is the reusable glossary key. The complete OCR
+    // block remains the example so a one-word correction is not detached
+    // from the sentence in which the user approved it.
+    let example = active.state.source().to_owned();
     let entry = GlossaryEntryDraft {
-        source_phrase: active.state.source().to_owned(),
+        source_phrase,
         approved_translation: active.state.translation().to_owned(),
         source_language: active.source_language,
         target_language: active.target_language,
@@ -2896,6 +2975,112 @@ fn finish_delete_screen_translation_image(
         set_status_problem(&runtime.settings, &error);
         return;
     }
+    invalidate_screen_result_pixels(request_id, runtime);
+}
+
+#[cfg(feature = "screen-translation")]
+fn open_latest_screen_translation(runtime: &RuntimeUi) {
+    let Some(store) = runtime.screenshot_store.as_ref().map(Arc::clone) else {
+        set_indicator_status(
+            &runtime.settings,
+            state_text(&runtime.state, UiText::NothingKeptYet),
+        );
+        return;
+    };
+    if let Err(error) = std::thread::Builder::new()
+        .name("screen-snapshot-open-latest".to_owned())
+        .spawn(move || {
+            dispatch_runtime_event(RuntimeEvent::LatestScreenTranslationLoaded(
+                store
+                    .load_latest_result(unix_ms())
+                    .map_err(|error| error.to_string()),
+            ));
+        })
+    {
+        set_status_problem(&runtime.settings, &error.to_string());
+    }
+}
+
+#[cfg(feature = "screen-translation")]
+fn finish_open_latest_screen_translation(
+    result: Result<
+        Option<(
+            ScreenTranslationDocument,
+            TranslationLanguage,
+            TranslationLanguage,
+        )>,
+        String,
+    >,
+    runtime: &RuntimeUi,
+) {
+    let (document, source_language, target_language) = match result {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            set_indicator_status(
+                &runtime.settings,
+                state_text(&runtime.state, UiText::NothingKeptYet),
+            );
+            return;
+        }
+        Err(error) => {
+            set_status_problem(&runtime.settings, &error);
+            return;
+        }
+    };
+    let request_id = document.request_id();
+    runtime.screen_translation.borrow_mut().restore_document(
+        document,
+        source_language,
+        target_language,
+    );
+    let Ok((snapshot, _, _)) = runtime
+        .screen_translation
+        .borrow()
+        .result_snapshot(request_id)
+    else {
+        set_status_problem(
+            &runtime.settings,
+            state_text(&runtime.state, UiText::ScreenTranslationRestoreFailed),
+        );
+        return;
+    };
+
+    if runtime
+        .translation_previews
+        .borrow()
+        .slot_for_request(request_id)
+        .is_none()
+    {
+        let blur_radius = runtime.translation_previews.borrow().blur_radius;
+        let slot = match create_translation_preview_slot(blur_radius) {
+            Ok(slot) => slot,
+            Err(error) => {
+                set_status_problem(&runtime.settings, &error.to_string());
+                return;
+            }
+        };
+        precreate_translation_preview(&slot);
+        slot.preview.set_request_id(request_id.to_string().into());
+        slot.preview.set_prepared(false);
+        runtime.translation_previews.borrow_mut().pinned.push(slot);
+    }
+    show_screen_image_result(request_id, snapshot.crop_rect, &snapshot, runtime);
+    if let Some(slot) = runtime
+        .translation_previews
+        .borrow()
+        .slot_for_request(request_id)
+    {
+        let _ = slot.preview.window().show();
+        let _ = slot
+            .preview
+            .window()
+            .with_winit_window(|window| window.focus_window());
+        slot.preview.window().request_redraw();
+    }
+}
+
+#[cfg(feature = "screen-translation")]
+fn invalidate_screen_result_pixels(request_id: RequestId, runtime: &RuntimeUi) {
     let editor_request = runtime
         .active_screen_editor
         .borrow()
@@ -3620,6 +3805,7 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                         .screen_translation
                         .borrow_mut()
                         .take_context(request_id);
+                    let context = ContextCollector::attach_nearby_text(context, &expected_text);
                     let retained_crop = Arc::clone(&crop);
                     let retention_ms = u64::from(runtime.state.borrow().screenshot_retention_hours)
                         .saturating_mul(60 * 60 * 1_000);
@@ -3659,6 +3845,7 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                     if let Some(store) = runtime.screenshot_store.as_ref() {
                         let metadata = ScreenshotMetadata {
                             request_id,
+                            revision: document.revision(),
                             crop_x: crop_rect.x,
                             crop_y: crop_rect.y,
                             width: crop_rect.width,
@@ -3666,6 +3853,8 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                             blocks: document.source_blocks(),
                             translations: Vec::new(),
                             context: document.context.clone(),
+                            source_language: None,
+                            target_language: None,
                             created_unix_ms: document.created_unix_ms,
                             expires_unix_ms: document.expires_unix_ms,
                             crop_filename: String::new(),
@@ -3683,6 +3872,13 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                                             report.removed_entries + report.removed_orphans,
                                             report.error_count
                                         ));
+                                        for removed_request_id in report.removed_request_ids {
+                                            dispatch_runtime_event(
+                                                RuntimeEvent::ScreenPixelsExpired {
+                                                    request_id: removed_request_id,
+                                                },
+                                            );
+                                        }
                                     }
                                     Err(error) => rust_app_core::diagnostics::log_line(&format!(
                                         "screen_snapshot request={request_id} result=failed error={error}"
@@ -5232,46 +5428,21 @@ fn show_screen_image_result(
 #[cfg(feature = "screen-translation")]
 fn persist_completed_screen_snapshot(
     snapshot: &screen_result::ScreenResultSnapshot,
+    source_language: TranslationLanguage,
+    target_language: TranslationLanguage,
     store: Option<&Arc<ScreenshotStore>>,
 ) {
-    let (Some(store), Some(crop)) = (store.map(Arc::clone), snapshot.crop.clone()) else {
+    let Some(store) = store.map(Arc::clone) else {
         return;
     };
-    let metadata = ScreenshotMetadata {
-        request_id: snapshot.request_id,
-        crop_x: snapshot.crop_rect.x,
-        crop_y: snapshot.crop_rect.y,
-        width: snapshot.crop_rect.width,
-        height: snapshot.crop_rect.height,
-        blocks: snapshot
-            .blocks
-            .iter()
-            .map(|block| rust_protocol::ScreenTextBlock {
-                block_id: block.block_id.clone(),
-                source_text: block.source.clone(),
-                bounds: block.bounds,
-                confidence_milli: block.confidence_milli,
-            })
-            .collect(),
-        translations: snapshot
-            .blocks
-            .iter()
-            .map(|block| TranslatedScreenBlock {
-                block_id: block.block_id.clone(),
-                translated_text: block.translation.clone(),
-                completion: BlockCompletion::Completed,
-                failure_message: None,
-            })
-            .collect(),
-        context: snapshot.context.clone(),
-        created_unix_ms: snapshot.created_unix_ms,
-        expires_unix_ms: snapshot.expires_unix_ms,
-        crop_filename: String::new(),
-    };
+    let snapshot = snapshot.clone();
     let request_id = snapshot.request_id;
     if std::thread::Builder::new()
         .name("screen-snapshot-finalize".to_owned())
-        .spawn(move || match store.persist_crop(metadata, crop.as_ref()) {
+        .spawn(move || match store.persist_snapshot(
+            &snapshot,
+            Some((source_language, target_language)),
+        ) {
             Ok(_) => rust_app_core::diagnostics::log_line(&format!(
                 "screen_snapshot request={request_id} result=translations_updated"
             )),
@@ -6654,6 +6825,8 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
                             show_screen_image_result(request_id, anchor, &snapshot, runtime);
                             persist_completed_screen_snapshot(
                                 &snapshot,
+                                source_language,
+                                target_language,
                                 runtime.screenshot_store.as_ref(),
                             );
                         }
@@ -7748,6 +7921,121 @@ fn unix_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(all(test, feature = "screen-translation"))]
+mod screen_translation_edit_borrow_tests {
+    use std::{cell::RefCell, rc::Rc, sync::Arc};
+
+    use rust_platform_windows::screen_capture::RgbaFrame;
+    use rust_protocol::{PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext};
+
+    use super::{
+        ScreenTranslationCoordinator, ScreenTranslationDocument, expire_screen_translation_pixels,
+        save_screen_translation_edit,
+    };
+
+    #[test]
+    fn saving_an_edit_releases_the_mutable_coordinator_borrow_before_refresh_reads() {
+        let request_id = RequestId::new();
+        let block_id = ScreenBlockId::from("block-1");
+        let crop = Arc::new(
+            RgbaFrame::try_new(
+                PhysicalRect {
+                    x: 3_002,
+                    y: 313,
+                    width: 1,
+                    height: 1,
+                },
+                4,
+                vec![0, 0, 0, 255],
+            )
+            .unwrap(),
+        );
+        let document = ScreenTranslationDocument::new(
+            request_id,
+            crop,
+            vec![ScreenTextBlock {
+                block_id: block_id.clone(),
+                source_text: "Cooldown".to_owned(),
+                bounds: PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                confidence_milli: 900,
+            }],
+            SourceContext::default(),
+            1,
+            2,
+        )
+        .unwrap();
+        let coordinator = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+        coordinator.borrow_mut().insert_document(document);
+
+        let revision = save_screen_translation_edit(
+            &coordinator,
+            request_id,
+            &block_id,
+            0,
+            "Перезарядка".to_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(revision, 1);
+        assert_eq!(
+            coordinator.borrow().copy_text(request_id).unwrap(),
+            "Перезарядка"
+        );
+    }
+
+    #[test]
+    fn expiry_dispatches_each_released_request_to_the_view_layer() {
+        let request_id = RequestId::new();
+        let crop = Arc::new(
+            RgbaFrame::try_new(
+                PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                4,
+                vec![0, 0, 0, 255],
+            )
+            .unwrap(),
+        );
+        let document = ScreenTranslationDocument::new(
+            request_id,
+            crop,
+            vec![ScreenTextBlock {
+                block_id: ScreenBlockId::from("block-1"),
+                source_text: "Source".to_owned(),
+                bounds: PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                confidence_milli: 900,
+            }],
+            SourceContext::default(),
+            1,
+            2,
+        )
+        .unwrap();
+        let coordinator = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+        coordinator.borrow_mut().insert_document(document);
+        let mut notified = Vec::new();
+
+        let released = expire_screen_translation_pixels(&coordinator, 2, |expired| {
+            notified.push(expired);
+        });
+
+        assert_eq!(released, 1);
+        assert_eq!(notified, vec![request_id]);
+    }
 }
 
 #[cfg(test)]

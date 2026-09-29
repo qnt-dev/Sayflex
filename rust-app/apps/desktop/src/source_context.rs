@@ -30,28 +30,63 @@ impl ContextCollector {
             executable_name: bounded(source.executable_name.as_deref()),
             window_title: bounded(source.window_title.as_deref()),
             site_url: None,
-            document_name: None,
+            document_name: document_name(
+                source.executable_name.as_deref(),
+                source.window_title.as_deref(),
+            ),
             nearby_text: None,
             domain: recognized_domain(source.executable_name.as_deref()),
             partial: source.partial,
         }
     }
+
+    pub(crate) fn attach_nearby_text(mut context: SourceContext, text: &str) -> SourceContext {
+        context.nearby_text = bounded_to(
+            Some(text),
+            rust_protocol::MAX_SOURCE_CONTEXT_NEARBY_TEXT_BYTES,
+        );
+        context
+    }
 }
 
 fn bounded(value: Option<&str>) -> Option<String> {
-    const MAX_BYTES: usize = rust_protocol::MAX_SOURCE_CONTEXT_FIELD_BYTES;
+    bounded_to(value, rust_protocol::MAX_SOURCE_CONTEXT_FIELD_BYTES)
+}
+
+fn bounded_to(value: Option<&str>, max_bytes: usize) -> Option<String> {
     let value = value?.trim();
     if value.is_empty() {
         return None;
     }
-    if value.len() <= MAX_BYTES {
+    if value.len() <= max_bytes {
         return Some(value.to_owned());
     }
-    let mut end = MAX_BYTES;
+    let mut end = max_bytes;
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
     Some(value[..end].to_owned())
+}
+
+fn document_name(executable: Option<&str>, title: Option<&str>) -> Option<String> {
+    let executable = executable?.to_ascii_lowercase();
+    let title = title?.trim();
+    let suffixes: &[&str] = match executable.as_str() {
+        "firefox.exe" => &[" — Mozilla Firefox", " - Mozilla Firefox"],
+        "chrome.exe" => &[" - Google Chrome"],
+        "msedge.exe" => &[" - Microsoft Edge"],
+        "brave.exe" => &[" - Brave"],
+        "opera.exe" => &[" - Opera"],
+        "sumatrapdf.exe" => &[" - SumatraPDF"],
+        "acrord32.exe" | "acrobat.exe" => &[" - Adobe Acrobat Reader", " - Adobe Acrobat"],
+        _ => return None,
+    };
+    suffixes
+        .iter()
+        .find_map(|suffix| title.strip_suffix(suffix))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| bounded(Some(value)))
 }
 
 fn recognized_domain(executable: Option<&str>) -> Option<String> {
@@ -108,6 +143,35 @@ mod tests {
         assert_eq!(context.executable_name.as_deref(), Some("firefox.exe"));
         assert_eq!(context.window_title.as_deref(), Some("Example page"));
         assert_eq!(context.site_url, None);
+    }
+
+    #[test]
+    fn browser_and_pdf_titles_expose_real_document_names_without_inventing_urls() {
+        let browser = ContextCollector::from_snapshot(&snapshot(
+            "firefox.exe",
+            "Release notes — Mozilla Firefox",
+        ));
+        let pdf = ContextCollector::from_snapshot(&snapshot(
+            "SumatraPDF.exe",
+            "Rust Reference.pdf - SumatraPDF",
+        ));
+
+        assert_eq!(browser.document_name.as_deref(), Some("Release notes"));
+        assert_eq!(browser.site_url, None);
+        assert_eq!(pdf.document_name.as_deref(), Some("Rust Reference.pdf"));
+    }
+
+    #[test]
+    fn selected_ocr_text_is_retained_as_bounded_untrusted_nearby_context() {
+        let context = ContextCollector::attach_nearby_text(
+            ContextCollector::from_snapshot(&snapshot("game.exe", "Game")),
+            "  Cooldown reduced by 25%  ",
+        );
+
+        assert_eq!(
+            context.nearby_text.as_deref(),
+            Some("Cooldown reduced by 25%")
+        );
     }
 
     #[test]

@@ -335,6 +335,7 @@ ScreenOcrNoText|No readable text was found in the selected area.
 ScreenOcrModelUnavailable|The local screen-reading model is not installed. Install it in Models.
 ScreenOcrLanguageUnavailable|This language is not available for local screen reading.
 ScreenOcrWorkerFailed|Screen text recognition stopped unexpectedly. Try again.
+ScreenTranslationRestoreFailed|The saved screen translation could not be restored.
 ScreenTranslationCancelled|Screen translation was cancelled.
 CompactModelDownloadOffer|Download {model} ({size}) to translate this language pair.
 DownloadModel|Download model

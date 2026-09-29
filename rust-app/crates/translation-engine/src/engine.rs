@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io,
     net::TcpListener,
+    ops::Range,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -35,6 +36,7 @@ const MAX_SOURCE_TOKENS_PER_REQUEST: usize = 1_200;
 // ordinary short selections.
 const MAX_UTF8_BYTES_WITHOUT_TOKENIZE: usize = 1_000;
 const _: () = assert!(MAX_UTF8_BYTES_WITHOUT_TOKENIZE < MAX_SOURCE_TOKENS_PER_REQUEST);
+const STRUCTURED_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(90);
 /// Attempts allowed when the server exits during startup, which is how losing
 /// the race for the drawn port presents itself. Each lost race costs seconds,
@@ -255,52 +257,112 @@ impl TranslationEngine {
         }
 
         if self.pack.backend.requires_llama_runtime() {
-            let messages =
-                structured_translation_messages(blocks, context, glossary, source, target)?;
             self.ensure_runtime()?;
-            let response = match self.runtime.as_mut() {
+            let deadline = Instant::now() + STRUCTURED_OPERATION_TIMEOUT;
+            let operation_active = || should_continue() && Instant::now() < deadline;
+            let planned_ranges = match self.runtime.as_ref() {
                 Some(ResidentRuntime::Llama(runtime)) => {
-                    runtime.translate_structured(messages, should_continue)
-                }
-                _ => bail!("translation runtime kind does not match its catalog backend"),
-            };
-            let translated = match response {
-                Ok(response) => validate_structured_response(&response, blocks),
-                Err(error) if error.downcast_ref::<TranslationCancelled>().is_some() => {
-                    return Err(error);
-                }
-                Err(error) => Err(error),
-            };
-            let translated = match translated {
-                Ok(translated) => translated,
-                // One bounded recovery pass keeps a malformed group from
-                // discarding otherwise independent blocks.  Each retry still
-                // uses the typed envelope and exact-ID validation.
-                Err(group_error) => {
-                    let mut recovered = Vec::with_capacity(blocks.len());
-                    for block in blocks {
+                    greedy_structured_ranges(blocks, |candidate| {
                         if !should_continue() {
                             return Err(TranslationCancelled.into());
                         }
-                        let single = std::slice::from_ref(block);
+                        if Instant::now() >= deadline {
+                            bail!("structured screen translation exceeded its operation deadline");
+                        }
                         let messages = structured_translation_messages(
-                            single, context, glossary, source, target,
+                            candidate, context, glossary, source, target,
                         )?;
-                        let Some(ResidentRuntime::Llama(runtime)) = self.runtime.as_mut() else {
-                            bail!("translation runtime kind changed during structured recovery");
-                        };
-                        let response = runtime
-                            .translate_structured(messages, should_continue)
-                            .with_context(|| {
-                                format!(
-                                    "structured translation recovery failed after: {group_error:#}"
-                                )
-                            })?;
-                        recovered.extend(validate_structured_response(&response, single)?);
-                    }
-                    recovered
+                        runtime.structured_request_fits(&messages, &operation_active)
+                    })
                 }
+                _ => bail!("translation runtime kind does not match its catalog backend"),
             };
+            let ranges = match planned_ranges {
+                Err(error)
+                    if error.downcast_ref::<TranslationCancelled>().is_some()
+                        && should_continue()
+                        && Instant::now() >= deadline =>
+                {
+                    bail!("structured screen translation exceeded its operation deadline")
+                }
+                other => other?,
+            };
+            let mut translated = Vec::with_capacity(blocks.len());
+            for range in ranges {
+                let group = &blocks[range];
+                let messages =
+                    structured_translation_messages(group, context, glossary, source, target)?;
+                let response = match self.runtime.as_mut() {
+                    Some(ResidentRuntime::Llama(runtime)) => {
+                        runtime.translate_structured(messages, &operation_active)
+                    }
+                    _ => bail!("translation runtime kind changed during structured translation"),
+                };
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error)
+                        if error.downcast_ref::<TranslationCancelled>().is_some()
+                            && should_continue()
+                            && Instant::now() >= deadline =>
+                    {
+                        bail!("structured screen translation exceeded its operation deadline")
+                    }
+                    Err(error) => return Err(error),
+                };
+                match validate_structured_response(&response, group) {
+                    Ok(group_output) => translated.extend(group_output),
+                    Err(group_error) if group.len() > 1 => {
+                        // One bounded recovery pass keeps a malformed group
+                        // from discarding independent blocks. Transport and
+                        // timeout failures never fan out into N retries.
+                        for block in group {
+                            if !should_continue() {
+                                return Err(TranslationCancelled.into());
+                            }
+                            if Instant::now() >= deadline {
+                                bail!(
+                                    "structured screen translation exceeded its operation deadline"
+                                );
+                            }
+                            let single = std::slice::from_ref(block);
+                            let messages = structured_translation_messages(
+                                single, context, glossary, source, target,
+                            )?;
+                            let Some(ResidentRuntime::Llama(runtime)) = self.runtime.as_mut()
+                            else {
+                                bail!(
+                                    "translation runtime kind changed during structured recovery"
+                                );
+                            };
+                            let response = match runtime
+                                .translate_structured(messages, &operation_active)
+                            {
+                                Ok(response) => response,
+                                Err(error)
+                                    if error.downcast_ref::<TranslationCancelled>().is_some()
+                                        && should_continue()
+                                        && Instant::now() >= deadline =>
+                                {
+                                    bail!(
+                                        "structured screen translation exceeded its operation deadline"
+                                    )
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            translated.extend(
+                                validate_structured_response(&response, single).with_context(
+                                    || {
+                                        format!(
+                                            "structured translation recovery failed after: {group_error:#}"
+                                        )
+                                    },
+                                )?,
+                            );
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             return Ok(BlockTranslationOutput {
                 blocks: translated,
                 source_language: source,
@@ -812,12 +874,26 @@ impl LlamaRuntime {
             };
             let status = response.status();
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
+                let body = tokio::select! {
+                    body = response.text() => body.unwrap_or_default(),
+                    () = wait_until_cancelled(should_continue) => {
+                        return Err(TranslationCancelled.into());
+                    }
+                };
                 bail!("local structured translation runtime returned {status}: {body}");
             }
-            let response: ChatResponse = response
-                .json()
-                .await
+            // Cancellation must cover response-body delivery as well as the
+            // initial HTTP headers. A local runtime can acknowledge a request
+            // and then stall while generating; waiting on Response::json()
+            // alone made Cancel ineffective for that entire interval.
+            let body = tokio::select! {
+                body = response.bytes() => body
+                    .context("could not read the local structured translation response")?,
+                () = wait_until_cancelled(should_continue) => {
+                    return Err(TranslationCancelled.into());
+                }
+            };
+            let response: ChatResponse = serde_json::from_slice(&body)
                 .context("local structured translation runtime returned invalid JSON")?;
             let choice = response.choices.into_iter().next().ok_or_else(|| {
                 anyhow!("local structured translation runtime returned no result")
@@ -853,6 +929,69 @@ impl LlamaRuntime {
             .json()
             .context("local tokenizer returned invalid JSON")?;
         Ok(response.tokens.len())
+    }
+
+    fn structured_request_fits(
+        &self,
+        messages: &(String, String),
+        should_continue: &impl Fn() -> bool,
+    ) -> Result<bool> {
+        let bytes = messages
+            .0
+            .len()
+            .saturating_add(1)
+            .saturating_add(messages.1.len());
+        if bytes <= MAX_UTF8_BYTES_WITHOUT_TOKENIZE {
+            return Ok(true);
+        }
+        let mut complete = String::with_capacity(bytes);
+        complete.push_str(&messages.0);
+        complete.push('\n');
+        complete.push_str(&messages.1);
+        Ok(self.token_count_cancellable(&complete, should_continue)?
+            <= MAX_SOURCE_TOKENS_PER_REQUEST)
+    }
+
+    fn token_count_cancellable(
+        &self,
+        text: &str,
+        should_continue: &impl Fn() -> bool,
+    ) -> Result<usize> {
+        let request = self
+            .async_client
+            .post(format!("{}/tokenize", self.endpoint))
+            .header(AUTHORIZATION, &self.authorization)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&TokenizeRequest {
+                content: text,
+                add_special: false,
+                parse_special: false,
+            });
+        self.async_runtime.block_on(async {
+            let response = tokio::select! {
+                response = request.send() => response
+                    .context("local tokenizer request failed")?,
+                () = wait_until_cancelled(should_continue) => {
+                    return Err(TranslationCancelled.into());
+                }
+            };
+            let status = response.status();
+            let body = tokio::select! {
+                body = response.bytes() => body.context("could not read the local tokenizer response")?,
+                () = wait_until_cancelled(should_continue) => {
+                    return Err(TranslationCancelled.into());
+                }
+            };
+            if !status.is_success() {
+                bail!(
+                    "local tokenizer returned {status}: {}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
+            let response: TokenizeResponse = serde_json::from_slice(&body)
+                .context("local tokenizer returned invalid JSON")?;
+            Ok(response.tokens.len())
+        })
     }
 
     fn translate_unit_streaming(
@@ -1155,6 +1294,43 @@ fn structured_translation_messages(
     Ok((system, user))
 }
 
+fn greedy_structured_ranges(
+    blocks: &[ScreenTextBlock],
+    mut fits: impl FnMut(&[ScreenTextBlock]) -> Result<bool>,
+) -> Result<Vec<Range<usize>>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < blocks.len() {
+        let first_end = start + 1;
+        if !fits(&blocks[start..first_end])? {
+            bail!("one screen translation block exceeds the structured request budget");
+        }
+        if first_end == blocks.len() || fits(&blocks[start..])? {
+            ranges.push(start..blocks.len());
+            break;
+        }
+
+        // Capacity is monotonic because candidates only append complete JSON
+        // blocks. Probe the boundary logarithmically; the previous linear walk
+        // could ask llama.cpp to tokenize dozens of nearly identical payloads
+        // before translating a dense screenshot.
+        let mut admitted_end = first_end;
+        let mut rejected_end = blocks.len();
+        while admitted_end + 1 < rejected_end {
+            let candidate_end = admitted_end + (rejected_end - admitted_end) / 2;
+            if fits(&blocks[start..candidate_end])? {
+                admitted_end = candidate_end;
+            } else {
+                rejected_end = candidate_end;
+            }
+        }
+        let end = admitted_end;
+        ranges.push(start..end);
+        start = end;
+    }
+    Ok(ranges)
+}
+
 fn validate_structured_response(
     response: &str,
     source_blocks: &[ScreenTextBlock],
@@ -1196,10 +1372,12 @@ fn validate_structured_response(
 }
 
 fn validate_protected_values(source: &str, translated: &str) -> Result<()> {
-    for protected in protected_values(source) {
-        if !translated.contains(&protected) {
-            bail!("structured translation changed or omitted protected value {protected:?}");
-        }
+    let expected = protected_values(source);
+    let actual = protected_values(translated);
+    if expected != actual {
+        bail!(
+            "structured translation changed protected values: expected {expected:?}, received {actual:?}"
+        );
     }
     Ok(())
 }
@@ -1210,14 +1388,29 @@ fn protected_values(text: &str) -> Vec<String> {
     let mut index = 0;
     while index < characters.len() {
         let (byte, character) = characters[index];
-        if character.is_ascii_digit() {
+        let signed_number = matches!(character, '+' | '-')
+            && characters
+                .get(index + 1)
+                .is_some_and(|(_, next)| next.is_ascii_digit())
+            && index
+                .checked_sub(1)
+                .and_then(|previous| characters.get(previous))
+                .is_none_or(|(_, previous)| !previous.is_alphanumeric() && *previous != '_');
+        if character.is_ascii_digit() || signed_number {
             let mut end = byte + character.len_utf8();
             index += 1;
             while index < characters.len() {
                 let (next_byte, next) = characters[index];
-                if next.is_ascii_digit() || matches!(next, '.' | ',' | ':' | '-' | '/' | '%') {
+                let numeric_separator = matches!(next, '.' | ',' | ':' | '-' | '/')
+                    && characters
+                        .get(index + 1)
+                        .is_some_and(|(_, following)| following.is_ascii_digit());
+                if next.is_ascii_digit() || numeric_separator || next == '%' {
                     end = next_byte + next.len_utf8();
                     index += 1;
+                    if next == '%' {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -1252,7 +1445,6 @@ fn protected_values(text: &str) -> Vec<String> {
         }
     }
     values.sort();
-    values.dedup();
     values
 }
 
@@ -1689,10 +1881,11 @@ mod tests {
     };
 
     use super::{
-        detect_language, normalize_line_endings, normalize_single_word_repetition,
-        split_at_natural_boundaries, strip_reasoning, structured_translation_messages,
-        translate_with_truncation_recovery, translation_instruction, translation_user_message,
-        validate_finish_reason, validate_structured_response,
+        detect_language, greedy_structured_ranges, normalize_line_endings,
+        normalize_single_word_repetition, split_at_natural_boundaries, strip_reasoning,
+        structured_translation_messages, translate_with_truncation_recovery,
+        translation_instruction, translation_user_message, validate_finish_reason,
+        validate_structured_response,
     };
 
     #[test]
@@ -1941,6 +2134,59 @@ mod tests {
     }
 
     #[test]
+    fn structured_screen_blocks_are_grouped_before_the_request_exceeds_its_budget() {
+        let blocks = (0..5)
+            .map(|index| ScreenTextBlock {
+                block_id: ScreenBlockId::from(format!("block-{index}")),
+                source_text: format!("source-{index}"),
+                bounds: PhysicalRect {
+                    x: 0,
+                    y: index * 20,
+                    width: 100,
+                    height: 20,
+                },
+                confidence_milli: 900,
+            })
+            .collect::<Vec<_>>();
+
+        let ranges =
+            greedy_structured_ranges(&blocks, |candidate| Ok(candidate.len() <= 2)).unwrap();
+
+        assert_eq!(ranges, vec![0..2, 2..4, 4..5]);
+    }
+
+    #[test]
+    fn structured_group_planning_does_not_probe_every_prefix() {
+        let blocks = (0..64)
+            .map(|index| ScreenTextBlock {
+                block_id: ScreenBlockId::from(format!("block-{index}")),
+                source_text: format!("source-{index}"),
+                bounds: PhysicalRect {
+                    x: 0,
+                    y: index * 20,
+                    width: 100,
+                    height: 20,
+                },
+                confidence_milli: 900,
+            })
+            .collect::<Vec<_>>();
+        let probes = std::cell::Cell::new(0);
+
+        let ranges = greedy_structured_ranges(&blocks, |candidate| {
+            probes.set(probes.get() + 1);
+            Ok(candidate.len() <= 32)
+        })
+        .unwrap();
+
+        assert_eq!(ranges, vec![0..32, 32..64]);
+        assert!(
+            probes.get() <= 16,
+            "monotonic capacity probing should be logarithmic, got {} calls",
+            probes.get()
+        );
+    }
+
+    #[test]
     fn structured_response_requires_the_exact_id_set_and_preserved_values() {
         let blocks = vec![
             ScreenTextBlock {
@@ -1977,6 +2223,29 @@ mod tests {
         let damaged = r#"{"translations":[{"block_id":"a","translated_text":"Урон"},{"block_id":"b","translated_text":"Перезарядка"}]}"#;
         for invalid in [missing, duplicate, unknown, damaged] {
             assert!(validate_structured_response(invalid, &blocks).is_err());
+        }
+    }
+
+    #[test]
+    fn structured_response_rejects_numeric_substrings_and_lost_repetitions() {
+        let blocks = vec![ScreenTextBlock {
+            block_id: ScreenBlockId::from("numbers"),
+            source_text: "Damage -25, then 25 and 25".to_owned(),
+            bounds: PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 20,
+            },
+            confidence_milli: 900,
+        }];
+
+        for translated in ["Урон -125, затем 25 и 25", "Урон -25, затем только 25"]
+        {
+            let response = format!(
+                r#"{{"translations":[{{"block_id":"numbers","translated_text":"{translated}"}}]}}"#
+            );
+            assert!(validate_structured_response(&response, &blocks).is_err());
         }
     }
 }

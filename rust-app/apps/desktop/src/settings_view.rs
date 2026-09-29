@@ -95,6 +95,9 @@ pub(crate) fn wire_contextual_translation_settings(settings: &SettingsWindow) {
     settings.on_delete_screenshots_now(|| {
         dispatch_runtime_event(RuntimeEvent::DeleteStoredScreenshots);
     });
+    settings.on_open_latest_screen_translation(|| {
+        dispatch_runtime_event(RuntimeEvent::OpenLatestScreenTranslation);
+    });
 }
 
 #[cfg(feature = "screen-translation")]

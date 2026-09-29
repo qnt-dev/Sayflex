@@ -841,3 +841,121 @@
 - [x] **Step 9: Commit**
 
   `git commit -m "fix(screen): restore production result interactions"`
+
+### Task 18: Correct the released screen-result coordinate and lifecycle failures
+
+**Files:**
+- Modify: `rust-app/apps/desktop/src/screen_result_view.rs`
+- Modify: `rust-app/apps/desktop/src/main.rs`
+- Modify: `rust-app/apps/desktop/src/screen_translation.rs`
+- Modify: `rust-app/apps/desktop/src/screen_result.rs`
+
+**Interfaces:**
+- Produces explicit crop-local overlay geometry; physical crop origin is never
+  subtracted from OCR-local block coordinates.
+- Produces a mutation-then-refresh boundary that drops the coordinator borrow
+  before any Slint refresh.
+- Produces request-scoped image invalidation notifications consumed by every open
+  or pinned result view.
+
+- [x] **Step 1: Add and observe failing tests**
+
+  Add the installed failing fixture with crop `(3002, 313, 305, 255)` and blocks
+  `(30, 13, 240, 120)` and `(30, 133, 251, 117)`. Assert distinct overlay
+  positions. Add a Save transition test that refreshes after the mutable document
+  guard is dropped. Add expiry/delete-all tests with multiple live presenters.
+
+- [x] **Step 2: Implement coordinate, borrow, and invalidation ownership**
+
+  Keep screen and crop-local rectangles in distinct APIs, scope all document
+  mutation before rendering, and publish pixel invalidation to every matching
+  view before dropping the final in-memory image.
+
+- [x] **Step 3: Verify focused GREEN**
+
+  Run desktop screen-result, editor, coordinator, and retention tests with the
+  `screen-translation` feature.
+
+### Task 19: Serialize screenshot persistence and restore corrected revisions
+
+**Files:**
+- Modify: `rust-app/apps/desktop/src/screenshot_store.rs`
+- Modify: `rust-app/apps/desktop/src/screen_result.rs`
+- Modify: `rust-app/apps/desktop/src/main.rs`
+
+**Interfaces:**
+- Produces versioned metadata with a monotonically increasing document revision.
+- Produces one serialized repository command lane per store. Pixels are written
+  once; translation/correction metadata updates cannot be reordered.
+- Produces restoration of stored results without coupling glossary lifetime to
+  screenshot lifetime.
+
+- [x] **Step 1: Add and observe failing ordering/restart tests**
+- [x] **Step 2: Implement serialized versioned persistence**
+- [x] **Step 3: Verify correction, restart, expiry, and orphan cleanup**
+
+### Task 20: Replace approximate overlay placement with collision-safe measured layout
+
+**Files:**
+- Modify: `rust-app/apps/desktop/src/screen_result_view.rs`
+- Modify: `rust-app/apps/desktop/ui/screen_translation.slint`
+
+**Interfaces:**
+- Produces a minimum 440-pixel compact result, non-overlapping header controls,
+  actual wrapped text measurement, a 12-pixel readable minimum, collision-safe
+  source labels/callouts, and leader lines from callouts to source rectangles.
+- Produces a reachable, centered expired-image state at every supported size.
+
+- [x] **Step 1: Add failing geometry/component tests for small and dense results**
+- [x] **Step 2: Implement measured responsive layout without adding controls**
+- [x] **Step 3: Render and inspect real fixtures at 100%, 125%, and 200% DPI**
+
+### Task 21: Make glossary correction phrase-aware and operation-safe
+
+**Files:**
+- Modify: `rust-app/apps/desktop/src/translation_editor.rs`
+- Modify: `rust-app/apps/desktop/src/glossary_view.rs`
+- Modify: `rust-app/apps/desktop/src/main.rs`
+- Modify: `rust-app/apps/translation-worker/src/glossary.rs`
+
+**Interfaces:**
+- Produces an editable source expression with the full source block retained as
+  its example.
+- Produces boundary-aware term retrieval ranked by language and source context;
+  it never applies blind substring replacement.
+- Produces independent operation tracking so overlapping list/update/delete
+  acknowledgements cannot leave stale rows.
+
+- [x] **Step 1: Add failing term-in-sentence and overlapping-operation tests**
+- [x] **Step 2: Implement phrase-aware retrieval and editor persistence**
+- [x] **Step 3: Verify correction, confirmation, context conflicts, and restart**
+
+### Task 22: Finish bounded source context and structured translation safety
+
+**Files:**
+- Modify: `rust-app/apps/desktop/src/source_context.rs`
+- Modify: `rust-app/crates/translation-engine/src/engine.rs`
+- Modify: `rust-app/apps/translation-worker/src/main.rs`
+
+**Interfaces:**
+- Produces bounded non-invasive context for available browser/document identity
+  and nearby OCR text. URL remains absent when the frozen application snapshot
+  exposes none; no address-bar, clipboard, or process-injection fallback is used.
+- Produces token-budgeted block groups, one total operation deadline, cancellation
+  across send and body decoding, and bounded typed recovery.
+- Produces exact multiset validation for numbers, URLs, placeholders, and symbols.
+
+- [x] **Step 1: Add failing provider, batching, cancellation, and token tests**
+- [x] **Step 2: Implement bounded providers and grouped translation**
+- [x] **Step 3: Verify malformed, partial, cancelled, and oversized requests**
+
+### Task 23: Validate the corrected installed application before release
+
+- [ ] Run focused tests after every task and the full workspace formatting,
+  linting, test, translation, release-validation, and installer gates.
+- [ ] Exercise the installed app with the non-zero-origin saved fixture, multiple
+  editable blocks, Save, glossary reuse in a new sentence, restart restoration,
+  pin/unpin, explicit deletion, delete-all, and expiry.
+- [ ] Capture the corrected states and report automated, witnessed, not-run, and
+  deferred evidence separately. No interaction is marked PASS from artifact
+  identity alone.

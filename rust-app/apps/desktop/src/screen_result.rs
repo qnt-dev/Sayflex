@@ -84,6 +84,8 @@ pub(crate) struct ScreenResultBlockSnapshot {
     pub(crate) block_id: ScreenBlockId,
     pub(crate) source: String,
     pub(crate) translation: String,
+    pub(crate) completion: BlockCompletion,
+    pub(crate) failure_message: Option<String>,
     pub(crate) bounds: PhysicalRect,
     pub(crate) confidence_milli: u16,
 }
@@ -151,6 +153,17 @@ pub(crate) struct ScreenTranslationDocument {
     pub(crate) expires_unix_ms: u64,
 }
 
+pub(crate) struct PersistedScreenResult {
+    pub(crate) request_id: RequestId,
+    pub(crate) crop: Arc<RgbaFrame>,
+    pub(crate) blocks: Vec<ScreenTextBlock>,
+    pub(crate) translations: Vec<TranslatedScreenBlock>,
+    pub(crate) context: SourceContext,
+    pub(crate) revision: u64,
+    pub(crate) created_unix_ms: u64,
+    pub(crate) expires_unix_ms: u64,
+}
+
 impl ScreenTranslationDocument {
     pub(crate) fn new(
         request_id: RequestId,
@@ -199,6 +212,22 @@ impl ScreenTranslationDocument {
             created_unix_ms,
             expires_unix_ms,
         })
+    }
+
+    pub(crate) fn restore(persisted: PersistedScreenResult) -> Result<Self, DocumentError> {
+        let mut document = Self::new(
+            persisted.request_id,
+            persisted.crop,
+            persisted.blocks,
+            persisted.context,
+            persisted.created_unix_ms,
+            persisted.expires_unix_ms,
+        )?;
+        if !persisted.translations.is_empty() {
+            document.apply_machine_blocks(persisted.request_id, 0, persisted.translations)?;
+        }
+        document.revision = document.revision.max(persisted.revision);
+        Ok(document)
     }
 
     pub(crate) fn request_id(&self) -> RequestId {
@@ -348,6 +377,15 @@ impl ScreenTranslationDocument {
                 .blocks
                 .get(block_id)
                 .ok_or(DocumentError::UnknownBlockId)?;
+            let (completion, failure_message) = if state.user_edit.is_some() {
+                (BlockCompletion::Completed, None)
+            } else {
+                let machine = state
+                    .machine
+                    .as_ref()
+                    .ok_or(DocumentError::IncompleteBlock)?;
+                (machine.completion, machine.failure_message.clone())
+            };
             blocks.push(ScreenResultBlockSnapshot {
                 block_id: block_id.clone(),
                 source: state.source.clone(),
@@ -355,6 +393,8 @@ impl ScreenTranslationDocument {
                     .effective_translation()
                     .ok_or(DocumentError::IncompleteBlock)?
                     .to_owned(),
+                completion,
+                failure_message,
                 bounds: state.bounds,
                 confidence_milli: state.confidence_milli,
             });
@@ -374,17 +414,40 @@ impl ScreenTranslationDocument {
 
 fn preservation_warnings(source: &str, translation: &str) -> Vec<PreservationWarning> {
     let mut warnings = Vec::new();
-    for (kind, tokens) in [
-        (PreservationKind::Number, number_tokens(source)),
-        (PreservationKind::Url, url_tokens(source)),
-        (PreservationKind::Placeholder, placeholder_tokens(source)),
+    for (kind, expected, actual) in [
+        (
+            PreservationKind::Number,
+            number_tokens(source),
+            number_tokens(translation),
+        ),
+        (
+            PreservationKind::Url,
+            url_tokens(source),
+            url_tokens(translation),
+        ),
+        (
+            PreservationKind::Placeholder,
+            placeholder_tokens(source),
+            placeholder_tokens(translation),
+        ),
         (
             PreservationKind::ProtectedSymbol,
             protected_symbol_tokens(source),
+            protected_symbol_tokens(translation),
         ),
     ] {
-        for token in tokens {
-            if !translation.contains(&token)
+        let actual_counts = actual.into_iter().fold(
+            std::collections::HashMap::<String, usize>::new(),
+            |mut counts, token| {
+                *counts.entry(token).or_default() += 1;
+                counts
+            },
+        );
+        let mut expected_counts = std::collections::HashMap::<String, usize>::new();
+        for token in expected {
+            let count = expected_counts.entry(token.clone()).or_default();
+            *count += 1;
+            if *count > actual_counts.get(&token).copied().unwrap_or_default()
                 && !warnings.iter().any(|warning: &PreservationWarning| {
                     warning.kind == kind && warning.token == token
                 })
@@ -397,12 +460,44 @@ fn preservation_warnings(source: &str, translation: &str) -> Vec<PreservationWar
 }
 
 fn number_tokens(text: &str) -> Vec<String> {
-    collect_runs(text, |character| {
-        character.is_ascii_digit() || matches!(character, '.' | ',')
-    })
-    .into_iter()
-    .filter(|token| token.chars().any(|character| character.is_ascii_digit()))
-    .collect()
+    let chars = text.char_indices().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let (start, character) = chars[index];
+        let signed_number = matches!(character, '+' | '-')
+            && chars
+                .get(index + 1)
+                .is_some_and(|(_, next)| next.is_ascii_digit())
+            && index
+                .checked_sub(1)
+                .and_then(|previous| chars.get(previous))
+                .is_none_or(|(_, previous)| !previous.is_alphanumeric() && *previous != '_');
+        if !character.is_ascii_digit() && !signed_number {
+            index += 1;
+            continue;
+        }
+        let mut end = start + character.len_utf8();
+        index += 1;
+        while index < chars.len() {
+            let (byte, next) = chars[index];
+            let numeric_separator = matches!(next, '.' | ',' | ':' | '-' | '/')
+                && chars
+                    .get(index + 1)
+                    .is_some_and(|(_, following)| following.is_ascii_digit());
+            if next.is_ascii_digit() || numeric_separator || next == '%' {
+                end = byte + next.len_utf8();
+                index += 1;
+                if next == '%' {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        tokens.push(text[start..end].to_owned());
+    }
+    tokens
 }
 
 fn url_tokens(text: &str) -> Vec<String> {
@@ -441,22 +536,6 @@ fn protected_symbol_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn collect_runs(text: &str, admitted: impl Fn(char) -> bool) -> Vec<String> {
-    let mut runs = Vec::new();
-    let mut current = String::new();
-    for character in text.chars() {
-        if admitted(character) {
-            current.push(character);
-        } else if !current.is_empty() {
-            runs.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        runs.push(current);
-    }
-    runs
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -468,8 +547,8 @@ mod tests {
     };
 
     use super::{
-        DocumentError, PreservationKind, ScreenTranslationDocument, UserTranslationEdit,
-        screen_blocks_from_ocr,
+        DocumentError, PersistedScreenResult, PreservationKind, ScreenTranslationDocument,
+        UserTranslationEdit, preservation_warnings, screen_blocks_from_ocr,
     };
 
     fn block(id: &str, source: &str, confidence_milli: u16) -> ScreenTextBlock {
@@ -521,6 +600,26 @@ mod tests {
             2_000,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn persisted_effective_translation_restores_with_its_monotonic_revision() {
+        let request_id = RequestId::new();
+        let restored = ScreenTranslationDocument::restore(PersistedScreenResult {
+            request_id,
+            crop: crop(),
+            blocks: vec![block("a", "Cooldown", 900)],
+            translations: vec![translated("a", "перезарядка")],
+            context: SourceContext::default(),
+            revision: 7,
+            created_unix_ms: 1_000,
+            expires_unix_ms: 2_000,
+        })
+        .unwrap();
+
+        assert_eq!(restored.revision(), 7);
+        assert_eq!(restored.copy_text().unwrap(), "перезарядка");
+        assert!(restored.result_snapshot().unwrap().crop.is_some());
     }
 
     #[test]
@@ -669,6 +768,22 @@ mod tests {
         ] {
             assert!(state.warnings().iter().any(|warning| warning.kind == kind));
         }
+    }
+
+    #[test]
+    fn preservation_warnings_compare_exact_counted_numbers_instead_of_substrings() {
+        let warnings = preservation_warnings("25 25 -7", "125 25 +7");
+
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.kind == PreservationKind::Number && warning.token == "25"
+            })
+        );
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.kind == PreservationKind::Number && warning.token == "-7"
+            })
+        );
     }
 
     #[test]

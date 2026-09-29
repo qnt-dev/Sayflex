@@ -13,6 +13,9 @@ export struct ScreenBlockOverlay {
     source-width: float,
     source-height: float,
     callout: bool,
+    overflow-panel: bool,
+    panel-order: int,
+    panel-left: bool,
     low-confidence: bool,
 }
 
@@ -57,7 +60,8 @@ component TranslatedLabel inherits Rectangle {
     in property <bool> dual: false;
     in property <bool> selected-label: false;
     in property <bool> dimmed: false;
-    in property <length> text-size: 10px;
+    in property <length> text-size: 12px;
+    out property <length> measured-content-height: translated-text-item.preferred-height + 8px;
     callback selected();
     callback edit-requested();
 
@@ -71,7 +75,7 @@ component TranslatedLabel inherits Rectangle {
     accessible-label: @tr("Editable translated image text");
     accessible-action-default => { root.edit-requested(); }
 
-    Text {
+    translated-text-item := Text {
         x: 4px;
         y: 2px;
         width: parent.width - 8px;
@@ -80,7 +84,7 @@ component TranslatedLabel inherits Rectangle {
             ? root.source-text + "\n" + root.translated-text
             : root.translated-text;
         color: #f3e9cf;
-        font-size: root.dual ? max(7px, root.text-size - 2px) : root.text-size;
+        font-size: max(12px, root.text-size);
         font-weight: 570;
         wrap: word-wrap;
         horizontal-alignment: center;
@@ -104,7 +108,7 @@ component TranslatedLabel inherits Rectangle {
 }
 
 export component TranslationCorrectionPanel inherits Rectangle {
-    in property <string> original-text: "End Turn";
+    in-out property <string> original-text: "End Turn";
     in property <string> context-text: "Battle for Wesnoth · game interface";
     in property <string> baseline-translation: "Завершить ход";
     in property <bool> save-error: false;
@@ -115,8 +119,8 @@ export component TranslationCorrectionPanel inherits Rectangle {
     callback confirm-requested();
     callback cancel-requested();
     callback retry-requested();
-    forward-focus: input;
-    init => { input.focus(); }
+    forward-focus: translation-input;
+    init => { translation-input.focus(); }
 
     background: #16181cf7;
     border-radius: 9px;
@@ -141,16 +145,41 @@ export component TranslationCorrectionPanel inherits Rectangle {
     }
     Rectangle { x: 14px; y: 39px; width: parent.width - 28px; height: 1px; background: Theme.line; }
 
-    Text { x: 14px; y: 50px; text: @tr("ORIGINAL"); color: Theme.text-faint; font-size: 8px; font-weight: 680; letter-spacing: 0.6px; }
-    Text { x: 14px; y: 67px; text: root.original-text; color: Theme.text; font-size: 12px; font-weight: 560; }
+    Text { x: 14px; y: 50px; text: @tr("SOURCE PHRASE"); color: Theme.text-faint; font-size: 8px; font-weight: 680; letter-spacing: 0.6px; }
 
-    input-frame := Rectangle {
-        x: 14px; y: 91px; width: parent.width - 28px; height: 48px;
+    source-frame := Rectangle {
+        x: 14px; y: 65px; width: parent.width - 28px; height: 42px;
         border-radius: 6px;
         border-width: 1px;
-        border-color: input.has-focus ? Theme.red : #3a3d43;
+        border-color: source-input.has-focus ? Theme.red : #3a3d43;
         background: #0f1115;
-        input := TextInput {
+        source-input := TextInput {
+            x: 9px; y: 6px; width: parent.width - 18px; height: parent.height - 12px;
+            text <=> root.original-text;
+            color: Theme.text;
+            selection-background-color: #d85c5c60;
+            font-size: 12px;
+            wrap: word-wrap;
+            enabled: root.editor-focusable;
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.cancel-requested();
+                    return accept;
+                }
+                reject
+            }
+        }
+    }
+
+    Text { x: 14px; y: 114px; text: @tr("APPROVED TRANSLATION"); color: Theme.text-faint; font-size: 8px; font-weight: 680; letter-spacing: 0.6px; }
+
+    input-frame := Rectangle {
+        x: 14px; y: 129px; width: parent.width - 28px; height: 52px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: translation-input.has-focus ? Theme.red : #3a3d43;
+        background: #0f1115;
+        translation-input := TextInput {
             x: 9px; y: 7px; width: parent.width - 18px; height: parent.height - 14px;
             text <=> root.edited-translation;
             color: Theme.text;
@@ -175,14 +204,14 @@ export component TranslationCorrectionPanel inherits Rectangle {
     }
 
     Text {
-        x: 14px; y: 148px; width: parent.width - 28px;
+        x: 14px; y: 190px; width: parent.width - 28px;
         text: root.context-text;
         color: Theme.text-muted;
         font-size: 9px;
         overflow: elide;
     }
     if root.save-error: Text {
-        x: 14px; y: 168px; width: parent.width - 28px;
+        x: 14px; y: 210px; width: parent.width - 28px;
         text: @tr("Save failed. Your correction is still here.");
         color: #e3a0a0;
         font-size: 9px;
@@ -220,17 +249,19 @@ export component ScreenImageResult inherits Rectangle {
     in property <bool> copied: false;
     in property <bool> edit-hint-visible: true;
     in property <bool> dim-other-blocks: false;
+    in property <bool> dense-panel-active: false;
+    in property <bool> dense-panel-left: false;
     in property <bool> use-fixture-blocks: true;
     in property <[ScreenBlockOverlay]> blocks;
     in property <float> editor-panel-x: 488;
     in property <float> editor-panel-y: 292;
-    in property <length> minimum-overlay-font-size: 10px;
+    in property <length> minimum-overlay-font-size: 12px;
     in property <string> menu-translation: "Меню";
     in property <string> actions-translation: "Действия";
     in property <string> encampment-translation: "Лагерь (Замок)";
     in property <string> unit-translation: "Кочевник · быстрый, стойкий";
     in property <string> end-turn-translation: "Завершить ход";
-    in property <string> editor-original: "End Turn";
+    in-out property <string> editor-original: "End Turn";
     in property <string> editor-context: "Battle for Wesnoth · game interface";
     in property <string> editor-direction: "EN → RU";
     in property <string> editor-baseline: "Завершить ход";
@@ -320,7 +351,7 @@ export component ScreenImageResult inherits Rectangle {
 
             if root.use-fixture-blocks && root.view-mode != 1: TranslatedLabel {
                 x: 3px; y: 1px; width: 75px; height: root.view-mode == 2 ? 28px : 18px;
-                source-text: "Menu"; translated-text: root.menu-translation; dual: root.view-mode == 2; text-size: 10px;
+                source-text: "Menu"; translated-text: root.menu-translation; dual: root.view-mode == 2; text-size: root.minimum-overlay-font-size;
                 selected-label: root.selected-block == 0;
                 dimmed: root.dim-other-blocks && root.selected-block != 0;
                 selected => { root.block-selected(0); }
@@ -328,7 +359,7 @@ export component ScreenImageResult inherits Rectangle {
             }
             if root.use-fixture-blocks && root.view-mode != 1: TranslatedLabel {
                 x: 80px; y: 1px; width: 76px; height: root.view-mode == 2 ? 28px : 18px;
-                source-text: "Actions"; translated-text: root.actions-translation; dual: root.view-mode == 2; text-size: 9px;
+                source-text: "Actions"; translated-text: root.actions-translation; dual: root.view-mode == 2; text-size: root.minimum-overlay-font-size;
                 selected-label: root.selected-block == 1;
                 dimmed: root.dim-other-blocks && root.selected-block != 1;
                 selected => { root.block-selected(1); }
@@ -336,7 +367,7 @@ export component ScreenImageResult inherits Rectangle {
             }
             if root.use-fixture-blocks && root.view-mode != 1: TranslatedLabel {
                 x: 830px; y: 216px; width: 126px; height: root.view-mode == 2 ? 34px : 19px;
-                source-text: "Encampment (Castle)"; translated-text: root.encampment-translation; dual: root.view-mode == 2; text-size: 9px;
+                source-text: "Encampment (Castle)"; translated-text: root.encampment-translation; dual: root.view-mode == 2; text-size: root.minimum-overlay-font-size;
                 selected-label: root.selected-block == 2;
                 dimmed: root.dim-other-blocks && root.selected-block != 2;
                 selected => { root.block-selected(2); }
@@ -349,7 +380,7 @@ export component ScreenImageResult inherits Rectangle {
                 dual: root.view-mode == 2;
                 selected-label: root.selected-block == 3;
                 dimmed: root.dim-other-blocks && root.selected-block != 3;
-                text-size: 9px;
+                text-size: root.minimum-overlay-font-size;
                 selected => { root.block-selected(3); }
                 edit-requested => { root.block-edit-requested(3); }
             }
@@ -360,17 +391,63 @@ export component ScreenImageResult inherits Rectangle {
                 dual: root.view-mode == 2;
                 selected-label: root.selected-block == 4;
                 dimmed: root.dim-other-blocks && root.selected-block != 4;
-                text-size: 10px;
+                text-size: root.minimum-overlay-font-size;
                 selected => { root.block-selected(4); }
                 edit-requested => { root.block-edit-requested(4); }
             }
 
+            // A callout is never allowed to leave the original glyphs visible
+            // underneath it. Cover the OCR source rectangle first, then draw a
+            // restrained leader so the translated text remains spatially tied
+            // to the part of the screenshot it replaces.
+            for block in root.blocks: Rectangle {
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.callout && !root.dense-panel-active;
+                x: block.source-x * 1px;
+                y: block.source-y * 1px;
+                width: block.source-width * 1px;
+                height: block.source-height * 1px;
+                background: #120e09f5;
+                border-width: 1px;
+                border-color: #d7d3cc40;
+                border-radius: 2px;
+            }
+            for block in root.blocks: Rectangle {
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.callout && !root.dense-panel-active;
+                x: min(
+                    block.source-x + block.source-width / 2,
+                    block.x + block.width / 2
+                ) * 1px;
+                y: (block.source-y + block.source-height / 2) * 1px;
+                width: max(1, abs(
+                    (block.x + block.width / 2)
+                    - (block.source-x + block.source-width / 2)
+                )) * 1px;
+                height: 1px;
+                background: Theme.red;
+                opacity: 0.72;
+            }
+            for block in root.blocks: Rectangle {
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.callout && !root.dense-panel-active;
+                x: (block.x + block.width / 2) * 1px;
+                y: min(
+                    block.source-y + block.source-height / 2,
+                    block.y + block.height / 2
+                ) * 1px;
+                width: 1px;
+                height: max(1, abs(
+                    (block.y + block.height / 2)
+                    - (block.source-y + block.source-height / 2)
+                )) * 1px;
+                background: Theme.red;
+                opacity: 0.72;
+            }
+
             for block[index] in root.blocks: TranslatedLabel {
-                visible: !root.use-fixture-blocks && root.view-mode != 1;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && !root.dense-panel-active;
                 x: block.x * 1px;
                 y: block.y * 1px;
                 width: block.width * 1px;
-                height: block.height * 1px;
+                height: block.callout ? max(block.height * 1px, self.measured-content-height) : block.height * 1px;
                 source-text: block.source;
                 translated-text: block.translation;
                 dual: root.view-mode == 2;
@@ -382,12 +459,89 @@ export component ScreenImageResult inherits Rectangle {
                 edit-requested => { root.block-edit-requested(index); }
             }
 
+            // If the image cannot hold collision-free callouts, preserve every
+            // source location and move the full, measured text into one
+            // scrollable panel. Labels are never allowed to overlap silently.
+            for block[index] in root.blocks: Rectangle {
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && root.dense-panel-active;
+                x: block.source-x * 1px;
+                y: block.source-y * 1px;
+                width: block.source-width * 1px;
+                height: block.source-height * 1px;
+                background: #120e09e8;
+                border-width: root.selected-block == index ? 2px : 1px;
+                border-color: block.low-confidence ? #d7a45b : root.selected-block == index ? Theme.red : #d7d3cc70;
+                border-radius: 2px;
+                marker-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.block-selected(index); }
+                    double-clicked => { root.block-edit-requested(index); }
+                }
+            }
+
+            if root.dense-panel-active && root.view-mode != 1: dense-panel := Rectangle {
+                x: root.dense-panel-left ? 8px : parent.width - self.width - 8px;
+                y: 8px;
+                width: min(320px, parent.width * 0.48);
+                height: parent.height - 16px;
+                background: #111318fa;
+                border-width: 1px;
+                border-color: Theme.line;
+                border-radius: 7px;
+                clip: true;
+
+                dense-scroll := Flickable {
+                    x: 7px;
+                    y: 7px;
+                    width: parent.width - 14px;
+                    height: parent.height - 14px;
+                    viewport-width: self.width;
+                    viewport-height: max(self.height, dense-stack.preferred-height);
+
+                    dense-stack := VerticalLayout {
+                        width: dense-scroll.width;
+                        spacing: 7px;
+
+                        for block[index] in root.blocks: Rectangle {
+                            width: parent.width;
+                            height: max(54px, panel-source.preferred-height + panel-translation.preferred-height + 21px);
+                            background: root.selected-block == index ? #2a1715f5 : #0c0f14ed;
+                            border-width: 1px;
+                            border-color: block.low-confidence ? #d7a45b : root.selected-block == index ? Theme.red : #d7d3cc35;
+                            border-radius: 5px;
+
+                            panel-source := Text {
+                                x: 9px; y: 7px; width: parent.width - 18px;
+                                text: block.source;
+                                color: Theme.text-muted;
+                                font-size: 10px;
+                                font-weight: 520;
+                                wrap: word-wrap;
+                            }
+                            panel-translation := Text {
+                                x: 9px; y: panel-source.preferred-height + 11px; width: parent.width - 18px;
+                                text: block.translation;
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 570;
+                                wrap: word-wrap;
+                            }
+                            panel-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.block-selected(index); }
+                                double-clicked => { root.block-edit-requested(index); }
+                            }
+                        }
+                    }
+                }
+            }
+
             if root.editor-visible: inline-editor := TranslationCorrectionPanel {
                 x: root.editor-panel-x * 1px;
                 y: root.editor-panel-y * 1px;
                 width: min(330px, parent.width - 16px);
-                height: min(230px, parent.height - 16px);
-                original-text: root.editor-original;
+                height: min(282px, parent.height - 16px);
+                original-text <=> root.editor-original;
                 context-text: root.editor-context;
                 direction-text: root.editor-direction;
                 baseline-translation: root.editor-baseline;
@@ -425,13 +579,37 @@ export component ScreenImageResult inherits Rectangle {
             width: parent.width;
             height: parent.height;
             background: #111318;
-            Text { x: 0px; y: 208px; width: parent.width; text: @tr("Image expired"); color: Theme.text; font-size: 20px; font-weight: 620; horizontal-alignment: center; }
-            Text { x: 0px; y: 246px; width: parent.width; text: @tr("The temporary screenshot was removed. Your text translation remains available."); color: Theme.text-muted; font-size: 12px; horizontal-alignment: center; }
-            OverlayButton {
-                x: (parent.width - 104px) / 2; y: 278px; width: 104px;
-                label: root.copied ? @tr("COPIED") : @tr("COPY TEXT");
-                active: root.copied;
-                clicked => { root.copy-text-requested(); }
+            expired-panel := Rectangle {
+                x: 18px;
+                y: max(12px, (parent.height - self.height) / 2);
+                width: parent.width - 36px;
+                height: min(150px, parent.height - 24px);
+                Text {
+                    y: 0px; width: parent.width; height: 30px;
+                    text: @tr("Image expired");
+                    color: Theme.text;
+                    font-size: 20px;
+                    font-weight: 620;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Text {
+                    y: 42px; width: parent.width; height: 38px;
+                    text: @tr("The temporary screenshot was removed. Your text translation remains available.");
+                    color: Theme.text-muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                OverlayButton {
+                    x: (parent.width - 104px) / 2;
+                    y: 96px;
+                    width: 104px;
+                    label: root.copied ? @tr("COPIED") : @tr("COPY TEXT");
+                    active: root.copied;
+                    clicked => { root.copy-text-requested(); }
+                }
             }
         }
 
@@ -468,14 +646,16 @@ export component ScreenTranslationPreviewWindow inherits Window {
     in-out property <int> selected-block: 4;
     in-out property <bool> copied: false;
     in-out property <bool> edit-hint-visible: true;
+    in-out property <bool> dense-panel-active: false;
+    in-out property <bool> dense-panel-left: false;
+    in-out property <[ScreenBlockOverlay]> fixture-blocks;
     out property <bool> dim-other-blocks: root.editor-visible;
     out property <bool> save-confirmation-visible: root.preview-state == 2;
     out property <float> editor-panel-x: root.selected-block <= 1 ? 164 : 488;
     out property <float> editor-panel-y: root.selected-block <= 1
         ? 30
         : root.selected-block == 2 ? 100
-        : root.selected-block == 3 ? 292
-        : 340;
+        : 292;
     in-out property <string> menu-translation: "Меню";
     in-out property <string> actions-translation: "Действия";
     in-out property <string> encampment-translation: "Лагерь (Замок)";
@@ -598,6 +778,10 @@ export component ScreenTranslationPreviewWindow inherits Window {
             copied: root.copied;
             edit-hint-visible: root.edit-hint-visible;
             dim-other-blocks: root.dim-other-blocks;
+            dense-panel-active: root.dense-panel-active;
+            dense-panel-left: root.dense-panel-left;
+            use-fixture-blocks: !root.dense-panel-active;
+            blocks: root.fixture-blocks;
             editor-panel-x: root.editor-panel-x;
             editor-panel-y: root.editor-panel-y;
             menu-translation: root.menu-translation;

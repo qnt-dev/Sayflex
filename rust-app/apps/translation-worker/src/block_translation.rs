@@ -78,10 +78,10 @@ pub(crate) fn validate_completed_blocks(
 }
 
 fn validate_protected_values(source: &str, translated: &str) -> Result<()> {
-    for value in protected_values(source) {
-        if !translated.contains(&value) {
-            bail!("translation changed or omitted protected value {value:?}");
-        }
+    let expected = protected_values(source);
+    let actual = protected_values(translated);
+    if expected != actual {
+        bail!("translation changed protected values: expected {expected:?}, received {actual:?}");
     }
     Ok(())
 }
@@ -92,14 +92,29 @@ fn protected_values(text: &str) -> Vec<String> {
     let mut index = 0;
     while index < chars.len() {
         let (start, character) = chars[index];
-        if character.is_ascii_digit() {
+        let signed_number = matches!(character, '+' | '-')
+            && chars
+                .get(index + 1)
+                .is_some_and(|(_, next)| next.is_ascii_digit())
+            && index
+                .checked_sub(1)
+                .and_then(|previous| chars.get(previous))
+                .is_none_or(|(_, previous)| !previous.is_alphanumeric() && *previous != '_');
+        if character.is_ascii_digit() || signed_number {
             let mut end = start + character.len_utf8();
             index += 1;
             while index < chars.len() {
                 let (byte, next) = chars[index];
-                if next.is_ascii_digit() || matches!(next, '.' | ',' | ':' | '-' | '/' | '%') {
+                let numeric_separator = matches!(next, '.' | ',' | ':' | '-' | '/')
+                    && chars
+                        .get(index + 1)
+                        .is_some_and(|(_, following)| following.is_ascii_digit());
+                if next.is_ascii_digit() || numeric_separator || next == '%' {
                     end = byte + next.len_utf8();
                     index += 1;
+                    if next == '%' {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -134,7 +149,6 @@ fn protected_values(text: &str) -> Vec<String> {
         }
     }
     values.sort();
-    values.dedup();
     values
 }
 
@@ -236,5 +250,38 @@ mod tests {
         assert!(!limited.structured_blocks);
         assert!(!limited.context_instructions);
         assert!(!limited.glossary_guidance);
+    }
+
+    #[test]
+    fn protected_numbers_are_compared_as_counted_tokens_not_substrings() {
+        let repeated = BlockTranslationPlan::new(
+            vec![source("numbers", "Damage -25, then 25 and 25")],
+            SourceContext::default(),
+            Vec::new(),
+            TranslationBackendCapabilities::structured(),
+        )
+        .unwrap();
+
+        assert!(
+            validate_completed_blocks(
+                &repeated,
+                vec![translated("numbers", "Урон -125, затем 25 и 25")]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_completed_blocks(
+                &repeated,
+                vec![translated("numbers", "Урон -25, затем только 25")]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_completed_blocks(
+                &repeated,
+                vec![translated("numbers", "Урон -25, затем 25 и 25")]
+            )
+            .is_ok()
+        );
     }
 }

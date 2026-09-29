@@ -7,9 +7,9 @@
 
 use std::error::Error;
 
-use slint::{ComponentHandle, LogicalSize};
+use slint::{ComponentHandle, LogicalSize, ModelRc, VecModel};
 
-use crate::ScreenTranslationPreviewWindow;
+use crate::{ScreenBlockOverlay, ScreenTranslationPreviewWindow};
 
 const PREVIEW_WIDTH: f32 = 960.0;
 const PREVIEW_HEIGHT: f32 = 614.0;
@@ -21,16 +21,18 @@ pub(crate) enum ScreenTranslationPreviewState {
     Saved,
     SaveError,
     Expired,
+    Dense,
 }
 
 impl ScreenTranslationPreviewState {
     #[cfg(test)]
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Result,
         Self::Editing,
         Self::Saved,
         Self::SaveError,
         Self::Expired,
+        Self::Dense,
     ];
 
     fn slint_value(self) -> i32 {
@@ -40,6 +42,7 @@ impl ScreenTranslationPreviewState {
             Self::Saved => 2,
             Self::SaveError => 3,
             Self::Expired => 4,
+            Self::Dense => 5,
         }
     }
 
@@ -51,6 +54,7 @@ impl ScreenTranslationPreviewState {
             Self::Saved => "saved",
             Self::SaveError => "save-error",
             Self::Expired => "expired-image",
+            Self::Dense => "dense-panel",
         }
     }
 }
@@ -64,6 +68,7 @@ pub(crate) fn requested_state() -> Option<ScreenTranslationPreviewState> {
             "saved" => Some(ScreenTranslationPreviewState::Saved),
             "save-error" | "error" => Some(ScreenTranslationPreviewState::SaveError),
             "expired" | "expired-image" => Some(ScreenTranslationPreviewState::Expired),
+            "dense" | "dense-panel" => Some(ScreenTranslationPreviewState::Dense),
             _ => None,
         }
     })
@@ -87,10 +92,42 @@ fn configured_window(
         ScreenTranslationPreviewState::Editing | ScreenTranslationPreviewState::SaveError
     ));
     window.set_view_mode(3);
+    if state == ScreenTranslationPreviewState::Dense {
+        window.set_dense_panel_active(true);
+        window.set_dense_panel_left(false);
+        window.set_fixture_blocks(ModelRc::new(VecModel::from(dense_preview_blocks())));
+    }
     window
         .window()
         .set_size(LogicalSize::new(PREVIEW_WIDTH, PREVIEW_HEIGHT));
     Ok(window)
+}
+
+fn dense_preview_blocks() -> Vec<ScreenBlockOverlay> {
+    (0..8)
+        .map(|index| ScreenBlockOverlay {
+            block_id: format!("dense-{index}").into(),
+            source: format!("Source line {} with a compact game label", index + 1).into(),
+            translation: format!(
+                "Перевод блока {} остаётся полностью читаемым даже при плотном расположении текста.",
+                index + 1
+            )
+            .into(),
+            x: 632.0,
+            y: index as f32 * 68.0,
+            width: 320.0,
+            height: 58.0,
+            source_x: 36.0 + (index % 2) as f32 * 255.0,
+            source_y: 24.0 + index as f32 * 64.0,
+            source_width: 220.0,
+            source_height: 42.0,
+            callout: true,
+            overflow_panel: true,
+            panel_order: index,
+            panel_left: false,
+            low_confidence: index == 5,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -350,11 +387,12 @@ mod tests {
     fn preview_surface_declares_accessible_controls_and_readable_overlay_text() {
         assert!(SOURCE.contains("accessible-role: button"));
         assert!(SOURCE.contains("accessible-label"));
-        assert!(SOURCE.contains("minimum-overlay-font-size: 10px"));
+        assert!(SOURCE.contains("minimum-overlay-font-size: 12px"));
+        assert!(SOURCE.contains("measured-content-height"));
         assert!(SOURCE.contains("inline-editor := TranslationCorrectionPanel"));
         assert!(SOURCE.contains("double-clicked => { root.edit-requested(); }"));
         assert!(
-            SOURCE.contains("init => { input.focus(); }"),
+            SOURCE.contains("init => { translation-input.focus(); }"),
             "the in-image editor must accept typing immediately after double-click"
         );
         assert!(

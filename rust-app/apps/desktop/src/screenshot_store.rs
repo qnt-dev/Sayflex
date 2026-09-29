@@ -14,6 +14,10 @@ use rust_protocol::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::screen_result::{
+    DocumentError, PersistedScreenResult, ScreenResultSnapshot, ScreenTranslationDocument,
+};
+
 const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_MAX_BYTES: u64 = 500 * 1024 * 1024;
 
@@ -37,6 +41,8 @@ impl Default for ScreenshotRetention {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ScreenshotMetadata {
     pub(crate) request_id: RequestId,
+    #[serde(default)]
+    pub(crate) revision: u64,
     pub(crate) crop_x: i32,
     pub(crate) crop_y: i32,
     pub(crate) width: u32,
@@ -44,6 +50,10 @@ pub(crate) struct ScreenshotMetadata {
     pub(crate) blocks: Vec<ScreenTextBlock>,
     pub(crate) translations: Vec<TranslatedScreenBlock>,
     pub(crate) context: SourceContext,
+    #[serde(default)]
+    pub(crate) source_language: Option<rust_protocol::TranslationLanguage>,
+    #[serde(default)]
+    pub(crate) target_language: Option<rust_protocol::TranslationLanguage>,
     pub(crate) created_unix_ms: u64,
     pub(crate) expires_unix_ms: u64,
     pub(crate) crop_filename: String,
@@ -56,11 +66,12 @@ pub(crate) struct StoredScreenshot {
     pub(crate) crop: RgbaFrame,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct CleanupReport {
     pub(crate) removed_entries: usize,
     pub(crate) removed_orphans: usize,
     pub(crate) error_count: usize,
+    pub(crate) removed_request_ids: Vec<RequestId>,
 }
 
 #[derive(Debug, Error)]
@@ -76,12 +87,15 @@ pub(crate) enum ScreenshotStoreError {
     #[error("the stored screenshot dimensions do not match its metadata")]
     #[allow(dead_code)] // Exercised once persisted screenshots are reopened by the UI.
     DimensionMismatch,
+    #[error("the stored screen translation document is invalid: {0:?}")]
+    Document(DocumentError),
 }
 
 pub(crate) struct ScreenshotStore {
     root: PathBuf,
     retention: Mutex<ScreenshotRetention>,
     deleted: Mutex<HashSet<RequestId>>,
+    write_lock: Mutex<()>,
 }
 
 impl ScreenshotStore {
@@ -110,6 +124,7 @@ impl ScreenshotStore {
             root,
             retention: Mutex::new(retention),
             deleted: Mutex::new(HashSet::new()),
+            write_lock: Mutex::new(()),
         })
     }
 
@@ -126,6 +141,10 @@ impl ScreenshotStore {
         mut metadata: ScreenshotMetadata,
         crop: &RgbaFrame,
     ) -> Result<Option<PathBuf>, ScreenshotStoreError> {
+        let _write = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let deleted = self
             .deleted
             .lock()
@@ -161,16 +180,34 @@ impl ScreenshotStore {
         let image_previous = self.root.join(format!("{stem}.png.previous"));
         let document_previous = self.root.join(format!("{stem}.json.previous"));
 
-        write_png(&image_temporary, crop)?;
+        let stored_revision = fs::read(&document)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ScreenshotMetadata>(&bytes).ok())
+            .map(|stored| stored.revision);
+        if stored_revision.is_some_and(|revision| revision > metadata.revision) {
+            return Ok(Some(document));
+        }
+        if stored_revision == Some(metadata.revision) && image.is_file() {
+            return Ok(Some(document));
+        }
+
+        let image_was_missing = !image.is_file();
+        if image_was_missing {
+            write_png(&image_temporary, crop)?;
+            rust_platform_windows::replace_file_atomically(
+                &image,
+                &image_temporary,
+                &image_previous,
+            )?;
+        }
         write_json(&document_temporary, &metadata)?;
-        rust_platform_windows::replace_file_atomically(&image, &image_temporary, &image_previous)?;
         if let Err(error) = rust_platform_windows::replace_file_atomically(
             &document,
             &document_temporary,
             &document_previous,
         ) {
             let _ = fs::remove_file(&document_temporary);
-            if image_previous.is_file() {
+            if image_was_missing && image_previous.is_file() {
                 let rollback_backup = self.root.join(format!("{stem}.png.rollback"));
                 let _ = rust_platform_windows::replace_file_atomically(
                     &image,
@@ -178,7 +215,7 @@ impl ScreenshotStore {
                     &rollback_backup,
                 );
                 let _ = fs::remove_file(rollback_backup);
-            } else {
+            } else if image_was_missing {
                 let _ = fs::remove_file(&image);
             }
             return Err(error.into());
@@ -186,6 +223,56 @@ impl ScreenshotStore {
         let _ = fs::remove_file(image_previous);
         let _ = fs::remove_file(document_previous);
         Ok(Some(document))
+    }
+
+    pub(crate) fn persist_snapshot(
+        &self,
+        snapshot: &ScreenResultSnapshot,
+        languages: Option<(
+            rust_protocol::TranslationLanguage,
+            rust_protocol::TranslationLanguage,
+        )>,
+    ) -> Result<Option<PathBuf>, ScreenshotStoreError> {
+        let Some(crop) = snapshot.crop.as_deref() else {
+            return Ok(None);
+        };
+        self.persist_crop(
+            ScreenshotMetadata {
+                request_id: snapshot.request_id,
+                revision: snapshot.revision,
+                crop_x: snapshot.crop_rect.x,
+                crop_y: snapshot.crop_rect.y,
+                width: snapshot.crop_rect.width,
+                height: snapshot.crop_rect.height,
+                blocks: snapshot
+                    .blocks
+                    .iter()
+                    .map(|block| ScreenTextBlock {
+                        block_id: block.block_id.clone(),
+                        source_text: block.source.clone(),
+                        bounds: block.bounds,
+                        confidence_milli: block.confidence_milli,
+                    })
+                    .collect(),
+                translations: snapshot
+                    .blocks
+                    .iter()
+                    .map(|block| TranslatedScreenBlock {
+                        block_id: block.block_id.clone(),
+                        translated_text: block.translation.clone(),
+                        completion: block.completion,
+                        failure_message: block.failure_message.clone(),
+                    })
+                    .collect(),
+                context: snapshot.context.clone(),
+                source_language: languages.map(|(source, _)| source),
+                target_language: languages.map(|(_, target)| target),
+                created_unix_ms: snapshot.created_unix_ms,
+                expires_unix_ms: snapshot.expires_unix_ms,
+                crop_filename: String::new(),
+            },
+            crop,
+        )
     }
 
     pub(crate) fn set_retention(&self, retention: ScreenshotRetention) {
@@ -200,6 +287,10 @@ impl ScreenshotStore {
         &self,
         request_id: RequestId,
     ) -> Result<Option<StoredScreenshot>, ScreenshotStoreError> {
+        let _write = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let deleted = self
             .deleted
             .lock()
@@ -232,8 +323,93 @@ impl ScreenshotStore {
         Ok(Some(StoredScreenshot { metadata, crop }))
     }
 
+    pub(crate) fn load_result(
+        &self,
+        request_id: RequestId,
+    ) -> Result<
+        Option<(
+            ScreenTranslationDocument,
+            rust_protocol::TranslationLanguage,
+            rust_protocol::TranslationLanguage,
+        )>,
+        ScreenshotStoreError,
+    > {
+        let Some(stored) = self.load_crop(request_id)? else {
+            return Ok(None);
+        };
+        let Some(source_language) = stored.metadata.source_language else {
+            return Ok(None);
+        };
+        let Some(target_language) = stored.metadata.target_language else {
+            return Ok(None);
+        };
+        if stored.metadata.translations.is_empty() {
+            return Ok(None);
+        }
+        let document = ScreenTranslationDocument::restore(PersistedScreenResult {
+            request_id: stored.metadata.request_id,
+            crop: std::sync::Arc::new(stored.crop),
+            blocks: stored.metadata.blocks,
+            translations: stored.metadata.translations,
+            context: stored.metadata.context,
+            revision: stored.metadata.revision,
+            created_unix_ms: stored.metadata.created_unix_ms,
+            expires_unix_ms: stored.metadata.expires_unix_ms,
+        })
+        .map_err(ScreenshotStoreError::Document)?;
+        Ok(Some((document, source_language, target_language)))
+    }
+
+    pub(crate) fn load_latest_result(
+        &self,
+        now_unix_ms: u64,
+    ) -> Result<
+        Option<(
+            ScreenTranslationDocument,
+            rust_protocol::TranslationLanguage,
+            rust_protocol::TranslationLanguage,
+        )>,
+        ScreenshotStoreError,
+    > {
+        let mut candidates = {
+            let _write = self
+                .write_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            fs::read_dir(&self.root)?
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|value| value == "json")
+                })
+                .filter_map(|entry| fs::read(entry.path()).ok())
+                .filter_map(|bytes| serde_json::from_slice::<ScreenshotMetadata>(&bytes).ok())
+                .filter(|metadata| {
+                    metadata.expires_unix_ms > now_unix_ms
+                        && metadata.source_language.is_some()
+                        && metadata.target_language.is_some()
+                        && !metadata.translations.is_empty()
+                })
+                .map(|metadata| (metadata.created_unix_ms, metadata.request_id))
+                .collect::<Vec<_>>()
+        };
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+        for (_, request_id) in candidates {
+            if let Some(result) = self.load_result(request_id)? {
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
+
     #[allow(dead_code)] // Public module contract; wired to history in Task 14.
     pub(crate) fn delete_now(&self, request_id: RequestId) -> Result<(), ScreenshotStoreError> {
+        let _write = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut deleted = self
             .deleted
             .lock()
@@ -248,6 +424,10 @@ impl ScreenshotStore {
     }
 
     pub(crate) fn delete_all(&self) -> Result<usize, ScreenshotStoreError> {
+        let _write = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut deleted = self
             .deleted
             .lock()
@@ -285,6 +465,10 @@ impl ScreenshotStore {
         request_id: RequestId,
         destination: &Path,
     ) -> Result<(), ScreenshotStoreError> {
+        let _write = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let deleted = self
             .deleted
             .lock()
@@ -306,7 +490,11 @@ impl ScreenshotStore {
     }
 
     pub(crate) fn cleanup(&self, now_unix_ms: u64) -> CleanupReport {
-        let _deleted = self
+        let _write = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut deleted = self
             .deleted
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -372,11 +560,14 @@ impl ScreenshotStore {
                     report.error_count += 1;
                 } else {
                     report.removed_entries += 1;
+                    report.removed_request_ids.push(metadata.request_id);
+                    deleted.insert(metadata.request_id);
                 }
                 continue;
             }
             let bytes = file_len(path).saturating_add(file_len(&image));
             entries.push(StoredEntry {
+                request_id: metadata.request_id,
                 document: path.clone(),
                 image,
                 created_unix_ms: metadata.created_unix_ms,
@@ -404,6 +595,8 @@ impl ScreenshotStore {
             } else {
                 total = total.saturating_sub(entry.bytes);
                 report.removed_entries += 1;
+                report.removed_request_ids.push(entry.request_id);
+                deleted.insert(entry.request_id);
             }
         }
         report
@@ -411,6 +604,7 @@ impl ScreenshotStore {
 }
 
 struct StoredEntry {
+    request_id: RequestId,
     document: PathBuf,
     image: PathBuf,
     created_unix_ms: u64,
@@ -535,10 +729,14 @@ mod tests {
     use std::{fs, time::Duration};
 
     use rust_platform_windows::screen_capture::RgbaFrame;
-    use rust_protocol::{PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext};
+    use rust_protocol::{
+        BlockCompletion, PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext,
+        TranslatedScreenBlock, TranslationLanguage,
+    };
     use tempfile::tempdir;
 
     use super::{ScreenshotMetadata, ScreenshotRetention, ScreenshotStore, save_frame_permanent};
+    use crate::screen_result::{DocumentError, ScreenTranslationDocument, UserTranslationEdit};
 
     fn frame(color: u8) -> RgbaFrame {
         RgbaFrame::try_new(
@@ -557,6 +755,7 @@ mod tests {
     fn metadata(request_id: RequestId, created: u64, expires: u64) -> ScreenshotMetadata {
         ScreenshotMetadata {
             request_id,
+            revision: 0,
             crop_x: -20,
             crop_y: 10,
             width: 2,
@@ -574,10 +773,189 @@ mod tests {
             }],
             translations: Vec::new(),
             context: SourceContext::default(),
+            source_language: None,
+            target_language: None,
             created_unix_ms: created,
             expires_unix_ms: expires,
             crop_filename: String::new(),
         }
+    }
+
+    #[test]
+    fn a_stale_snapshot_revision_cannot_overwrite_a_newer_translation_or_pixels() {
+        let directory = tempdir().unwrap();
+        let store =
+            ScreenshotStore::open_at(directory.path(), ScreenshotRetention::default()).unwrap();
+        let request_id = RequestId::new();
+        let mut newer = metadata(request_id, 100, 200);
+        newer.revision = 2;
+        newer.translations = vec![TranslatedScreenBlock {
+            block_id: ScreenBlockId::from("block-1"),
+            translated_text: "newer".to_owned(),
+            completion: BlockCompletion::Completed,
+            failure_message: None,
+        }];
+        let mut stale = metadata(request_id, 100, 200);
+        stale.revision = 1;
+        stale.translations = vec![TranslatedScreenBlock {
+            block_id: ScreenBlockId::from("block-1"),
+            translated_text: "stale".to_owned(),
+            completion: BlockCompletion::Completed,
+            failure_message: None,
+        }];
+
+        store.persist_crop(newer, &frame(9)).unwrap();
+        store.persist_crop(stale, &frame(1)).unwrap();
+        let loaded = store.load_crop(request_id).unwrap().unwrap();
+
+        assert_eq!(loaded.metadata.revision, 2);
+        assert_eq!(loaded.metadata.translations[0].translated_text, "newer");
+        assert_eq!(loaded.crop.pixels, frame(9).pixels);
+    }
+
+    #[test]
+    fn a_saved_user_correction_is_persisted_as_the_new_document_revision() {
+        let directory = tempdir().unwrap();
+        let store =
+            ScreenshotStore::open_at(directory.path(), ScreenshotRetention::default()).unwrap();
+        let request_id = RequestId::new();
+        let block_id = ScreenBlockId::from("block-1");
+        let mut document = ScreenTranslationDocument::new(
+            request_id,
+            std::sync::Arc::new(frame(4)),
+            vec![ScreenTextBlock {
+                block_id: block_id.clone(),
+                source_text: "Cooldown".to_owned(),
+                bounds: PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                },
+                confidence_milli: 900,
+            }],
+            SourceContext::default(),
+            100,
+            200,
+        )
+        .unwrap();
+        document
+            .save_user_edit(
+                &block_id,
+                0,
+                UserTranslationEdit::new("перезарядка".to_owned()),
+            )
+            .unwrap();
+
+        store
+            .persist_snapshot(
+                &document.result_snapshot().unwrap(),
+                Some((TranslationLanguage::English, TranslationLanguage::Russian)),
+            )
+            .unwrap();
+        let loaded = store.load_crop(request_id).unwrap().unwrap();
+
+        assert_eq!(loaded.metadata.revision, 1);
+        assert_eq!(
+            loaded.metadata.translations[0].translated_text,
+            "перезарядка"
+        );
+        assert_eq!(
+            loaded.metadata.source_language,
+            Some(TranslationLanguage::English)
+        );
+        assert_eq!(
+            loaded.metadata.target_language,
+            Some(TranslationLanguage::Russian)
+        );
+        let (restored, source, target) = store.load_result(request_id).unwrap().unwrap();
+        assert_eq!(source, TranslationLanguage::English);
+        assert_eq!(target, TranslationLanguage::Russian);
+        assert_eq!(restored.revision(), 1);
+        assert_eq!(restored.copy_text().unwrap(), "перезарядка");
+    }
+
+    #[test]
+    fn latest_completed_result_can_be_restored_after_restart() {
+        let directory = tempdir().unwrap();
+        let store =
+            ScreenshotStore::open_at(directory.path(), ScreenshotRetention::default()).unwrap();
+        let older = RequestId::new();
+        let newer = RequestId::new();
+        for (request_id, created, translation) in
+            [(older, 100, "старый"), (newer, 200, "исправленный")]
+        {
+            let mut stored = metadata(request_id, created, 10_000);
+            stored.revision = 4;
+            stored.source_language = Some(TranslationLanguage::English);
+            stored.target_language = Some(TranslationLanguage::Russian);
+            stored.translations = vec![TranslatedScreenBlock {
+                block_id: ScreenBlockId::from("block-1"),
+                translated_text: translation.to_owned(),
+                completion: BlockCompletion::Completed,
+                failure_message: None,
+            }];
+            store.persist_crop(stored, &frame(7)).unwrap();
+        }
+
+        let (restored, source, target) = store
+            .load_latest_result(1_000)
+            .unwrap()
+            .expect("latest completed screen result");
+
+        assert_eq!(restored.request_id(), newer);
+        assert_eq!(restored.copy_text().unwrap(), "исправленный");
+        assert_eq!(source, TranslationLanguage::English);
+        assert_eq!(target, TranslationLanguage::Russian);
+    }
+
+    #[test]
+    fn an_incomplete_block_does_not_become_safe_after_persistence_and_restart() {
+        let directory = tempdir().unwrap();
+        let store =
+            ScreenshotStore::open_at(directory.path(), ScreenshotRetention::default()).unwrap();
+        let request_id = RequestId::new();
+        let mut document = ScreenTranslationDocument::new(
+            request_id,
+            std::sync::Arc::new(frame(4)),
+            vec![ScreenTextBlock {
+                block_id: ScreenBlockId::from("block-1"),
+                source_text: "Cooldown reduced by 25%".to_owned(),
+                bounds: PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                },
+                confidence_milli: 900,
+            }],
+            SourceContext::default(),
+            100,
+            200,
+        )
+        .unwrap();
+        document
+            .apply_machine_blocks(
+                request_id,
+                0,
+                vec![TranslatedScreenBlock {
+                    block_id: ScreenBlockId::from("block-1"),
+                    translated_text: "Перезарядка уменьшена на 25%".to_owned(),
+                    completion: BlockCompletion::LimitReached,
+                    failure_message: Some("generation limit reached".to_owned()),
+                }],
+            )
+            .unwrap();
+
+        store
+            .persist_snapshot(
+                &document.result_snapshot().unwrap(),
+                Some((TranslationLanguage::English, TranslationLanguage::Russian)),
+            )
+            .unwrap();
+        let (restored, _, _) = store.load_result(request_id).unwrap().unwrap();
+
+        assert_eq!(restored.copy_text(), Err(DocumentError::IncompleteBlock));
     }
 
     #[test]
@@ -712,6 +1090,14 @@ mod tests {
         assert!(!directory.path().join("orphan.png").exists());
         assert!(!directory.path().join("interrupted.tmp").exists());
         assert_eq!(report.error_count, 0);
+        assert_eq!(report.removed_request_ids, vec![request_id]);
+        assert!(
+            store
+                .persist_crop(metadata(request_id, 100, 150), &frame(9))
+                .unwrap()
+                .is_none(),
+            "a late persistence task must not resurrect an expired screenshot"
+        );
     }
 
     #[test]
@@ -763,10 +1149,11 @@ mod tests {
         )
         .unwrap();
 
-        limited.cleanup(300);
+        let report = limited.cleanup(300);
 
         assert!(limited.load_crop(oldest).unwrap().is_none());
         assert!(limited.load_crop(newest).unwrap().is_some());
+        assert_eq!(report.removed_request_ids, vec![oldest]);
     }
 
     #[test]

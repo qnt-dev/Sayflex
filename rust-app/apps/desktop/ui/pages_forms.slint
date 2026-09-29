@@ -43,6 +43,7 @@ export component TranslationPage inherits VerticalLayout {
     callback open-translator();
     callback note-acted();
     callback set-screenshot-retention-enabled(bool);
+    callback open-latest-screen-translation();
     callback delete-screenshots-now();
 
     spacing: 0px;
@@ -233,11 +234,18 @@ export component TranslationPage inherits VerticalLayout {
 
     FormRow {
         label: @tr("Stored screen captures");
-        hint: @tr("Deletes temporary images now. Text translations and personal glossary entries remain available.");
-        ConfirmAction {
-            label: @tr("Delete now");
-            question: @tr("Delete every temporary screen capture?");
-            confirmed => { root.delete-screenshots-now(); }
+        hint: @tr("Open the latest saved screen translation, or delete temporary images. Text translations and personal glossary entries remain available.");
+        HorizontalLayout {
+            spacing: 8px;
+            RowAction {
+                label: @tr("Open latest");
+                clicked => { root.open-latest-screen-translation(); }
+            }
+            ConfirmAction {
+                label: @tr("Delete now");
+                question: @tr("Delete every temporary screen capture?");
+                confirmed => { root.delete-screenshots-now(); }
+            }
         }
     }
 

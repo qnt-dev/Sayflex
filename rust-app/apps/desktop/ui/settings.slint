@@ -304,6 +304,7 @@ export component SettingsWindow inherits Window {
     callback set-translation-primary-language(string);
     callback set-translation-secondary-language(string);
     callback set-screenshot-retention-enabled(bool);
+    callback open-latest-screen-translation();
     callback delete-screenshots-now();
     callback search-glossary(string);
     callback save-glossary-entry(string, string, string);
@@ -507,6 +508,7 @@ export component SettingsWindow inherits Window {
                     set-primary-language(value) => { root.set-translation-primary-language(value); }
                     set-secondary-language(value) => { root.set-translation-secondary-language(value); }
                     set-screenshot-retention-enabled(next) => { root.set-screenshot-retention-enabled(next); }
+                    open-latest-screen-translation => { root.open-latest-screen-translation(); }
                     delete-screenshots-now => { root.delete-screenshots-now(); }
                     open-translator => { root.open-translator(); }
                     note-acted => { root.active-page = 3; }

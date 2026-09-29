@@ -196,11 +196,24 @@ impl GlossaryStore {
             .filter(|entry| {
                 entry.source_language == source_language
                     && entry.target_language == target_language
-                    && normalize(&entry.source_phrase) == normalized_source
+                    && phrase_occurs_at_word_boundaries(
+                        &normalized_source,
+                        &normalize(&entry.source_phrase),
+                    )
             })
             .filter_map(|entry| context_rank(&entry.context, context).map(|rank| (rank, entry)))
             .collect::<Vec<_>>();
-        ranked.sort_by_key(|(rank, entry)| (*rank, std::cmp::Reverse(entry.updated_unix_ms)));
+        ranked.sort_by(|(left_rank, left), (right_rank, right)| {
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| {
+                    normalize(&right.source_phrase)
+                        .chars()
+                        .count()
+                        .cmp(&normalize(&left.source_phrase).chars().count())
+                })
+                .then_with(|| right.updated_unix_ms.cmp(&left.updated_unix_ms))
+        });
         ranked
             .into_iter()
             .take(limit)
@@ -328,6 +341,22 @@ fn scope(context: &SourceContext) -> String {
     {
         return format!("domain:{domain}");
     }
+    if let Some(site) = context
+        .site_url
+        .as_deref()
+        .and_then(site_scope)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("site:{site}");
+    }
+    if let Some(document) = context
+        .document_name
+        .as_deref()
+        .map(normalize)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("document:{document}");
+    }
     if let Some(application) = context
         .application_id
         .as_deref()
@@ -347,9 +376,26 @@ fn scope(context: &SourceContext) -> String {
     "general".to_owned()
 }
 
+fn site_scope(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value);
+    let authority = value.split(['/', '?', '#']).next()?.trim();
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+        .split(':')
+        .next()?
+        .trim_start_matches("www.");
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
 fn context_rank(entry: &SourceContext, requested: &SourceContext) -> Option<u8> {
-    match scope(entry).split_once(':') {
-        None if scope(entry) == "general" => Some(3),
+    let entry_scope = scope(entry);
+    match entry_scope.split_once(':') {
+        None if entry_scope == "general" => Some(5),
         Some(("domain", value))
             if requested
                 .domain
@@ -358,13 +404,30 @@ fn context_rank(entry: &SourceContext, requested: &SourceContext) -> Option<u8> 
         {
             Some(0)
         }
+        Some(("site", value))
+            if requested
+                .site_url
+                .as_deref()
+                .and_then(site_scope)
+                .is_some_and(|site| site == value) =>
+        {
+            Some(1)
+        }
+        Some(("document", value))
+            if requested
+                .document_name
+                .as_deref()
+                .is_some_and(|document| normalize(document) == value) =>
+        {
+            Some(2)
+        }
         Some(("application", value))
             if requested
                 .application_id
                 .as_deref()
                 .is_some_and(|application| normalize(application) == value) =>
         {
-            Some(1)
+            Some(3)
         }
         Some(("executable", value))
             if requested
@@ -372,7 +435,7 @@ fn context_rank(entry: &SourceContext, requested: &SourceContext) -> Option<u8> 
                 .as_deref()
                 .is_some_and(|executable| normalize(executable) == value) =>
         {
-            Some(2)
+            Some(4)
         }
         _ => None,
     }
@@ -425,6 +488,46 @@ fn push_example(examples: &mut Vec<String>, example: String) {
 
 fn normalize(value: &str) -> String {
     collapse_whitespace(value).to_lowercase()
+}
+
+fn phrase_occurs_at_word_boundaries(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let begins_with_word = needle.chars().next().is_some_and(requires_word_boundary);
+    let ends_with_word = needle
+        .chars()
+        .next_back()
+        .is_some_and(requires_word_boundary);
+    haystack.match_indices(needle).any(|(start, matched)| {
+        let end = start + matched.len();
+        let left_is_clear = !begins_with_word
+            || haystack[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !is_term_character(character));
+        let right_is_clear = !ends_with_word
+            || haystack[end..]
+                .chars()
+                .next()
+                .is_none_or(|character| !is_term_character(character));
+        left_is_clear && right_is_clear
+    })
+}
+
+fn is_term_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn requires_word_boundary(character: char) -> bool {
+    is_term_character(character)
+        && !matches!(
+            character,
+            '\u{3400}'..='\u{4dbf}'
+                | '\u{4e00}'..='\u{9fff}'
+                | '\u{3040}'..='\u{30ff}'
+                | '\u{ac00}'..='\u{d7af}'
+        )
 }
 
 fn collapse_whitespace(value: &str) -> String {
@@ -593,6 +696,87 @@ mod tests {
         assert_eq!(store.list(None, 10)[0].examples.len(), 2);
         assert_eq!(store.list(None, 10)[0].created_unix_ms, 10);
         assert_eq!(store.list(None, 10)[0].updated_unix_ms, 30);
+    }
+
+    #[test]
+    fn approved_term_matches_inside_a_later_sentence_at_word_boundaries() {
+        let directory = tempdir().unwrap();
+        let mut store = GlossaryStore::load(directory.path().join("glossary.json")).unwrap();
+        store
+            .save(
+                draft(Some("dota2"), "перезарядка", "Cooldown reduced by 10%"),
+                1,
+            )
+            .unwrap();
+        let context = draft(Some("dota2"), "", "").context;
+
+        let matches = store.lookup(
+            "Cooldown reduced by 25%",
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+            &context,
+            10,
+        );
+        let false_matches = store.lookup(
+            "The cooldowns counter is decorative",
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+            &context,
+            10,
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].source_phrase, "cooldown");
+        assert!(false_matches.is_empty());
+    }
+
+    #[test]
+    fn approved_cjk_term_matches_text_that_does_not_use_spaces() {
+        let directory = tempdir().unwrap();
+        let mut store = GlossaryStore::load(directory.path().join("glossary.json")).unwrap();
+        let mut chinese = draft(None, "cooldown", "例子");
+        chinese.source_phrase = "冷却".to_owned();
+        chinese.source_language = TranslationLanguage::ChineseSimplified;
+        chinese.target_language = TranslationLanguage::English;
+        let context = chinese.context.clone();
+        store.save(chinese, 1).unwrap();
+
+        let matches = store.lookup(
+            "技能冷却时间缩短",
+            TranslationLanguage::ChineseSimplified,
+            TranslationLanguage::English,
+            &context,
+            10,
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].source_phrase, "冷却");
+    }
+
+    #[test]
+    fn the_same_phrase_can_have_distinct_document_scopes_in_one_application() {
+        let directory = tempdir().unwrap();
+        let mut store = GlossaryStore::load(directory.path().join("glossary.json")).unwrap();
+        let mut first = draft(None, "сборка", "Build the project");
+        first.context.application_id = Some("firefox".to_owned());
+        first.context.document_name = Some("Rust guide".to_owned());
+        let mut second = draft(None, "телосложение", "Character build");
+        second.context.application_id = Some("firefox".to_owned());
+        second.context.document_name = Some("Game wiki".to_owned());
+        store.save(first, 1).unwrap();
+        store.save(second.clone(), 2).unwrap();
+
+        let matches = store.lookup(
+            "cooldown",
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+            &second.context,
+            10,
+        );
+
+        assert_eq!(store.list(None, 10).len(), 2);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].approved_translation, "телосложение");
     }
 
     #[test]

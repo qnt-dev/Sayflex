@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rust_protocol::{GlossaryEntry, GlossaryEntryDraft, GlossaryEntryId, RequestId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +21,7 @@ pub(crate) struct PendingGlossaryAction {
 pub(crate) struct GlossaryViewState {
     entries: Vec<GlossaryEntry>,
     pending_list: Option<RequestId>,
-    pending_action: Option<PendingGlossaryAction>,
+    pending_actions: HashMap<RequestId, GlossaryAction>,
     failed_action: Option<GlossaryAction>,
     error: Option<String>,
     retryable: bool,
@@ -63,10 +65,7 @@ impl GlossaryViewState {
 
     pub(crate) fn begin_action(&mut self, action: GlossaryAction) -> RequestId {
         let operation_id = RequestId::new();
-        self.pending_action = Some(PendingGlossaryAction {
-            operation_id,
-            action,
-        });
+        self.pending_actions.insert(operation_id, action);
         self.failed_action = None;
         self.error = None;
         self.retryable = false;
@@ -74,14 +73,9 @@ impl GlossaryViewState {
     }
 
     pub(crate) fn apply_saved(&mut self, operation_id: RequestId, entry: GlossaryEntry) -> bool {
-        if self
-            .pending_action
-            .as_ref()
-            .is_none_or(|pending| pending.operation_id != operation_id)
-        {
+        if self.pending_actions.remove(&operation_id).is_none() {
             return false;
         }
-        self.pending_action = None;
         self.merge_entry(entry);
         true
     }
@@ -91,14 +85,9 @@ impl GlossaryViewState {
         operation_id: RequestId,
         entry_id: &GlossaryEntryId,
     ) -> bool {
-        if self
-            .pending_action
-            .as_ref()
-            .is_none_or(|pending| pending.operation_id != operation_id)
-        {
+        if self.pending_actions.remove(&operation_id).is_none() {
             return false;
         }
-        self.pending_action = None;
         self.entries.retain(|entry| &entry.entry_id != entry_id);
         true
     }
@@ -109,14 +98,10 @@ impl GlossaryViewState {
         error: String,
         retryable: bool,
     ) -> bool {
-        let Some(pending) = self.pending_action.take() else {
+        let Some(action) = self.pending_actions.remove(&operation_id) else {
             return false;
         };
-        if pending.operation_id != operation_id {
-            self.pending_action = Some(pending);
-            return false;
-        }
-        self.failed_action = Some(pending.action);
+        self.failed_action = Some(action);
         self.error = Some(error);
         self.retryable = retryable;
         true
@@ -196,6 +181,19 @@ mod tests {
             retry.action,
             GlossaryAction::Update { ref draft, .. } if draft.as_ref() == &expected
         ));
+    }
+
+    #[test]
+    fn quick_actions_can_complete_out_of_order_without_losing_the_first_acknowledgement() {
+        let mut view = GlossaryViewState::default();
+        view.merge_entry(entry("first"));
+        view.merge_entry(entry("second"));
+        let first = view.begin_action(GlossaryAction::Delete(GlossaryEntryId::from("first")));
+        let second = view.begin_action(GlossaryAction::Delete(GlossaryEntryId::from("second")));
+
+        assert!(view.apply_deleted(first, &GlossaryEntryId::from("first")));
+        assert!(view.apply_deleted(second, &GlossaryEntryId::from("second")));
+        assert!(view.entries().is_empty());
     }
 
     fn draft() -> GlossaryEntryDraft {

@@ -548,6 +548,8 @@ export component TranslationPreview inherits Window {
     in-out property <bool> screen-saved: false;
     in-out property <bool> screen-save-error: false;
     in-out property <bool> screen-edit-hint-visible: true;
+    in-out property <bool> screen-dense-panel-active: false;
+    in-out property <bool> screen-dense-panel-left: false;
     in-out property <string> screen-editor-original;
     in-out property <string> screen-editor-context;
     in-out property <string> screen-editor-direction;
@@ -671,9 +673,11 @@ export component TranslationPreview inherits Window {
         save-error: root.screen-save-error;
         edit-hint-visible: root.screen-edit-hint-visible;
         dim-other-blocks: root.screen-editor-visible;
+        dense-panel-active: root.screen-dense-panel-active;
+        dense-panel-left: root.screen-dense-panel-left;
         use-fixture-blocks: false;
         blocks: root.screen-blocks;
-        editor-original: root.screen-editor-original;
+        editor-original <=> root.screen-editor-original;
         editor-context: root.screen-editor-context;
         editor-direction: root.screen-editor-direction;
         editor-baseline: root.screen-editor-baseline;

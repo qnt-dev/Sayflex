@@ -200,6 +200,19 @@ impl ScreenTranslationCoordinator {
     }
 
     #[cfg(feature = "screen-translation")]
+    pub(crate) fn restore_document(
+        &mut self,
+        document: ScreenTranslationDocument,
+        source_language: rust_protocol::TranslationLanguage,
+        target_language: rust_protocol::TranslationLanguage,
+    ) {
+        let request_id = document.request_id();
+        self.documents.insert(request_id, document);
+        self.languages
+            .insert(request_id, (source_language, target_language));
+    }
+
+    #[cfg(feature = "screen-translation")]
     pub(crate) fn source_text(&self, request_id: RequestId) -> Option<String> {
         self.documents
             .get(&request_id)
@@ -347,10 +360,13 @@ impl ScreenTranslationCoordinator {
     }
 
     #[cfg(feature = "screen-translation")]
-    pub(crate) fn expire_pixels(&mut self, now_unix_ms: u64) {
-        for document in self.documents.values_mut() {
-            let _ = document.expire_pixels(now_unix_ms);
-        }
+    pub(crate) fn expire_pixels(&mut self, now_unix_ms: u64) -> Vec<RequestId> {
+        self.documents
+            .iter_mut()
+            .filter_map(|(request_id, document)| {
+                document.expire_pixels(now_unix_ms).map(|_| *request_id)
+            })
+            .collect()
     }
 
     #[cfg(feature = "screen-translation")]
@@ -1697,6 +1713,40 @@ mod tests {
             coordinator.copy_text(request_id).unwrap(),
             projection.translated_text
         );
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn expiring_pixels_reports_every_document_whose_live_image_was_released() {
+        let expired = RequestId::new();
+        let retained = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.insert_document(document(expired));
+
+        let frame = Arc::new(RgbaFrame::try_new(rect(0, 0, 1, 1), 4, vec![0, 0, 0, 255]).unwrap());
+        coordinator.insert_document(
+            ScreenTranslationDocument::new(
+                retained,
+                frame,
+                vec![ScreenTextBlock {
+                    block_id: ScreenBlockId::from("retained"),
+                    source_text: "Retained".to_owned(),
+                    bounds: rect(0, 0, 1, 1),
+                    confidence_milli: 900,
+                }],
+                SourceContext::default(),
+                100,
+                500,
+            )
+            .unwrap(),
+        );
+
+        let released = coordinator.expire_pixels(200);
+
+        assert_eq!(released, vec![expired]);
+        assert!(!coordinator.document_has_pixels(expired));
+        assert!(coordinator.document_has_pixels(retained));
+        assert!(coordinator.expire_pixels(200).is_empty());
     }
 
     #[cfg(feature = "screen-translation")]
