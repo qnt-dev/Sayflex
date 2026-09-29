@@ -17,6 +17,7 @@ export struct ScreenBlockOverlay {
     panel-order: int,
     low-confidence: bool,
     replace-source: bool,
+    mask-source: bool,
 }
 
 component OverlayButton inherits Rectangle {
@@ -386,7 +387,7 @@ export component ScreenImageResult inherits Rectangle {
             // restrained leader so the translated text remains spatially tied
             // to the part of the screenshot it replaces.
             for block in root.blocks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && block.callout && !block.overflow-panel;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.mask-source && block.callout && !block.overflow-panel;
                 x: block.source-x * 1px;
                 y: block.source-y * 1px;
                 width: block.source-width * 1px;
@@ -397,7 +398,7 @@ export component ScreenImageResult inherits Rectangle {
                 border-radius: 2px;
             }
             for block in root.blocks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && block.callout && !block.overflow-panel;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.mask-source && block.callout && !block.overflow-panel;
                 x: min(
                     block.source-x + block.source-width / 2,
                     block.x + block.width / 2
@@ -412,7 +413,7 @@ export component ScreenImageResult inherits Rectangle {
                 opacity: 0.72;
             }
             for block in root.blocks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && block.callout && !block.overflow-panel;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.mask-source && block.callout && !block.overflow-panel;
                 x: (block.x + block.width / 2) * 1px;
                 y: min(
                     block.source-y + block.source-height / 2,
@@ -444,18 +445,19 @@ export component ScreenImageResult inherits Rectangle {
                 edit-requested => { root.block-edit-requested(index); }
             }
 
-            // If the image cannot hold collision-free callouts, preserve every
-            // source location and move the full, measured text into one
-            // scrollable panel. Labels are never allowed to overlap silently.
+            // If the image cannot hold collision-free callouts, keep the
+            // screenshot pixels untouched and move the translation into the
+            // external panel. The transparent hit target preserves selection
+            // and double-click editing without leaving an empty mask behind.
             for block[index] in root.blocks: Rectangle {
                 visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && block.overflow-panel;
                 x: block.source-x * 1px;
                 y: block.source-y * 1px;
                 width: block.source-width * 1px;
                 height: block.source-height * 1px;
-                background: #120e09ff;
-                border-width: root.selected-block == index ? 2px : 1px;
-                border-color: block.low-confidence ? #d7a45b : root.selected-block == index ? Theme.red : #d7d3cc70;
+                background: transparent;
+                border-width: root.selected-block == index || block.low-confidence ? 1px : 0px;
+                border-color: block.low-confidence ? #d7a45b : Theme.red;
                 border-radius: 2px;
                 marker-touch := TouchArea {
                     mouse-cursor: pointer;

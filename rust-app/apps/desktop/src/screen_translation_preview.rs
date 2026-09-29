@@ -125,6 +125,7 @@ fn dense_preview_blocks() -> Vec<ScreenBlockOverlay> {
             panel_order: index,
             low_confidence: index == 5,
             replace_source: true,
+            mask_source: false,
         })
         .collect()
 }

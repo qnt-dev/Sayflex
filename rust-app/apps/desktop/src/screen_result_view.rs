@@ -138,6 +138,9 @@ pub(crate) struct BlockLayout {
     pub(crate) panel_order: i32,
     pub(crate) low_confidence: bool,
     pub(crate) replace_source: bool,
+    /// The source pixels may be covered only when the translated text is
+    /// rendered on the image. External-panel rows keep the screenshot intact.
+    pub(crate) mask_source: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -237,6 +240,7 @@ pub(crate) fn layout_blocks(
                 panel_order: -1,
                 low_confidence: block.confidence_milli < 650,
                 replace_source,
+                mask_source: replace_source,
             }
         })
         .collect::<Vec<_>>();
@@ -366,6 +370,7 @@ fn assign_overflow_panel(layouts: &mut [BlockLayout], viewport_width: f32) {
     for (panel_order, index) in order.into_iter().enumerate() {
         let block = &mut layouts[index];
         block.overflow_panel = true;
+        block.mask_source = false;
         block.panel_order = i32::try_from(panel_order).unwrap_or(i32::MAX);
         block.x = panel_x;
         block.y = block.source_y;
@@ -394,6 +399,7 @@ pub(crate) fn plan_screen_result_layout(
         for (panel_order, (index, _, _)) in callout_order.into_iter().enumerate() {
             let block = &mut layouts[index];
             block.overflow_panel = true;
+            block.mask_source = false;
             block.panel_order = i32::try_from(panel_order).unwrap_or(i32::MAX);
         }
     }
@@ -479,6 +485,7 @@ pub(crate) fn apply_snapshot(
             panel_order: block.panel_order,
             low_confidence: block.low_confidence,
             replace_source: block.replace_source,
+            mask_source: block.mask_source,
         })
         .collect::<Vec<_>>();
     let pairs = snapshot
@@ -877,7 +884,7 @@ mod tests {
         let masked_area = plan
             .blocks
             .iter()
-            .filter(|block| block.replace_source)
+            .filter(|block| block.mask_source)
             .map(|block| block.source_width * block.source_height)
             .sum::<f32>();
 
@@ -898,6 +905,13 @@ mod tests {
                 .iter()
                 .filter(|block| block.overflow_panel)
                 .all(|block| block.x >= plan.image_width as f32 + 8.0)
+        );
+        assert!(
+            plan.blocks
+                .iter()
+                .filter(|block| block.overflow_panel)
+                .all(|block| !block.mask_source),
+            "translations rendered in the external panel must not erase source pixels"
         );
     }
 
