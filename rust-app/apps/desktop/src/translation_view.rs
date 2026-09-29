@@ -35,45 +35,11 @@ pub(crate) enum DragPresentationMode {
     LiveBackdrop,
 }
 
-pub(crate) fn drag_presentation_mode(
-    pinned: bool,
-    screen_image_active: bool,
-) -> DragPresentationMode {
-    if pinned || screen_image_active {
+pub(crate) fn drag_presentation_mode(pinned: bool) -> DragPresentationMode {
+    if pinned {
         DragPresentationMode::Direct
     } else {
         DragPresentationMode::LiveBackdrop
-    }
-}
-
-pub(crate) fn screen_result_request_id(
-    preview_request_id: &str,
-    screen_image_active: bool,
-) -> Option<RequestId> {
-    screen_image_active
-        .then(|| RequestId::parse(preview_request_id))
-        .flatten()
-}
-
-#[cfg(test)]
-mod screen_result_lifetime_tests {
-    use rust_protocol::RequestId;
-
-    use super::screen_result_request_id;
-
-    #[test]
-    fn pinned_screen_result_keeps_its_request_identity_after_current_slot_rotates() {
-        let request_id = RequestId::new();
-
-        assert_eq!(
-            screen_result_request_id(&request_id.to_string(), true),
-            Some(request_id)
-        );
-        assert_eq!(
-            screen_result_request_id(&request_id.to_string(), false),
-            None
-        );
-        assert_eq!(screen_result_request_id("not-a-request", true), None);
     }
 }
 
@@ -82,45 +48,6 @@ pub(crate) struct TranslationPreviewSlot {
     pub(crate) preview: Rc<TranslationPreview>,
     pub(crate) presenter: OverlayPresenter,
     pub(crate) attached: Rc<Cell<bool>>,
-    screen_result_active: Arc<AtomicBool>,
-    screen_result_pinned: Arc<AtomicBool>,
-}
-
-impl TranslationPreviewSlot {
-    pub(crate) fn set_screen_result_mode(&self, active: bool, pinned: bool) {
-        self.screen_result_active.store(active, Ordering::Release);
-        self.screen_result_pinned.store(pinned, Ordering::Release);
-        let Some(handle) = slint_window_handle(self.preview.window()) else {
-            return;
-        };
-        if active {
-            rust_platform_windows::deactivate_popup_dismiss(handle);
-            if let Err(error) =
-                rust_platform_windows::configure_screen_result_window(handle, pinned)
-            {
-                rust_app_core::diagnostics::log_line(&format!(
-                    "screen_result window_mode=failed hwnd={handle} pinned={pinned} error={error}"
-                ));
-            }
-        } else {
-            rust_platform_windows::clear_screen_result_window_mode(handle);
-        }
-    }
-
-    pub(crate) fn set_screen_result_pinned(&self, pinned: bool) {
-        self.screen_result_pinned.store(pinned, Ordering::Release);
-        if !self.screen_result_active.load(Ordering::Acquire) {
-            return;
-        }
-        let Some(handle) = slint_window_handle(self.preview.window()) else {
-            return;
-        };
-        if let Err(error) = rust_platform_windows::set_screen_result_window_pinned(handle, pinned) {
-            rust_app_core::diagnostics::log_line(&format!(
-                "screen_result pin_z_order=failed hwnd={handle} pinned={pinned} error={error}"
-            ));
-        }
-    }
 }
 
 pub(crate) struct TranslationPreviewRegistry {
@@ -335,79 +262,6 @@ pub(crate) fn wire_translation_preview(preview: &TranslationPreview, presenter: 
     preview.on_download_model(|| {
         dispatch_runtime_event(RuntimeEvent::ConfirmQueuedModelInstall);
     });
-    #[cfg(feature = "screen-translation")]
-    {
-        let preview_weak = preview.as_weak();
-        preview.on_screen_close_requested(move || {
-            if let Some(preview) = preview_weak.upgrade()
-                && let Some(window_handle) = slint_window_handle(preview.window())
-            {
-                dispatch_runtime_event(RuntimeEvent::DismissTranslationPreview(window_handle));
-            }
-        });
-    }
-    #[cfg(feature = "screen-translation")]
-    {
-        preview.on_screen_editor_save_requested(|| {
-            dispatch_runtime_event(RuntimeEvent::ScreenEditorCommit);
-        });
-        preview.on_screen_editor_confirm_requested(|| {
-            dispatch_runtime_event(RuntimeEvent::ScreenEditorCommit);
-        });
-        preview.on_screen_editor_cancel_requested(|| {
-            dispatch_runtime_event(RuntimeEvent::ScreenEditorCancel);
-        });
-        preview.on_screen_editor_retry_requested(|| {
-            dispatch_runtime_event(RuntimeEvent::ScreenEditorRetry);
-        });
-    }
-    #[cfg(feature = "screen-translation")]
-    {
-        let preview_weak = preview.as_weak();
-        preview.on_screen_block_edit_requested(move |block_index| {
-            if let Some(preview) = preview_weak.upgrade()
-                && let Some(window_handle) = slint_window_handle(preview.window())
-            {
-                dispatch_runtime_event(RuntimeEvent::ScreenBlockEditRequested {
-                    window_handle,
-                    block_index,
-                });
-            }
-        });
-    }
-    #[cfg(feature = "screen-translation")]
-    {
-        let preview_weak = preview.as_weak();
-        preview.on_screen_copy_text_requested(move || {
-            if let Some(preview) = preview_weak.upgrade()
-                && let Some(window_handle) = slint_window_handle(preview.window())
-            {
-                dispatch_runtime_event(RuntimeEvent::ScreenCopyTextRequested { window_handle });
-            }
-        });
-    }
-    #[cfg(feature = "screen-translation")]
-    {
-        let preview_weak = preview.as_weak();
-        preview.on_screen_save_file_requested(move || {
-            if let Some(preview) = preview_weak.upgrade()
-                && let Some(window_handle) = slint_window_handle(preview.window())
-            {
-                dispatch_runtime_event(RuntimeEvent::ScreenSaveFileRequested { window_handle });
-            }
-        });
-    }
-    #[cfg(feature = "screen-translation")]
-    {
-        let preview_weak = preview.as_weak();
-        preview.on_screen_delete_image_requested(move || {
-            if let Some(preview) = preview_weak.upgrade()
-                && let Some(window_handle) = slint_window_handle(preview.window())
-            {
-                dispatch_runtime_event(RuntimeEvent::ScreenDeleteImageRequested { window_handle });
-            }
-        });
-    }
     {
         let preview_weak = preview.as_weak();
         preview.on_pin_state_changed(move |pinned| {
@@ -467,8 +321,7 @@ pub(crate) fn wire_translation_preview(preview: &TranslationPreview, presenter: 
         let drag_active = Arc::clone(&drag_active);
         preview.on_begin_drag(move || {
             if let Some(preview) = preview_weak.upgrade()
-                && drag_presentation_mode(preview.get_pinned(), preview.get_screen_image_active())
-                    == DragPresentationMode::Direct
+                && drag_presentation_mode(preview.get_pinned()) == DragPresentationMode::Direct
             {
                 let result = slint_window_handle(preview.window())
                     .ok_or_else(|| "translation window handle is not available".to_owned())
@@ -555,28 +408,17 @@ pub(crate) fn create_translation_preview_slot(
             .map_err(|error| format!("could not create translation window: {error}"))?,
     );
     preview.set_blur_radius(blur_radius as i32);
-    let screen_result_active = Arc::new(AtomicBool::new(false));
-    let screen_result_pinned = Arc::new(AtomicBool::new(false));
-    let presented_screen_result_active = Arc::clone(&screen_result_active);
     let presenter = OverlayPresenter::install_content_gated(
         preview.window(),
         "translation_preview_overlay",
         OverlayContract::Interactive,
-        Some(Arc::new(move |window_handle| {
-            if presented_screen_result_active.load(Ordering::Acquire) {
-                rust_platform_windows::deactivate_popup_dismiss(window_handle);
-            } else {
-                rust_platform_windows::activate_popup_dismiss(window_handle);
-            }
-        })),
+        Some(Arc::new(rust_platform_windows::activate_popup_dismiss)),
     )?;
     wire_translation_preview(&preview, &presenter);
     Ok(TranslationPreviewSlot {
         preview,
         presenter,
         attached: Rc::new(Cell::new(false)),
-        screen_result_active,
-        screen_result_pinned,
     })
 }
 
@@ -597,12 +439,9 @@ pub(crate) fn retire_translation_preview(slot: &TranslationPreviewSlot, reason: 
     slot.preview.set_prepared(false);
     slot.preview.set_request_id("".into());
     slot.presenter.retire(slot.preview.window(), reason);
-    slot.set_screen_result_mode(false, false);
 }
 
 fn clear_translation_preview_content(preview: &TranslationPreview) {
-    #[cfg(feature = "screen-translation")]
-    crate::screen_result_view::clear_snapshot(preview);
     preview.set_source_text("".into());
     preview.set_translated_text("".into());
     preview.set_translated_paragraphs(slint::ModelRc::new(slint::VecModel::from(Vec::<
@@ -634,11 +473,6 @@ pub(crate) fn apply_translation_preview_pin_state(
     let Some(window_handle) = slint_window_handle(preview.window()) else {
         return Err("translation window handle is not available".to_owned());
     };
-    if preview.get_screen_image_active() {
-        preview.set_live_glass(false);
-        return rust_platform_windows::set_screen_result_window_pinned(window_handle, pinned);
-    }
-
     configure_slint_translation_resize(preview, pinned)?;
     if pinned {
         // A resizable surface must have one compositor owner for its entire
@@ -694,11 +528,7 @@ pub(crate) fn configure_slint_translation_resize(
     // The styles only. `prepare_translation_window` would also cloak and park
     // the window, which is right for a slot being made ready and wrong here —
     // this runs on pin, and pinning a preview made it vanish.
-    if preview.get_screen_image_active() {
-        rust_platform_windows::configure_screen_result_window(handle, preview.get_pinned())
-    } else {
-        rust_platform_windows::configure_action_window(handle)
-    }
+    rust_platform_windows::configure_action_window(handle)
 }
 
 pub(crate) fn begin_slint_window_resize(window: &slint::Window, edge: i32) -> Result<(), String> {
@@ -916,11 +746,6 @@ pub(crate) fn refresh_cloaked_translation_backdrop(
     preview: &TranslationPreview,
     window_handle: u64,
 ) {
-    if preview.get_screen_image_active() {
-        preview.set_live_glass(false);
-        let _ = rust_platform_windows::disable_translation_live_backdrop(window_handle);
-        return;
-    }
     let blur_radius = preview
         .get_blur_radius()
         .clamp(0, MAX_TRANSLATION_BLUR_RADIUS as i32) as u32;
@@ -1044,8 +869,6 @@ pub(crate) fn precreate_translation_preview(slot: &TranslationPreviewSlot) {
     let preview = slot.preview.as_weak();
     let presenter = slot.presenter.clone();
     let attached = Rc::clone(&slot.attached);
-    let screen_result_active = Arc::clone(&slot.screen_result_active);
-    let screen_result_pinned = Arc::clone(&slot.screen_result_pinned);
     let _ = slint::spawn_local(async move {
         let Some(preview) = preview.upgrade() else {
             return;
@@ -1059,15 +882,7 @@ pub(crate) fn precreate_translation_preview(slot: &TranslationPreviewSlot) {
             .and_then(native_window_handle)
             .ok_or_else(|| "native translation-preview HWND is unavailable".to_owned())
             .and_then(|handle| {
-                if screen_result_active.load(Ordering::Acquire) {
-                    rust_platform_windows::configure_screen_result_window(
-                        handle,
-                        screen_result_pinned.load(Ordering::Acquire),
-                    )?;
-                    rust_platform_windows::conceal_overlay_window(handle)?;
-                } else {
-                    rust_platform_windows::prepare_translation_window(handle)?;
-                }
+                rust_platform_windows::prepare_translation_window(handle)?;
                 presenter.attach(handle)?;
                 configure_slint_translation_resize(&preview, false)
             });
@@ -1111,17 +926,10 @@ mod adaptive_popup_tests {
     };
 
     #[test]
-    fn image_results_drag_directly_without_switching_compositor_backdrops() {
+    fn pinned_compact_results_drag_directly_without_switching_backdrops() {
+        assert_eq!(drag_presentation_mode(true), DragPresentationMode::Direct);
         assert_eq!(
-            drag_presentation_mode(false, true),
-            DragPresentationMode::Direct
-        );
-        assert_eq!(
-            drag_presentation_mode(true, false),
-            DragPresentationMode::Direct
-        );
-        assert_eq!(
-            drag_presentation_mode(false, false),
+            drag_presentation_mode(false),
             DragPresentationMode::LiveBackdrop
         );
     }

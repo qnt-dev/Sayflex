@@ -620,6 +620,114 @@ export component ScreenImageResult inherits Rectangle {
     }
 }
 
+// Production screen results own a dedicated component and native window for
+// their entire lifetime. The compact TranslationPreview never changes into
+// this surface, so pinning, editing and dragging cannot rewrite its HWND
+// contract or reveal compact-popup chrome.
+export component ScreenTranslationWindow inherits Window {
+    title: @tr("Screen translation result");
+    preferred-width: root.screen-content-width * 1px;
+    preferred-height: (root.screen-content-height + 38) * 1px;
+    min-width: 320px;
+    min-height: 220px;
+    no-frame: true;
+    always-on-top: false;
+    background: transparent;
+    default-font-family: "Segoe UI Variable Text";
+
+    in-out property <string> request-id;
+    in-out property <bool> prepared: false;
+    in-out property <bool> pinned: false;
+    in-out property <bool> pin-enabled: true;
+    in-out property <image> screen-crop-image;
+    in-out property <[ScreenBlockOverlay]> screen-blocks;
+    in-out property <float> screen-content-width: 960;
+    in-out property <float> screen-content-height: 576;
+    in-out property <float> screen-image-content-width: 960;
+    in-out property <float> screen-dense-panel-width: 0;
+    in-out property <int> screen-view-mode: 3;
+    in-out property <int> screen-selected-block: -1;
+    in-out property <bool> screen-editor-visible: false;
+    in-out property <bool> screen-image-expired: false;
+    in-out property <bool> screen-saved: false;
+    in-out property <bool> screen-save-error: false;
+    in-out property <bool> screen-dense-panel-active: false;
+    in-out property <string> screen-editor-original;
+    in-out property <string> screen-editor-context;
+    in-out property <string> screen-editor-direction;
+    in-out property <string> screen-editor-baseline;
+    in-out property <string> screen-editor-translation;
+    in-out property <bool> screen-editor-saving: false;
+    in-out property <float> screen-editor-panel-x: 8;
+    in-out property <float> screen-editor-panel-y: 8;
+
+    callback begin-drag();
+    callback pin-state-changed(bool);
+    callback screen-block-selected(int);
+    callback screen-block-edit-requested(int);
+    callback screen-copy-text-requested();
+    callback screen-save-file-requested();
+    callback screen-delete-image-requested();
+    callback screen-close-requested();
+    callback screen-editor-save-requested();
+    callback screen-editor-confirm-requested();
+    callback screen-editor-cancel-requested();
+    callback screen-editor-retry-requested();
+
+    ScreenImageResult {
+        width: parent.width;
+        height: parent.height;
+        crop-image: root.screen-crop-image;
+        view-mode: root.screen-view-mode;
+        pinned: root.pinned;
+        selected-block: root.screen-selected-block;
+        editor-visible: root.screen-editor-visible;
+        image-expired: root.screen-image-expired;
+        saved: root.screen-saved;
+        save-error: root.screen-save-error;
+        dim-other-blocks: root.screen-editor-visible;
+        dense-panel-active: root.screen-dense-panel-active;
+        image-content-width: root.screen-image-content-width;
+        dense-panel-width: root.screen-dense-panel-width;
+        use-fixture-blocks: false;
+        blocks: root.screen-blocks;
+        editor-original <=> root.screen-editor-original;
+        editor-context: root.screen-editor-context;
+        editor-direction: root.screen-editor-direction;
+        editor-baseline: root.screen-editor-baseline;
+        editor-translation <=> root.screen-editor-translation;
+        editor-saving: root.screen-editor-saving;
+        editor-panel-x: root.screen-editor-panel-x;
+        editor-panel-y: root.screen-editor-panel-y;
+        begin-drag-requested => { root.begin-drag(); }
+        close-requested => { root.screen-close-requested(); }
+        view-requested(mode) => {
+            root.screen-view-mode = root.screen-view-mode == mode ? 0 : mode;
+        }
+        pin-requested => {
+            if root.pin-enabled {
+                root.pinned = !root.pinned;
+                root.pin-state-changed(root.pinned);
+            }
+        }
+        block-selected(block) => {
+            root.screen-selected-block = block;
+            root.screen-block-selected(block);
+        }
+        block-edit-requested(block) => {
+            root.screen-selected-block = block;
+            root.screen-block-edit-requested(block);
+        }
+        copy-text-requested => { root.screen-copy-text-requested(); }
+        save-file-requested => { root.screen-save-file-requested(); }
+        delete-image-requested => { root.screen-delete-image-requested(); }
+        save-requested => { root.screen-editor-save-requested(); }
+        confirm-requested => { root.screen-editor-confirm-requested(); }
+        cancel-requested => { root.screen-editor-cancel-requested(); }
+        retry-requested => { root.screen-editor-retry-requested(); }
+    }
+}
+
 export component ScreenTranslationPreviewWindow inherits Window {
     title: "Screen translation visual preview";
     preferred-width: 960px;

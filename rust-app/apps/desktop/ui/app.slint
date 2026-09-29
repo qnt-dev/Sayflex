@@ -11,9 +11,9 @@ import { Fact } from "parts.slint";
 import { MenuOption, RowAction } from "controls.slint";
 import { Sheet } from "sheet.slint";
 import { RecordingVisual, SlateLine } from "recording_visual.slint";
-import { ScreenBlockOverlay, ScreenImageResult, ScreenTranslationPreviewWindow } from "screen_translation.slint";
+import { ScreenBlockOverlay, ScreenTranslationPreviewWindow, ScreenTranslationWindow } from "screen_translation.slint";
 
-export { Theme, SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, GlossaryRow, HotkeyRow, ResourceRow, Fact, MenuOption, SlateLine, ScreenBlockOverlay, ScreenTranslationPreviewWindow }
+export { Theme, SettingsWindow, SupportWindow, ModelRow, ProviderRow, HistoryRow, GlossaryRow, HotkeyRow, ResourceRow, Fact, MenuOption, SlateLine, ScreenBlockOverlay, ScreenTranslationPreviewWindow, ScreenTranslationWindow }
 
 export struct TranslationPair {
     source: string,
@@ -492,13 +492,9 @@ export component TranslationPreview inherits Window {
     // Kept for diagnostics and accessibility only. The window is frameless, so
     // no title or chrome is rendered to the user.
     title: @tr("Translation preview");
-    preferred-width: root.screen-image-active
-        ? root.screen-content-width * 1px
-        : root.card-width * 1px;
-    preferred-height: root.screen-image-active
-        ? (root.screen-content-height + 38) * 1px
-        : root.main-card-height * 1px
-            + (root.view-mode == 1 ? root.original-card-height * 1px + 18px : 0px);
+    preferred-width: root.card-width * 1px;
+    preferred-height: root.main-card-height * 1px
+        + (root.view-mode == 1 ? root.original-card-height * 1px + 18px : 0px);
     min-width: 252px;
     min-height: root.preferred-height;
     no-frame: true;
@@ -536,28 +532,6 @@ export component TranslationPreview inherits Window {
     in-out property <bool> dark-text: false;
     in-out property <int> blur-radius: 3;
     in-out property <float> card-width: 252;
-    in-out property <bool> screen-image-active: false;
-    in-out property <image> screen-crop-image;
-    in-out property <[ScreenBlockOverlay]> screen-blocks;
-    in-out property <float> screen-content-width: 960;
-    in-out property <float> screen-content-height: 576;
-    in-out property <float> screen-image-content-width: 960;
-    in-out property <float> screen-dense-panel-width: 0;
-    in-out property <int> screen-view-mode: 3;
-    in-out property <int> screen-selected-block: -1;
-    in-out property <bool> screen-editor-visible: false;
-    in-out property <bool> screen-image-expired: false;
-    in-out property <bool> screen-saved: false;
-    in-out property <bool> screen-save-error: false;
-    in-out property <bool> screen-dense-panel-active: false;
-    in-out property <string> screen-editor-original;
-    in-out property <string> screen-editor-context;
-    in-out property <string> screen-editor-direction;
-    in-out property <string> screen-editor-baseline;
-    in-out property <string> screen-editor-translation;
-    in-out property <bool> screen-editor-saving: false;
-    in-out property <float> screen-editor-panel-x: 8;
-    in-out property <float> screen-editor-panel-y: 8;
     in property <image> glass-backdrop;
     in-out property <float> original-card-height: 96;
     /// What the original actually needs, measured rather than estimated.
@@ -596,16 +570,6 @@ export component TranslationPreview inherits Window {
     callback reset-scroll();
     callback scroll-by(float);
     callback download-model();
-    callback screen-block-selected(int);
-    callback screen-block-edit-requested(int);
-    callback screen-copy-text-requested();
-    callback screen-save-file-requested();
-    callback screen-delete-image-requested();
-    callback screen-close-requested();
-    callback screen-editor-save-requested();
-    callback screen-editor-confirm-requested();
-    callback screen-editor-cancel-requested();
-    callback screen-editor-retry-requested();
     reset-scroll => {
         result-scroll.viewport-y = 0px;
     }
@@ -660,58 +624,7 @@ export component TranslationPreview inherits Window {
         wrap: word-wrap;
     }
 
-    if root.screen-image-active: screen-result := ScreenImageResult {
-        width: parent.width;
-        height: parent.height;
-        crop-image: root.screen-crop-image;
-        view-mode: root.screen-view-mode;
-        pinned: root.pinned;
-        selected-block: root.screen-selected-block;
-        editor-visible: root.screen-editor-visible;
-        image-expired: root.screen-image-expired;
-        saved: root.screen-saved;
-        save-error: root.screen-save-error;
-        dim-other-blocks: root.screen-editor-visible;
-        dense-panel-active: root.screen-dense-panel-active;
-        image-content-width: root.screen-image-content-width;
-        dense-panel-width: root.screen-dense-panel-width;
-        use-fixture-blocks: false;
-        blocks: root.screen-blocks;
-        editor-original <=> root.screen-editor-original;
-        editor-context: root.screen-editor-context;
-        editor-direction: root.screen-editor-direction;
-        editor-baseline: root.screen-editor-baseline;
-        editor-translation <=> root.screen-editor-translation;
-        editor-saving: root.screen-editor-saving;
-        editor-panel-x: root.screen-editor-panel-x;
-        editor-panel-y: root.screen-editor-panel-y;
-        begin-drag-requested => { root.begin-drag(); }
-        close-requested => { root.screen-close-requested(); }
-        view-requested(mode) => { root.screen-view-mode = root.screen-view-mode == mode ? 0 : mode; }
-        pin-requested => {
-            if root.pin-enabled {
-                root.pinned = !root.pinned;
-                root.pin-state-changed(root.pinned);
-            }
-        }
-        block-selected(block) => {
-            root.screen-selected-block = block;
-            root.screen-block-selected(block);
-        }
-        block-edit-requested(block) => {
-            root.screen-selected-block = block;
-            root.screen-block-edit-requested(block);
-        }
-        copy-text-requested => { root.screen-copy-text-requested(); }
-        save-file-requested => { root.screen-save-file-requested(); }
-        delete-image-requested => { root.screen-delete-image-requested(); }
-        save-requested => { root.screen-editor-save-requested(); }
-        confirm-requested => { root.screen-editor-confirm-requested(); }
-        cancel-requested => { root.screen-editor-cancel-requested(); }
-        retry-requested => { root.screen-editor-retry-requested(); }
-    }
-
-    if !root.screen-image-active && root.view-mode == 1: original-card := Rectangle {
+    if root.view-mode == 1: original-card := Rectangle {
         x: 5px;
         y: 6px;
         width: parent.width - 10px;
@@ -777,7 +690,6 @@ export component TranslationPreview inherits Window {
     }
 
     main-card := Rectangle {
-        visible: !root.screen-image-active;
         x: root.view-mode == 1 ? 5px : 0px;
         y: root.view-mode == 1 ? root.original-card-height * 1px + 18px : 0px;
         width: parent.width - (root.view-mode == 1 ? 10px : 0px);
@@ -1183,7 +1095,7 @@ export component TranslationPreview inherits Window {
         }
     }
 
-    if !root.screen-image-active && root.pinned: TouchArea {
+    if root.pinned: TouchArea {
         x: 0;
         y: 7px;
         width: 7px;

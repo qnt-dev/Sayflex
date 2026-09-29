@@ -56,6 +56,11 @@ use screen_result::{
     screen_blocks_from_ocr,
 };
 #[cfg(feature = "screen-translation")]
+use screen_result_window::{
+    ScreenResultWindowRegistry, create_screen_result_window, pin_screen_result,
+    present_screen_result,
+};
+#[cfg(feature = "screen-translation")]
 use screen_translation::ScreenTranslationBegin;
 #[cfg(feature = "screen-translation")]
 use screen_translation::SelectionFailure;
@@ -97,8 +102,8 @@ use translation_view::{
     adaptive_text_panel_height, apply_translation_preview_layout,
     apply_translation_preview_pin_state, configure_slint_translation_resize,
     create_translation_preview_slot, precreate_translation_preview,
-    refresh_cloaked_translation_backdrop, retire_translation_preview, screen_result_request_id,
-    set_translation_status, update_translation_preview_content, wire_translation_preview,
+    refresh_cloaked_translation_backdrop, retire_translation_preview, set_translation_status,
+    update_translation_preview_content, wire_translation_preview,
 };
 use visualizer::{
     BroadcastMicPalette, CircularSpectrumPalette, INDICATOR_FRAME_INTERVAL, IndicatorAnimation,
@@ -124,6 +129,8 @@ mod resource_view;
 mod screen_result;
 #[cfg(feature = "screen-translation")]
 mod screen_result_view;
+#[cfg(feature = "screen-translation")]
+mod screen_result_window;
 mod screen_translation;
 mod screen_translation_preview;
 #[cfg(feature = "screen-translation")]
@@ -393,6 +400,8 @@ struct RuntimeUi {
     action_palette: slint::Weak<ActionPalette>,
     action_palette_presenter: OverlayPresenter,
     translation_previews: Rc<RefCell<TranslationPreviewRegistry>>,
+    #[cfg(feature = "screen-translation")]
+    screen_result_windows: Rc<RefCell<ScreenResultWindowRegistry>>,
     translator: slint::Weak<TranslatorWindow>,
     state: Rc<RefCell<AppState>>,
     workers: Rc<Workers>,
@@ -1386,6 +1395,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         pinned: Vec::new(),
         blur_radius: saved_settings.translation_blur_radius,
     }));
+    #[cfg(feature = "screen-translation")]
+    let screen_result_windows = Rc::new(RefCell::new(ScreenResultWindowRegistry::default()));
     let translator = TranslatorWindow::new()?;
     let tray = AppTray::new()?;
     precreate_indicator(
@@ -1642,6 +1653,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         action_palette: action_palette.as_weak(),
         action_palette_presenter: action_palette_presenter.clone(),
         translation_previews: Rc::clone(&translation_previews),
+        #[cfg(feature = "screen-translation")]
+        screen_result_windows: Rc::clone(&screen_result_windows),
         translator: translator.as_weak(),
         state: Rc::clone(&state),
         workers: Rc::clone(&workers),
@@ -1713,6 +1726,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     tray.show()?;
     slint::run_event_loop()?;
+    #[cfg(feature = "screen-translation")]
+    screen_result_windows.borrow_mut().retire_all("shutdown");
     animation_timer.stop();
     resource_timer.stop();
     #[cfg(feature = "screen-translation")]
@@ -2220,6 +2235,32 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             }
         },
         RuntimeEvent::DismissTranslationPreview(window_handle) => {
+            #[cfg(feature = "screen-translation")]
+            if let Some(slot) = runtime
+                .screen_result_windows
+                .borrow()
+                .slot_by_handle(window_handle)
+            {
+                let request_id = slot.request_id();
+                let active_host = runtime
+                    .active_screen_editor
+                    .borrow()
+                    .as_ref()
+                    .map(|active| active.host_window_handle);
+                if host_editor_should_close(active_host, window_handle) {
+                    close_screen_translation_editor(runtime, false);
+                }
+                runtime
+                    .screen_result_windows
+                    .borrow_mut()
+                    .retire(request_id, "close");
+                if let Some(cancellation) =
+                    runtime.screen_translation.borrow_mut().close(request_id)
+                {
+                    apply_screen_translation_cancellation(cancellation, runtime);
+                }
+                return;
+            }
             let slot = runtime
                 .translation_previews
                 .borrow()
@@ -2232,11 +2273,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                 let current_request = is_current
                     .then(|| runtime.translation_previews.borrow().current_request)
                     .flatten();
-                let owned_screen_request = screen_result_request_id(
-                    slot.preview.get_request_id().as_str(),
-                    slot.preview.get_screen_image_active(),
-                );
-                let request_id = owned_screen_request.or(current_request);
+                let request_id = current_request;
                 retire_runtime_translation_preview(&slot, "click_away", runtime);
                 if let Some(request_id) = request_id
                     && let Some(cancellation) =
@@ -2273,6 +2310,33 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
             window_handle,
             pinned,
         } => {
+            #[cfg(feature = "screen-translation")]
+            if let Some(slot) = runtime
+                .screen_result_windows
+                .borrow()
+                .slot_by_handle(window_handle)
+            {
+                let request_id = slot.request_id();
+                if pinned
+                    && !runtime
+                        .screen_translation
+                        .borrow_mut()
+                        .pin_completed(request_id)
+                {
+                    slot.window.set_pinned(false);
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "screen_result request={request_id} pin=ignored reason=processing"
+                    ));
+                    return;
+                }
+                if let Err(error) = pin_screen_result(&slot, pinned) {
+                    slot.window.set_pinned(!pinned);
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "screen_result request={request_id} pin=failed error={error}"
+                    ));
+                }
+                return;
+            }
             let slot = runtime
                 .translation_previews
                 .borrow()
@@ -2282,36 +2346,7 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                     let previews = runtime.translation_previews.borrow();
                     slint_window_handle(previews.current.preview.window()) == Some(window_handle)
                 };
-                if pinned && is_current {
-                    let request_id = runtime.translation_previews.borrow().current_request;
-                    let is_screen_request = request_id.is_some_and(|request_id| {
-                        runtime
-                            .screen_translation
-                            .borrow()
-                            .anchor(request_id)
-                            .is_some()
-                    });
-                    if let Some(request_id) = request_id
-                        && is_screen_request
-                        && !runtime
-                            .screen_translation
-                            .borrow_mut()
-                            .pin_completed(request_id)
-                    {
-                        slot.preview.set_pinned(false);
-                        slot.set_screen_result_pinned(false);
-                        rust_app_core::diagnostics::log_line(&format!(
-                            "translation_preview pin=ignored request={request_id} reason=screen_translation_processing"
-                        ));
-                        return;
-                    }
-                }
-                if slot.preview.get_screen_image_active() {
-                    let mode = screen_result_view::ScreenResultWindowMode::new(pinned);
-                    slot.set_screen_result_pinned(mode.topmost());
-                } else {
-                    rust_platform_windows::set_popup_pinned(window_handle, pinned);
-                }
+                rust_platform_windows::set_popup_pinned(window_handle, pinned);
                 if pinned && is_current {
                     // Keep the immutable RefCell borrow out of the match
                     // scrutinee. Rust extends a scrutinee temporary through
@@ -2556,11 +2591,11 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
         .map(|active| (active.host_window_handle, active.block_index));
     if existing == Some((window_handle, block_index)) {
         if let Some(slot) = runtime
-            .translation_previews
+            .screen_result_windows
             .borrow()
             .slot_by_handle(window_handle)
         {
-            slot.preview.set_screen_editor_visible(true);
+            slot.window.set_screen_editor_visible(true);
         }
         return;
     }
@@ -2568,15 +2603,13 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
         close_screen_translation_editor(runtime, false);
     }
     let Some(slot) = runtime
-        .translation_previews
+        .screen_result_windows
         .borrow()
         .slot_by_handle(window_handle)
     else {
         return;
     };
-    let Some(request_id) = RequestId::parse(slot.preview.get_request_id().as_str()) else {
-        return;
-    };
+    let request_id = slot.request_id();
     let Ok((snapshot, source_language, target_language)) = runtime
         .screen_translation
         .borrow()
@@ -2600,15 +2633,15 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
         block.source.clone(),
         block.translation.clone(),
     );
-    slot.preview
+    slot.window
         .set_screen_editor_original(block.source.clone().into());
-    slot.preview
+    slot.window
         .set_screen_editor_baseline(block.translation.clone().into());
-    slot.preview
+    slot.window
         .set_screen_editor_translation(block.translation.clone().into());
-    slot.preview
+    slot.window
         .set_screen_editor_context(source_context_label(&snapshot.context).into());
-    slot.preview.set_screen_editor_direction(
+    slot.window.set_screen_editor_direction(
         format!(
             "{} → {}",
             source_language.code().to_ascii_uppercase(),
@@ -2616,14 +2649,14 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
         )
         .into(),
     );
-    slot.preview.set_screen_save_error(false);
-    slot.preview.set_screen_editor_saving(false);
+    slot.window.set_screen_save_error(false);
+    slot.window.set_screen_editor_saving(false);
 
-    slot.preview.set_screen_selected_block(block_index);
-    slot.preview.set_screen_editor_visible(true);
+    slot.window.set_screen_selected_block(block_index);
+    slot.window.set_screen_editor_visible(true);
     if let Some((x, y)) = screen_translation_editor_position(&snapshot, index) {
-        slot.preview.set_screen_editor_panel_x(x);
-        slot.preview.set_screen_editor_panel_y(y);
+        slot.window.set_screen_editor_panel_x(x);
+        slot.window.set_screen_editor_panel_y(y);
     }
     *runtime.active_screen_editor.borrow_mut() = Some(ActiveScreenEditor {
         state,
@@ -2636,10 +2669,10 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
         last_applied_translation: block.translation.clone(),
     });
     let _ = slot
-        .preview
+        .window
         .window()
         .with_winit_window(|window| window.focus_window());
-    slot.preview.window().request_redraw();
+    slot.window.window().request_redraw();
 }
 
 #[cfg(feature = "screen-translation")]
@@ -2717,7 +2750,7 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
         return;
     };
     let Some(slot) = runtime
-        .translation_previews
+        .screen_result_windows
         .borrow()
         .slot_by_handle(active.host_window_handle)
     else {
@@ -2725,14 +2758,14 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
         return;
     };
     let edited = slot
-        .preview
+        .window
         .get_screen_editor_translation()
         .trim()
         .to_owned();
-    let source_phrase = slot.preview.get_screen_editor_original().trim().to_owned();
+    let source_phrase = slot.window.get_screen_editor_original().trim().to_owned();
     if edited.is_empty() || source_phrase.is_empty() {
-        slot.preview.set_screen_save_error(true);
-        slot.preview.set_screen_editor_saving(false);
+        slot.window.set_screen_save_error(true);
+        slot.window.set_screen_editor_saving(false);
         *runtime.active_screen_editor.borrow_mut() = Some(active);
         return;
     }
@@ -2785,8 +2818,8 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
             }
             Err(error) => {
                 active.state.fail(operation_id, format!("{error:?}"), true);
-                slot.preview.set_screen_save_error(true);
-                slot.preview.set_screen_editor_saving(false);
+                slot.window.set_screen_save_error(true);
+                slot.window.set_screen_editor_saving(false);
                 *runtime.active_screen_editor.borrow_mut() = Some(active);
                 return;
             }
@@ -2817,12 +2850,12 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
         expected_revision: active.canonical_revision,
         entry,
     };
-    slot.preview.set_screen_editor_saving(true);
-    slot.preview.set_screen_save_error(false);
+    slot.window.set_screen_editor_saving(true);
+    slot.window.set_screen_save_error(false);
     if let Err(error) = runtime.workers.translation.send(&command) {
         active.state.fail(operation_id, error.to_string(), true);
-        slot.preview.set_screen_editor_saving(false);
-        slot.preview.set_screen_save_error(true);
+        slot.window.set_screen_editor_saving(false);
+        slot.window.set_screen_save_error(true);
     }
     *runtime.active_screen_editor.borrow_mut() = Some(active);
 }
@@ -2836,18 +2869,18 @@ fn close_screen_translation_editor(runtime: &RuntimeUi, saved: bool) {
         active.state.cancel();
     }
     let slot = runtime
-        .translation_previews
+        .screen_result_windows
         .borrow()
         .slot_by_handle(active.host_window_handle);
     if let Some(slot) = slot {
-        slot.preview.set_screen_editor_visible(false);
-        slot.preview.set_screen_editor_saving(false);
-        slot.preview.set_screen_save_error(false);
+        slot.window.set_screen_editor_visible(false);
+        slot.window.set_screen_editor_saving(false);
+        slot.window.set_screen_save_error(false);
         if saved {
-            slot.preview.set_screen_saved(true);
-            let preview = Rc::clone(&slot.preview);
+            slot.window.set_screen_saved(true);
+            let window = Rc::clone(&slot.window);
             Timer::single_shot(std::time::Duration::from_secs(2), move || {
-                preview.set_screen_saved(false);
+                window.set_screen_saved(false);
             });
         }
     }
@@ -2856,15 +2889,13 @@ fn close_screen_translation_editor(runtime: &RuntimeUi, saved: bool) {
 #[cfg(feature = "screen-translation")]
 fn copy_screen_translation(window_handle: u64, runtime: &RuntimeUi) {
     let Some(slot) = runtime
-        .translation_previews
+        .screen_result_windows
         .borrow()
         .slot_by_handle(window_handle)
     else {
         return;
     };
-    let Some(request_id) = RequestId::parse(slot.preview.get_request_id().as_str()) else {
-        return;
-    };
+    let request_id = slot.request_id();
     match runtime.screen_translation.borrow().copy_text(request_id) {
         Ok(text) => {
             if let Err(error) = runtime.workers.input.send(&InputHostCommand::CopyText {
@@ -2886,15 +2917,13 @@ fn copy_screen_translation(window_handle: u64, runtime: &RuntimeUi) {
 #[cfg(feature = "screen-translation")]
 fn save_screen_translation_file(window_handle: u64, runtime: &RuntimeUi) {
     let Some(slot) = runtime
-        .translation_previews
+        .screen_result_windows
         .borrow()
         .slot_by_handle(window_handle)
     else {
         return;
     };
-    let Some(request_id) = RequestId::parse(slot.preview.get_request_id().as_str()) else {
-        return;
-    };
+    let request_id = slot.request_id();
     let Ok((snapshot, _, _)) = runtime
         .screen_translation
         .borrow()
@@ -2936,15 +2965,13 @@ fn save_screen_translation_file(window_handle: u64, runtime: &RuntimeUi) {
 #[cfg(feature = "screen-translation")]
 fn delete_screen_translation_image(window_handle: u64, runtime: &RuntimeUi) {
     let Some(slot) = runtime
-        .translation_previews
+        .screen_result_windows
         .borrow()
         .slot_by_handle(window_handle)
     else {
         return;
     };
-    let Some(request_id) = RequestId::parse(slot.preview.get_request_id().as_str()) else {
-        return;
-    };
+    let request_id = slot.request_id();
     let Some(store) = runtime.screenshot_store.as_ref().map(Arc::clone) else {
         finish_delete_screen_translation_image(request_id, Ok(()), runtime);
         return;
@@ -3044,37 +3071,18 @@ fn finish_open_latest_screen_translation(
         return;
     };
 
-    if runtime
-        .translation_previews
-        .borrow()
-        .slot_for_request(request_id)
-        .is_none()
-    {
-        let blur_radius = runtime.translation_previews.borrow().blur_radius;
-        let slot = match create_translation_preview_slot(blur_radius) {
-            Ok(slot) => slot,
-            Err(error) => {
-                set_status_problem(&runtime.settings, &error.to_string());
-                return;
-            }
-        };
-        precreate_translation_preview(&slot);
-        slot.preview.set_request_id(request_id.to_string().into());
-        slot.preview.set_prepared(false);
-        runtime.translation_previews.borrow_mut().pinned.push(slot);
-    }
     show_screen_image_result(request_id, snapshot.crop_rect, &snapshot, runtime);
     if let Some(slot) = runtime
-        .translation_previews
+        .screen_result_windows
         .borrow()
         .slot_for_request(request_id)
     {
-        let _ = slot.preview.window().show();
+        let _ = slot.window.window().show();
         let _ = slot
-            .preview
+            .window
             .window()
             .with_winit_window(|window| window.focus_window());
-        slot.preview.window().request_redraw();
+        slot.window.window().request_redraw();
     }
 }
 
@@ -3092,7 +3100,10 @@ fn invalidate_screen_result_pixels(request_id: RequestId, runtime: &RuntimeUi) {
         .screen_translation
         .borrow_mut()
         .expire_request_pixels(request_id);
-    refresh_screen_result_preview(request_id, -1, runtime);
+    runtime
+        .screen_result_windows
+        .borrow_mut()
+        .retire(request_id, "pixels_expired");
 }
 
 #[cfg(feature = "screen-translation")]
@@ -3105,33 +3116,32 @@ fn refresh_screen_result_preview(request_id: RequestId, selected_block: i32, run
         return;
     };
     let Some(slot) = runtime
-        .translation_previews
+        .screen_result_windows
         .borrow()
         .slot_for_request(request_id)
     else {
         return;
     };
-    let mode = slot.preview.get_screen_view_mode();
-    let editor_visible = slot.preview.get_screen_editor_visible();
-    if let Err(error) = screen_result_view::apply_snapshot(&slot.preview, &snapshot) {
+    let mode = slot.window.get_screen_view_mode();
+    let editor_visible = slot.window.get_screen_editor_visible();
+    if let Err(error) = screen_result_view::apply_snapshot(&slot.window, &snapshot) {
         rust_app_core::diagnostics::log_line(&format!(
             "screen_translation request={request_id} stage=result_refresh result=failed error={error}"
         ));
         return;
     }
-    slot.preview
+    slot.window
         .set_screen_view_mode(screen_result_view::visible_ui_mode(
             mode,
             snapshot.crop.is_some(),
         ));
-    slot.preview.set_screen_selected_block(selected_block);
-    slot.preview.set_screen_editor_visible(
-        screen_result_view::preserve_editor_on_snapshot_refresh(
+    slot.window.set_screen_selected_block(selected_block);
+    slot.window
+        .set_screen_editor_visible(screen_result_view::preserve_editor_on_snapshot_refresh(
             editor_visible,
             snapshot.crop.is_some(),
-        ),
-    );
-    slot.preview.window().request_redraw();
+        ));
+    slot.window.window().request_redraw();
 }
 
 #[cfg(feature = "screen-translation")]
@@ -3168,6 +3178,11 @@ fn handle_session_end(event: rust_platform_windows::SessionEndEvent, runtime: &R
                 "desktop lifecycle=exit_requested reason=session_end_confirmed",
             );
             runtime.workers.confirm_session_end();
+            #[cfg(feature = "screen-translation")]
+            runtime
+                .screen_result_windows
+                .borrow_mut()
+                .retire_all("session_end");
             let _ = slint::quit_event_loop();
         }
         rust_platform_windows::SessionEndEvent::Cancelled => {
@@ -4220,6 +4235,18 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                 ));
                 return;
             };
+            let retired = runtime
+                .screen_result_windows
+                .borrow_mut()
+                .retire_unpinned("superseded");
+            if runtime
+                .active_screen_editor
+                .borrow()
+                .as_ref()
+                .is_some_and(|active| retired.contains(&active.state.key().request_id))
+            {
+                close_screen_translation_editor(runtime, false);
+            }
             let old_request = runtime.translation_previews.borrow().current_request;
             if old_request.is_some_and(|old_request| {
                 runtime
@@ -4235,7 +4262,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             if let Some(cancellation) = cancellation {
                 apply_screen_translation_cancellation(cancellation, runtime);
             }
-            let excluded_overlays = match runtime
+            let mut excluded_overlays = match runtime
                 .translation_previews
                 .borrow()
                 .cloak_presented_for_capture()
@@ -4255,6 +4282,29 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     return;
                 }
             };
+            match runtime
+                .screen_result_windows
+                .borrow()
+                .cloak_presented_for_capture()
+            {
+                Ok(mut surfaces) => excluded_overlays.append(&mut surfaces),
+                Err(error) => {
+                    for surface in &excluded_overlays {
+                        let _ = surface.restore();
+                    }
+                    runtime.screen_translation.borrow_mut().complete(request_id);
+                    show_screen_translation_outcome(
+                        request_id,
+                        None,
+                        ScreenTranslationOutcome::CaptureUnavailable,
+                        runtime,
+                    );
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "screen_translation request={request_id} stage=screen_result_exclusion result=failed error={error}"
+                    ));
+                    return;
+                }
+            }
             let excluded_on_spawn_failure = excluded_overlays.clone();
             let capture_backend = Arc::clone(&runtime.screen_capture_backend);
             let spawn = std::thread::Builder::new()
@@ -5321,107 +5371,55 @@ fn show_screen_image_result(
     snapshot: &screen_result::ScreenResultSnapshot,
     runtime: &RuntimeUi,
 ) {
-    let Some(slot) = runtime
+    // The compact progress card and the screenshot result never share a
+    // component or HWND. Retire any transient progress surface before the
+    // dedicated result is created.
+    let compact = runtime
         .translation_previews
         .borrow()
+        .slot_for_request(request_id);
+    if let Some(compact) = compact {
+        retire_runtime_translation_preview(&compact, "screen_result_ready", runtime);
+        runtime
+            .translation_previews
+            .borrow_mut()
+            .clear_current_request(request_id);
+    }
+    let slot = match runtime
+        .screen_result_windows
+        .borrow()
         .slot_for_request(request_id)
-    else {
-        rust_app_core::diagnostics::log_line(&format!(
-            "screen_translation request={request_id} stage=result_present result=superseded"
-        ));
-        return;
+    {
+        Some(slot) => slot,
+        None => match create_screen_result_window(request_id) {
+            Ok(slot) => {
+                runtime
+                    .screen_result_windows
+                    .borrow_mut()
+                    .insert(slot.clone());
+                slot
+            }
+            Err(error) => {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "screen_translation request={request_id} stage=result_window result=create_failed error={error}"
+                ));
+                return;
+            }
+        },
     };
-    let preview = &slot.preview;
-    let window_mode = screen_result_view::ScreenResultWindowMode::new(preview.get_pinned());
-    slot.set_screen_result_mode(true, window_mode.topmost());
-    let first_show = preview.get_request_id().as_str() != request_id.to_string();
-    preview.set_request_id(request_id.to_string().into());
-    preview.set_screen_anchor_active(true);
-    preview.set_screen_anchor_x(anchor.x);
-    preview.set_screen_anchor_y(anchor.y);
-    preview.set_screen_anchor_width(i32::try_from(anchor.width).unwrap_or(i32::MAX));
-    preview.set_screen_anchor_height(i32::try_from(anchor.height).unwrap_or(i32::MAX));
-    preview.set_processing(false);
-    preview.set_pin_enabled(true);
-    preview.set_model_offer_visible(false);
-    preview.set_model_offer_action("".into());
-    preview.set_screen_saved(false);
-    preview.set_screen_save_error(false);
-    if let Err(error) = screen_result_view::apply_snapshot(preview, snapshot) {
+    slot.window.set_pin_enabled(true);
+    slot.window.set_screen_saved(false);
+    slot.window.set_screen_save_error(false);
+    if let Err(error) = screen_result_view::apply_snapshot(&slot.window, snapshot) {
         rust_app_core::diagnostics::log_line(&format!(
             "screen_translation request={request_id} stage=result_present result=image_failed error={error}"
         ));
-        show_screen_translation_preview(
-            request_id,
-            anchor,
-            &snapshot
-                .blocks
-                .iter()
-                .map(|block| block.source.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-            &snapshot
-                .blocks
-                .iter()
-                .map(|block| block.translation.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-            &runtime.translation_previews,
-            true,
-        );
         return;
     }
-    preview.window().set_size(slint::LogicalSize::new(
-        preview.get_screen_content_width(),
-        preview.get_screen_content_height() + 38.0,
-    ));
-    let right = i64::from(anchor.x)
-        .saturating_add(i64::from(anchor.width))
-        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-    let bottom = i64::from(anchor.y)
-        .saturating_add(i64::from(anchor.height))
-        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-    if let Some(handle) = slint_window_handle(preview.window())
-        && let Err(error) = rust_platform_windows::position_screen_result_window_for_region(
-            handle,
-            (anchor.x, anchor.y, right, bottom),
-        )
-    {
+    if let Err(error) = present_screen_result(&slot, anchor) {
         rust_app_core::diagnostics::log_line(&format!(
-            "screen_translation request={request_id} stage=result_position result=failed error={error}"
+            "screen_translation request={request_id} stage=result_present result=failed error={error}"
         ));
-    }
-    preview.window().request_redraw();
-    if first_show || !preview.get_prepared() {
-        preview.set_prepared(false);
-        preview.invoke_reset_scroll();
-        if slot.attached.get()
-            && let Err(error) = present_translation_preview(
-                preview,
-                &slot.presenter,
-                Some(TranslationPreviewAnchor::ScreenRegion(anchor)),
-            )
-        {
-            rust_app_core::diagnostics::log_line(&format!(
-                "screen_translation request={request_id} stage=result_present result=failed error={error}"
-            ));
-        }
-    } else {
-        match slot.presenter.begin_refresh() {
-            Ok(ticket) => {
-                if let Err(error) = slot.presenter.await_frame(preview.window(), ticket) {
-                    slot.presenter.abort_prepare(
-                        preview.window(),
-                        ticket,
-                        "screen_result_refresh",
-                        &error,
-                    );
-                }
-            }
-            Err(reason) => rust_app_core::diagnostics::log_line(&format!(
-                "screen_translation request={request_id} stage=result_refresh result=folded reason={reason}"
-            )),
-        }
     }
 }
 
@@ -5479,7 +5477,6 @@ fn show_translation_preview_at(
         return;
     };
     let preview = &slot.preview;
-    slot.set_screen_result_mode(false, false);
     let translation_preview_presenter = &slot.presenter;
     let request_id_text = request_id.to_string();
     let first_show = preview.get_request_id().as_str() != request_id_text;
@@ -6942,12 +6939,12 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             if editor_failed {
                 if let Some(active) = runtime.active_screen_editor.borrow().as_ref()
                     && let Some(slot) = runtime
-                        .translation_previews
+                        .screen_result_windows
                         .borrow()
                         .slot_by_handle(active.host_window_handle)
                 {
-                    slot.preview.set_screen_editor_saving(false);
-                    slot.preview.set_screen_save_error(true);
+                    slot.window.set_screen_editor_saving(false);
+                    slot.window.set_screen_save_error(true);
                 }
             } else if runtime.glossary_view.borrow_mut().apply_failure(
                 operation_id,

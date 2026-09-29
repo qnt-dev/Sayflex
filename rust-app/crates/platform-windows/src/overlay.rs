@@ -840,7 +840,50 @@ fn apply_screen_result_window_contract(hwnd: HWND, pinned: bool) -> Result<(), S
             return Err("SetWindowPos failed for screen-result window".to_owned());
         }
     }
+    verify_screen_result_frameless_style(hwnd)?;
     Ok(())
+}
+
+fn verify_screen_result_frameless_style(hwnd: HWND) -> Result<(), String> {
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+    let required = WS_POPUP as isize;
+    let forbidden =
+        (WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
+    if style & required == 0 || style & forbidden != 0 {
+        let message = format!(
+            "screen-result frame contract mismatch: hwnd=0x{:X} style=0x{style:X} required=0x{required:X} forbidden=0x{forbidden:X}",
+            hwnd as usize,
+        );
+        rust_app_core::diagnostics::log_line(&message);
+        return Err(message);
+    }
+    Ok(())
+}
+
+/// Moves the dedicated screen-result HWND entirely through client-owned
+/// positioning. This deliberately avoids winit's/native caption drag loop,
+/// which can temporarily restore non-client chrome while the pointer is down.
+pub fn move_screen_result_window_client(window_handle: u64, x: i32, y: i32) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("screen-result window handle is not available".to_owned());
+    }
+    verify_screen_result_frameless_style(hwnd)?;
+    if unsafe {
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+        )
+    } == 0
+    {
+        return Err("SetWindowPos failed while moving screen-result window".to_owned());
+    }
+    verify_screen_result_frameless_style(hwnd)
 }
 
 pub fn set_screen_result_window_pinned(window_handle: u64, pinned: bool) -> Result<(), String> {
@@ -915,7 +958,6 @@ pub fn begin_borderless_window_drag(window_handle: u64) -> Result<(), String> {
     let spawn_result = std::thread::Builder::new()
         .name("sayflex-borderless-window-drag".to_owned())
         .spawn(move || {
-            let hwnd = window_handle as usize as HWND;
             let pressed_deadline = Instant::now() + Duration::from_millis(120);
             while !primary_pointer_button_is_down() && Instant::now() < pressed_deadline {
                 std::thread::sleep(Duration::from_millis(2));
@@ -930,18 +972,7 @@ pub fn begin_borderless_window_drag(window_handle: u64) -> Result<(), String> {
                     (pointer_at_press.x, pointer_at_press.y),
                     (pointer_now.x, pointer_now.y),
                 );
-                let moved = unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        null_mut(),
-                        x,
-                        y,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-                    )
-                };
-                if moved == 0 {
+                if move_screen_result_window_client(window_handle, x, y).is_err() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(8));
@@ -2048,14 +2079,14 @@ mod screen_result_contract_tests {
     use std::ptr::null_mut;
 
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GetWindowLongPtrW, WS_EX_TOPMOST,
-        WS_OVERLAPPEDWINDOW,
+        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, WS_CAPTION,
+        WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
     };
 
     use super::{
         borderless_drag_position, clear_screen_result_window_mode, configure_screen_result_window,
-        position_screen_result_window_for_region, reconcile_interactive_overlay_window_contract,
-        set_screen_result_window_pinned,
+        move_screen_result_window_client, position_screen_result_window_for_region,
+        reconcile_interactive_overlay_window_contract, set_screen_result_window_pinned,
     };
 
     #[test]
@@ -2136,5 +2167,18 @@ mod screen_result_contract_tests {
         set_screen_result_window_pinned(window.handle(), false).unwrap();
         reconcile_interactive_overlay_window_contract(window.handle()).unwrap();
         assert!(!window.is_topmost());
+    }
+
+    #[test]
+    fn repeated_client_moves_preserve_the_frameless_popup_contract() {
+        let window = TestWindow::create();
+        configure_screen_result_window(window.handle(), false).unwrap();
+
+        for (x, y) in [(20, 30), (150, 90), (5, 7), (600, 320)] {
+            move_screen_result_window_client(window.handle(), x, y).unwrap();
+            let style = unsafe { GetWindowLongPtrW(window.0, GWL_STYLE) };
+            assert_ne!(style & WS_POPUP as isize, 0);
+            assert_eq!(style & (WS_CAPTION | WS_THICKFRAME) as isize, 0);
+        }
     }
 }

@@ -2,7 +2,7 @@ use rust_protocol::{PhysicalRect, ScreenBlockId};
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 use crate::screen_result::ScreenResultSnapshot;
-use crate::{ScreenBlockOverlay, TranslationPair, TranslationPreview};
+use crate::{ScreenBlockOverlay, ScreenTranslationWindow};
 
 const MIN_CALLOUT_WIDTH: f32 = 180.0;
 const MAX_CALLOUT_WIDTH: f32 = 320.0;
@@ -23,11 +23,13 @@ pub(crate) enum ResultViewMode {
     OnImage,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScreenResultWindowMode {
     pinned: bool,
 }
 
+#[cfg(test)]
 impl ScreenResultWindowMode {
     pub(crate) fn new(pinned: bool) -> Self {
         Self { pinned }
@@ -449,7 +451,7 @@ impl SaturatingSubF32 for f32 {
 }
 
 pub(crate) fn apply_snapshot(
-    preview: &TranslationPreview,
+    preview: &ScreenTranslationWindow,
     snapshot: &ScreenResultSnapshot,
 ) -> Result<Vec<BlockLayout>, String> {
     let crop_size = CropPixelSize::from_screen_rect(snapshot.crop_rect);
@@ -488,39 +490,6 @@ pub(crate) fn apply_snapshot(
             mask_source: block.mask_source,
         })
         .collect::<Vec<_>>();
-    let pairs = snapshot
-        .blocks
-        .iter()
-        .map(|block| TranslationPair {
-            source: block.source.clone().into(),
-            translation: block.translation.clone().into(),
-        })
-        .collect::<Vec<_>>();
-    let translations = snapshot
-        .blocks
-        .iter()
-        .map(|block| slint::SharedString::from(block.translation.as_str()))
-        .collect::<Vec<_>>();
-    preview.set_source_text(
-        snapshot
-            .blocks
-            .iter()
-            .map(|block| block.source.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n")
-            .into(),
-    );
-    preview.set_translated_text(
-        snapshot
-            .blocks
-            .iter()
-            .map(|block| block.translation.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n")
-            .into(),
-    );
-    preview.set_translated_paragraphs(ModelRc::new(VecModel::from(translations)));
-    preview.set_dual_pairs(ModelRc::new(VecModel::from(pairs)));
     preview.set_screen_blocks(ModelRc::new(VecModel::from(rows)));
     preview.set_screen_dense_panel_active(plan.dense_panel_active);
     preview.set_screen_image_content_width(plan.image_width as f32);
@@ -532,28 +501,11 @@ pub(crate) fn apply_snapshot(
     preview.set_screen_selected_block(-1);
     preview.set_screen_editor_visible(false);
     preview.set_screen_save_error(false);
-    preview.set_screen_image_active(true);
     preview.set_screen_crop_image(match snapshot.crop.as_deref() {
         Some(frame) => frame_image(frame)?,
         None => Image::default(),
     });
     Ok(layouts.to_vec())
-}
-
-pub(crate) fn clear_snapshot(preview: &TranslationPreview) {
-    preview.set_screen_image_active(false);
-    preview.set_screen_crop_image(Image::default());
-    preview.set_screen_blocks(ModelRc::new(VecModel::from(
-        Vec::<ScreenBlockOverlay>::new(),
-    )));
-    preview.set_screen_dense_panel_active(false);
-    preview.set_screen_image_content_width(960.0);
-    preview.set_screen_dense_panel_width(0.0);
-    preview.set_screen_editor_visible(false);
-    preview.set_screen_image_expired(false);
-    preview.set_screen_saved(false);
-    preview.set_screen_save_error(false);
-    preview.set_screen_selected_block(-1);
 }
 
 fn fitted_viewport(crop: CropPixelSize) -> (u32, u32) {
@@ -996,7 +948,7 @@ mod tests {
             expires_unix_ms: u64::MAX,
         };
 
-        let preview = crate::TranslationPreview::new().expect("preview should instantiate");
+        let preview = crate::ScreenTranslationWindow::new().expect("preview should instantiate");
         let plan = super::plan_screen_result_layout(crop_size(682, 466), &nimbus_layout_inputs());
         super::apply_snapshot(&preview, &snapshot).expect("snapshot should bind to the real view");
         preview
