@@ -309,59 +309,43 @@ impl TranslationEngine {
                     }
                     Err(error) => return Err(error),
                 };
-                match validate_structured_response(&response, group) {
-                    Ok(group_output) => translated.extend(group_output),
-                    Err(group_error) if group.len() > 1 => {
+                let group_output =
+                    recover_structured_response(&response, group, target, |block| {
                         // One bounded recovery pass keeps a malformed group
-                        // from discarding independent blocks. Transport and
-                        // timeout failures never fan out into N retries.
-                        for block in group {
-                            if !should_continue() {
-                                return Err(TranslationCancelled.into());
-                            }
-                            if Instant::now() >= deadline {
+                        // from discarding independent blocks. A malformed
+                        // single-row response receives the same one retry;
+                        // transport and timeout failures never fan out again.
+                        if !should_continue() {
+                            return Err(TranslationCancelled.into());
+                        }
+                        if Instant::now() >= deadline {
+                            bail!("structured screen translation exceeded its operation deadline");
+                        }
+                        let messages = structured_translation_messages(
+                            std::slice::from_ref(block),
+                            context,
+                            glossary,
+                            source,
+                            target,
+                        )?;
+                        let Some(ResidentRuntime::Llama(runtime)) = self.runtime.as_mut() else {
+                            bail!("translation runtime kind changed during structured recovery");
+                        };
+                        match runtime.translate_structured(messages, &operation_active) {
+                            Ok(response) => Ok(response),
+                            Err(error)
+                                if error.downcast_ref::<TranslationCancelled>().is_some()
+                                    && should_continue()
+                                    && Instant::now() >= deadline =>
+                            {
                                 bail!(
                                     "structured screen translation exceeded its operation deadline"
-                                );
+                                )
                             }
-                            let single = std::slice::from_ref(block);
-                            let messages = structured_translation_messages(
-                                single, context, glossary, source, target,
-                            )?;
-                            let Some(ResidentRuntime::Llama(runtime)) = self.runtime.as_mut()
-                            else {
-                                bail!(
-                                    "translation runtime kind changed during structured recovery"
-                                );
-                            };
-                            let response = match runtime
-                                .translate_structured(messages, &operation_active)
-                            {
-                                Ok(response) => response,
-                                Err(error)
-                                    if error.downcast_ref::<TranslationCancelled>().is_some()
-                                        && should_continue()
-                                        && Instant::now() >= deadline =>
-                                {
-                                    bail!(
-                                        "structured screen translation exceeded its operation deadline"
-                                    )
-                                }
-                                Err(error) => return Err(error),
-                            };
-                            translated.extend(
-                                validate_structured_response(&response, single).with_context(
-                                    || {
-                                        format!(
-                                            "structured translation recovery failed after: {group_error:#}"
-                                        )
-                                    },
-                                )?,
-                            );
+                            Err(error) => Err(error),
                         }
-                    }
-                    Err(error) => return Err(error),
-                }
+                    })?;
+                translated.extend(group_output);
             }
             return Ok(BlockTranslationOutput {
                 blocks: translated,
@@ -1334,6 +1318,7 @@ fn greedy_structured_ranges(
 fn validate_structured_response(
     response: &str,
     source_blocks: &[ScreenTextBlock],
+    target_language: TranslationLanguage,
 ) -> Result<Vec<TranslatedScreenBlock>> {
     let response: StructuredTranslationResponse = serde_json::from_str(response.trim())
         .context("structured translation response does not match the required JSON schema")?;
@@ -1358,6 +1343,13 @@ fn validate_structured_response(
             .remove(&source.block_id)
             .ok_or_else(|| anyhow!("structured translation omitted a block id"))?;
         validate_protected_values(&source.source_text, &translated_text)?;
+        let protected_tokens = protected_script_tokens(&source.source_text);
+        validate_target_script(
+            &source.source_text,
+            &translated_text,
+            target_language,
+            &protected_tokens,
+        )?;
         ordered.push(TranslatedScreenBlock {
             block_id: source.block_id.clone(),
             translated_text,
@@ -1371,6 +1363,37 @@ fn validate_structured_response(
     Ok(ordered)
 }
 
+fn recover_structured_response(
+    initial_response: &str,
+    source_blocks: &[ScreenTextBlock],
+    target_language: TranslationLanguage,
+    mut retry_one: impl FnMut(&ScreenTextBlock) -> Result<String>,
+) -> Result<Vec<TranslatedScreenBlock>> {
+    let initial_error =
+        match validate_structured_response(initial_response, source_blocks, target_language) {
+            Ok(output) => return Ok(output),
+            Err(error) => error,
+        };
+
+    let mut recovered = Vec::with_capacity(source_blocks.len());
+    for block in source_blocks {
+        let response = retry_one(block).with_context(|| {
+            format!("structured translation recovery failed after: {initial_error:#}")
+        })?;
+        match validate_structured_response(&response, std::slice::from_ref(block), target_language)
+        {
+            Ok(output) => recovered.extend(output),
+            Err(_) => recovered.push(TranslatedScreenBlock {
+                block_id: block.block_id.clone(),
+                translated_text: String::new(),
+                completion: BlockCompletion::Failed,
+                failure_message: Some("translation validation failed after one retry".to_owned()),
+            }),
+        }
+    }
+    Ok(recovered)
+}
+
 fn validate_protected_values(source: &str, translated: &str) -> Result<()> {
     let expected = protected_values(source);
     let actual = protected_values(translated);
@@ -1380,6 +1403,73 @@ fn validate_protected_values(source: &str, translated: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn protected_script_tokens(source: &str) -> Vec<String> {
+    let mut tokens = lexical_spans(source)
+        .into_iter()
+        .map(|(start, end)| source[start..end].to_owned())
+        .collect::<Vec<_>>();
+    tokens.extend(
+        protected_values(source)
+            .into_iter()
+            .filter(|token| token.starts_with("https://") || token.starts_with("http://")),
+    );
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn validate_target_script(
+    source: &str,
+    translation: &str,
+    target_language: TranslationLanguage,
+    protected_tokens: &[String],
+) -> Result<()> {
+    let checks_latin_cyrillic_mix = matches!(
+        target_language,
+        TranslationLanguage::English
+            | TranslationLanguage::Russian
+            | TranslationLanguage::Ukrainian
+            | TranslationLanguage::Spanish
+            | TranslationLanguage::PortugueseBrazil
+            | TranslationLanguage::German
+            | TranslationLanguage::French
+            | TranslationLanguage::Italian
+    );
+    if !checks_latin_cyrillic_mix {
+        return Ok(());
+    }
+
+    let admitted = protected_tokens
+        .iter()
+        .filter(|token| !token.is_empty() && source.contains(token.as_str()))
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    for (start, end) in lexical_spans(translation) {
+        let token = &translation[start..end];
+        let has_latin = token.chars().any(is_latin_letter);
+        let has_cyrillic = token.chars().any(is_cyrillic_letter);
+        if has_latin && has_cyrillic && !admitted.contains(token) {
+            bail!("structured translation returned a mixed-script token");
+        }
+    }
+    Ok(())
+}
+
+fn is_latin_letter(character: char) -> bool {
+    character.is_ascii_alphabetic()
+        || matches!(
+            character as u32,
+            0x00C0..=0x024F | 0x1E00..=0x1EFF | 0x2C60..=0x2C7F | 0xA720..=0xA7FF
+        )
+}
+
+fn is_cyrillic_letter(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x0400..=0x052F | 0x1C80..=0x1C8F | 0x2DE0..=0x2DFF | 0xA640..=0xA69F
+    )
 }
 
 fn protected_values(text: &str) -> Vec<String> {
@@ -1876,16 +1966,16 @@ fn lexical_spans(text: &str) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use rust_protocol::{
-        GlossaryEntry, GlossaryEntryId, GlossaryOrigin, PhysicalRect, ScreenBlockId,
-        ScreenTextBlock, SourceContext, TranslationLanguage,
+        BlockCompletion, GlossaryEntry, GlossaryEntryId, GlossaryOrigin, PhysicalRect,
+        ScreenBlockId, ScreenTextBlock, SourceContext, TranslationLanguage,
     };
 
     use super::{
         detect_language, greedy_structured_ranges, normalize_line_endings,
-        normalize_single_word_repetition, split_at_natural_boundaries, strip_reasoning,
-        structured_translation_messages, translate_with_truncation_recovery,
-        translation_instruction, translation_user_message, validate_finish_reason,
-        validate_structured_response,
+        normalize_single_word_repetition, protected_script_tokens, recover_structured_response,
+        split_at_natural_boundaries, strip_reasoning, structured_translation_messages,
+        translate_with_truncation_recovery, translation_instruction, translation_user_message,
+        validate_finish_reason, validate_structured_response, validate_target_script,
     };
 
     #[test]
@@ -2135,6 +2225,128 @@ mod tests {
     }
 
     #[test]
+    fn structured_screen_request_keeps_merged_visual_row_and_semantic_context() {
+        let blocks = vec![ScreenTextBlock {
+            block_id: ScreenBlockId::from("screen-block-0000"),
+            source_text: "DAMAGE TYPE:I Magical".to_owned(),
+            bounds: PhysicalRect {
+                x: 30,
+                y: 180,
+                width: 156,
+                height: 21,
+            },
+            fragments: vec![
+                PhysicalRect {
+                    x: 30,
+                    y: 180,
+                    width: 112,
+                    height: 21,
+                },
+                PhysicalRect {
+                    x: 135,
+                    y: 185,
+                    width: 51,
+                    height: 14,
+                },
+            ],
+            confidence_milli: 985,
+        }];
+        let context = SourceContext {
+            nearby_text: Some(
+                "Nimbus\nCreates a storm cloud.\nDAMAGE TYPE:I Magical\nCooldown 30".to_owned(),
+            ),
+            ..SourceContext::default()
+        };
+
+        let (_, user) = structured_translation_messages(
+            &blocks,
+            &context,
+            &[],
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&user).unwrap();
+
+        assert_eq!(
+            envelope["blocks"][0]["source_text"],
+            "DAMAGE TYPE:I Magical"
+        );
+        assert_eq!(
+            envelope["context"]["nearby_text"],
+            context.nearby_text.as_deref().unwrap()
+        );
+    }
+
+    #[test]
+    fn screen_target_script_rejects_confusable_mixed_word_but_allows_protected_tokens() {
+        let source = "SCEPTER grants https://example.com/item_1";
+        let protected = protected_script_tokens(source);
+
+        assert!(
+            validate_target_script(
+                source,
+                "СCEPTER даёт https://example.com/item_1",
+                TranslationLanguage::Russian,
+                &protected,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_target_script(
+                source,
+                "SCEPTER даёт https://example.com/item_1",
+                TranslationLanguage::Russian,
+                &protected,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn screen_malformed_single_row_receives_exactly_one_bounded_retry() {
+        let blocks = vec![ScreenTextBlock {
+            block_id: ScreenBlockId::from("a"),
+            source_text: "SCEPTER grants power".to_owned(),
+            bounds: PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 20,
+            },
+            fragments: Vec::new(),
+            confidence_milli: 900,
+        }];
+        let malformed =
+            r#"{"translations":[{"block_id":"a","translated_text":"СCEPTER даёт силу"}]}"#;
+        let valid = r#"{"translations":[{"block_id":"a","translated_text":"SCEPTER даёт силу"}]}"#;
+        let attempts = std::cell::Cell::new(0);
+
+        let recovered =
+            recover_structured_response(malformed, &blocks, TranslationLanguage::Russian, |_| {
+                attempts.set(attempts.get() + 1);
+                Ok(valid.to_owned())
+            })
+            .unwrap();
+
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].translated_text, "SCEPTER даёт силу");
+
+        attempts.set(0);
+        let failed =
+            recover_structured_response(malformed, &blocks, TranslationLanguage::Russian, |_| {
+                attempts.set(attempts.get() + 1);
+                Ok(malformed.to_owned())
+            })
+            .unwrap();
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(failed[0].completion, BlockCompletion::Failed);
+        assert!(failed[0].translated_text.is_empty());
+        assert!(failed[0].failure_message.is_some());
+    }
+
+    #[test]
     fn structured_screen_blocks_are_grouped_before_the_request_exceeds_its_budget() {
         let blocks = (0..5)
             .map(|index| ScreenTextBlock {
@@ -2218,7 +2430,8 @@ mod tests {
             },
         ];
         let reordered = r#"{"translations":[{"block_id":"b","translated_text":"Перезарядка"},{"block_id":"a","translated_text":"Урон 25: https://example.com {count} ™"}]}"#;
-        let parsed = validate_structured_response(reordered, &blocks).unwrap();
+        let parsed =
+            validate_structured_response(reordered, &blocks, TranslationLanguage::Russian).unwrap();
         assert_eq!(parsed[0].block_id.as_str(), "a");
         assert_eq!(parsed[1].block_id.as_str(), "b");
 
@@ -2227,7 +2440,10 @@ mod tests {
         let unknown = r#"{"translations":[{"block_id":"a","translated_text":"Урон 25: https://example.com {count} ™"},{"block_id":"x","translated_text":"?"}]}"#;
         let damaged = r#"{"translations":[{"block_id":"a","translated_text":"Урон"},{"block_id":"b","translated_text":"Перезарядка"}]}"#;
         for invalid in [missing, duplicate, unknown, damaged] {
-            assert!(validate_structured_response(invalid, &blocks).is_err());
+            assert!(
+                validate_structured_response(invalid, &blocks, TranslationLanguage::Russian)
+                    .is_err()
+            );
         }
     }
 
@@ -2251,7 +2467,10 @@ mod tests {
             let response = format!(
                 r#"{{"translations":[{{"block_id":"numbers","translated_text":"{translated}"}}]}}"#
             );
-            assert!(validate_structured_response(&response, &blocks).is_err());
+            assert!(
+                validate_structured_response(&response, &blocks, TranslationLanguage::Russian)
+                    .is_err()
+            );
         }
     }
 }
