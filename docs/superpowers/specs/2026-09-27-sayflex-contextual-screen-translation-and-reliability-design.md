@@ -1,7 +1,8 @@
 # SayFlex Contextual Screen Translation and Reliability Design
 
 **Date:** 2026-09-27  
-**Status:** Approved for implementation
+**Revised:** 2026-09-29 after installed 0.8.6 visual review
+**Status:** Approved design; revised image-layout contract awaiting review
 **Delivery:** One public application update after the complete scope passes its gates
 
 ## 1. Outcome
@@ -176,15 +177,27 @@ One request-scoped result owns:
 - captured source context and glossary matches;
 - persistence and deletion state.
 
+OCR semantic grouping and image-display geometry are separate projections.
+Semantic paragraphs and columns provide translation context but never define a
+mask. Image display uses ordered visual rows. A visual row may contain several
+OCR fragments on the same baseline (for example `DAMAGE TYPE:` and `Magical`),
+retains every fragment rectangle, and has its own stable ID plus an ordered
+mapping back to the contributing OCR block IDs. Standalone values are joined to
+a label only when baseline, distance, confidence, and reading-order evidence are
+unambiguous. Distant values such as icon counters `45` and `275` remain separate.
+Low-confidence punctuation or a suspected value is not silently incorporated
+into a translated phrase.
+
 Text presentation and image presentation are views over this result. They do not
 maintain independent copies that can diverge.
 
-The translation boundary consumes related blocks with shared context and returns
-an exact mapping from `block_id` to translated text. The coordinator rejects
-missing, duplicate, or unknown IDs and validates preservation of numbers, URLs,
-placeholders, and protected symbols. Existing column and paragraph reconstruction
-continues to determine reading groups. Low-confidence OCR is visually marked and
-can be corrected before glossary confirmation.
+The translation boundary consumes related visual rows with shared semantic
+context and returns an exact mapping from stable visual-row ID to translated
+text. The coordinator rejects missing, duplicate, or unknown IDs and validates
+preservation of numbers, URLs, placeholders, and protected symbols. Existing
+column and paragraph reconstruction continues to determine context and reading
+groups without replacing the finer display geometry. Low-confidence OCR is
+visually marked and can be corrected before glossary confirmation.
 
 Late model output may update only the machine layer for the matching request,
 block, and revision. It cannot overwrite a user-edited revision.
@@ -298,9 +311,11 @@ Word correspondence is never inferred from DUAL sentence ordering. The user can
 select or amend the source expression in the editor. Correcting an entire block
 stores a phrase pair rather than inventing word-level pairs.
 
-The ordinary result card remains non-activating. Only an explicit double-click
-or keyboard edit action opens a focusable editor while preserving the original
-insertion target identity.
+The compact text-result card remains non-activating. The dedicated screenshot
+result window is an ordinary focusable tool window because it owns selection,
+dragging, pinning, and its embedded editor. Only an explicit double-click or
+keyboard edit action focuses the editor; this does not alter the saved insertion
+target identity.
 `Ctrl+Enter` saves; `Escape` cancels. An outside click neither silently saves nor
 silently destroys the draft. Draft identity includes request, block, and revision.
 
@@ -318,21 +333,46 @@ expired image. Visual approval is distinct from automated correctness.
 The result adds **On image** while preserving translation-only, `ORIG`, `DUAL`,
 copy, and pin behavior.
 
-The first version uses Slint `Image`, `Rectangle`, and `Text` over the immutable
-selected crop. Each translated block uses its OCR rectangle after coordinate
-conversion for image scale and monitor DPI.
+The production screenshot result has its own Slint window and native HWND. It
+does not reuse the compact translation popup or switch that popup between
+incompatible activation, decoration, backdrop, and z-order contracts. The
+screen-result HWND is frameless for its whole lifetime, belongs to the ordinary
+window z-order until **PIN** is chosen, and uses client-owned movement rather
+than Windows non-client caption dragging. Neither dragging nor pinning may add a
+system title bar, replace the client header, or flash a second surface.
 
-- A calm opaque or nearly opaque theme surface covers original glyphs so source
-  and translation do not overlap.
-- Font size and wrapping use actual UI text measurement. Overlay text is never
-  reduced below 12 logical pixels.
-- Long text wraps. When the source rectangle cannot hold readable text, a nearby
-  callout is placed inside the viewport and linked to the source rectangle.
-- Layout resolves collisions between translated blocks and callouts. A compact
-  result is at least 440 logical pixels wide, and its leading and trailing header
-  controls never overlap at any supported DPI.
-- Selected blocks receive a thin accent outline and expose correction.
-- Pan/scroll/scale changes preserve exact block alignment.
+The image mode uses Slint `Image`, `Rectangle`, and `Text` over the immutable
+selected crop. It has no permanent side column, dense-results panel, or other
+external list of translations. Every visible translation remains spatially
+associated with its source inside the image viewport.
+
+- The crop is uniformly enlarged when that improves readability, up to the
+  current monitor work area while preserving aspect ratio. The entire image,
+  overlay geometry, hit targets, and editor anchors share the same scale.
+- Layout operates on visual rows, not semantic paragraph rectangles. Fragments
+  on one baseline may form one row; each contributing glyph rectangle remains
+  available for masking and hit testing.
+- Text is measured by the same UI font/renderer that draws it. The solver tries
+  the normal size, permitted wrapping, and available collision-free horizontal
+  or vertical space. It never decides fit from character count alone and never
+  clips or elides a completed translation.
+- Original pixels are covered only after the complete translated row has a
+  readable, collision-free placement. Only the contributing source-glyph
+  rectangles are masked; icons, unrelated labels, counters, and background
+  outside those rectangles remain untouched.
+- When a row needs more room, its translated surface may expand into adjacent
+  unoccupied image space or become a restrained in-image callout with a leader.
+  It must not cover another OCR row, icon, standalone value, or existing
+  translation. An external right/bottom translation panel is forbidden.
+- If no readable collision-free placement exists within the available monitor
+  work area, the original row remains visible and the result reports that row as
+  not placeable. It must not show an empty mask, a clipped phrase, or silently
+  move the translation outside the image. This explicit exceptional state is
+  distinct from a successful image translation.
+- Selected rows receive a thin accent outline and expose correction by double
+  click; there is no permanent correction button over the image.
+- A compact result remains large enough for all header controls without overlap
+  at every supported DPI.
 - Missing or expired pixels degrade to the normal text result; translation and
   glossary remain available.
 
@@ -427,6 +467,13 @@ Required checks include:
 - deleting images/history leaves glossary records intact;
 - overlays remain readable and aligned across DPI, scale, long text, and small
   work areas;
+- the installed Nimbus regression sample has no external translation column,
+  keeps icons and `45`/`275` at their original positions, displays every
+  successfully placed row in full, and never masks a row whose translation was
+  not placed;
+- holding the pointer and moving the installed screenshot-result window never
+  reveals the Windows caption or a second frame; unpinned, pinned, editor-open,
+  and post-save states use the same frameless surface;
 - cancellation/retry leaves no hung capture, OCR, speech, or translation owner;
 - aggregate resources remain within the measured budget with a game running;
 - history, recovery insertion, `ORIG`, `DUAL`, pinning, compact translation, Qwen
@@ -436,6 +483,8 @@ Required checks include:
 
 Release gates include focused Rust tests, workspace tests, formatting, linting,
 release builds, installer validation, installed Windows scenarios, and screenshots
-of the five approved UI states. README, SECURITY, third-party/model notices,
-release notes, and the OCR benchmark are updated from the same application path
-that ships.
+of the five approved UI states. Automated render tests protect geometry and
+masking invariants, while physical visual acceptance of the installed UI is
+performed by the user from explicit test steps and supplied screenshots or a
+short drag recording. README, SECURITY, third-party/model notices, release notes,
+and the OCR benchmark are updated from the same application path that ships.
