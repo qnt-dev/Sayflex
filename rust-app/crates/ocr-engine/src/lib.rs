@@ -10,7 +10,9 @@ use thiserror::Error;
 
 mod reconstruct;
 
-pub use reconstruct::{ReconstructedBlock, ReconstructedText, reconstruct_text};
+pub use reconstruct::{
+    ReconstructedBlock, ReconstructedElement, ReconstructedText, reconstruct_text,
+};
 
 #[cfg(feature = "ppocr")]
 mod ppocr;

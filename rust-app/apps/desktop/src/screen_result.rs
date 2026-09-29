@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use rust_ocr_engine::ReconstructedBlock;
+use rust_ocr_engine::ReconstructedElement;
 use rust_platform_windows::screen_capture::RgbaFrame;
 use rust_protocol::{
     BlockCompletion, PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext,
@@ -17,15 +17,15 @@ const LOW_CONFIDENCE_MILLI: u16 = 650;
 pub(crate) const MIN_ADMITTED_OCR_CONFIDENCE_MILLI: u16 = 350;
 pub(crate) const DEFAULT_SCREENSHOT_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
 
-pub(crate) fn screen_blocks_from_ocr(blocks: Vec<ReconstructedBlock>) -> Vec<ScreenTextBlock> {
-    blocks
+pub(crate) fn screen_blocks_from_ocr(elements: Vec<ReconstructedElement>) -> Vec<ScreenTextBlock> {
+    elements
         .into_iter()
         .enumerate()
-        .map(|(index, block)| ScreenTextBlock {
+        .map(|(index, element)| ScreenTextBlock {
             block_id: ScreenBlockId::from(format!("screen-block-{index:04}")),
-            source_text: block.text,
-            bounds: block.bounds,
-            confidence_milli: block.confidence_milli,
+            source_text: element.text,
+            bounds: element.bounds,
+            confidence_milli: element.confidence_milli,
         })
         .collect()
 }
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn ocr_reading_order_gets_stable_request_local_ids() {
         let blocks = screen_blocks_from_ocr(vec![
-            rust_ocr_engine::ReconstructedBlock {
+            rust_ocr_engine::ReconstructedElement {
                 text: "first".to_owned(),
                 bounds: PhysicalRect {
                     x: 0,
@@ -635,7 +635,7 @@ mod tests {
                 },
                 confidence_milli: 900,
             },
-            rust_ocr_engine::ReconstructedBlock {
+            rust_ocr_engine::ReconstructedElement {
                 text: "second".to_owned(),
                 bounds: PhysicalRect {
                     x: 20,
@@ -650,6 +650,7 @@ mod tests {
         assert_eq!(blocks[0].block_id.as_str(), "screen-block-0000");
         assert_eq!(blocks[1].block_id.as_str(), "screen-block-0001");
         assert_eq!(blocks[1].source_text, "second");
+        assert_eq!(blocks[1].bounds.x, 20);
     }
 
     #[test]

@@ -15,8 +15,8 @@ export struct ScreenBlockOverlay {
     callout: bool,
     overflow-panel: bool,
     panel-order: int,
-    panel-left: bool,
     low-confidence: bool,
+    replace-source: bool,
 }
 
 component OverlayButton inherits Rectangle {
@@ -69,7 +69,7 @@ component TranslatedLabel inherits Rectangle {
     forward-focus: key-focus;
     border-width: root.selected-label || touch.has-hover ? 1px : 0px;
     border-color: root.selected-label ? Theme.red : #f3e9cf80;
-    background: touch.has-hover ? #25170ff2 : #120e09ee;
+    background: touch.has-hover ? #25170fff : #120e09ff;
     opacity: root.dimmed ? 0.38 : 1;
     accessible-role: button;
     accessible-label: @tr("Editable translated image text");
@@ -87,7 +87,7 @@ component TranslatedLabel inherits Rectangle {
         font-size: max(12px, root.text-size);
         font-weight: 570;
         wrap: word-wrap;
-        horizontal-alignment: center;
+        horizontal-alignment: left;
         vertical-alignment: center;
     }
     touch := TouchArea {
@@ -247,12 +247,12 @@ export component ScreenImageResult inherits Rectangle {
     in property <bool> saved: false;
     in property <bool> save-error: false;
     in property <bool> copied: false;
-    in property <bool> edit-hint-visible: true;
     in property <bool> dim-other-blocks: false;
     in property <bool> dense-panel-active: false;
-    in property <bool> dense-panel-left: false;
     in property <bool> use-fixture-blocks: true;
     in property <[ScreenBlockOverlay]> blocks;
+    in property <float> image-content-width: root.width / 1px;
+    in property <float> dense-panel-width: 0;
     in property <float> editor-panel-x: 488;
     in property <float> editor-panel-y: 292;
     in property <length> minimum-overlay-font-size: 12px;
@@ -320,22 +320,6 @@ export component ScreenImageResult inherits Rectangle {
     OverlayButton { x: 236px; y: 7px; width: 38px; label: "DEL"; accessible-name: @tr("Delete image"); enabled: !root.image-expired; clicked => { root.delete-image-requested(); } }
     OverlayButton { x: parent.width - 96px; y: 7px; width: 44px; label: "PIN"; active: root.pinned; clicked => { root.pin-requested(); } }
     OverlayButton { x: parent.width - 46px; y: 7px; width: 38px; label: "×"; accessible-name: @tr("Close"); clicked => { root.close-requested(); } }
-    if root.edit-hint-visible && root.view-mode != 1 && !root.editor-visible && root.width >= 610px: Rectangle {
-        x: 282px; y: 8px; width: 226px; height: 22px;
-        border-radius: 6px;
-        border-width: 1px;
-        border-color: Theme.line;
-        background: #11141ac7;
-        Text {
-            text: @tr("Double-click a translation to edit");
-            color: Theme.text-muted;
-            font-size: 9px;
-            font-weight: 520;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-
     content := Rectangle {
         x: 0px; y: 38px;
         width: parent.width;
@@ -344,7 +328,8 @@ export component ScreenImageResult inherits Rectangle {
         clip: true;
 
         if root.view-mode != 0 && !root.image-expired: image-content := Rectangle {
-            width: parent.width;
+            x: 0px;
+            width: root.image-content-width * 1px;
             height: parent.height;
             clip: true;
             Image { width: parent.width; height: parent.height; source: root.crop-image; image-fit: fill; }
@@ -401,18 +386,18 @@ export component ScreenImageResult inherits Rectangle {
             // restrained leader so the translated text remains spatially tied
             // to the part of the screenshot it replaces.
             for block in root.blocks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.callout && !root.dense-panel-active;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && block.callout && !block.overflow-panel;
                 x: block.source-x * 1px;
                 y: block.source-y * 1px;
                 width: block.source-width * 1px;
                 height: block.source-height * 1px;
-                background: #120e09f5;
+                background: #120e09ff;
                 border-width: 1px;
                 border-color: #d7d3cc40;
                 border-radius: 2px;
             }
             for block in root.blocks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.callout && !root.dense-panel-active;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && block.callout && !block.overflow-panel;
                 x: min(
                     block.source-x + block.source-width / 2,
                     block.x + block.width / 2
@@ -427,7 +412,7 @@ export component ScreenImageResult inherits Rectangle {
                 opacity: 0.72;
             }
             for block in root.blocks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.callout && !root.dense-panel-active;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && block.callout && !block.overflow-panel;
                 x: (block.x + block.width / 2) * 1px;
                 y: min(
                     block.source-y + block.source-height / 2,
@@ -443,7 +428,7 @@ export component ScreenImageResult inherits Rectangle {
             }
 
             for block[index] in root.blocks: TranslatedLabel {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && !root.dense-panel-active;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && !block.overflow-panel;
                 x: block.x * 1px;
                 y: block.y * 1px;
                 width: block.width * 1px;
@@ -463,12 +448,12 @@ export component ScreenImageResult inherits Rectangle {
             // source location and move the full, measured text into one
             // scrollable panel. Labels are never allowed to overlap silently.
             for block[index] in root.blocks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && root.dense-panel-active;
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.replace-source && block.overflow-panel;
                 x: block.source-x * 1px;
                 y: block.source-y * 1px;
                 width: block.source-width * 1px;
                 height: block.source-height * 1px;
-                background: #120e09e8;
+                background: #120e09ff;
                 border-width: root.selected-block == index ? 2px : 1px;
                 border-color: block.low-confidence ? #d7a45b : root.selected-block == index ? Theme.red : #d7d3cc70;
                 border-radius: 2px;
@@ -479,32 +464,41 @@ export component ScreenImageResult inherits Rectangle {
                 }
             }
 
-            if root.dense-panel-active && root.view-mode != 1: dense-panel := Rectangle {
-                x: root.dense-panel-left ? 8px : parent.width - self.width - 8px;
-                y: 8px;
-                width: min(320px, parent.width * 0.48);
-                height: parent.height - 16px;
-                background: #111318fa;
-                border-width: 1px;
-                border-color: Theme.line;
-                border-radius: 7px;
-                clip: true;
+        }
 
-                dense-scroll := Flickable {
-                    x: 7px;
-                    y: 7px;
-                    width: parent.width - 14px;
-                    height: parent.height - 14px;
-                    viewport-width: self.width;
-                    viewport-height: max(self.height, dense-stack.preferred-height);
+        if root.dense-panel-active && root.view-mode != 1: dense-panel := Rectangle {
+            x: root.image-content-width * 1px + 8px;
+            y: 8px;
+            width: root.dense-panel-width * 1px;
+            height: parent.height - 16px;
+            background: #111318fa;
+            border-width: 1px;
+            border-color: Theme.line;
+            border-radius: 7px;
+            clip: true;
 
-                    dense-stack := VerticalLayout {
-                        width: dense-scroll.width;
-                        spacing: 7px;
+            dense-scroll := Flickable {
+                x: 7px;
+                y: 7px;
+                width: parent.width - 14px;
+                height: parent.height - 14px;
+                viewport-width: self.width;
+                viewport-height: max(self.height, dense-stack.preferred-height);
 
-                        for block[index] in root.blocks: Rectangle {
+                dense-stack := VerticalLayout {
+                    width: dense-scroll.width;
+                    spacing: 0px;
+
+                    for block[index] in root.blocks: panel-row := Rectangle {
+                        visible: block.overflow-panel;
+                        width: parent.width;
+                        height: block.overflow-panel
+                            ? max(54px, panel-source.preferred-height + panel-translation.preferred-height + 21px) + 7px
+                            : 0px;
+
+                        card := Rectangle {
                             width: parent.width;
-                            height: max(54px, panel-source.preferred-height + panel-translation.preferred-height + 21px);
+                            height: max(0px, parent.height - 7px);
                             background: root.selected-block == index ? #2a1715f5 : #0c0f14ed;
                             border-width: 1px;
                             border-color: block.low-confidence ? #d7a45b : root.selected-block == index ? Theme.red : #d7d3cc35;
@@ -535,24 +529,24 @@ export component ScreenImageResult inherits Rectangle {
                     }
                 }
             }
+        }
 
-            if root.editor-visible: inline-editor := TranslationCorrectionPanel {
-                x: root.editor-panel-x * 1px;
-                y: root.editor-panel-y * 1px;
-                width: min(330px, parent.width - 16px);
-                height: min(282px, parent.height - 16px);
-                original-text <=> root.editor-original;
-                context-text: root.editor-context;
-                direction-text: root.editor-direction;
-                baseline-translation: root.editor-baseline;
-                edited-translation <=> root.editor-translation;
-                save-error: root.save-error;
-                editor-focusable: !root.editor-saving;
-                save-requested => { root.save-requested(); }
-                confirm-requested => { root.confirm-requested(); }
-                cancel-requested => { root.cancel-requested(); }
-                retry-requested => { root.retry-requested(); }
-            }
+        if root.editor-visible: inline-editor := TranslationCorrectionPanel {
+            x: root.editor-panel-x * 1px;
+            y: root.editor-panel-y * 1px;
+            width: min(330px, parent.width - self.x - 8px);
+            height: min(282px, parent.height - self.y - 8px);
+            original-text <=> root.editor-original;
+            context-text: root.editor-context;
+            direction-text: root.editor-direction;
+            baseline-translation: root.editor-baseline;
+            edited-translation <=> root.editor-translation;
+            save-error: root.save-error;
+            editor-focusable: !root.editor-saving;
+            save-requested => { root.save-requested(); }
+            confirm-requested => { root.confirm-requested(); }
+            cancel-requested => { root.cancel-requested(); }
+            retry-requested => { root.retry-requested(); }
         }
 
         if root.view-mode == 0: Rectangle {
@@ -645,9 +639,7 @@ export component ScreenTranslationPreviewWindow inherits Window {
     in-out property <bool> editor-visible: false;
     in-out property <int> selected-block: 4;
     in-out property <bool> copied: false;
-    in-out property <bool> edit-hint-visible: true;
     in-out property <bool> dense-panel-active: false;
-    in-out property <bool> dense-panel-left: false;
     in-out property <[ScreenBlockOverlay]> fixture-blocks;
     out property <bool> dim-other-blocks: root.editor-visible;
     out property <bool> save-confirmation-visible: root.preview-state == 2;
@@ -693,7 +685,6 @@ export component ScreenTranslationPreviewWindow inherits Window {
     }
     edit-block(block) => {
         root.selected-block = block;
-        root.edit-hint-visible = false;
         if block == 0 {
             root.editor-original = "Menu";
             root.editor-translation = root.menu-translation;
@@ -776,10 +767,10 @@ export component ScreenTranslationPreviewWindow inherits Window {
             saved: root.save-confirmation-visible;
             save-error: root.preview-state == 3;
             copied: root.copied;
-            edit-hint-visible: root.edit-hint-visible;
             dim-other-blocks: root.dim-other-blocks;
             dense-panel-active: root.dense-panel-active;
-            dense-panel-left: root.dense-panel-left;
+            image-content-width: root.dense-panel-active ? 632 : 960;
+            dense-panel-width: root.dense-panel-active ? 320 : 0;
             use-fixture-blocks: !root.dense-panel-active;
             blocks: root.fixture-blocks;
             editor-panel-x: root.editor-panel-x;

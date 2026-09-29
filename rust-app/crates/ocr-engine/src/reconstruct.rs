@@ -6,12 +6,23 @@ const MAX_DENSE_BLOCK_LINES: u64 = 6;
 pub struct ReconstructedText {
     pub text: String,
     pub blocks: Vec<ReconstructedBlock>,
+    /// OCR rows in reading order, retaining the exact rectangles that were
+    /// detected in the crop. `blocks` are semantic context groups; these
+    /// elements are the only geometry suitable for replacing text in-place.
+    pub elements: Vec<ReconstructedElement>,
     pub accepted_line_count: usize,
     pub average_confidence_milli: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconstructedBlock {
+    pub text: String,
+    pub bounds: rust_protocol::PhysicalRect,
+    pub confidence_milli: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconstructedElement {
     pub text: String,
     pub bounds: rust_protocol::PhysicalRect,
     pub confidence_milli: u16,
@@ -112,15 +123,19 @@ pub fn reconstruct_text(
     columns.sort_by_key(Column::anchor_x);
 
     let paragraph_gap = i64::from(median_height) * 7 / 5;
-    let blocks = columns
-        .iter_mut()
-        .flat_map(|column| {
-            column
-                .lines
-                .sort_by_key(|line| (line.source.bounds.y, line.source.bounds.x, line.index));
-            reconstruct_column(&column.lines, paragraph_gap)
-        })
-        .collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    let mut elements = Vec::with_capacity(accepted.len());
+    for column in &mut columns {
+        column
+            .lines
+            .sort_by_key(|line| (line.source.bounds.y, line.source.bounds.x, line.index));
+        elements.extend(column.lines.iter().map(|line| ReconstructedElement {
+            text: line.text.to_owned(),
+            bounds: line.source.bounds,
+            confidence_milli: line.source.confidence_milli,
+        }));
+        blocks.extend(reconstruct_column(&column.lines, paragraph_gap));
+    }
     let text = blocks
         .iter()
         .map(|block| block.text.as_str())
@@ -140,6 +155,7 @@ pub fn reconstruct_text(
     Ok(ReconstructedText {
         text,
         blocks,
+        elements,
         accepted_line_count: accepted.len(),
         average_confidence_milli,
     })

@@ -2621,7 +2621,7 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
 
     slot.preview.set_screen_selected_block(block_index);
     slot.preview.set_screen_editor_visible(true);
-    if let Some((x, y)) = screen_translation_editor_position(&slot, &snapshot, index) {
+    if let Some((x, y)) = screen_translation_editor_position(&snapshot, index) {
         slot.preview.set_screen_editor_panel_x(x);
         slot.preview.set_screen_editor_panel_y(y);
     }
@@ -2644,7 +2644,6 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
 
 #[cfg(feature = "screen-translation")]
 fn screen_translation_editor_position(
-    slot: &TranslationPreviewSlot,
     snapshot: &screen_result::ScreenResultSnapshot,
     block_index: usize,
 ) -> Option<(f32, f32)> {
@@ -2659,29 +2658,29 @@ fn screen_translation_editor_position(
             confidence_milli: block.confidence_milli,
         })
         .collect::<Vec<_>>();
-    let viewport_width = slot.preview.get_screen_content_width().max(1.0) as u32;
-    let viewport_height = slot.preview.get_screen_content_height().max(1.0) as u32;
-    let block = screen_result_view::layout_blocks(
+    let plan = screen_result_view::plan_screen_result_layout(
         screen_result_view::CropPixelSize::from_screen_rect(snapshot.crop_rect),
-        viewport_width,
-        viewport_height,
         &inputs,
-    )
-    .get(block_index)
-    .cloned()?;
-    let editor_width = 330.0_f32.min((viewport_width as f32 - 16.0).max(1.0));
-    let editor_height = 282.0_f32.min((viewport_height as f32 - 16.0).max(1.0));
+    );
+    let block = plan.blocks.get(block_index)?.clone();
+    let content_width = plan.content_width as f32;
+    let content_height = plan.image_height as f32;
+    let editor_width = 330.0_f32.min((content_width - 16.0).max(1.0));
+    let editor_height = 282.0_f32.min((content_height - 16.0).max(1.0));
+    if block.overflow_panel {
+        return Some((plan.image_width as f32 + 8.0, 8.0));
+    }
     let right_candidate = block.x + block.width + 8.0;
     let left_candidate = block.x - editor_width - 8.0;
-    let x = if right_candidate + editor_width <= viewport_width as f32 {
+    let x = if right_candidate + editor_width <= content_width {
         right_candidate
     } else {
         left_candidate
     }
-    .clamp(8.0, (viewport_width as f32 - editor_width - 8.0).max(8.0));
+    .clamp(8.0, (content_width - editor_width - 8.0).max(8.0));
     let y = block
         .y
-        .clamp(8.0, (viewport_height as f32 - editor_height - 8.0).max(8.0));
+        .clamp(8.0, (content_height - editor_height - 8.0).max(8.0));
     Some((x, y))
 }
 
@@ -3113,7 +3112,6 @@ fn refresh_screen_result_preview(request_id: RequestId, selected_block: i32, run
         return;
     };
     let mode = slot.preview.get_screen_view_mode();
-    let hint = slot.preview.get_screen_edit_hint_visible();
     let editor_visible = slot.preview.get_screen_editor_visible();
     if let Err(error) = screen_result_view::apply_snapshot(&slot.preview, &snapshot) {
         rust_app_core::diagnostics::log_line(&format!(
@@ -3127,7 +3125,6 @@ fn refresh_screen_result_preview(request_id: RequestId, selected_block: i32, run
             snapshot.crop.is_some(),
         ));
     slot.preview.set_screen_selected_block(selected_block);
-    slot.preview.set_screen_edit_hint_visible(hint);
     slot.preview.set_screen_editor_visible(
         screen_result_view::preserve_editor_on_snapshot_refresh(
             editor_visible,
@@ -3799,7 +3796,7 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                         return;
                     };
                     let expected_text = reconstructed.text;
-                    let blocks = screen_blocks_from_ocr(reconstructed.blocks);
+                    let blocks = screen_blocks_from_ocr(reconstructed.elements);
                     let created_unix_ms = unix_ms();
                     let context = runtime
                         .screen_translation
@@ -3832,7 +3829,10 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                             return;
                         }
                     };
-                    debug_assert_eq!(document.source_text(), expected_text);
+                    debug_assert_eq!(
+                        document.context.nearby_text.as_deref(),
+                        Some(expected_text.as_str())
+                    );
                     let crop_rect = document.crop_rect();
                     let block_count = document.source_blocks().len();
                     rust_app_core::diagnostics::log_line(&format!(

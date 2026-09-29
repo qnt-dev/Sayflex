@@ -12,6 +12,8 @@ const MAX_CALLOUT_WIDTH: f32 = 320.0;
 const MIN_READABLE_LINE_HEIGHT: f32 = 18.0;
 const APPROXIMATE_GLYPH_WIDTH: f32 = 7.0;
 const CALLOUT_GAP: f32 = 8.0;
+const DENSE_PANEL_MIN_WIDTH: u32 = 220;
+const DENSE_PANEL_MAX_WIDTH: u32 = 320;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultViewMode {
@@ -134,8 +136,30 @@ pub(crate) struct BlockLayout {
     pub(crate) callout: bool,
     pub(crate) overflow_panel: bool,
     pub(crate) panel_order: i32,
-    pub(crate) panel_left: bool,
     pub(crate) low_confidence: bool,
+    pub(crate) replace_source: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScreenResultLayoutPlan {
+    pub(crate) blocks: Vec<BlockLayout>,
+    pub(crate) image_width: u32,
+    pub(crate) image_height: u32,
+    pub(crate) content_width: u32,
+    pub(crate) panel_width: u32,
+    pub(crate) dense_panel_active: bool,
+}
+
+pub(crate) fn translation_needs_visual_replacement(source: &str, translation: &str) -> bool {
+    let source = source.trim();
+    let translation = translation.trim();
+    if source.is_empty()
+        || translation.is_empty()
+        || source.to_lowercase() == translation.to_lowercase()
+    {
+        return false;
+    }
+    source.chars().any(char::is_alphabetic)
 }
 
 pub(crate) fn layout_blocks(
@@ -155,6 +179,8 @@ pub(crate) fn layout_blocks(
     let mut layouts = blocks
         .iter()
         .map(|block| {
+            let replace_source =
+                translation_needs_visual_replacement(&block.source, &block.translation);
             let source_x = (block.bounds.x as f32 * scale_x).clamp(0.0, viewport_width);
             let source_y = (block.bounds.y as f32 * scale_y).clamp(0.0, viewport_height);
             let source_width = (block.bounds.width as f32 * scale_x)
@@ -166,7 +192,7 @@ pub(crate) fn layout_blocks(
             let readable_columns = (source_width / APPROXIMATE_GLYPH_WIDTH).floor().max(1.0);
             let readable_lines = (source_height / MIN_READABLE_LINE_HEIGHT).floor().max(1.0);
             let capacity = (readable_columns * readable_lines) as usize;
-            let callout = block.translation.chars().count() > capacity;
+            let callout = replace_source && block.translation.chars().count() > capacity;
 
             let (x, y, width, height) = if callout {
                 let desired_width =
@@ -209,8 +235,8 @@ pub(crate) fn layout_blocks(
                 callout,
                 overflow_panel: false,
                 panel_order: -1,
-                panel_left: false,
                 low_confidence: block.confidence_milli < 650,
+                replace_source,
             }
         })
         .collect::<Vec<_>>();
@@ -314,47 +340,23 @@ fn resolve_callout_collisions(
             // There is no collision-free callout arrangement in the image.
             // Do not silently accept overlaps: the complete result will use
             // one measured, scrollable side panel instead.
-            assign_overflow_panel(layouts, viewport_width, viewport_height);
+            assign_overflow_panel(layouts, viewport_width);
             return;
         }
     }
 }
 
-fn assign_overflow_panel(layouts: &mut [BlockLayout], viewport_width: f32, viewport_height: f32) {
+fn assign_overflow_panel(layouts: &mut [BlockLayout], viewport_width: f32) {
     let panel_width = (viewport_width * 0.48)
         .clamp(MIN_CALLOUT_WIDTH, MAX_CALLOUT_WIDTH)
         .min(viewport_width);
-    let right_x = (viewport_width - panel_width - CALLOUT_GAP).max(0.0);
-    let left_rect = (
-        CALLOUT_GAP.min(viewport_width),
-        0.0,
-        panel_width,
-        viewport_height,
-    );
-    let right_rect = (right_x, 0.0, panel_width, viewport_height);
-    let overlap = |panel: (f32, f32, f32, f32)| {
-        layouts
-            .iter()
-            .map(|block| {
-                rectangle_intersection_area(
-                    panel,
-                    (
-                        block.source_x,
-                        block.source_y,
-                        block.source_width,
-                        block.source_height,
-                    ),
-                )
-            })
-            .sum::<f32>()
-    };
-    let panel_left = overlap(left_rect) < overlap(right_rect);
-    let panel_x = if panel_left {
-        left_rect.0
-    } else {
-        right_rect.0
-    };
-    let mut order = (0..layouts.len()).collect::<Vec<_>>();
+    let panel_x = (viewport_width - panel_width - CALLOUT_GAP).max(0.0);
+    let mut order = layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.replace_source)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
     order.sort_by(|left, right| {
         layouts[*left]
             .source_y
@@ -365,10 +367,61 @@ fn assign_overflow_panel(layouts: &mut [BlockLayout], viewport_width: f32, viewp
         let block = &mut layouts[index];
         block.overflow_panel = true;
         block.panel_order = i32::try_from(panel_order).unwrap_or(i32::MAX);
-        block.panel_left = panel_left;
         block.x = panel_x;
         block.y = block.source_y;
         block.width = panel_width;
+    }
+}
+
+pub(crate) fn plan_screen_result_layout(
+    crop: CropPixelSize,
+    blocks: &[BlockLayoutInput],
+) -> ScreenResultLayoutPlan {
+    let (image_width, image_height) = fitted_viewport(crop);
+    let mut layouts = layout_blocks(crop, image_width, image_height, blocks);
+    if !layouts.iter().any(|block| block.overflow_panel) {
+        let mut callout_order = layouts
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| block.callout)
+            .map(|(index, block)| (index, block.source_y, block.source_x))
+            .collect::<Vec<_>>();
+        callout_order.sort_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| left.2.total_cmp(&right.2))
+        });
+        for (panel_order, (index, _, _)) in callout_order.into_iter().enumerate() {
+            let block = &mut layouts[index];
+            block.overflow_panel = true;
+            block.panel_order = i32::try_from(panel_order).unwrap_or(i32::MAX);
+        }
+    }
+    let dense_panel_active = layouts.iter().any(|block| block.overflow_panel);
+    let panel_width = if dense_panel_active {
+        (image_width * 2 / 5).clamp(DENSE_PANEL_MIN_WIDTH, DENSE_PANEL_MAX_WIDTH)
+    } else {
+        0
+    };
+    if dense_panel_active {
+        let panel_x = image_width.saturating_add(CALLOUT_GAP as u32) as f32;
+        for block in layouts.iter_mut().filter(|block| block.overflow_panel) {
+            block.x = panel_x;
+            block.width = panel_width as f32;
+        }
+    }
+    let content_width = image_width.saturating_add(if dense_panel_active {
+        CALLOUT_GAP as u32 + panel_width
+    } else {
+        0
+    });
+    ScreenResultLayoutPlan {
+        blocks: layouts,
+        image_width,
+        image_height,
+        content_width,
+        panel_width,
+        dense_panel_active,
     }
 }
 
@@ -377,12 +430,6 @@ fn rectangles_overlap(left: (f32, f32, f32, f32), right: (f32, f32, f32, f32)) -
         && right.0 < left.0 + left.2
         && left.1 < right.1 + right.3
         && right.1 < left.1 + left.3
-}
-
-fn rectangle_intersection_area(left: (f32, f32, f32, f32), right: (f32, f32, f32, f32)) -> f32 {
-    let width = (left.0 + left.2).min(right.0 + right.2) - left.0.max(right.0);
-    let height = (left.1 + left.3).min(right.1 + right.3) - left.1.max(right.1);
-    width.max(0.0) * height.max(0.0)
 }
 
 trait SaturatingSubF32 {
@@ -400,7 +447,6 @@ pub(crate) fn apply_snapshot(
     snapshot: &ScreenResultSnapshot,
 ) -> Result<Vec<BlockLayout>, String> {
     let crop_size = CropPixelSize::from_screen_rect(snapshot.crop_rect);
-    let (viewport_width, viewport_height) = fitted_viewport(crop_size);
     let inputs = snapshot
         .blocks
         .iter()
@@ -412,7 +458,8 @@ pub(crate) fn apply_snapshot(
             confidence_milli: block.confidence_milli,
         })
         .collect::<Vec<_>>();
-    let layouts = layout_blocks(crop_size, viewport_width, viewport_height, &inputs);
+    let plan = plan_screen_result_layout(crop_size, &inputs);
+    let layouts = &plan.blocks;
     let rows = layouts
         .iter()
         .map(|block| ScreenBlockOverlay {
@@ -430,8 +477,8 @@ pub(crate) fn apply_snapshot(
             callout: block.callout,
             overflow_panel: block.overflow_panel,
             panel_order: block.panel_order,
-            panel_left: block.panel_left,
             low_confidence: block.low_confidence,
+            replace_source: block.replace_source,
         })
         .collect::<Vec<_>>();
     let pairs = snapshot
@@ -468,15 +515,11 @@ pub(crate) fn apply_snapshot(
     preview.set_translated_paragraphs(ModelRc::new(VecModel::from(translations)));
     preview.set_dual_pairs(ModelRc::new(VecModel::from(pairs)));
     preview.set_screen_blocks(ModelRc::new(VecModel::from(rows)));
-    preview.set_screen_dense_panel_active(layouts.iter().any(|block| block.overflow_panel));
-    preview.set_screen_dense_panel_left(
-        layouts
-            .iter()
-            .find(|block| block.overflow_panel)
-            .is_some_and(|block| block.panel_left),
-    );
-    preview.set_screen_content_width(viewport_width as f32);
-    preview.set_screen_content_height(viewport_height as f32);
+    preview.set_screen_dense_panel_active(plan.dense_panel_active);
+    preview.set_screen_image_content_width(plan.image_width as f32);
+    preview.set_screen_dense_panel_width(plan.panel_width as f32);
+    preview.set_screen_content_width(plan.content_width as f32);
+    preview.set_screen_content_height(plan.image_height as f32);
     preview.set_screen_image_expired(snapshot.crop.is_none());
     preview.set_screen_view_mode(visible_ui_mode(3, snapshot.crop.is_some()));
     preview.set_screen_selected_block(-1);
@@ -487,7 +530,7 @@ pub(crate) fn apply_snapshot(
         Some(frame) => frame_image(frame)?,
         None => Image::default(),
     });
-    Ok(layouts)
+    Ok(layouts.to_vec())
 }
 
 pub(crate) fn clear_snapshot(preview: &TranslationPreview) {
@@ -497,7 +540,8 @@ pub(crate) fn clear_snapshot(preview: &TranslationPreview) {
         Vec::<ScreenBlockOverlay>::new(),
     )));
     preview.set_screen_dense_panel_active(false);
-    preview.set_screen_dense_panel_left(false);
+    preview.set_screen_image_content_width(960.0);
+    preview.set_screen_dense_panel_width(0.0);
     preview.set_screen_editor_visible(false);
     preview.set_screen_image_expired(false);
     preview.set_screen_saved(false);
@@ -558,7 +602,8 @@ mod tests {
 
     use super::{
         BlockLayoutInput, CropLocalRect, CropPixelSize, ResultViewMode, ScreenResultWindowMode,
-        fitted_viewport, layout_blocks, preserve_editor_on_snapshot_refresh, visible_mode,
+        fitted_viewport, layout_blocks, plan_screen_result_layout,
+        preserve_editor_on_snapshot_refresh, translation_needs_visual_replacement, visible_mode,
         visible_ui_mode,
     };
 
@@ -682,6 +727,285 @@ mod tests {
             (0..8).collect::<Vec<_>>()
         );
         assert!(laid_out.iter().all(|block| block.width >= 180.0));
+    }
+
+    #[test]
+    fn dense_panel_is_reserved_beside_the_image_instead_of_covering_it() {
+        let long = "A translated paragraph that cannot fit inside its source rectangle ".repeat(5);
+        let blocks = (0..8)
+            .map(|index| BlockLayoutInput {
+                block_id: ScreenBlockId::from(format!("block-{index}")),
+                source: format!("source {index}"),
+                translation: long.clone(),
+                bounds: local_rect(0, index * 40, 440, 36),
+                confidence_milli: 900,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = plan_screen_result_layout(crop_size(440, 320), &blocks);
+
+        assert!(plan.dense_panel_active);
+        assert!(plan.content_width > plan.image_width);
+        assert!(plan.panel_width >= 180);
+        assert!(
+            plan.blocks
+                .iter()
+                .all(|block| !block.overflow_panel || block.x >= plan.image_width as f32 + 8.0)
+        );
+    }
+
+    #[test]
+    fn standalone_numbers_and_unchanged_text_remain_visible_from_the_original_image() {
+        assert!(!translation_needs_visual_replacement("45", "45"));
+        assert!(!translation_needs_visual_replacement("275", "275"));
+        assert!(!translation_needs_visual_replacement(
+            "https://example.com",
+            "https://example.com"
+        ));
+        assert!(translation_needs_visual_replacement(
+            "RADIUS: 450",
+            "РАДИУС: 450"
+        ));
+    }
+
+    fn nimbus_layout_inputs() -> Vec<BlockLayoutInput> {
+        let rows = [
+            ("NIMBUS", "НИМБУС", 140, 23, 111, 30),
+            (
+                "SCEPTER GRANTS NEW ABILITY",
+                "СКИПЕТР ДАЁТ НОВУЮ СПОСОБНОСТЬ",
+                145,
+                56,
+                254,
+                28,
+            ),
+            (
+                "Creates a storm cloud anywhere on the map that automatically casts",
+                "Создаёт грозовое облако в выбранной точке карты",
+                141,
+                84,
+                511,
+                26,
+            ),
+            (
+                "Lightning Bolt on nearby enemies.",
+                "Оно автоматически выпускает молнии в ближайших врагов.",
+                142,
+                106,
+                259,
+                26,
+            ),
+            ("ABILITY: Point Target", "ЦЕЛЬ: точка", 34, 166, 143, 20),
+            (
+                "PIERCES SPELL IMMUNITY: No",
+                "ПРОБИВАЕТ НЕВОСПРИИМЧИВОСТЬ: нет",
+                338,
+                166,
+                207,
+                20,
+            ),
+            (
+                "DAMAGE TYPE: Magical",
+                "ТИП УРОНА: магический",
+                34,
+                187,
+                161,
+                19,
+            ),
+            ("DURATION:", "ДЛИТЕЛЬНОСТЬ:", 34, 228, 88, 19),
+            ("30", "30", 116, 229, 25, 16),
+            (
+                "LIGHTNING BOLT BASE COOLDOWN: 2.5",
+                "БАЗОВАЯ ПЕРЕЗАРЯДКА МОЛНИИ: 2.5",
+                34,
+                252,
+                284,
+                19,
+            ),
+            ("RADIUS: 450", "РАДИУС: 450", 34, 276, 92, 20),
+            (
+                "HITS TO DESTROY: 8",
+                "УДАРОВ ДЛЯ УНИЧТОЖЕНИЯ: 8",
+                35,
+                301,
+                148,
+                17,
+            ),
+            (
+                "CREEP HITS TO DESTROY: 16",
+                "УДАРОВ КРИПОВ ДЛЯ УНИЧТОЖЕНИЯ: 16",
+                35,
+                324,
+                202,
+                20,
+            ),
+            ("45", "45", 60, 362, 22, 17),
+            ("275", "275", 619, 363, 29, 17),
+            (
+                "Where the thunder god's ire grows, storm clouds quickly gather.",
+                "Там, где растёт гнев бога грома, быстро собираются грозовые облака.",
+                47,
+                408,
+                371,
+                23,
+            ),
+        ];
+        rows.into_iter()
+            .enumerate()
+            .map(
+                |(index, (source, translation, x, y, width, height))| BlockLayoutInput {
+                    block_id: ScreenBlockId::from(format!("nimbus-{index}")),
+                    source: source.to_owned(),
+                    translation: translation.to_owned(),
+                    bounds: CropLocalRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                    confidence_milli: 980,
+                },
+            )
+            .collect()
+    }
+
+    #[test]
+    fn nimbus_capture_masks_only_detected_text_rows_and_keeps_numeric_icon_values() {
+        let inputs = nimbus_layout_inputs();
+
+        let plan = plan_screen_result_layout(crop_size(682, 466), &inputs);
+        let masked_area = plan
+            .blocks
+            .iter()
+            .filter(|block| block.replace_source)
+            .map(|block| block.source_width * block.source_height)
+            .sum::<f32>();
+
+        assert_eq!(plan.blocks.len(), 16);
+        assert!(plan.dense_panel_active);
+        assert!(masked_area < 682.0 * 466.0 * 0.25);
+        for value in ["30", "45", "275"] {
+            let block = plan
+                .blocks
+                .iter()
+                .find(|block| block.source.trim() == value)
+                .unwrap();
+            assert!(!block.replace_source, "{value} must remain in the image");
+            assert!(!block.overflow_panel);
+        }
+        assert!(
+            plan.blocks
+                .iter()
+                .filter(|block| block.overflow_panel)
+                .all(|block| block.x >= plan.image_width as f32 + 8.0)
+        );
+    }
+
+    #[test]
+    fn render_recorded_nimbus_result_when_requested() {
+        use std::{fs, io::BufReader, io::BufWriter, sync::Arc};
+
+        use rust_platform_windows::screen_capture::RgbaFrame;
+        use rust_protocol::{BlockCompletion, PhysicalRect, RequestId, SourceContext};
+        use slint::{ComponentHandle, LogicalSize};
+
+        let Some(sample_path) = std::env::var_os("SAYFLEX_SCREEN_SAMPLE_PNG") else {
+            return;
+        };
+        let Some(output_dir) = std::env::var_os("SAYFLEX_SCREEN_SAMPLE_OUTPUT") else {
+            return;
+        };
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .expect("testing platform should initialize once");
+
+        let sample_path = std::path::Path::new(&sample_path);
+        let decoder = png::Decoder::new(BufReader::new(
+            fs::File::open(sample_path).expect("sample PNG should open"),
+        ));
+        let mut reader = decoder.read_info().expect("sample PNG should decode");
+        let mut pixels = vec![0_u8; reader.output_buffer_size().unwrap()];
+        let info = reader
+            .next_frame(&mut pixels)
+            .expect("sample PNG should contain one frame");
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        assert_eq!(info.bit_depth, png::BitDepth::Eight);
+        pixels.truncate(info.buffer_size());
+        let crop_rect = PhysicalRect {
+            x: 0,
+            y: 0,
+            width: info.width,
+            height: info.height,
+        };
+        let frame = RgbaFrame::try_new(crop_rect, info.width * 4, pixels)
+            .expect("sample pixels should form a capture frame");
+        let inputs = nimbus_layout_inputs();
+        let snapshot = crate::screen_result::ScreenResultSnapshot {
+            request_id: RequestId::new(),
+            revision: 1,
+            crop: Some(Arc::new(frame)),
+            crop_rect,
+            blocks: inputs
+                .into_iter()
+                .map(|input| crate::screen_result::ScreenResultBlockSnapshot {
+                    block_id: input.block_id,
+                    source: input.source,
+                    translation: input.translation,
+                    completion: BlockCompletion::Completed,
+                    failure_message: None,
+                    bounds: PhysicalRect {
+                        x: input.bounds.x,
+                        y: input.bounds.y,
+                        width: input.bounds.width,
+                        height: input.bounds.height,
+                    },
+                    confidence_milli: input.confidence_milli,
+                })
+                .collect(),
+            context: SourceContext {
+                application_id: Some("dota2".to_owned()),
+                nearby_text: Some("Nimbus item card".to_owned()),
+                ..SourceContext::default()
+            },
+            created_unix_ms: 1,
+            expires_unix_ms: u64::MAX,
+        };
+
+        let preview = crate::TranslationPreview::new().expect("preview should instantiate");
+        let plan = super::plan_screen_result_layout(crop_size(682, 466), &nimbus_layout_inputs());
+        super::apply_snapshot(&preview, &snapshot).expect("snapshot should bind to the real view");
+        preview
+            .show()
+            .expect("preview should show on testing backend");
+        preview.window().set_size(LogicalSize::new(
+            plan.content_width as f32,
+            plan.image_height as f32 + 38.0,
+        ));
+        let rendered = preview
+            .window()
+            .take_snapshot()
+            .expect("screen result should render");
+
+        let output_dir = std::path::Path::new(&output_dir);
+        fs::create_dir_all(output_dir).expect("sample output directory should be creatable");
+        fs::copy(sample_path, output_dir.join("nimbus-original.png"))
+            .expect("original evidence should copy");
+        let file = fs::File::create(output_dir.join("nimbus-result.png"))
+            .expect("result evidence should be creatable");
+        let mut encoder =
+            png::Encoder::new(BufWriter::new(file), rendered.width(), rendered.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .expect("result PNG header should be valid")
+            .write_image_data(rendered.as_bytes())
+            .expect("result PNG should be written");
     }
 
     fn overlaps(left: &super::BlockLayout, right: &super::BlockLayout) -> bool {

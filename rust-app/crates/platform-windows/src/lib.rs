@@ -39,9 +39,9 @@ pub use file_dialog::choose_png_save_path;
 pub use job::WorkerJob;
 #[cfg(windows)]
 pub use overlay::{
-    capture_blurred_cloaked_overlay_backdrop, capture_blurred_overlay_backdrop,
-    clear_screen_result_window_mode, cloak_overlay_window, conceal_overlay_window,
-    configure_action_window, configure_action_window_for_target,
+    begin_borderless_window_drag, capture_blurred_cloaked_overlay_backdrop,
+    capture_blurred_overlay_backdrop, clear_screen_result_window_mode, cloak_overlay_window,
+    conceal_overlay_window, configure_action_window, configure_action_window_for_target,
     configure_blue_glass_overlay_window, configure_overlay_window, configure_screen_result_window,
     configure_standard_window, configure_translation_window,
     configure_translation_window_for_region, configure_translation_window_for_target,
@@ -487,6 +487,11 @@ pub fn clear_screen_result_window_mode(_window_handle: u64) {}
 
 #[cfg(not(windows))]
 pub fn set_screen_result_window_pinned(_window_handle: u64, _pinned: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn begin_borderless_window_drag(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
 

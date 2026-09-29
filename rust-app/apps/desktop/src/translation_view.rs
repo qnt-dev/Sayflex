@@ -470,9 +470,12 @@ pub(crate) fn wire_translation_preview(preview: &TranslationPreview, presenter: 
                 && drag_presentation_mode(preview.get_pinned(), preview.get_screen_image_active())
                     == DragPresentationMode::Direct
             {
-                if let Err(error) = begin_slint_window_drag(preview.window()) {
+                let result = slint_window_handle(preview.window())
+                    .ok_or_else(|| "translation window handle is not available".to_owned())
+                    .and_then(rust_platform_windows::begin_borderless_window_drag);
+                if let Err(error) = result {
                     rust_app_core::diagnostics::log_line(&format!(
-                        "translation_preview drag=failed stage=native_drag error={error}"
+                        "translation_preview drag=failed stage=borderless_client_drag error={error}"
                     ));
                 }
                 return;

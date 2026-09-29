@@ -541,15 +541,15 @@ export component TranslationPreview inherits Window {
     in-out property <[ScreenBlockOverlay]> screen-blocks;
     in-out property <float> screen-content-width: 960;
     in-out property <float> screen-content-height: 576;
+    in-out property <float> screen-image-content-width: 960;
+    in-out property <float> screen-dense-panel-width: 0;
     in-out property <int> screen-view-mode: 3;
     in-out property <int> screen-selected-block: -1;
     in-out property <bool> screen-editor-visible: false;
     in-out property <bool> screen-image-expired: false;
     in-out property <bool> screen-saved: false;
     in-out property <bool> screen-save-error: false;
-    in-out property <bool> screen-edit-hint-visible: true;
     in-out property <bool> screen-dense-panel-active: false;
-    in-out property <bool> screen-dense-panel-left: false;
     in-out property <string> screen-editor-original;
     in-out property <string> screen-editor-context;
     in-out property <string> screen-editor-direction;
@@ -671,10 +671,10 @@ export component TranslationPreview inherits Window {
         image-expired: root.screen-image-expired;
         saved: root.screen-saved;
         save-error: root.screen-save-error;
-        edit-hint-visible: root.screen-edit-hint-visible;
         dim-other-blocks: root.screen-editor-visible;
         dense-panel-active: root.screen-dense-panel-active;
-        dense-panel-left: root.screen-dense-panel-left;
+        image-content-width: root.screen-image-content-width;
+        dense-panel-width: root.screen-dense-panel-width;
         use-fixture-blocks: false;
         blocks: root.screen-blocks;
         editor-original <=> root.screen-editor-original;
@@ -700,7 +700,6 @@ export component TranslationPreview inherits Window {
         }
         block-edit-requested(block) => {
             root.screen-selected-block = block;
-            root.screen-edit-hint-visible = false;
             root.screen-block-edit-requested(block);
         }
         copy-text-requested => { root.screen-copy-text-requested(); }

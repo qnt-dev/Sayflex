@@ -94,7 +94,6 @@ fn configured_window(
     window.set_view_mode(3);
     if state == ScreenTranslationPreviewState::Dense {
         window.set_dense_panel_active(true);
-        window.set_dense_panel_left(false);
         window.set_fixture_blocks(ModelRc::new(VecModel::from(dense_preview_blocks())));
     }
     window
@@ -124,8 +123,8 @@ fn dense_preview_blocks() -> Vec<ScreenBlockOverlay> {
             callout: true,
             overflow_panel: true,
             panel_order: index,
-            panel_left: false,
             low_confidence: index == 5,
+            replace_source: true,
         })
         .collect()
 }
@@ -189,7 +188,6 @@ mod tests {
         let surface_size = window.window().size();
         assert_eq!(surface_size.width, PREVIEW_WIDTH as u32);
         assert_eq!(surface_size.height, PREVIEW_HEIGHT as u32);
-        assert!(window.get_edit_hint_visible());
         assert!(!window.get_dim_other_blocks());
         assert!(!window.get_save_confirmation_visible());
 
@@ -218,7 +216,6 @@ mod tests {
         assert!(!window.get_editor_visible());
         window.invoke_keyboard_edit_selected();
         assert!(window.get_editor_visible());
-        assert!(!window.get_edit_hint_visible());
         assert!(window.get_dim_other_blocks());
         assert_eq!(window.get_editor_panel_x(), 488.0);
         assert_eq!(window.get_editor_panel_y(), 292.0);
@@ -390,7 +387,23 @@ mod tests {
         assert!(SOURCE.contains("minimum-overlay-font-size: 12px"));
         assert!(SOURCE.contains("measured-content-height"));
         assert!(SOURCE.contains("inline-editor := TranslationCorrectionPanel"));
+        assert!(
+            SOURCE.contains("image-content := Rectangle {\n            x: 0px;"),
+            "the crop origin and OCR coordinates must share the same left edge"
+        );
+        assert!(
+            SOURCE.contains("height: block.overflow-panel"),
+            "non-panel OCR rows must not reserve blank space in the side list"
+        );
+        assert!(
+            SOURCE.contains("background: #120e09ff"),
+            "replacement masks must fully hide the original glyphs"
+        );
         assert!(SOURCE.contains("double-clicked => { root.edit-requested(); }"));
+        assert!(
+            !SOURCE.contains("Double-click a translation to edit"),
+            "the screen-result header must not carry a permanent editing hint"
+        );
         assert!(
             SOURCE.contains("init => { translation-input.focus(); }"),
             "the in-image editor must accept typing immediately after double-click"

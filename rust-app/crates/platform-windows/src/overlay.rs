@@ -5,6 +5,7 @@ use std::{
     ptr::null_mut,
     slice,
     sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use crate::BlurredBackdrop;
@@ -862,6 +863,102 @@ pub fn set_screen_result_window_pinned(window_handle: u64, pinned: bool) -> Resu
         }
     }
     remember_screen_result_window_mode(window_handle, pinned);
+    Ok(())
+}
+
+fn borderless_drag_position(
+    window_origin: (i32, i32),
+    pointer_at_press: (i32, i32),
+    pointer_now: (i32, i32),
+) -> (i32, i32) {
+    (
+        window_origin
+            .0
+            .saturating_add(pointer_now.0.saturating_sub(pointer_at_press.0)),
+        window_origin
+            .1
+            .saturating_add(pointer_now.1.saturating_sub(pointer_at_press.1)),
+    )
+}
+
+/// Moves a frameless result window without entering Windows' non-client drag
+/// loop. `WM_NCLBUTTONDOWN/HTCAPTION` can make DWM paint a temporary system
+/// caption over a popup even though the HWND has no `WS_CAPTION`; moving the
+/// client-owned popup directly keeps the native and Slint frame contracts in
+/// agreement for the whole gesture.
+pub fn begin_borderless_window_drag(window_handle: u64) -> Result<(), String> {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return Err("borderless window handle is not available".to_owned());
+    }
+    let mut pointer_at_press = POINT::default();
+    let mut window_rect = RECT::default();
+    unsafe {
+        if GetCursorPos(&raw mut pointer_at_press) == 0
+            || GetWindowRect(hwnd, &raw mut window_rect) == 0
+        {
+            return Err("Windows could not measure the borderless drag origin".to_owned());
+        }
+    }
+
+    static ACTIVE_DRAGS: OnceLock<Mutex<HashMap<u64, ()>>> = OnceLock::new();
+    let active_drags = ACTIVE_DRAGS.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let mut active = active_drags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.insert(window_handle, ()).is_some() {
+            return Ok(());
+        }
+    }
+
+    let spawn_result = std::thread::Builder::new()
+        .name("sayflex-borderless-window-drag".to_owned())
+        .spawn(move || {
+            let hwnd = window_handle as usize as HWND;
+            let pressed_deadline = Instant::now() + Duration::from_millis(120);
+            while !primary_pointer_button_is_down() && Instant::now() < pressed_deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            while primary_pointer_button_is_down() {
+                let mut pointer_now = POINT::default();
+                if unsafe { GetCursorPos(&raw mut pointer_now) } == 0 {
+                    break;
+                }
+                let (x, y) = borderless_drag_position(
+                    (window_rect.left, window_rect.top),
+                    (pointer_at_press.x, pointer_at_press.y),
+                    (pointer_now.x, pointer_now.y),
+                );
+                let moved = unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        null_mut(),
+                        x,
+                        y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                    )
+                };
+                if moved == 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            ACTIVE_DRAGS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&window_handle);
+        });
+    if let Err(error) = spawn_result {
+        active_drags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&window_handle);
+        return Err(format!("could not start borderless window drag: {error}"));
+    }
     Ok(())
 }
 
@@ -1956,10 +2053,22 @@ mod screen_result_contract_tests {
     };
 
     use super::{
-        clear_screen_result_window_mode, configure_screen_result_window,
+        borderless_drag_position, clear_screen_result_window_mode, configure_screen_result_window,
         position_screen_result_window_for_region, reconcile_interactive_overlay_window_contract,
         set_screen_result_window_pinned,
     };
+
+    #[test]
+    fn borderless_drag_keeps_the_pointer_grab_offset_without_native_caption_dragging() {
+        let window_origin = (500, 300);
+        let pointer_at_press = (620, 325);
+        let pointer_now = (900, 700);
+
+        assert_eq!(
+            borderless_drag_position(window_origin, pointer_at_press, pointer_now),
+            (780, 675)
+        );
+    }
 
     struct TestWindow(windows_sys::Win32::Foundation::HWND);
 

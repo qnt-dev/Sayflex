@@ -225,3 +225,74 @@ fn ordinary_wrapped_paragraph_remains_one_block() {
         "A sentence wraps naturally\nonto one following line."
     );
 }
+
+#[test]
+fn semantic_paragraph_keeps_each_ocr_line_as_a_display_element() {
+    let reconstructed = reconstruct_text(
+        &[
+            line("A sentence wraps naturally", 10, 10, 260, 990),
+            line("onto one following line.", 10, 30, 230, 980),
+        ],
+        650,
+    )
+    .unwrap();
+
+    assert_eq!(reconstructed.blocks.len(), 1);
+    assert_eq!(reconstructed.elements.len(), 2);
+    assert_eq!(reconstructed.elements[0].text, "A sentence wraps naturally");
+    assert_eq!(
+        reconstructed.elements[0].bounds,
+        PhysicalRect {
+            x: 10,
+            y: 10,
+            width: 260,
+            height: 18,
+        }
+    );
+    assert_eq!(reconstructed.elements[1].text, "onto one following line.");
+    assert_eq!(reconstructed.elements[1].bounds.y, 30);
+    assert_eq!(reconstructed.elements[1].confidence_milli, 980);
+}
+
+#[test]
+fn nimbus_style_card_does_not_turn_rows_and_standalone_values_into_one_mask() {
+    let reconstructed = reconstruct_text(
+        &[
+            line("RADIUS: 450", 34, 276, 118, 990),
+            line("HITS TO DESTROY: 8", 34, 300, 172, 985),
+            line("CREEP HITS TO DESTROY: 16", 34, 324, 224, 980),
+            line("45", 54, 366, 24, 995),
+            line("275", 610, 366, 38, 995),
+            line(
+                "Where the thunder god's ire grows, storm clouds quickly gather.",
+                34,
+                408,
+                520,
+                970,
+            ),
+        ],
+        650,
+    )
+    .unwrap();
+
+    assert!(reconstructed.blocks.len() < reconstructed.elements.len());
+    assert_eq!(reconstructed.elements.len(), 6);
+    let forty_five = reconstructed
+        .elements
+        .iter()
+        .find(|element| element.text == "45")
+        .unwrap();
+    let two_seventy_five = reconstructed
+        .elements
+        .iter()
+        .find(|element| element.text == "275")
+        .unwrap();
+    assert_eq!(forty_five.bounds.width, 24);
+    assert_eq!(two_seventy_five.bounds.x, 610);
+    assert!(
+        reconstructed
+            .elements
+            .iter()
+            .all(|element| element.bounds.height == 18)
+    );
+}
