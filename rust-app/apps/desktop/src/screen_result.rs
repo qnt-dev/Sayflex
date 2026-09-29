@@ -744,7 +744,7 @@ mod tests {
             .apply_machine_blocks(
                 request_id,
                 0,
-                vec![translated(&block_id.as_str(), "Машинный перевод")],
+                vec![translated(block_id.as_str(), "Машинный перевод")],
             )
             .unwrap();
 

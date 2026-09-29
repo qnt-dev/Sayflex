@@ -2654,7 +2654,7 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
 
     slot.window.set_screen_selected_block(block_index);
     slot.window.set_screen_editor_visible(true);
-    if let Some((x, y)) = screen_translation_editor_position(&snapshot, index) {
+    if let Some((x, y)) = screen_result_view::editor_position(&slot.window, index) {
         slot.window.set_screen_editor_panel_x(x);
         slot.window.set_screen_editor_panel_y(y);
     }
@@ -2673,48 +2673,6 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
         .window()
         .with_winit_window(|window| window.focus_window());
     slot.window.window().request_redraw();
-}
-
-#[cfg(feature = "screen-translation")]
-fn screen_translation_editor_position(
-    snapshot: &screen_result::ScreenResultSnapshot,
-    block_index: usize,
-) -> Option<(f32, f32)> {
-    let inputs = snapshot
-        .blocks
-        .iter()
-        .map(|block| screen_result_view::BlockLayoutInput {
-            block_id: block.block_id.clone(),
-            source: block.source.clone(),
-            translation: block.translation.clone(),
-            bounds: screen_result_view::CropLocalRect::from_ocr_bounds(block.bounds),
-            confidence_milli: block.confidence_milli,
-        })
-        .collect::<Vec<_>>();
-    let plan = screen_result_view::plan_screen_result_layout(
-        screen_result_view::CropPixelSize::from_screen_rect(snapshot.crop_rect),
-        &inputs,
-    );
-    let block = plan.blocks.get(block_index)?.clone();
-    let content_width = plan.content_width as f32;
-    let content_height = plan.image_height as f32;
-    let editor_width = 330.0_f32.min((content_width - 16.0).max(1.0));
-    let editor_height = 282.0_f32.min((content_height - 16.0).max(1.0));
-    if block.overflow_panel {
-        return Some((plan.image_width as f32 + 8.0, 8.0));
-    }
-    let right_candidate = block.x + block.width + 8.0;
-    let left_candidate = block.x - editor_width - 8.0;
-    let x = if right_candidate + editor_width <= content_width {
-        right_candidate
-    } else {
-        left_candidate
-    }
-    .clamp(8.0, (content_width - editor_width - 8.0).max(8.0));
-    let y = block
-        .y
-        .clamp(8.0, (content_height - editor_height - 8.0).max(8.0));
-    Some((x, y))
 }
 
 #[cfg(feature = "screen-translation")]

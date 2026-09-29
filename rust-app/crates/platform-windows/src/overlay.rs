@@ -29,6 +29,7 @@ use windows_sys::Win32::{
         Threading::GetCurrentProcessId,
     },
     UI::{
+        HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
         WindowsAndMessaging::{
             GCLP_HICON, GCLP_HICONSM, GUITHREADINFO, GWL_EXSTYLE, GWL_STYLE, GetCursorPos,
@@ -1176,6 +1177,47 @@ pub fn position_screen_result_window_for_region(
         }
     }
     Ok(())
+}
+
+/// Returns the monitor work area in logical pixels for the selected physical
+/// screen region. Layout is computed before the result HWND exists, so the
+/// monitor is resolved from the frozen capture geometry rather than from a
+/// transient window handle.
+pub fn screen_result_logical_work_area(region: (i32, i32, u32, u32)) -> Result<(f32, f32), String> {
+    let center = POINT {
+        x: i64::from(region.0)
+            .saturating_add(i64::from(region.2) / 2)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        y: i64::from(region.1)
+            .saturating_add(i64::from(region.3) / 2)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+    };
+    unsafe {
+        let monitor = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
+            return Err("Windows could not resolve the screen-result monitor".to_owned());
+        }
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        if GetMonitorInfoW(monitor, &raw mut info) == 0 {
+            return Err("Windows could not measure the screen-result work area".to_owned());
+        }
+        let mut dpi_x = 96_u32;
+        let mut dpi_y = 96_u32;
+        if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y) != 0 {
+            dpi_x = 96;
+            dpi_y = 96;
+        }
+        let width =
+            (info.rcWork.right - info.rcWork.left).max(1) as f32 * 96.0 / dpi_x.max(96) as f32;
+        let height =
+            (info.rcWork.bottom - info.rcWork.top).max(1) as f32 * 96.0 / dpi_y.max(96) as f32;
+        Ok((width, height))
+    }
 }
 
 fn selection_anchor(rect: Option<(i32, i32, i32, i32)>) -> Option<POINT> {

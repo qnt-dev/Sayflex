@@ -52,8 +52,8 @@ pub use overlay::{
     prepare_transparent_overlay_window, primary_pointer_button_is_down,
     reconcile_interactive_overlay_window_contract, reconcile_overlay_window_contract,
     request_repaint, restore_target_if_our_action_window_activated, reveal_overlay_window,
-    set_screen_result_window_pinned, verify_interactive_overlay_window_contract,
-    verify_overlay_window_contract,
+    screen_result_logical_work_area, set_screen_result_window_pinned,
+    verify_interactive_overlay_window_contract, verify_overlay_window_contract,
 };
 #[cfg(windows)]
 pub use popup_dismiss::{
