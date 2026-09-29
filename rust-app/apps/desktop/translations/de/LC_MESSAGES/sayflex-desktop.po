@@ -1646,8 +1646,8 @@ msgstr "Korrigiert"
 msgid "Editable translated image text"
 msgstr "Bearbeitbarer übersetzter Bildtext"
 
-msgid "Double-click a translation to edit"
-msgstr "Doppelklicken Sie auf eine Übersetzung, um sie zu bearbeiten"
+msgid "Screen translation result"
+msgstr "Ergebnis der Bildschirmübersetzung"
 
 msgid "Image expired"
 msgstr "Bild abgelaufen"

@@ -1646,8 +1646,8 @@ msgstr "수정됨"
 msgid "Editable translated image text"
 msgstr "이미지에서 편집 가능한 번역 텍스트"
 
-msgid "Double-click a translation to edit"
-msgstr "번역을 편집하려면 두 번 클릭하세요"
+msgid "Screen translation result"
+msgstr "화면 번역 결과"
 
 msgid "Image expired"
 msgstr "이미지 보관 기간 만료"

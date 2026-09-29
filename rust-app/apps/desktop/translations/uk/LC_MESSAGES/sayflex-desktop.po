@@ -1646,8 +1646,8 @@ msgstr "Виправлено"
 msgid "Editable translated image text"
 msgstr "Редагований текст перекладу на зображенні"
 
-msgid "Double-click a translation to edit"
-msgstr "Двічі клацніть переклад, щоб змінити його"
+msgid "Screen translation result"
+msgstr "Результат перекладу екрана"
 
 msgid "Image expired"
 msgstr "Термін зберігання зображення минув"
