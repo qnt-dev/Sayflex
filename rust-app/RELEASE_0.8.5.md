@@ -46,6 +46,80 @@
 
 ## Verification status
 
-This file is completed with exact source commit, installer hash, installed-file
-identity, and witnessed Windows scenarios only after the candidate is built and
-installed. Authenticode signing remains a separate public-release gate.
+### Release identity
+
+- Source commit embedded in the installer:
+  `6fb02e176e6909932b9f5dfd9ed8dc01072f40c1`.
+- Installer: `dist/SayFlex-0.8.5-win-x64-setup.exe`.
+- Installer size: `568,318,868` bytes.
+- Installer SHA-256:
+  `DB5C64593FB22A0CA7165F1A9DD9CFAC554B68344B9FF03BB8A90C2AE064EA69`.
+- Installed application directory:
+  `%LOCALAPPDATA%\Programs\SayFlex`.
+- Installed `SayFlex.exe` SHA-256:
+  `9C460EC22DF75E7B1B62EF6977BE8185B556302E53DD7709598B70835C408768`.
+- Installed manifest reports version `0.8.5`, protocol `31`, the source commit
+  above, and 30 hashed payload entries. The previous build was replaced in
+  place; no second SayFlex installation was retained.
+- The installer is not Authenticode-signed. SignPath signing remains a separate
+  public-release gate.
+
+### Verified
+
+- `cargo fmt --all -- --check` completed successfully.
+- The desktop suite with screen translation enabled passed: 320 tests.
+- The workspace suite excluding the feature-matrix speech worker passed with
+  all features enabled.
+- Speech-worker CPU, CUDA, and Vulkan configurations each passed their 44 unit
+  tests and 4 integration tests.
+- Strict Clippy completed successfully for the non-speech workspace and for
+  the CPU, CUDA, and Vulkan speech-worker configurations.
+- The localization validator passed with 558 messages in each of 8 locales.
+- The release build produced and validated CPU, CUDA, Vulkan, OCR, model, and
+  installer payloads. The staged and installed file sets match the build
+  manifest.
+- Silent in-place installation completed with exit code zero. Installed-file,
+  build-manifest, Cargo.lock, backend-manifest, version, protocol, checksum,
+  and uninstall-registration validation passed.
+- The installed 0.8.5 process tree started from the installed directory. The
+  desktop, input host, CUDA speech worker, and translation worker reported
+  ready; CUDA detected the NVIDIA GeForce RTX 5070 Ti. Speech-model loading
+  took 1,585 ms plus 135 ms warm-up, and translation-model loading took
+  4,719 ms in this witnessed launch.
+- DXGI screen capture and selection-overlay presentation were exercised in the
+  installed build. Capture returned three outputs in 315 ms and the overlay was
+  presented in 84 ms.
+- Dense-result headless fixtures were rendered and inspected at 100%, 125%,
+  and 200% scale.
+- The compact translation card exposes the `Translating` status to accessibility
+  only while processing is active; terminal and error states do not retain an
+  invisible stale status element.
+
+### Not verified as completed user scenarios
+
+- The installed-artifact smoke receipt records 1 artifact-identity PASS,
+  0 FAIL, and 39 NOT_COMPLETE checks. It is not evidence of 39 interactive
+  passes.
+- A complete physical screen-selection -> OCR -> translation -> correction ->
+  pin/drag -> delete/expiry lifecycle has not been witnessed on the installed
+  build. The automated drag was deliberately rejected by the product's
+  injected-input protection and the selection watchdog cancelled it after
+  15 seconds. That protection was not weakened for testing.
+- Restart restoration could not be verified using the retained 0.8.4 record:
+  that older metadata did not store source and target languages. Version 0.8.5
+  refuses to guess them. The old record remains on disk and is not presented as
+  a valid 0.8.5 restore test.
+- Russian- or German-Windows GPU-counter localization has not been exercised on
+  a corresponding operating-system installation.
+- The aggregate VRAM/RAM budget and game-frame-time impact have not been
+  measured with a game running.
+- Browser URL extraction is not claimed. Translation proceeds with the
+  application/title/document context that Windows actually exposes.
+- One pre-existing Pause/Resume global-hotkey registration conflict was logged
+  as Windows error 1409 during startup. It did not prevent the witnessed worker
+  startup, but the conflicting owner was not identified in this release check.
+
+The detailed artifact-only smoke receipt is
+`dist/smoke-receipt-0.8.5-final.json`. Public release still requires the
+separate Authenticode/SignPath step and user verification of the interactive
+screen-translation lifecycle listed above.
