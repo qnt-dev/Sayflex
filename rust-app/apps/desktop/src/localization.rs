@@ -2804,6 +2804,10 @@ mod tests {
         assert!(preview.contains("text: @tr(\"ORIG\")"));
         assert!(preview.contains("text: @tr(\"DUAL\")"));
         assert!(preview.contains("text: @tr(\"PIN\")"));
+        assert!(
+            preview.contains("visible: root.processing;"),
+            "a terminal preview must remove the Translating subtree from accessibility"
+        );
         for forbidden in [
             "source-language-label",
             "target-language-label",

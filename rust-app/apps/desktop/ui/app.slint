@@ -1038,6 +1038,12 @@ export component TranslationPreview inherits Window {
         }
 
         translating-status := Rectangle {
+            // Opacity alone only hides the pixels. UI Automation would still
+            // expose "Translating" after a terminal result (including a
+            // capture failure), which gives assistive technology a state that
+            // contradicts the visible card. Remove the subtree whenever the
+            // operation is no longer running.
+            visible: root.processing;
             x: 14px;
             y: parent.height - 25px;
             width: 86px;
