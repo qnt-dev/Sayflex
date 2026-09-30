@@ -840,7 +840,10 @@ fn apply_screen_result_window_contract(hwnd: HWND, pinned: bool) -> Result<(), S
             & !(WS_EX_NOACTIVATE as isize))
             | WS_EX_TOOLWINDOW as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_style);
-        apply_translation_window_contract(hwnd);
+        // Slint's `no-frame` property is implemented by winit's window
+        // procedure. Rewriting GWL_STYLE here competes with that owner: winit
+        // may restore its caption-capable styles on a later state update,
+        // briefly exposing native chrome while this window moves.
         if SetWindowPos(
             hwnd,
             if pinned { HWND_TOPMOST } else { HWND_NOTOPMOST },
@@ -854,23 +857,6 @@ fn apply_screen_result_window_contract(hwnd: HWND, pinned: bool) -> Result<(), S
             return Err("SetWindowPos failed for screen-result window".to_owned());
         }
     }
-    verify_screen_result_frameless_style(hwnd)?;
-    Ok(())
-}
-
-fn verify_screen_result_frameless_style(hwnd: HWND) -> Result<(), String> {
-    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
-    let required = WS_POPUP as isize;
-    let forbidden =
-        (WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
-    if style & required == 0 || style & forbidden != 0 {
-        let message = format!(
-            "screen-result frame contract mismatch: hwnd=0x{:X} style=0x{style:X} required=0x{required:X} forbidden=0x{forbidden:X}",
-            hwnd as usize,
-        );
-        rust_app_core::diagnostics::log_line(&message);
-        return Err(message);
-    }
     Ok(())
 }
 
@@ -882,7 +868,6 @@ pub fn move_screen_result_window_client(window_handle: u64, x: i32, y: i32) -> R
     if hwnd.is_null() {
         return Err("screen-result window handle is not available".to_owned());
     }
-    verify_screen_result_frameless_style(hwnd)?;
     if unsafe {
         SetWindowPos(
             hwnd,
@@ -897,7 +882,7 @@ pub fn move_screen_result_window_client(window_handle: u64, x: i32, y: i32) -> R
     {
         return Err("SetWindowPos failed while moving screen-result window".to_owned());
     }
-    verify_screen_result_frameless_style(hwnd)
+    Ok(())
 }
 
 pub fn set_screen_result_window_pinned(window_handle: u64, pinned: bool) -> Result<(), String> {
@@ -2151,8 +2136,8 @@ mod screen_result_contract_tests {
     use std::ptr::null_mut;
 
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, WS_CAPTION,
-        WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
+        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, WS_EX_TOPMOST,
+        WS_OVERLAPPEDWINDOW,
     };
 
     use super::{
@@ -2261,15 +2246,26 @@ mod screen_result_contract_tests {
     }
 
     #[test]
-    fn repeated_client_moves_preserve_the_frameless_popup_contract() {
+    fn repeated_client_moves_preserve_the_toolkit_owned_style() {
         let window = TestWindow::create();
+        let original = unsafe { GetWindowLongPtrW(window.0, GWL_STYLE) };
         configure_screen_result_window(window.handle(), false).unwrap();
 
         for (x, y) in [(20, 30), (150, 90), (5, 7), (600, 320)] {
             move_screen_result_window_client(window.handle(), x, y).unwrap();
             let style = unsafe { GetWindowLongPtrW(window.0, GWL_STYLE) };
-            assert_ne!(style & WS_POPUP as isize, 0);
-            assert_eq!(style & (WS_CAPTION | WS_THICKFRAME) as isize, 0);
+            assert_eq!(style, original);
         }
+    }
+
+    #[test]
+    fn configuring_result_preserves_the_toolkit_owned_window_style() {
+        let window = TestWindow::create();
+        let original = unsafe { GetWindowLongPtrW(window.0, GWL_STYLE) };
+
+        configure_screen_result_window(window.handle(), false).unwrap();
+        reconcile_interactive_overlay_window_contract(window.handle()).unwrap();
+
+        assert_eq!(unsafe { GetWindowLongPtrW(window.0, GWL_STYLE) }, original);
     }
 }

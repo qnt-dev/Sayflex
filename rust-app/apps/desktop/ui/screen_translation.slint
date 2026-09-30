@@ -16,6 +16,7 @@ export struct ScreenBlockOverlay {
     replace-source: bool,
     placed: bool,
     not-placeable: bool,
+    callout: bool,
     font-size: float,
 }
 
@@ -25,6 +26,14 @@ export struct ScreenMaskOverlay {
     y: float,
     width: float,
     height: float,
+}
+
+export struct ScreenConnectorOverlay {
+    block-id: string,
+    start-x: float,
+    start-y: float,
+    end-x: float,
+    end-y: float,
 }
 
 component OverlayButton inherits Rectangle {
@@ -68,6 +77,7 @@ component TranslatedLabel inherits Rectangle {
     in property <bool> dual: false;
     in property <bool> selected-label: false;
     in property <bool> dimmed: false;
+    in property <bool> callout: false;
     in property <length> text-size: 12px;
     out property <length> measured-content-height: translated-text-item.preferred-height + 8px;
     callback selected();
@@ -75,9 +85,9 @@ component TranslatedLabel inherits Rectangle {
 
     border-radius: 3px;
     forward-focus: key-focus;
-    border-width: root.selected-label || touch.has-hover ? 1px : 0px;
-    border-color: root.selected-label ? Theme.red : #f3e9cf80;
-    background: touch.has-hover ? #25170f88 : transparent;
+    border-width: root.callout || root.selected-label || touch.has-hover ? 1px : 0px;
+    border-color: root.selected-label ? Theme.red : root.callout ? #d7a45b : #f3e9cf80;
+    background: root.callout ? #171a20f5 : touch.has-hover ? #25170f88 : transparent;
     opacity: root.dimmed ? 0.38 : 1;
     accessible-role: button;
     accessible-label: @tr("Editable translated image text");
@@ -259,7 +269,11 @@ export component ScreenImageResult inherits Rectangle {
     in property <bool> use-fixture-blocks: true;
     in property <[ScreenBlockOverlay]> blocks;
     in property <[ScreenMaskOverlay]> masks;
+    in property <[ScreenConnectorOverlay]> connectors;
     in property <float> image-content-width: root.width / 1px;
+    in property <float> image-content-height: root.height / 1px;
+    in property <float> total-content-height: root.height / 1px;
+    out property <float> scroll-offset: -result-scroll.viewport-y / 1px;
     in property <float> editor-panel-x: 488;
     in property <float> editor-panel-y: 292;
     in property <length> minimum-overlay-font-size: 12px;
@@ -334,12 +348,27 @@ export component ScreenImageResult inherits Rectangle {
         background: #0b0d11;
         clip: true;
 
-        if root.view-mode != 0 && !root.image-expired: image-content := Rectangle {
+        result-scroll := Flickable {
+            visible: root.view-mode != 0 && !root.image-expired;
             x: 0px;
-            width: root.image-content-width * 1px;
+            y: 0px;
+            width: parent.width;
             height: parent.height;
-            clip: true;
-            Image { width: parent.width; height: parent.height; source: root.crop-image; image-fit: fill; }
+            viewport-width: root.image-content-width * 1px;
+            viewport-height: root.total-content-height * 1px;
+            Rectangle {
+                width: root.image-content-width * 1px;
+                height: root.total-content-height * 1px;
+                background: #0b0d11;
+            }
+            image-content := Rectangle {
+                x: 0px;
+                y: 0px;
+                width: root.image-content-width * 1px;
+                height: root.image-content-height * 1px;
+                clip: true;
+                Image { width: parent.width; height: parent.height; source: root.crop-image; image-fit: fill; }
+            }
 
             if root.use-fixture-blocks && root.view-mode != 1: TranslatedLabel {
                 x: 3px; y: 1px; width: 75px; height: root.view-mode == 2 ? 28px : 18px;
@@ -399,6 +428,33 @@ export component ScreenImageResult inherits Rectangle {
                 background: #120e09ff;
                 border-radius: 2px;
             }
+            // Every moved translation has a persistent visual link to the
+            // exact OCR row that supplied it, including below-image overflow.
+            for connector in root.connectors: Path {
+                visible: !root.use-fixture-blocks && root.view-mode != 1;
+                width: root.image-content-width * 1px;
+                height: root.total-content-height * 1px;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: root.image-content-width;
+                viewbox-height: root.total-content-height;
+                fill: transparent;
+                stroke: #d7a45b;
+                stroke-width: 1.5px;
+                MoveTo { x: connector.start-x; y: connector.start-y; }
+                LineTo { x: connector.end-x; y: connector.end-y; }
+            }
+            for block in root.blocks: Rectangle {
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.placed && block.callout;
+                x: block.source-x * 1px;
+                y: block.source-y * 1px;
+                width: block.source-width * 1px;
+                height: block.source-height * 1px;
+                background: transparent;
+                border-width: 1px;
+                border-color: #d7a45b;
+                border-radius: 2px;
+            }
             for block[index] in root.blocks: TranslatedLabel {
                 visible: !root.use-fixture-blocks && root.view-mode != 1 && block.placed;
                 x: block.x * 1px;
@@ -410,6 +466,7 @@ export component ScreenImageResult inherits Rectangle {
                 dual: root.view-mode == 2;
                 selected-label: root.selected-block == index;
                 dimmed: root.dim-other-blocks && root.selected-block != index;
+                callout: block.callout;
                 text-size: max(root.minimum-overlay-font-size, block.font-size * 1px);
                 border-color: block.low-confidence && !self.selected-label ? #d7a45b : Theme.red;
                 selected => { root.block-selected(index); }
@@ -547,9 +604,13 @@ export component ScreenTranslationWindow inherits Window {
     in-out property <image> screen-crop-image;
     in-out property <[ScreenBlockOverlay]> screen-blocks;
     in-out property <[ScreenMaskOverlay]> screen-masks;
+    in-out property <[ScreenConnectorOverlay]> screen-connectors;
     in-out property <float> screen-content-width: 960;
     in-out property <float> screen-content-height: 576;
     in-out property <float> screen-image-content-width: 960;
+    in-out property <float> screen-image-content-height: 576;
+    in-out property <float> screen-total-content-height: 576;
+    out property <float> screen-scroll-offset: image-view.scroll-offset;
     in-out property <int> screen-view-mode: 3;
     in-out property <int> screen-selected-block: -1;
     in-out property <bool> screen-editor-visible: false;
@@ -596,7 +657,7 @@ export component ScreenTranslationWindow inherits Window {
         wrap: word-wrap;
     }
 
-    ScreenImageResult {
+    image-view := ScreenImageResult {
         width: parent.width;
         height: parent.height;
         crop-image: root.screen-crop-image;
@@ -609,9 +670,12 @@ export component ScreenTranslationWindow inherits Window {
         save-error: root.screen-save-error;
         dim-other-blocks: root.screen-editor-visible;
         image-content-width: root.screen-image-content-width;
+        image-content-height: root.screen-image-content-height;
+        total-content-height: root.screen-total-content-height;
         use-fixture-blocks: false;
         blocks: root.screen-blocks;
         masks: root.screen-masks;
+        connectors: root.screen-connectors;
         editor-original <=> root.screen-editor-original;
         editor-context: root.screen-editor-context;
         editor-direction: root.screen-editor-direction;

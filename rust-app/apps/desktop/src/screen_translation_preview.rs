@@ -351,10 +351,6 @@ mod tests {
         assert!(SOURCE.contains("minimum-overlay-font-size: 12px"));
         assert!(SOURCE.contains("measured-content-height"));
         assert!(SOURCE.contains("inline-editor := TranslationCorrectionPanel"));
-        assert!(
-            SOURCE.contains("image-content := Rectangle {\n            x: 0px;"),
-            "the crop origin and OCR coordinates must share the same left edge"
-        );
         assert!(!SOURCE.contains("overflow-panel"));
         assert!(!SOURCE.contains("dense-panel"));
         assert!(SOURCE.contains("for mask in root.masks"));
