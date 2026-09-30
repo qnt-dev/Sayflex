@@ -57,8 +57,8 @@ use screen_result::{
 };
 #[cfg(feature = "screen-translation")]
 use screen_result_window::{
-    ScreenResultWindowRegistry, create_screen_result_window, pin_screen_result,
-    present_screen_result,
+    ScreenResultWindowRegistry, create_screen_result_window, get_or_create_screen_result_slot,
+    pin_screen_result, present_screen_result, retire_screen_result_slot_by_handle,
 };
 #[cfg(feature = "screen-translation")]
 use screen_translation::ScreenTranslationBegin;
@@ -2241,24 +2241,20 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
         },
         RuntimeEvent::DismissTranslationPreview(window_handle) => {
             #[cfg(feature = "screen-translation")]
-            if let Some(slot) = runtime
-                .screen_result_windows
-                .borrow()
-                .slot_by_handle(window_handle)
-            {
-                let request_id = slot.request_id();
-                let active_host = runtime
-                    .active_screen_editor
-                    .borrow()
-                    .as_ref()
-                    .map(|active| active.host_window_handle);
-                if host_editor_should_close(active_host, window_handle) {
-                    close_screen_translation_editor(runtime, false);
-                }
-                runtime
-                    .screen_result_windows
-                    .borrow_mut()
-                    .retire(request_id, "close");
+            if let Some(request_id) = retire_screen_result_slot_by_handle(
+                &runtime.screen_result_windows,
+                window_handle,
+                || {
+                    let active_host = runtime
+                        .active_screen_editor
+                        .borrow()
+                        .as_ref()
+                        .map(|active| active.host_window_handle);
+                    if host_editor_should_close(active_host, window_handle) {
+                        close_screen_translation_editor(runtime, false);
+                    }
+                },
+            ) {
                 if let Some(cancellation) =
                     runtime.screen_translation.borrow_mut().close(request_id)
                 {
@@ -4840,13 +4836,6 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
             delivery,
             dispatch_duration_ms,
         } => {
-            if state
-                .borrow()
-                .active_visualizer_style
-                .is_some_and(VisualizerStyle::uses_external_renderer)
-            {
-                let _ = workers.send_companion(&CompanionRendererCommand::Complete { session_id });
-            }
             let (owns_indicator, total_after_release_ms, transcript_latency) = {
                 let mut state = state.borrow_mut();
                 state.targets.remove(&session_id);
@@ -5400,27 +5389,18 @@ fn show_screen_image_result(
             .borrow_mut()
             .clear_current_request(request_id);
     }
-    let slot = match runtime
-        .screen_result_windows
-        .borrow()
-        .slot_for_request(request_id)
-    {
-        Some(slot) => slot,
-        None => match create_screen_result_window(request_id) {
-            Ok(slot) => {
-                runtime
-                    .screen_result_windows
-                    .borrow_mut()
-                    .insert(slot.clone());
-                slot
-            }
-            Err(error) => {
-                rust_app_core::diagnostics::log_line(&format!(
-                    "screen_translation request={request_id} stage=result_window result=create_failed error={error}"
-                ));
-                return;
-            }
-        },
+    let slot = match get_or_create_screen_result_slot(
+        &runtime.screen_result_windows,
+        request_id,
+        || create_screen_result_window(request_id),
+    ) {
+        Ok(slot) => slot,
+        Err(error) => {
+            rust_app_core::diagnostics::log_line(&format!(
+                "screen_translation request={request_id} stage=result_window result=create_failed error={error}"
+            ));
+            return;
+        }
     };
     slot.window.set_pin_enabled(true);
     slot.window.set_screen_saved(false);
@@ -6015,6 +5995,24 @@ fn handle_speech_event(
                 };
                 plan_completion(stored, replaced_existing, awaiting_target, captured_target)
             };
+            // Recognition is finished here. Clipboard delivery can still wait
+            // for up to 2.5 seconds for a read acknowledgement; that wait is
+            // not recording or speech processing and must not keep the visual
+            // on screen. Keep indicator_session until insertion settles so a
+            // second dictation cannot overtake the pending delivery.
+            let owns_visual = stored && state.borrow().indicator_session == Some(session_id);
+            if owns_visual {
+                if state
+                    .borrow()
+                    .active_visualizer_style
+                    .is_some_and(VisualizerStyle::uses_external_renderer)
+                {
+                    let _ =
+                        workers.send_companion(&CompanionRendererCommand::Complete { session_id });
+                }
+                indicator_animation.borrow_mut().stop();
+                recording_overlays.retire_all("transcription_completed");
+            }
             // The insertion command leaves before any list model work.
             // docs/LATENCY_ARCHITECTURE.md keeps history persistence and
             // presentation off the release-to-insertion path.
@@ -6050,14 +6048,6 @@ delivery={} target_pid={}",
                     transcript.text.chars().count(),
                 ));
                 state.borrow_mut().indicator_session = None;
-                if state
-                    .borrow()
-                    .active_visualizer_style
-                    .is_some_and(VisualizerStyle::uses_external_renderer)
-                {
-                    let _ =
-                        workers.send_companion(&CompanionRendererCommand::Complete { session_id });
-                }
                 state.borrow_mut().active_visualizer_style = None;
                 indicator_animation.borrow_mut().stop();
                 recording_overlays.retire_all("target_lost");

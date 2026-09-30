@@ -22,6 +22,12 @@
 
 ## Reliability included in this candidate
 
+- The first completed screenshot result, closing its window, and reopening a
+  saved result no longer overlap read and write borrows of the window registry.
+  The two transitions have regression tests that reproduced the original panic.
+- The recording visual is dismissed when recognition finishes. Clipboard paste
+  acknowledgement may continue afterward without keeping the speech visual on
+  screen; delivery remains tracked until the input host responds.
 - Screen rows retain stable identifiers through OCR, translation, persistence,
   correction, and late worker responses.
 - Mixed-script malformed target text receives one bounded retry and cannot be
@@ -33,7 +39,7 @@
 
 ### Verified in the source tree
 
-- Desktop tests with screen translation enabled: 329 passed, 0 failed.
+- Desktop tests with screen translation enabled: 333 passed, 0 failed.
 - Strict Clippy passed for the OCR engine, protocol, translation engine,
   Windows platform layer, translation worker, and desktop with warnings denied.
 - The retained Nimbus crop completed the automated production-view renderer

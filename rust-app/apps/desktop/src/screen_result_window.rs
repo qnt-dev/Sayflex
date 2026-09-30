@@ -5,7 +5,7 @@
 //! retirement. Pinning changes only z-order; dragging only changes position.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
     sync::{
@@ -146,6 +146,34 @@ impl ScreenResultWindowRegistry {
     ) -> Result<Vec<CaptureExcludedOverlay>, String> {
         cloak_screen_results_for_capture(self)
     }
+}
+
+pub(crate) fn get_or_create_screen_result_slot(
+    registry: &RefCell<ScreenResultWindowRegistry>,
+    request_id: RequestId,
+    create: impl FnOnce() -> Result<ScreenResultWindowSlot, String>,
+) -> Result<ScreenResultWindowSlot, String> {
+    let existing = registry.borrow().slot_for_request(request_id);
+    match existing {
+        Some(slot) => Ok(slot),
+        None => {
+            let slot = create()?;
+            registry.borrow_mut().insert(slot.clone());
+            Ok(slot)
+        }
+    }
+}
+
+pub(crate) fn retire_screen_result_slot_by_handle(
+    registry: &RefCell<ScreenResultWindowRegistry>,
+    window_handle: u64,
+    before_retire: impl FnOnce(),
+) -> Option<RequestId> {
+    let slot = registry.borrow().slot_by_handle(window_handle)?;
+    let request_id = slot.request_id();
+    before_retire();
+    registry.borrow_mut().retire(request_id, "close");
+    Some(request_id)
 }
 
 pub(crate) fn create_screen_result_window(
@@ -446,9 +474,73 @@ fn wire_screen_result_window(window: &ScreenTranslationWindow) {
 
 #[cfg(test)]
 mod screen_result_window_tests {
+    use std::cell::{Cell, RefCell};
+
     use rust_protocol::RequestId;
 
-    use super::{ScreenResultWindowRegistry, ScreenResultWindowSlot};
+    use super::{
+        ScreenResultWindowRegistry, ScreenResultWindowSlot, get_or_create_screen_result_slot,
+        retire_screen_result_slot_by_handle,
+    };
+
+    #[test]
+    fn first_result_and_restored_result_can_create_after_registry_lookup() {
+        i_slint_backend_testing::init_no_event_loop();
+        let registry = RefCell::new(ScreenResultWindowRegistry::default());
+        let first_request = RequestId::new();
+        let first = ScreenResultWindowSlot::test_slot(first_request, 41);
+        let slot = get_or_create_screen_result_slot(&registry, first_request, || Ok(first.clone()))
+            .expect("first completed result opens");
+        assert_eq!(slot.handle(), 41);
+
+        let reused = get_or_create_screen_result_slot(&registry, first_request, || {
+            panic!("an existing result must reuse its window")
+        })
+        .expect("existing result reuses its window");
+        assert_eq!(reused.component_id(), slot.component_id());
+
+        assert_eq!(
+            registry
+                .borrow_mut()
+                .retire(first_request, "test")
+                .unwrap()
+                .handle(),
+            41
+        );
+        let restored = ScreenResultWindowSlot::test_slot(first_request, 43);
+        let slot = get_or_create_screen_result_slot(&registry, first_request, || Ok(restored))
+            .expect("restored result opens after the earlier window closed");
+        assert_eq!(slot.handle(), 43);
+    }
+
+    #[test]
+    fn close_result_releases_lookup_before_editor_cleanup_and_retirement() {
+        i_slint_backend_testing::init_no_event_loop();
+        let registry = RefCell::new(ScreenResultWindowRegistry::default());
+        let first_request = RequestId::new();
+        let first = ScreenResultWindowSlot::test_slot(first_request, 51);
+        registry.borrow_mut().insert(first.clone());
+        let editor_closed = Cell::new(false);
+
+        let closed = retire_screen_result_slot_by_handle(&registry, 51, || {
+            assert!(registry.try_borrow_mut().is_ok());
+            editor_closed.set(true);
+        });
+        assert_eq!(closed, Some(first_request));
+        assert!(editor_closed.get());
+        assert!(registry.borrow().slot_for_request(first_request).is_none());
+        assert_eq!(first.test_retire_count(), 1);
+
+        let second_request = RequestId::new();
+        registry
+            .borrow_mut()
+            .insert(ScreenResultWindowSlot::test_slot(second_request, 52));
+        assert_eq!(
+            retire_screen_result_slot_by_handle(&registry, 52, || {}),
+            Some(second_request)
+        );
+        assert!(registry.borrow().slot_for_request(second_request).is_none());
+    }
 
     #[test]
     fn registry_owns_identity_pin_and_idempotent_retirement() {
