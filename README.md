@@ -2,7 +2,7 @@
 
 SayFlex is a local-first Windows utility for voice dictation, selected-text
 translation, and RU/EN keyboard-layout correction. The current Rust/Slint
-release candidate is version **0.8.7**.
+release candidate is version **0.8.8**.
 
 Audio, local speech recognition, layout correction, and installed translation
 models run on the user's computer by default. Optional cloud providers remain
@@ -47,19 +47,19 @@ and trust-boundary description.
 
 ## Release status
 
-Version 0.8.7 is undergoing release hardening. A public installer is not ready
+Version 0.8.8 is undergoing release hardening. A public installer is not ready
 until the exact installed artifact passes the Windows interaction matrix and
 carries a valid Authenticode signature. Do not treat files from a local `dist`
 directory as an official release.
 
 The current release notes are in
-[rust-app/RELEASE_0.8.7.md](rust-app/RELEASE_0.8.7.md).
+[rust-app/RELEASE_0.8.8.md](rust-app/RELEASE_0.8.8.md).
 
 ## Build and test
 
 The maintained application lives in `rust-app`. The older C# implementation in
 the repository root is retained for history and is not a build dependency of
-SayFlex 0.8.7.
+SayFlex 0.8.8.
 
 ```powershell
 cd rust-app

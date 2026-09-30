@@ -920,6 +920,24 @@ fn reconcile_and_verify_contract(
 }
 
 #[cfg(test)]
+pub(crate) mod test_utils {
+    use std::sync::{Arc, Mutex};
+
+    use super::{ContentPolicy, OverlayContract, OverlayPresenter, PresentationState};
+
+    pub(crate) fn attached_presenter(window_handle: u64) -> OverlayPresenter {
+        let mut state = PresentationState::new(ContentPolicy::RequiresContent);
+        state.attach(window_handle).unwrap();
+        OverlayPresenter {
+            state: Arc::new(Mutex::new(state)),
+            rendered_frame_callback: Arc::new(Mutex::new(None)),
+            name: "screen_result_position_test",
+            contract: OverlayContract::Interactive,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{ContentPolicy, PresentationPhase, PresentationState};
 

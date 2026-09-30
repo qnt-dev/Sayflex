@@ -474,6 +474,19 @@ pub fn reveal_overlay_window(window_handle: u64) -> Result<(), String> {
     if hwnd.is_null() {
         return Err("overlay window handle is not available".to_owned());
     }
+    // A prepared window is parked outside the virtual desktop until its owner
+    // positions it. Uncloaking that HWND is not a successful presentation:
+    // the compositor can acknowledge the frame while the user sees nothing.
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return Err("GetWindowRect failed before revealing overlay".to_owned());
+    }
+    if rect.left == PREWARM_WINDOW_COORDINATE && rect.top == PREWARM_WINDOW_COORDINATE {
+        return Err(format!(
+            "overlay is still parked off-screen at ({}, {}) before reveal",
+            rect.left, rect.top
+        ));
+    }
     // Uncloaking a window that has lost WS_VISIBLE leaves it invisible and
     // says nothing about it. The overlay is meant to be hidden by the DWM
     // cloak alone, so if the style has gone missing, put it back rather than
@@ -1152,10 +1165,11 @@ pub fn position_screen_result_window_for_region(
             dwFlags: 0,
         };
         let mut window_rect = RECT::default();
-        if GetMonitorInfoW(monitor, &mut monitor_info) == 0
-            || GetWindowRect(hwnd, &mut window_rect) == 0
-        {
-            return Ok(());
+        if GetMonitorInfoW(monitor, &mut monitor_info) == 0 {
+            return Err("GetMonitorInfoW failed while positioning screen-result window".to_owned());
+        }
+        if GetWindowRect(hwnd, &mut window_rect) == 0 {
+            return Err("GetWindowRect failed while positioning screen-result window".to_owned());
         }
         let fitted = fit_window_for_region(
             region,
@@ -1175,6 +1189,22 @@ pub fn position_screen_result_window_for_region(
         {
             return Err("SetWindowPos failed while positioning screen-result window".to_owned());
         }
+        let mut actual = RECT::default();
+        if GetWindowRect(hwnd, &mut actual) == 0 {
+            return Err("GetWindowRect failed after positioning screen-result window".to_owned());
+        }
+        rust_app_core::diagnostics::log_line(&format!(
+            "screen_result_window position=applied hwnd={window_handle} \
+             anchor=({}, {}, {}, {}) actual=({}, {}, {}, {})",
+            region.left,
+            region.top,
+            region.right,
+            region.bottom,
+            actual.left,
+            actual.top,
+            actual.right,
+            actual.bottom
+        ));
     }
     Ok(())
 }
@@ -2126,9 +2156,10 @@ mod screen_result_contract_tests {
     };
 
     use super::{
-        borderless_drag_position, clear_screen_result_window_mode, configure_screen_result_window,
-        move_screen_result_window_client, position_screen_result_window_for_region,
-        reconcile_interactive_overlay_window_contract, set_screen_result_window_pinned,
+        borderless_drag_position, clear_screen_result_window_mode, conceal_overlay_window,
+        configure_screen_result_window, move_screen_result_window_client,
+        position_screen_result_window_for_region, reconcile_interactive_overlay_window_contract,
+        reveal_overlay_window, set_screen_result_window_pinned,
     };
 
     #[test]
@@ -2209,6 +2240,24 @@ mod screen_result_contract_tests {
         set_screen_result_window_pinned(window.handle(), false).unwrap();
         reconcile_interactive_overlay_window_contract(window.handle()).unwrap();
         assert!(!window.is_topmost());
+    }
+
+    #[test]
+    fn parked_result_cannot_be_reported_as_revealed() {
+        let window = TestWindow::create();
+        configure_screen_result_window(window.handle(), false).unwrap();
+        conceal_overlay_window(window.handle()).unwrap();
+
+        let error = reveal_overlay_window(window.handle())
+            .expect_err("an off-screen parked result must not count as presented");
+        assert!(error.contains("parked"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn positioning_result_reports_an_invalid_native_window() {
+        let error = position_screen_result_window_for_region(u64::MAX, (20, 20, 200, 100))
+            .expect_err("an invalid HWND cannot be positioned successfully");
+        assert!(error.contains("GetWindowRect"), "unexpected error: {error}");
     }
 
     #[test]

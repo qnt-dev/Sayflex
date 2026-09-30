@@ -35,6 +35,9 @@ i-slint-backend-testing = { version = "1.17.1", features = ["renderer-software"]
 rqrr = { version = "0.11.0", default-features = false }
 tempfile.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys.workspace = true
+
 [features]
 default = ["screen-translation"]
 # Compiles Slint's CPU renderer in as well, so a build can be told

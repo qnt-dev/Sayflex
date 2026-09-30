@@ -299,17 +299,27 @@ fn present_attached(slot: &ScreenResultWindowSlot, anchor: PhysicalRect) -> Resu
     let bottom = i64::from(anchor.y)
         .saturating_add(i64::from(anchor.height))
         .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-    rust_platform_windows::position_screen_result_window_for_region(
-        handle,
-        (anchor.x, anchor.y, right, bottom),
-    )?;
     presenter.content_changed(slot.window.window(), true);
     let ticket = if slot.window.get_prepared() {
         presenter.begin_refresh()?
     } else {
         presenter.begin_prepare()?
     };
-    presenter.await_frame(slot.window.window(), ticket)
+    // begin_prepare parks the HWND while waiting for its first rendered frame.
+    // Placement must happen after that parking step, or reveal succeeds while
+    // the result is still at the off-screen prewarm coordinate.
+    if let Err(error) = rust_platform_windows::position_screen_result_window_for_region(
+        handle,
+        (anchor.x, anchor.y, right, bottom),
+    ) {
+        presenter.abort_prepare(slot.window.window(), ticket, "position", &error);
+        return Err(error);
+    }
+    if let Err(error) = presenter.await_frame(slot.window.window(), ticket) {
+        presenter.abort_prepare(slot.window.window(), ticket, "await_frame", &error);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(crate) fn pin_screen_result(slot: &ScreenResultWindowSlot, pinned: bool) -> Result<(), String> {
@@ -578,5 +588,86 @@ mod screen_result_window_tests {
             assert!(registry.retire(request_id, reason).is_none());
         }
         assert_eq!(slot.test_retire_count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_result_is_positioned_on_screen_after_prepare_parks_the_window() {
+        use std::{
+            ptr::null_mut,
+            rc::Rc,
+            sync::{Arc, atomic::AtomicBool},
+        };
+
+        use rust_protocol::PhysicalRect;
+        use slint::ComponentHandle;
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetWindowRect, WS_OVERLAPPEDWINDOW,
+        };
+
+        use super::{ScreenTranslationWindow, present_attached};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let class = "STATIC\0".encode_utf16().collect::<Vec<_>>();
+        let native = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                class.as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                320,
+                180,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            )
+        };
+        assert!(!native.is_null());
+        let handle = native as usize as u64;
+        let window = Rc::new(ScreenTranslationWindow::new().unwrap());
+        let presenter = crate::overlay_presenter::test_utils::attached_presenter(handle);
+        rust_platform_windows::configure_screen_result_window(handle, false).unwrap();
+        rust_platform_windows::conceal_overlay_window(handle).unwrap();
+        let slot = ScreenResultWindowSlot {
+            window,
+            presenter: Some(presenter),
+            request_id: RequestId::new(),
+            native_handle: Rc::new(Cell::new(handle)),
+            attached: Rc::new(Cell::new(true)),
+            shown: Rc::new(Cell::new(true)),
+            pinned: Rc::new(Cell::new(false)),
+            retired: Arc::new(AtomicBool::new(false)),
+            retire_count: Rc::new(Cell::new(0)),
+        };
+
+        present_attached(
+            &slot,
+            PhysicalRect {
+                x: 100,
+                y: 100,
+                width: 200,
+                height: 100,
+            },
+        )
+        .unwrap();
+        let mut rect = RECT::default();
+        assert_ne!(unsafe { GetWindowRect(native, &mut rect) }, 0);
+        assert!(
+            rect.left >= 0 && rect.top >= 0,
+            "result remained parked at ({}, {})",
+            rect.left,
+            rect.top
+        );
+
+        slot.presenter
+            .as_ref()
+            .unwrap()
+            .retire(slot.window.window(), "test_cleanup");
+        rust_platform_windows::clear_screen_result_window_mode(handle);
+        unsafe { DestroyWindow(native) };
     }
 }
