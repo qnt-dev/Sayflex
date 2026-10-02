@@ -50,10 +50,7 @@ pub fn validate(bindings: &HotkeyBindings) -> Result<(), HotkeyValidationError> 
         if !binding.enabled {
             continue;
         }
-        if binding.spec.modifiers.is_empty()
-            || binding.spec.virtual_key == 0
-            || is_modifier_key(binding.spec.virtual_key)
-        {
+        if !well_formed(binding.spec) {
             return Err(invalid(
                 action,
                 "A shortcut needs a non-modifier key and at least one modifier.",
@@ -72,6 +69,65 @@ pub fn validate(bindings: &HotkeyBindings) -> Result<(), HotkeyValidationError> 
         }
     }
     Ok(())
+}
+
+/// Repairs only the parts of a stored configuration that `validate` rejects.
+///
+/// A settings file can hold a configuration the validator refuses — older
+/// builds saved what Windows accepted instead of what the user chose, so a
+/// recovery chord another application held was written back as disabled.
+/// Replacing the whole table would silently discard every custom chord the
+/// user set, so each defect is repaired where it is: pause is re-enabled,
+/// a malformed chord returns to its default, and an action whose chord is
+/// already taken returns to its default chord or, failing that, is switched
+/// off. Pause claims its chord first because it is the one that must stay.
+#[must_use]
+pub fn repair(bindings: &HotkeyBindings) -> HotkeyBindings {
+    if validate(bindings).is_ok() {
+        return bindings.clone();
+    }
+    let defaults = HotkeyBindings::default();
+    let mut repaired = bindings.clone();
+    repaired.pause_resume.enabled = true;
+
+    let order = std::iter::once(HotkeyAction::PauseResume).chain(
+        HotkeyAction::ALL
+            .into_iter()
+            .filter(|action| *action != HotkeyAction::PauseResume),
+    );
+    let mut occupied = HashMap::<HotkeySpec, HotkeyAction>::new();
+    for action in order {
+        let default = defaults.binding(action).spec;
+        let binding = repaired.binding_mut(action);
+        if !binding.enabled {
+            continue;
+        }
+        if !well_formed(binding.spec) {
+            binding.spec = default;
+        }
+        if occupied.contains_key(&binding.spec) {
+            binding.spec = default;
+        }
+        if occupied.contains_key(&binding.spec) {
+            if action == HotkeyAction::PauseResume {
+                // Unreachable: pause is placed first, but never leave it off.
+                continue;
+            }
+            binding.enabled = false;
+            continue;
+        }
+        occupied.insert(binding.spec, action);
+    }
+
+    if validate(&repaired).is_ok() {
+        repaired
+    } else {
+        defaults
+    }
+}
+
+fn well_formed(spec: HotkeySpec) -> bool {
+    !spec.modifiers.is_empty() && spec.virtual_key != 0 && !is_modifier_key(spec.virtual_key)
 }
 
 fn invalid(action: HotkeyAction, message: &str) -> HotkeyValidationError {
@@ -106,7 +162,99 @@ fn key_name(key: u16) -> String {
 mod tests {
     use rust_protocol::{HotkeyAction, HotkeyBindings, HotkeyRejection, HotkeySpec};
 
-    use super::{format_hotkey, validate};
+    use super::{format_hotkey, repair, validate};
+
+    fn custom() -> HotkeyBindings {
+        let mut bindings = HotkeyBindings::default();
+        bindings.dictate.spec = HotkeySpec::control_alt(u16::from(b'D'));
+        bindings.insert_last.spec = HotkeySpec::control_alt(u16::from(b'I'));
+        bindings.translate.enabled = true;
+        bindings.translate.spec = HotkeySpec::control_alt(u16::from(b'T'));
+        bindings
+    }
+
+    #[test]
+    fn repair_keeps_a_valid_configuration_untouched() {
+        let bindings = custom();
+
+        assert_eq!(repair(&bindings), bindings);
+    }
+
+    #[test]
+    fn repair_re_enables_pause_and_keeps_every_custom_chord() {
+        // The exact shape older builds wrote when Windows refused Ctrl+Alt+P.
+        let mut stored = custom();
+        stored.pause_resume.enabled = false;
+
+        let repaired = repair(&stored);
+
+        assert!(repaired.pause_resume.enabled);
+        assert_eq!(repaired.pause_resume.spec, stored.pause_resume.spec);
+        for action in HotkeyAction::ALL {
+            if action != HotkeyAction::PauseResume {
+                assert_eq!(
+                    repaired.binding(action),
+                    stored.binding(action),
+                    "{action:?}"
+                );
+            }
+        }
+        assert_eq!(validate(&repaired), Ok(()));
+    }
+
+    #[test]
+    fn repair_returns_only_a_malformed_chord_to_its_default() {
+        let mut stored = custom();
+        stored.insert_last.spec.modifiers = rust_protocol::HotkeyModifiers {
+            control: false,
+            alt: false,
+            shift: false,
+            windows: false,
+        };
+
+        let repaired = repair(&stored);
+
+        assert_eq!(
+            repaired.insert_last.spec,
+            HotkeyBindings::default().insert_last.spec
+        );
+        assert_eq!(repaired.dictate, stored.dictate);
+        assert_eq!(repaired.translate, stored.translate);
+        assert_eq!(validate(&repaired), Ok(()));
+    }
+
+    #[test]
+    fn repair_resolves_a_duplicate_without_touching_the_first_owner() {
+        let mut stored = custom();
+        stored.translate.spec = stored.dictate.spec;
+
+        let repaired = repair(&stored);
+
+        assert_eq!(repaired.dictate, stored.dictate);
+        assert_eq!(
+            repaired.translate.spec,
+            HotkeyBindings::default().translate.spec
+        );
+        assert!(repaired.translate.enabled);
+        assert_eq!(validate(&repaired), Ok(()));
+    }
+
+    #[test]
+    fn pause_keeps_its_chord_when_another_action_took_it() {
+        let mut stored = custom();
+        stored.pause_resume.enabled = false;
+        stored.translate.spec = stored.pause_resume.spec;
+
+        let repaired = repair(&stored);
+
+        assert!(repaired.pause_resume.enabled);
+        assert_eq!(
+            repaired.pause_resume.spec,
+            HotkeyBindings::default().pause_resume.spec
+        );
+        assert_ne!(repaired.translate.spec, repaired.pause_resume.spec);
+        assert_eq!(validate(&repaired), Ok(()));
+    }
 
     #[test]
     fn duplicate_enabled_chords_name_the_second_action() {

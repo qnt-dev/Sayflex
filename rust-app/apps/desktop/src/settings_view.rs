@@ -652,8 +652,12 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
         .copied()
         .map(|action| {
             let binding = *state.hotkeys.binding(action);
+            // Whether a chord for this action is live in Windows right now:
+            // after a refused edit the previous one still is; after a refused
+            // start-up registration nothing is.
+            let live = state.registered_hotkeys.binding(action).enabled;
             let rejection = state.hotkey_errors.get(&action).copied();
-            let (row_tone, row_state) = if rejection.is_some() && binding.enabled {
+            let (row_tone, row_state) = if rejection.is_some() && live {
                 (tone::WORKING, text(locale, UiText::PreviousShortcutKept))
             } else if rejection.is_some() {
                 (tone::REFUSED, text(locale, UiText::Unavailable))
@@ -702,7 +706,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
             };
             let detail = rejection
                 .map(|reason| {
-                    if reason == HotkeyRejection::RegistrationFailed && binding.enabled {
+                    if reason == HotkeyRejection::RegistrationFailed && live {
                         text(locale, UiText::ShortcutAlreadyInUsePreviousKept)
                     } else {
                         hotkey_rejection_detail(locale, reason)
@@ -788,7 +792,7 @@ fn hotkeys_summary(state: &AppState) -> String {
     let enabled = actions
         .iter()
         .copied()
-        .filter(|action| state.hotkeys.binding(*action).enabled)
+        .filter(|action| state.registered_hotkeys.binding(*action).enabled)
         .count();
     if state.input_paused {
         render(
@@ -3601,7 +3605,8 @@ mod hotkey_capture_tests {
             HotkeyAction::PauseResume,
             HotkeyRejection::RegistrationFailed,
         );
-        state.hotkeys.pause_resume.enabled = false;
+        // Windows refused the chord at start-up; the user's choice is intact.
+        state.registered_hotkeys.pause_resume.enabled = false;
 
         let rows = hotkey_rows(&state);
         let pause_index = visible_hotkey_actions()
@@ -3612,6 +3617,7 @@ mod hotkey_capture_tests {
         assert_eq!(row.tone, tone::REFUSED);
         assert_eq!(row.state, "Unavailable");
         assert_eq!(row.detail, "Shortcut already in use. Choose another.");
+        assert!(row.enabled, "the chosen chord stays chosen");
         assert!(row.locked_reason.is_empty());
         assert_eq!(
             hotkeys_summary(&state),

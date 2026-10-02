@@ -469,11 +469,11 @@ impl SavedSettings {
                     TranslationLanguage::Russian
                 };
         }
-        if rust_app_core::hotkeys::validate(&self.hotkeys).is_err() {
-            self.hotkeys = HotkeyBindings::default();
-            self.hotkeys.correct_layout.enabled = self.layout_enabled;
-            self.hotkeys.translate.enabled = self.translation_enabled;
-        }
+        // Repair only what the validator rejects. Builds up to 0.8.9 saved the
+        // set Windows accepted, so a refused Ctrl+Alt+P was stored as a
+        // disabled pause; resetting the whole table for that discarded every
+        // other custom chord on each start.
+        self.hotkeys = rust_app_core::hotkeys::repair(&self.hotkeys);
         self.schema_version = SETTINGS_SCHEMA_VERSION;
         self
     }
@@ -792,6 +792,45 @@ mod settings_document_tests {
             HotkeySpec::control_alt(b'F' as u16)
         );
         assert!(settings.hotkeys.translate.enabled);
+    }
+
+    #[test]
+    fn a_pause_saved_as_disabled_does_not_reset_the_other_custom_chords() {
+        // The shape 0.8.9 wrote after Windows refused Ctrl+Alt+P: pause
+        // disabled, everything else the user's own. Loading it used to replace
+        // the whole table with defaults on every start.
+        let settings = parse_settings(
+            br#"{
+                "translation_enabled": true,
+                "hotkeys": {
+                    "dictate": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":68},"enabled":true},
+                    "insert_last": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":73},"enabled":true},
+                    "correct_layout": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":75},"enabled":false},
+                    "translate": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":84},"enabled":true},
+                    "screen_translate": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":71},"enabled":true},
+                    "pause_resume": {"spec":{"modifiers":{"control":true,"alt":true,"shift":false,"windows":false},"virtual_key":80},"enabled":false}
+                }
+            }"#,
+        );
+
+        assert!(settings.hotkeys.pause_resume.enabled);
+        assert_eq!(
+            settings.hotkeys.pause_resume.spec,
+            HotkeySpec::control_alt(b'P' as u16)
+        );
+        assert_eq!(
+            settings.hotkeys.dictate.spec,
+            HotkeySpec::control_alt(b'D' as u16)
+        );
+        assert_eq!(
+            settings.hotkeys.insert_last.spec,
+            HotkeySpec::control_alt(b'I' as u16)
+        );
+        assert!(!settings.hotkeys.correct_layout.enabled);
+        assert_eq!(
+            settings.hotkeys.translate.spec,
+            HotkeySpec::control_alt(b'T' as u16)
+        );
     }
 
     fn history_setting(enabled: bool) -> SavedSettings {

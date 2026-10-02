@@ -1757,6 +1757,38 @@ mod tests {
     }
 
     #[test]
+    fn a_held_pause_chord_is_reported_and_pause_can_move_to_a_free_one() {
+        let backend = FakeRegistrationBackend::default();
+        let observer = backend.clone();
+        let held = HotkeySpec::control_alt(u16::from(b'P'));
+        observer.fail_spec.set(Some(held));
+        let mut registered = RegisteredHotkeys::dormant_with_backend(Box::new(backend)).unwrap();
+
+        // Start-up: the desktop submits the user's saved choice.
+        let outcome = registered.apply(HotkeyBindings::default()).unwrap();
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].action, HotkeyAction::PauseResume);
+        assert_eq!(
+            outcome.failures[0].reason,
+            rust_protocol::HotkeyRejection::RegistrationFailed
+        );
+        assert!(!outcome.bindings.pause_resume.enabled);
+        assert!(!observer.active.borrow().values().any(|spec| *spec == held));
+        assert_eq!(observer.active.borrow().len(), 3, "the others still work");
+
+        // The user records a free chord for pause in the editor.
+        let free = HotkeySpec::control_alt(u16::from(b'O'));
+        let mut moved = HotkeyBindings::default();
+        moved.pause_resume.spec = free;
+        let outcome = registered.apply(moved).unwrap();
+        assert!(outcome.failures.is_empty());
+        assert!(outcome.bindings.pause_resume.enabled);
+        assert_eq!(outcome.bindings.pause_resume.spec, free);
+        assert!(observer.active.borrow().values().any(|spec| *spec == free));
+        assert_eq!(observer.active.borrow().len(), 4);
+    }
+
+    #[test]
     fn screen_capture_escape_is_consumed_once_and_mode_is_released() {
         let request_id = RequestId::new();
         set_screen_capture_mode(request_id, true);

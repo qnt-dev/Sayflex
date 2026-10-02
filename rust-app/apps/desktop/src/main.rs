@@ -36,14 +36,14 @@ use rust_ocr_engine::reconstruct_text;
 use rust_platform_windows::screen_capture::DesktopCaptureBackend as _;
 use rust_protocol::{
     BUILD_COMMIT, CompanionRendererCommand, CompanionRendererEvent, DictationLanguage,
-    HistoryEntry, HotkeyAction, HotkeyBindings, HotkeyConfiguration, HotkeyRejection,
-    InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION, PhysicalRect, RequestId,
-    SessionId, SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent, TargetSnapshot,
-    TextActionIntent, Transcript, TranscriptionProviderEntry, TranscriptionProviderStatus,
-    TranslationFailureKind, TranslationFailureReport, TranslationHistoryEntry, TranslationLanguage,
-    TranslationLanguagePolicy, TranslationModelSummary, TranslationProviderEntry,
-    TranslationProviderStatus, TranslationResult, TranslationTier, TranslationWorkerCommand,
-    TranslationWorkerEvent,
+    HistoryEntry, HotkeyAction, HotkeyBindings, HotkeyConfiguration, HotkeyFailure,
+    HotkeyRejection, InputHostCommand, InputHostEvent, ModelSummary, PROTOCOL_VERSION,
+    PhysicalRect, RequestId, SessionId, SpeechOutputMode, SpeechWorkerCommand, SpeechWorkerEvent,
+    TargetSnapshot, TextActionIntent, Transcript, TranscriptionProviderEntry,
+    TranscriptionProviderStatus, TranslationFailureKind, TranslationFailureReport,
+    TranslationHistoryEntry, TranslationLanguage, TranslationLanguagePolicy,
+    TranslationModelSummary, TranslationProviderEntry, TranslationProviderStatus,
+    TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
 #[cfg(feature = "screen-translation")]
 use rust_protocol::{
@@ -844,7 +844,13 @@ struct AppState {
     writing_slate_surface: WritingSlateSurface,
     companion_home_position: Option<(i32, i32)>,
     input_ready: bool,
+    /// The chords the user chose. This is what is saved and validated.
     hotkeys: HotkeyBindings,
+    /// What Windows actually registered for the last acknowledged request.
+    /// A chord another application holds stays chosen in `hotkeys` and is
+    /// reported through `hotkey_errors`; it is never written back as the
+    /// user's choice.
+    registered_hotkeys: HotkeyBindings,
     pending_hotkeys: Option<(RequestId, HotkeyBindings)>,
     hotkey_errors: HashMap<HotkeyAction, HotkeyRejection>,
     input_paused: bool,
@@ -980,6 +986,7 @@ impl AppState {
             companion_home_position: saved_settings.companion_home_position,
             input_ready: false,
             hotkeys: saved_settings.hotkeys.clone(),
+            registered_hotkeys: saved_settings.hotkeys.clone(),
             pending_hotkeys: None,
             hotkey_errors: HashMap::new(),
             input_paused: false,
@@ -4995,11 +5002,12 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
         } => {
             let applied = {
                 let mut state = state.borrow_mut();
-                if commit_hotkeys_if_pending(&mut state, operation_id, configuration.bindings) {
-                    state.hotkey_errors = failures
-                        .iter()
-                        .map(|failure| (failure.action, failure.reason))
-                        .collect();
+                if commit_hotkeys_if_pending(
+                    &mut state,
+                    operation_id,
+                    configuration.bindings,
+                    &failures,
+                ) {
                     let _ = save_settings(&state);
                     true
                 } else {
@@ -5557,21 +5565,41 @@ speculative_reuse={} method={} delivery={}",
     }
 }
 
+/// Accepts the input host's answer to the pending shortcut request.
+///
+/// `registered` is what Windows accepted; `failures` are the actions it
+/// refused. The user's choice (`state.hotkeys`) takes the requested set,
+/// except where the request *changed* an action and Windows refused the new
+/// chord: that edit did not happen, so the previous choice stays. A refused
+/// chord the user did not change — another application holding it right now —
+/// stays chosen and is reported, so it is retried on the next start instead of
+/// being saved as switched off.
 fn commit_hotkeys_if_pending(
     state: &mut AppState,
     operation_id: RequestId,
-    bindings: HotkeyBindings,
+    registered: HotkeyBindings,
+    failures: &[HotkeyFailure],
 ) -> bool {
-    if !state
-        .pending_hotkeys
-        .as_ref()
-        .is_some_and(|(pending, _)| *pending == operation_id)
-    {
+    let Some((pending, requested)) = state.pending_hotkeys.take() else {
+        return false;
+    };
+    if pending != operation_id {
+        state.pending_hotkeys = Some((pending, requested));
         return false;
     }
-    state.pending_hotkeys = None;
-    state.hotkey_errors.clear();
-    state.hotkeys = bindings;
+    let mut chosen = requested.clone();
+    for failure in failures {
+        let action = failure.action;
+        if requested.binding(action) != state.hotkeys.binding(action) {
+            *chosen.binding_mut(action) = *state.hotkeys.binding(action);
+        }
+    }
+    state.hotkey_errors = failures
+        .iter()
+        .map(|failure| (failure.action, failure.reason))
+        .collect();
+    state.hotkeys = chosen;
+    state.registered_hotkeys = registered;
     state.layout_enabled = state.hotkeys.binding(HotkeyAction::CorrectLayout).enabled;
     state.translation_enabled = state.hotkeys.binding(HotkeyAction::Translate).enabled;
     true
@@ -8940,11 +8968,13 @@ mod provider_path_readiness_tests {
 
 #[cfg(test)]
 mod hotkey_ack_tests {
-    use rust_protocol::{HotkeyAction, HotkeyRejection, HotkeySpec, RequestId, SpeechOutputMode};
+    use rust_protocol::{
+        HotkeyAction, HotkeyFailure, HotkeyRejection, HotkeySpec, RequestId, SpeechOutputMode,
+    };
 
     use super::{
         AppState, SavedSettings, SpeechBackend, commit_hotkeys_if_pending,
-        reject_hotkeys_if_pending,
+        reject_hotkeys_if_pending, settings_document,
     };
 
     fn state() -> AppState {
@@ -8979,28 +9009,174 @@ mod hotkey_ack_tests {
         );
     }
 
+    fn refused(action: HotkeyAction) -> HotkeyFailure {
+        HotkeyFailure {
+            action,
+            reason: HotkeyRejection::RegistrationFailed,
+            message: "Windows refused the shortcut (error 1409).".to_owned(),
+        }
+    }
+
     #[test]
-    fn only_the_matching_ack_promotes_the_effective_configuration() {
+    fn only_the_matching_ack_promotes_the_requested_configuration() {
         let mut state = state();
         let mut proposed = state.hotkeys.clone();
         proposed.binding_mut(HotkeyAction::Translate).enabled = true;
         let operation_id = RequestId::new();
         state.pending_hotkeys = Some((operation_id, proposed.clone()));
-        let mut effective = proposed.clone();
-        effective.binding_mut(HotkeyAction::Translate).enabled = false;
 
         assert!(!commit_hotkeys_if_pending(
             &mut state,
             RequestId::new(),
-            proposed.clone()
+            proposed.clone(),
+            &[],
         ));
+        assert!(
+            state.pending_hotkeys.is_some(),
+            "a stale ack keeps the wait"
+        );
         assert!(commit_hotkeys_if_pending(
             &mut state,
             operation_id,
-            effective.clone()
+            proposed.clone(),
+            &[],
         ));
-        assert_eq!(state.hotkeys, effective);
+        assert_eq!(state.hotkeys, proposed);
+        assert_eq!(state.registered_hotkeys, proposed);
+        assert!(state.translation_enabled);
         assert!(state.hotkey_errors.is_empty());
+    }
+
+    /// The machine this was found on: another application holds Ctrl+Alt+P.
+    #[test]
+    fn a_chord_windows_refuses_at_start_up_stays_chosen_and_is_saved_enabled() {
+        let mut state = state();
+        let chosen = state.hotkeys.clone();
+        let operation_id = RequestId::new();
+        state.pending_hotkeys = Some((operation_id, chosen.clone()));
+        let mut registered = chosen.clone();
+        registered.pause_resume.enabled = false;
+
+        assert!(commit_hotkeys_if_pending(
+            &mut state,
+            operation_id,
+            registered,
+            &[refused(HotkeyAction::PauseResume)],
+        ));
+
+        assert_eq!(state.hotkeys, chosen, "the user's choice is not rewritten");
+        assert!(!state.registered_hotkeys.pause_resume.enabled);
+        assert_eq!(
+            state.hotkey_errors.get(&HotkeyAction::PauseResume),
+            Some(&HotkeyRejection::RegistrationFailed)
+        );
+        let saved = settings_document::SavedSettings::from_state(&state);
+        assert!(saved.hotkeys.pause_resume.enabled);
+        assert_eq!(rust_app_core::hotkeys::validate(&saved.hotkeys), Ok(()));
+    }
+
+    #[test]
+    fn after_a_refused_start_up_chord_pause_can_be_moved_to_a_free_one() {
+        let mut state = state();
+        let operation_id = RequestId::new();
+        state.pending_hotkeys = Some((operation_id, state.hotkeys.clone()));
+        let mut registered = state.hotkeys.clone();
+        registered.pause_resume.enabled = false;
+        commit_hotkeys_if_pending(
+            &mut state,
+            operation_id,
+            registered,
+            &[refused(HotkeyAction::PauseResume)],
+        );
+
+        // What the shortcut editor builds when the user records Ctrl+Alt+O.
+        let mut edited = state.hotkeys.clone();
+        edited.pause_resume.spec = HotkeySpec::control_alt(u16::from(b'O'));
+        assert_eq!(rust_app_core::hotkeys::validate(&edited), Ok(()));
+
+        let operation_id = RequestId::new();
+        state.pending_hotkeys = Some((operation_id, edited.clone()));
+        assert!(commit_hotkeys_if_pending(
+            &mut state,
+            operation_id,
+            edited.clone(),
+            &[],
+        ));
+        assert_eq!(state.hotkeys, edited);
+        assert!(state.registered_hotkeys.pause_resume.enabled);
+        assert!(state.hotkey_errors.is_empty());
+    }
+
+    #[test]
+    fn a_refused_edit_keeps_the_previous_choice_and_other_edits_still_land() {
+        let mut state = state();
+        let before = state.hotkeys.clone();
+        let mut requested = before.clone();
+        requested.correct_layout.spec = HotkeySpec::control_alt(u16::from(b'L'));
+        requested.insert_last.spec = HotkeySpec::control_alt(u16::from(b'B'));
+        let operation_id = RequestId::new();
+        state.pending_hotkeys = Some((operation_id, requested.clone()));
+        // The input host kept the old layout chord live and moved insert-last.
+        let mut registered = requested.clone();
+        registered.correct_layout = before.correct_layout;
+
+        assert!(commit_hotkeys_if_pending(
+            &mut state,
+            operation_id,
+            registered,
+            &[refused(HotkeyAction::CorrectLayout)],
+        ));
+
+        assert_eq!(state.hotkeys.correct_layout, before.correct_layout);
+        assert_eq!(state.hotkeys.insert_last, requested.insert_last);
+        assert!(state.layout_enabled);
+    }
+
+    #[test]
+    fn refusing_the_translate_chord_does_not_switch_the_feature_off() {
+        let mut state = state();
+        state.hotkeys.translate.enabled = true;
+        state.translation_enabled = true;
+        let chosen = state.hotkeys.clone();
+        let operation_id = RequestId::new();
+        state.pending_hotkeys = Some((operation_id, chosen.clone()));
+        let mut registered = chosen;
+        registered.translate.enabled = false;
+
+        commit_hotkeys_if_pending(
+            &mut state,
+            operation_id,
+            registered,
+            &[refused(HotkeyAction::Translate)],
+        );
+
+        assert!(state.translation_enabled);
+        assert!(state.hotkeys.translate.enabled);
+    }
+
+    #[test]
+    fn chosen_chords_survive_a_restart_after_a_start_up_refusal() {
+        let mut state = state();
+        state.hotkeys.dictate.spec = HotkeySpec::control_alt(u16::from(b'D'));
+        state.hotkeys.insert_last.spec = HotkeySpec::control_alt(u16::from(b'I'));
+        let chosen = state.hotkeys.clone();
+        let operation_id = RequestId::new();
+        state.pending_hotkeys = Some((operation_id, chosen.clone()));
+        let mut registered = chosen.clone();
+        registered.pause_resume.enabled = false;
+        commit_hotkeys_if_pending(
+            &mut state,
+            operation_id,
+            registered,
+            &[refused(HotkeyAction::PauseResume)],
+        );
+
+        let document =
+            serde_json::to_vec_pretty(&settings_document::SavedSettings::from_state(&state))
+                .unwrap();
+        let reloaded = settings_document::parse_settings(&document);
+
+        assert_eq!(reloaded.hotkeys, chosen);
     }
 }
 
