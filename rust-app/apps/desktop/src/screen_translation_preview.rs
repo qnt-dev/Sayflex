@@ -354,8 +354,11 @@ mod tests {
         assert!(!SOURCE.contains("overflow-panel"));
         assert!(!SOURCE.contains("dense-panel"));
         assert!(SOURCE.contains("for mask in root.masks"));
+        // The fill is sampled from the picture and always opaque (alpha 255,
+        // see screen_result_view::slint_color), so the original glyphs stay
+        // fully hidden while the mask matches the page around them.
         assert!(
-            SOURCE.contains("background: #120e09ff"),
+            SOURCE.contains("background: mask.fill;"),
             "replacement masks must fully hide the original glyphs"
         );
         assert!(SOURCE.contains("double-clicked => { root.edit-requested(); }"));

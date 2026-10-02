@@ -21,6 +21,10 @@ export struct ScreenBlockOverlay {
     overflow: bool,
     callout: bool,
     font-size: float,
+    // Read from the picture around the label, so a translation sits on the
+    // colour it replaced; the design's dark plate where there is no picture.
+    plate: color,
+    ink: color,
 }
 
 export struct ScreenMaskOverlay {
@@ -29,6 +33,7 @@ export struct ScreenMaskOverlay {
     y: float,
     width: float,
     height: float,
+    fill: color,
 }
 
 export struct ScreenConnectorOverlay {
@@ -83,6 +88,8 @@ component TranslatedLabel inherits Rectangle {
     in property <bool> callout: false;
     in property <bool> overflow: false;
     in property <length> text-size: 12px;
+    in property <color> plate: #120e09;
+    in property <color> ink: #f3e9cf;
     out property <length> measured-content-height: translated-text-item.preferred-height + 8px;
     callback selected();
     callback edit-requested();
@@ -90,8 +97,8 @@ component TranslatedLabel inherits Rectangle {
     border-radius: 3px;
     forward-focus: key-focus;
     border-width: root.selected-label || touch.has-hover ? 1px : 0px;
-    border-color: root.selected-label ? Theme.red : #f3e9cf80;
-    background: touch.has-hover ? #25170fff : #120e09ff;
+    border-color: root.selected-label ? Theme.red : root.ink.with-alpha(0.5);
+    background: touch.has-hover ? root.plate.mix(root.ink, 0.88) : root.plate;
     clip: true;
     opacity: root.dimmed ? 0.38 : 1;
     accessible-role: button;
@@ -106,7 +113,7 @@ component TranslatedLabel inherits Rectangle {
         text: root.dual
             ? root.source-text + "\n" + root.translated-text
             : root.translated-text;
-        color: #f3e9cf;
+        color: root.ink;
         font-size: max(12px, root.text-size);
         font-weight: 570;
         wrap: word-wrap;
@@ -444,7 +451,7 @@ export component ScreenImageResult inherits Rectangle {
                 y: mask.y * 1px;
                 width: mask.width * 1px;
                 height: mask.height * 1px;
-                background: #120e09ff;
+                background: mask.fill;
                 border-radius: 2px;
             }
             for block[index] in root.blocks: TranslatedLabel {
@@ -461,6 +468,8 @@ export component ScreenImageResult inherits Rectangle {
                 callout: block.callout;
                 overflow: block.overflow;
                 text-size: max(root.minimum-overlay-font-size, block.font-size * 1px);
+                plate: block.plate;
+                ink: block.ink;
                 border-color: block.low-confidence && !self.selected-label ? #d7a45b : Theme.red;
                 selected => { root.block-selected(index); }
                 edit-requested => { root.block-edit-requested(index); }

@@ -673,9 +673,26 @@ pub(crate) fn apply_snapshot(
         snapshot.crop.as_deref(),
     );
     let layouts = &plan.blocks;
+    let frame = snapshot.crop.as_deref();
+    let scale = frame.map(|frame| {
+        (
+            plan.image_width as f32 / frame.rect.width.max(1) as f32,
+            plan.image_height as f32 / frame.rect.height.max(1) as f32,
+        )
+    });
+    let plate_at = |rect: LayoutRect| {
+        frame
+            .zip(scale)
+            .and_then(|(frame, scale)| surrounding_color(frame, rect, scale))
+            .unwrap_or(DEFAULT_PLATE)
+    };
     let rows = layouts
         .iter()
-        .map(|block| ScreenBlockOverlay {
+        .map(|block| {
+            let plate = plate_at((block.x, block.y, block.width, block.height));
+            (block, plate)
+        })
+        .map(|(block, plate)| ScreenBlockOverlay {
             block_id: block.block_id.as_str().into(),
             source: block.source.clone().into(),
             translation: block.display_translation.clone().into(),
@@ -695,17 +712,31 @@ pub(crate) fn apply_snapshot(
             editable_source: block.editable_source,
             overflow: block.overflow,
             font_size: block.font_size,
+            plate: slint_color(plate),
+            ink: slint_color(ink_for(plate)),
         })
         .collect::<Vec<_>>();
     let masks = plan
         .masks
         .iter()
-        .map(|mask| ScreenMaskOverlay {
-            block_id: mask.block_id.as_str().into(),
-            x: mask.x,
-            y: mask.y,
-            width: mask.width,
-            height: mask.height,
+        .map(|mask| {
+            // One pixel of margin covers the anti-aliased fringe of the
+            // glyphs the OCR box stops at; painted in the surrounding colour
+            // it is invisible, where a bright edge pixel used to remain.
+            let (x, y) = (
+                (mask.x - MASK_FRINGE).max(0.0),
+                (mask.y - MASK_FRINGE).max(0.0),
+            );
+            let width = mask.width + (mask.x - x) + MASK_FRINGE;
+            let height = mask.height + (mask.y - y) + MASK_FRINGE;
+            ScreenMaskOverlay {
+                block_id: mask.block_id.as_str().into(),
+                x,
+                y,
+                width,
+                height,
+                fill: slint_color(plate_at((mask.x, mask.y, mask.width, mask.height))),
+            }
         })
         .collect::<Vec<_>>();
     let connectors = plan
@@ -737,6 +768,75 @@ pub(crate) fn apply_snapshot(
         None => Image::default(),
     });
     Ok(layouts.to_vec())
+}
+
+/// The design's plate, kept where the picture offers no colour: a callout
+/// placed below the image, or a result whose pixels have expired.
+const DEFAULT_PLATE: [u8; 3] = [0x12, 0x0e, 0x09];
+const MASK_FRINGE: f32 = 1.0;
+const DARK_INK: [u8; 3] = [0x14, 0x14, 0x14];
+const LIGHT_INK: [u8; 3] = [0xf3, 0xe9, 0xcf];
+
+/// The colour around `rect` (layout coordinates) in the captured picture: the
+/// median of a two-pixel ring just outside it. A fixed dark plate looked like
+/// a sticker on a game interface and like a black box on a light page.
+fn surrounding_color(
+    frame: &rust_platform_windows::screen_capture::RgbaFrame,
+    rect: LayoutRect,
+    scale: (f32, f32),
+) -> Option<[u8; 3]> {
+    let width = i64::from(frame.rect.width);
+    let height = i64::from(frame.rect.height);
+    let to_pixel = |value: f32, factor: f32| (value / factor.max(f32::EPSILON)).floor() as i64;
+    let left = to_pixel(rect.0, scale.0);
+    let top = to_pixel(rect.1, scale.1);
+    let right = to_pixel(rect.0 + rect.2, scale.0);
+    let bottom = to_pixel(rect.1 + rect.3, scale.1);
+    let mut channels: [Vec<u8>; 3] = Default::default();
+    let mut take = |x: i64, y: i64| {
+        if x < 0 || y < 0 || x >= width || y >= height {
+            return;
+        }
+        if let Some([red, green, blue, _]) = frame.pixel(x as u32, y as u32) {
+            channels[0].push(red);
+            channels[1].push(green);
+            channels[2].push(blue);
+        }
+    };
+    for offset in 1..=2 {
+        for x in (left - offset)..=(right + offset) {
+            take(x, top - offset);
+            take(x, bottom + offset);
+        }
+        for y in (top - offset)..=(bottom + offset) {
+            take(left - offset, y);
+            take(right + offset, y);
+        }
+    }
+    if channels[0].len() < 8 {
+        return None;
+    }
+    Some(channels.map(|mut channel| {
+        channel.sort_unstable();
+        channel[channel.len() / 2]
+    }))
+}
+
+/// Dark ink on a light plate, the design's cream on a dark one.
+fn ink_for(plate: [u8; 3]) -> [u8; 3] {
+    let luminance = (0.2126 * f32::from(plate[0])
+        + 0.7152 * f32::from(plate[1])
+        + 0.0722 * f32::from(plate[2]))
+        / 255.0;
+    if luminance > 0.55 {
+        DARK_INK
+    } else {
+        LIGHT_INK
+    }
+}
+
+fn slint_color([red, green, blue]: [u8; 3]) -> slint::Color {
+    slint::Color::from_rgb_u8(red, green, blue)
 }
 
 pub(crate) fn editor_position(
@@ -1355,6 +1455,13 @@ mod tests {
         for pixel in pixels.chunks_exact_mut(4) {
             pixel[3] = 255;
         }
+        // Dark "glyphs" in the source row: the underlay must hide them.
+        for y in 30..42 {
+            for x in 110..270 {
+                let offset = (y * 400 + x) * 4;
+                pixels[offset..offset + 3].copy_from_slice(&[30, 30, 30]);
+            }
+        }
         let frame = RgbaFrame::try_new(crop_rect, 400 * 4, pixels).unwrap();
         let snapshot = crate::screen_result::ScreenResultSnapshot {
             request_id: RequestId::new(),
@@ -1412,11 +1519,22 @@ mod tests {
         };
         let label_x = (row.x + row.width - 3.0) as usize;
         let label_y = (row.y + row.height - 3.0 + 38.0) as usize;
-        assert!(
-            sample(&rendered, label_x, label_y)
-                .into_iter()
-                .all(|channel| channel < 65)
+        // The underlay is opaque and takes the page's own colour, so the
+        // dark source glyphs under the label are gone: no dark sticker on a
+        // light page, and no original text showing through.
+        assert_eq!(row.plate, slint::Color::from_rgb_u8(240, 240, 240));
+        // Left of the overflow badge, which owns the label's last 20 px.
+        let plate_x = (row.x + row.width - 30.0) as usize;
+        assert_eq!(sample(&rendered, plate_x, label_y), [240, 240, 240]);
+        // The mask over the dark source glyphs is painted in the page colour.
+        let mask = window.get_screen_masks().row_data(0).unwrap();
+        assert_eq!(mask.fill, slint::Color::from_rgb_u8(240, 240, 240));
+        assert_eq!(
+            mask.fill.alpha(),
+            255,
+            "a mask must hide the glyphs completely"
         );
+        assert!(mask.x <= 110.0 && mask.x + mask.width >= 270.0);
         // This corner is outside both the source glyph mask and even the
         // expanded label. The bottom right can legitimately be underlaid by
         // this deliberately oversized translation.
@@ -1431,6 +1549,60 @@ mod tests {
         let original = window.window().take_snapshot().unwrap();
         assert_eq!(sample(&original, label_x, label_y), [240, 240, 240]);
         assert_eq!(window.get_screen_masks().row_count(), 0);
+    }
+
+    fn page(width: u32, height: u32, background: [u8; 3]) -> RgbaFrame {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..width * height {
+            pixels.extend_from_slice(&[background[0], background[1], background[2], 255]);
+        }
+        RgbaFrame::try_new(
+            rust_protocol::PhysicalRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            width * 4,
+            pixels,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_label_on_a_light_page_takes_the_page_colour_and_dark_ink() {
+        let mut frame = page(120, 60, [250, 250, 248]);
+        // Dark glyphs inside the row must not colour the plate.
+        for y in 20..30 {
+            for x in 30..60 {
+                let offset = (y * frame.stride + x * 4) as usize;
+                frame.pixels[offset..offset + 3].copy_from_slice(&[20, 20, 20]);
+            }
+        }
+
+        let plate = super::surrounding_color(&frame, (30.0, 20.0, 30.0, 10.0), (1.0, 1.0)).unwrap();
+
+        assert_eq!(plate, [250, 250, 248]);
+        assert_eq!(super::ink_for(plate), super::DARK_INK);
+    }
+
+    #[test]
+    fn a_label_on_a_dark_interface_keeps_the_light_ink() {
+        let frame = page(120, 60, [17, 20, 26]);
+        let plate = super::surrounding_color(&frame, (10.0, 10.0, 40.0, 12.0), (1.0, 1.0)).unwrap();
+
+        assert_eq!(plate, [17, 20, 26]);
+        assert_eq!(super::ink_for(plate), super::LIGHT_INK);
+    }
+
+    #[test]
+    fn a_label_outside_the_picture_has_no_sampled_colour() {
+        // A callout placed below the image: the design plate applies.
+        let frame = page(120, 60, [250, 250, 248]);
+        assert_eq!(
+            super::surrounding_color(&frame, (0.0, 90.0, 100.0, 20.0), (1.0, 1.0)),
+            None
+        );
     }
 
     #[test]
