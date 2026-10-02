@@ -144,6 +144,12 @@ impl ScreenTranslationCoordinator {
             .is_some_and(|active| active.stage != ScreenTranslationStage::Complete)
     }
 
+    pub(crate) fn is_active_work_request(&self, request_id: RequestId) -> bool {
+        self.flow.active.is_some_and(|active| {
+            active.request_id == request_id && active.stage != ScreenTranslationStage::Complete
+        })
+    }
+
     fn active_translation(&self) -> Option<(RequestId, PhysicalRect)> {
         let active = self
             .flow
@@ -159,7 +165,25 @@ impl ScreenTranslationCoordinator {
     }
 
     pub(crate) fn pin_completed(&mut self, request_id: RequestId) -> bool {
-        self.flow.pin_completed(request_id)
+        #[cfg(not(feature = "screen-translation"))]
+        return self.flow.pin_completed(request_id);
+        #[cfg(feature = "screen-translation")]
+        {
+            if self
+                .documents
+                .get(&request_id)
+                .and_then(|document| document.result_snapshot().ok())
+                .is_none()
+            {
+                return false;
+            }
+            if self.flow.active.is_some_and(|active| {
+                active.request_id == request_id && active.stage == ScreenTranslationStage::Complete
+            }) {
+                self.flow.active = None;
+            }
+            true
+        }
     }
 
     #[cfg(feature = "screen-translation")]
@@ -495,6 +519,7 @@ impl ScreenTranslationFlow {
         cancellation
     }
 
+    #[cfg(any(test, not(feature = "screen-translation")))]
     pub(crate) fn pin_completed(&mut self, request_id: RequestId) -> bool {
         if self.active.is_some_and(|active| {
             active.request_id == request_id && active.stage == ScreenTranslationStage::Complete
@@ -1819,6 +1844,56 @@ mod tests {
         assert_eq!(coordinator.close(request_id), None);
         assert!(!coordinator.document_has_pixels(request_id));
         assert!(coordinator.copy_text(request_id).is_err());
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn restored_result_can_be_pinned_again_without_changing_another_active_request() {
+        let restored = RequestId::new();
+        let mut restored_doc = document(restored);
+        restored_doc
+            .apply_machine_blocks(
+                restored,
+                0,
+                vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+            )
+            .unwrap();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.restore_document(
+            restored_doc,
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+        );
+        let active = RequestId::new();
+        coordinator.begin(active);
+        coordinator.selected(active, rect(0, 0, 20, 20));
+
+        assert!(coordinator.pin_completed(restored));
+        assert!(coordinator.pin_completed(restored));
+        assert!(coordinator.is_active_work_request(active));
+        assert!(coordinator.result_snapshot(restored).is_ok());
+        assert!(!coordinator.pin_completed(RequestId::new()));
+
+        // Superseding an unpinned window closes only its document; a retained
+        // pinned document remains available until that window itself closes.
+        let abandoned = RequestId::new();
+        let mut abandoned_doc = document(abandoned);
+        abandoned_doc
+            .apply_machine_blocks(
+                abandoned,
+                0,
+                vec![translated("a", "Урон"), translated("b", "Перезарядка")],
+            )
+            .unwrap();
+        coordinator.restore_document(
+            abandoned_doc,
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+        );
+        coordinator.close(abandoned);
+        assert!(coordinator.result_snapshot(abandoned).is_err());
+        assert!(coordinator.result_snapshot(restored).is_ok());
+        assert!(coordinator.is_active_work_request(active));
     }
 
     #[test]

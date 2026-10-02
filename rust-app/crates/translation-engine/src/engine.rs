@@ -43,6 +43,7 @@ const SERVER_START_TIMEOUT: Duration = Duration::from_secs(90);
 /// not the full startup deadline.
 const SERVER_START_ATTEMPTS: u32 = 3;
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SERVER_HEALTH_POLL_TIMEOUT: Duration = Duration::from_millis(750);
 const SERVER_LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 
 pub struct TranslationEngine {
@@ -101,6 +102,17 @@ pub struct TranslationCancelled;
 #[derive(Debug, thiserror::Error)]
 #[error("local translation was not completed before the output token limit")]
 struct TranslationIncomplete;
+
+fn is_recoverable_llama_transport(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|transport| {
+                !transport.is_timeout()
+                    && (transport.is_connect() || transport.is_request() || transport.is_body())
+            })
+    })
+}
 
 const MAX_INCOMPLETE_SPLIT_DEPTH: u8 = 2;
 
@@ -259,80 +271,54 @@ impl TranslationEngine {
         if self.pack.backend.requires_llama_runtime() {
             self.ensure_runtime()?;
             let deadline = Instant::now() + STRUCTURED_OPERATION_TIMEOUT;
-            let operation_active = || should_continue() && Instant::now() < deadline;
-            let planned_ranges = match self.runtime.as_ref() {
-                Some(ResidentRuntime::Llama(runtime)) => {
-                    greedy_structured_ranges(blocks, |candidate| {
-                        if !should_continue() {
-                            return Err(TranslationCancelled.into());
+            for restart in 0..=1 {
+                let attempt = (|| -> Result<BlockTranslationOutput> {
+                    let operation_active = || should_continue() && Instant::now() < deadline;
+                    let planned_ranges = match self.runtime.as_ref() {
+                        Some(ResidentRuntime::Llama(runtime)) => {
+                            greedy_structured_ranges(blocks, |candidate| {
+                                if !should_continue() {
+                                    return Err(TranslationCancelled.into());
+                                }
+                                if Instant::now() >= deadline {
+                                    bail!(
+                                        "structured screen translation exceeded its operation deadline"
+                                    );
+                                }
+                                let messages = structured_translation_messages(
+                                    candidate, context, glossary, source, target,
+                                )?;
+                                runtime.structured_request_fits(&messages, &operation_active)
+                            })
                         }
-                        if Instant::now() >= deadline {
-                            bail!("structured screen translation exceeded its operation deadline");
+                        _ => bail!("translation runtime kind does not match its catalog backend"),
+                    };
+                    let ranges = match planned_ranges {
+                        Err(error)
+                            if error.downcast_ref::<TranslationCancelled>().is_some()
+                                && should_continue()
+                                && Instant::now() >= deadline =>
+                        {
+                            bail!("structured screen translation exceeded its operation deadline")
                         }
+                        other => other?,
+                    };
+                    let mut translated = Vec::with_capacity(blocks.len());
+                    for range in ranges {
+                        let group = &blocks[range];
                         let messages = structured_translation_messages(
-                            candidate, context, glossary, source, target,
+                            group, context, glossary, source, target,
                         )?;
-                        runtime.structured_request_fits(&messages, &operation_active)
-                    })
-                }
-                _ => bail!("translation runtime kind does not match its catalog backend"),
-            };
-            let ranges = match planned_ranges {
-                Err(error)
-                    if error.downcast_ref::<TranslationCancelled>().is_some()
-                        && should_continue()
-                        && Instant::now() >= deadline =>
-                {
-                    bail!("structured screen translation exceeded its operation deadline")
-                }
-                other => other?,
-            };
-            let mut translated = Vec::with_capacity(blocks.len());
-            for range in ranges {
-                let group = &blocks[range];
-                let messages =
-                    structured_translation_messages(group, context, glossary, source, target)?;
-                let response = match self.runtime.as_mut() {
-                    Some(ResidentRuntime::Llama(runtime)) => {
-                        runtime.translate_structured(messages, &operation_active)
-                    }
-                    _ => bail!("translation runtime kind changed during structured translation"),
-                };
-                let response = match response {
-                    Ok(response) => response,
-                    Err(error)
-                        if error.downcast_ref::<TranslationCancelled>().is_some()
-                            && should_continue()
-                            && Instant::now() >= deadline =>
-                    {
-                        bail!("structured screen translation exceeded its operation deadline")
-                    }
-                    Err(error) => return Err(error),
-                };
-                let group_output =
-                    recover_structured_response(&response, group, target, |block| {
-                        // One bounded recovery pass keeps a malformed group
-                        // from discarding independent blocks. A malformed
-                        // single-row response receives the same one retry;
-                        // transport and timeout failures never fan out again.
-                        if !should_continue() {
-                            return Err(TranslationCancelled.into());
-                        }
-                        if Instant::now() >= deadline {
-                            bail!("structured screen translation exceeded its operation deadline");
-                        }
-                        let messages = structured_translation_messages(
-                            std::slice::from_ref(block),
-                            context,
-                            glossary,
-                            source,
-                            target,
-                        )?;
-                        let Some(ResidentRuntime::Llama(runtime)) = self.runtime.as_mut() else {
-                            bail!("translation runtime kind changed during structured recovery");
+                        let response = match self.runtime.as_mut() {
+                            Some(ResidentRuntime::Llama(runtime)) => {
+                                runtime.translate_structured(messages, &operation_active)
+                            }
+                            _ => bail!(
+                                "translation runtime kind changed during structured translation"
+                            ),
                         };
-                        match runtime.translate_structured(messages, &operation_active) {
-                            Ok(response) => Ok(response),
+                        let response = match response {
+                            Ok(response) => response,
                             Err(error)
                                 if error.downcast_ref::<TranslationCancelled>().is_some()
                                     && should_continue()
@@ -342,17 +328,85 @@ impl TranslationEngine {
                                     "structured screen translation exceeded its operation deadline"
                                 )
                             }
-                            Err(error) => Err(error),
-                        }
-                    })?;
-                translated.extend(group_output);
+                            Err(error) => return Err(error),
+                        };
+                        let group_output = recover_structured_response(
+                            &response,
+                            group,
+                            target,
+                            |block| {
+                                // One bounded recovery pass keeps a malformed group
+                                // from discarding independent blocks. A malformed
+                                // single-row response receives the same one retry;
+                                // transport and timeout failures never fan out again.
+                                if !should_continue() {
+                                    return Err(TranslationCancelled.into());
+                                }
+                                if Instant::now() >= deadline {
+                                    bail!(
+                                        "structured screen translation exceeded its operation deadline"
+                                    );
+                                }
+                                let messages = structured_translation_messages(
+                                    std::slice::from_ref(block),
+                                    context,
+                                    glossary,
+                                    source,
+                                    target,
+                                )?;
+                                let Some(ResidentRuntime::Llama(runtime)) = self.runtime.as_mut()
+                                else {
+                                    bail!(
+                                        "translation runtime kind changed during structured recovery"
+                                    );
+                                };
+                                match runtime.translate_structured(messages, &operation_active) {
+                                    Ok(response) => Ok(response),
+                                    Err(error)
+                                        if error
+                                            .downcast_ref::<TranslationCancelled>()
+                                            .is_some()
+                                            && should_continue()
+                                            && Instant::now() >= deadline =>
+                                    {
+                                        bail!(
+                                            "structured screen translation exceeded its operation deadline"
+                                        )
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            },
+                        )?;
+                        translated.extend(group_output);
+                    }
+                    Ok(BlockTranslationOutput {
+                        blocks: translated,
+                        source_language: source,
+                        target_language: target,
+                        capabilities: TranslationBackendCapabilities::structured(),
+                    })
+                })();
+                match attempt {
+                    Ok(output) => return Ok(output),
+                    Err(error)
+                        if restart == 0
+                            && should_continue()
+                            && Instant::now() < deadline
+                            && is_recoverable_llama_transport(&error)
+                            && self
+                                .runtime
+                                .as_mut()
+                                .is_some_and(|runtime| !runtime.is_ready()) =>
+                    {
+                        // Only an exited server needs a model reload. A live server
+                        // can close an idle HTTP socket without losing its model.
+                        self.restart_exited_llama_runtime(deadline, should_continue)
+                            .context("structured translation backend restart failed")?;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
-            return Ok(BlockTranslationOutput {
-                blocks: translated,
-                source_language: source,
-                target_language: target,
-                capabilities: TranslationBackendCapabilities::structured(),
-            });
+            unreachable!("bounded structured translation loop returns on its final attempt");
         }
 
         // Firefox packs translate exact blocks separately.  They preserve
@@ -520,6 +574,42 @@ impl TranslationEngine {
             .as_mut()
             .ok_or_else(|| anyhow!("translation runtime disappeared"))
     }
+
+    fn restart_exited_llama_runtime(
+        &mut self,
+        deadline: Instant,
+        should_continue: &dyn Fn() -> bool,
+    ) -> Result<()> {
+        self.runtime = None;
+        if !should_continue() {
+            return Err(TranslationCancelled.into());
+        }
+        if Instant::now() >= deadline {
+            bail!("structured screen translation exceeded its operation deadline");
+        }
+        let TranslationBackendDescriptor::LlamaCpp {
+            model_file,
+            context_size,
+            max_output_tokens,
+        } = &self.pack.backend
+        else {
+            bail!("translation runtime kind does not match its catalog backend");
+        };
+        let model_path = self.model_root.join(model_file);
+        let runtime = LlamaRuntime::start_bounded(
+            &self.runtime_root,
+            &model_path,
+            *context_size,
+            *max_output_tokens,
+            deadline,
+            should_continue,
+        )?;
+        if !should_continue() {
+            return Err(TranslationCancelled.into());
+        }
+        self.runtime = Some(ResidentRuntime::Llama(runtime));
+        Ok(())
+    }
 }
 
 #[must_use]
@@ -608,6 +698,43 @@ enum StartAttempt {
     Timeout,
 }
 
+#[derive(Debug)]
+enum HealthPoll {
+    Ready,
+    Exited(String),
+    Pending,
+}
+
+fn poll_runtime_health(
+    deadline: Instant,
+    should_continue: &dyn Fn() -> bool,
+    mut poll: impl FnMut(Duration) -> Result<HealthPoll>,
+) -> Result<HealthPoll> {
+    loop {
+        if !should_continue() {
+            return Err(TranslationCancelled.into());
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(HealthPoll::Pending);
+        };
+        if remaining.is_zero() {
+            return Ok(HealthPoll::Pending);
+        }
+        match poll(remaining.min(SERVER_HEALTH_POLL_TIMEOUT))? {
+            HealthPoll::Pending => {}
+            outcome => return Ok(outcome),
+        }
+        if !should_continue() {
+            return Err(TranslationCancelled.into());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(HealthPoll::Pending);
+        }
+        thread::sleep(SERVER_POLL_INTERVAL.min(remaining));
+    }
+}
+
 impl LlamaRuntime {
     fn start(
         runtime_root: &Path,
@@ -615,14 +742,44 @@ impl LlamaRuntime {
         context_size: u32,
         max_output_tokens: u32,
     ) -> Result<Self> {
+        Self::start_bounded(
+            runtime_root,
+            model_path,
+            context_size,
+            max_output_tokens,
+            Instant::now() + SERVER_START_TIMEOUT,
+            &|| true,
+        )
+    }
+
+    fn start_bounded(
+        runtime_root: &Path,
+        model_path: &Path,
+        context_size: u32,
+        max_output_tokens: u32,
+        deadline: Instant,
+        should_continue: &dyn Fn() -> bool,
+    ) -> Result<Self> {
         let mut last_exit = None;
         for attempt in 1..=SERVER_START_ATTEMPTS {
-            match Self::start_attempt(runtime_root, model_path, context_size, max_output_tokens)? {
+            if !should_continue() {
+                return Err(TranslationCancelled.into());
+            }
+            if Instant::now() >= deadline {
+                bail!("llama.cpp translation runtime did not become ready before its deadline");
+            }
+            match Self::start_attempt(
+                runtime_root,
+                model_path,
+                context_size,
+                max_output_tokens,
+                deadline,
+                should_continue,
+            )? {
                 StartAttempt::Ready(runtime) => return Ok(*runtime),
-                StartAttempt::Timeout => bail!(
-                    "llama.cpp translation runtime did not become ready in {} seconds",
-                    SERVER_START_TIMEOUT.as_secs()
-                ),
+                StartAttempt::Timeout => {
+                    bail!("llama.cpp translation runtime did not become ready before its deadline")
+                }
                 StartAttempt::Exited(status) => {
                     eprintln!(
                         "llama-server attempt {attempt}/{SERVER_START_ATTEMPTS} exited during \
@@ -644,7 +801,12 @@ impl LlamaRuntime {
         model_path: &Path,
         context_size: u32,
         max_output_tokens: u32,
+        deadline: Instant,
+        should_continue: &dyn Fn() -> bool,
     ) -> Result<StartAttempt> {
+        if !should_continue() {
+            return Err(TranslationCancelled.into());
+        }
         let executable = runtime_root.join("llama-server.exe");
         if !executable.is_file() {
             bail!(
@@ -652,7 +814,7 @@ impl LlamaRuntime {
                 executable.display()
             );
         }
-        let device = preferred_vulkan_device(&executable, runtime_root);
+        let device = preferred_vulkan_device(&executable, runtime_root, deadline, should_continue)?;
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .context("could not reserve a local translation port")?;
         let port = listener.local_addr()?.port();
@@ -691,14 +853,12 @@ impl LlamaRuntime {
             .spawn()
             .context("could not launch the local llama.cpp translation runtime")?;
 
-        let client = Client::builder()
-            .no_proxy()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(120))
-            .build()
-            .context("could not create the local translation client")?;
+        let client = blocking_local_client()?;
         let async_client = reqwest::Client::builder()
             .no_proxy()
+            // The local server closes idle keepalive connections before this
+            // current-thread runtime is polled again on the next request.
+            .pool_max_idle_per_host(0)
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(120))
             .build()
@@ -717,7 +877,7 @@ impl LlamaRuntime {
             authorization,
             max_output_tokens,
         };
-        runtime.wait_until_ready()
+        runtime.wait_until_ready(deadline, should_continue)
     }
 
     /// Waits for the server to answer `/health`, exit, or run out of time.
@@ -725,30 +885,41 @@ impl LlamaRuntime {
     /// Takes ownership so a failed start cannot leave a half-live handle
     /// behind: returning anything other than `Ready` drops the runtime here,
     /// and its `Drop` kills the child process.
-    fn wait_until_ready(mut self) -> Result<StartAttempt> {
-        let deadline = Instant::now() + SERVER_START_TIMEOUT;
-        while Instant::now() < deadline {
+    fn wait_until_ready(
+        mut self,
+        deadline: Instant,
+        should_continue: &dyn Fn() -> bool,
+    ) -> Result<StartAttempt> {
+        let health = poll_runtime_health(deadline, should_continue, |timeout| {
             if let Some(status) = self.child.try_wait()? {
-                return Ok(StartAttempt::Exited(status.to_string()));
+                return Ok(HealthPoll::Exited(status.to_string()));
             }
-            // Bind the borrow of `self` to a statement so the handle can be
-            // moved out inside the match below.
-            let health = self
+            let response = self
                 .client
                 .get(format!("{}/health", self.endpoint))
                 .header(AUTHORIZATION, &self.authorization)
+                .timeout(timeout)
                 .send();
-            match health {
-                Ok(response) if response.status().is_success() => {
-                    return Ok(StartAttempt::Ready(Box::new(self)));
-                }
-                // Loading and busy are expected while the model is read from
-                // disk; anything else is retried until the deadline as well.
-                Ok(_) | Err(_) => {}
+            Ok(
+                if response.is_ok_and(|response| response.status().is_success()) {
+                    HealthPoll::Ready
+                } else {
+                    HealthPoll::Pending
+                },
+            )
+        })?;
+        match health {
+            HealthPoll::Ready => {
+                eprintln!(
+                    "local_llama_runtime state=ready pid={} endpoint={}",
+                    self.child.id(),
+                    self.endpoint
+                );
+                Ok(StartAttempt::Ready(Box::new(self)))
             }
-            thread::sleep(SERVER_POLL_INTERVAL);
+            HealthPoll::Exited(status) => Ok(StartAttempt::Exited(status)),
+            HealthPoll::Pending => Ok(StartAttempt::Timeout),
         }
-        Ok(StartAttempt::Timeout)
     }
 
     fn is_running(&mut self) -> bool {
@@ -1085,6 +1256,15 @@ impl LlamaRuntime {
         }
         Ok(StreamedUnit { content })
     }
+}
+
+fn blocking_local_client() -> Result<Client> {
+    Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .context("could not create the local translation client")
 }
 
 impl Drop for LlamaRuntime {
@@ -1538,14 +1718,46 @@ fn protected_values(text: &str) -> Vec<String> {
     values
 }
 
-fn preferred_vulkan_device(executable: &Path, runtime_root: &Path) -> Option<String> {
+fn preferred_vulkan_device(
+    executable: &Path,
+    runtime_root: &Path,
+    deadline: Instant,
+    should_continue: &dyn Fn() -> bool,
+) -> Result<Option<String>> {
     let mut command = Command::new(executable);
     command
         .arg("--list-devices")
         .current_dir(runtime_root)
-        .env("PATH", runtime_root);
+        .env("PATH", runtime_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     configure_hidden_process(&mut command);
-    let output = command.output().ok()?;
+    if !should_continue() {
+        return Err(TranslationCancelled.into());
+    }
+    if Instant::now() >= deadline {
+        bail!("translation runtime device discovery exceeded its operation deadline");
+    }
+    let Ok(mut child) = command.spawn() else {
+        return Ok(None);
+    };
+    loop {
+        if !should_continue() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(TranslationCancelled.into());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("translation runtime device discovery exceeded its operation deadline");
+        }
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        thread::sleep(SERVER_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+    let output = child.wait_with_output()?;
     let listing = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -1559,7 +1771,7 @@ fn preferred_vulkan_device(executable: &Path, runtime_root: &Path) -> Option<Str
                 .then(|| (id.to_owned(), name.trim().to_owned()))
         })
         .collect::<Vec<_>>();
-    devices
+    Ok(devices
         .iter()
         .find(|(_, name)| {
             let name = name.to_ascii_lowercase();
@@ -1569,7 +1781,7 @@ fn preferred_vulkan_device(executable: &Path, runtime_root: &Path) -> Option<Str
                 && !name.contains("intel iris")
         })
         .or_else(|| devices.first())
-        .map(|(id, _)| id.clone())
+        .map(|(id, _)| id.clone()))
 }
 
 fn open_server_log(runtime_root: &Path) -> io::Result<File> {
@@ -1965,18 +2177,129 @@ fn lexical_spans(text: &str) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blocking_generation_can_exceed_health_poll_timeout() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        fn delayed_reply(delay: Duration) -> (String, thread::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = format!("http://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 512];
+                let _ = socket.read(&mut request);
+                thread::sleep(delay);
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            });
+            (address, server)
+        }
+
+        let client = super::blocking_local_client().unwrap();
+        let (endpoint, server) = delayed_reply(Duration::from_millis(900));
+        let started = Instant::now();
+        let ordinary = client.get(format!("{endpoint}/v1/chat/completions")).send();
+        server.join().unwrap();
+        assert!(
+            ordinary.is_ok(),
+            "normal request inherited the health timeout: {ordinary:?}"
+        );
+        assert!(started.elapsed() >= super::SERVER_HEALTH_POLL_TIMEOUT);
+
+        let (endpoint, server) = delayed_reply(Duration::from_millis(350));
+        let started = Instant::now();
+        let health = client
+            .get(format!("{endpoint}/health"))
+            .timeout(Duration::from_millis(80))
+            .send();
+        assert!(
+            health.is_err(),
+            "slow health response exceeded its request deadline"
+        );
+        assert!(started.elapsed() < Duration::from_millis(300));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn health_recovery_observes_cancellation_between_bounded_polls() {
+        use std::{
+            cell::Cell,
+            time::{Duration, Instant},
+        };
+        let active = Cell::new(true);
+        let polls = Cell::new(0);
+        let result = super::poll_runtime_health(
+            Instant::now() + Duration::from_secs(10),
+            &|| active.get(),
+            |timeout| {
+                assert!(timeout <= super::SERVER_HEALTH_POLL_TIMEOUT);
+                polls.set(polls.get() + 1);
+                active.set(false);
+                Ok(super::HealthPoll::Pending)
+            },
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<super::TranslationCancelled>()
+                .is_some()
+        );
+        assert_eq!(polls.get(), 1);
+    }
+
+    #[test]
+    fn health_recovery_never_polls_past_remaining_deadline() {
+        use std::time::{Duration, Instant};
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(35);
+        let result = super::poll_runtime_health(deadline, &|| true, |timeout| {
+            assert!(timeout <= Duration::from_millis(35));
+            std::thread::sleep(timeout);
+            Ok(super::HealthPoll::Pending)
+        })
+        .unwrap();
+        assert!(matches!(result, super::HealthPoll::Pending));
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
     use rust_protocol::{
         BlockCompletion, GlossaryEntry, GlossaryEntryId, GlossaryOrigin, PhysicalRect,
         ScreenBlockId, ScreenTextBlock, SourceContext, TranslationLanguage,
     };
 
     use super::{
-        detect_language, greedy_structured_ranges, normalize_line_endings,
-        normalize_single_word_repetition, protected_script_tokens, recover_structured_response,
-        split_at_natural_boundaries, strip_reasoning, structured_translation_messages,
-        translate_with_truncation_recovery, translation_instruction, translation_user_message,
-        validate_finish_reason, validate_structured_response, validate_target_script,
+        detect_language, greedy_structured_ranges, is_recoverable_llama_transport,
+        normalize_line_endings, normalize_single_word_repetition, protected_script_tokens,
+        recover_structured_response, split_at_natural_boundaries, strip_reasoning,
+        structured_translation_messages, translate_with_truncation_recovery,
+        translation_instruction, translation_user_message, validate_finish_reason,
+        validate_structured_response, validate_target_script,
     };
+
+    #[test]
+    fn structured_runtime_restarts_only_for_transport_failures() {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        drop(socket);
+        let transport = reqwest::blocking::Client::new()
+            .get(format!("http://{address}/tokenize"))
+            .send()
+            .unwrap_err();
+        assert!(is_recoverable_llama_transport(&anyhow::Error::from(
+            transport
+        )));
+        assert!(!is_recoverable_llama_transport(&anyhow::anyhow!(
+            "structured translation validation failed"
+        )));
+        assert!(!is_recoverable_llama_transport(&anyhow::Error::new(
+            super::TranslationCancelled
+        )));
+    }
 
     #[test]
     fn language_detection_is_deterministic_for_the_supported_pair() {

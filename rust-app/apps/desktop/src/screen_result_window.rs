@@ -2,7 +2,8 @@
 //!
 //! A screen result is intentionally never a mode of `TranslationPreview`.
 //! Each request keeps one Slint component and one HWND from first reveal until
-//! retirement. Pinning changes only z-order; dragging only changes position.
+//! retirement. Pinning changes only z-order; dragging and resizing retain the
+//! same window and renderer.
 
 use std::{
     cell::{Cell, RefCell},
@@ -476,6 +477,19 @@ fn wire_screen_result_window(window: &ScreenTranslationWindow) {
             {
                 rust_app_core::diagnostics::log_line(&format!(
                     "screen_result drag=failed hwnd={handle} error={error}"
+                ));
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_begin_resize(move || {
+            if let Some(window) = weak.upgrade()
+                && let Err(error) =
+                    crate::translation_view::begin_slint_window_resize(window.window(), 7)
+            {
+                rust_app_core::diagnostics::log_line(&format!(
+                    "screen_result resize=failed edge=southeast error={error}"
                 ));
             }
         });

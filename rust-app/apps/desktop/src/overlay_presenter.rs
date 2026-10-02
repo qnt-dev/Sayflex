@@ -349,6 +349,25 @@ impl CaptureExcludedOverlay {
 }
 
 impl OverlayPresenter {
+    #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+    pub(crate) fn is_presented_at(&self, window_handle: u64) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .presented_ticket()
+            .is_some_and(|ticket| ticket.window_handle == window_handle)
+    }
+
+    pub(crate) fn has_active_presentation(&self) -> bool {
+        !matches!(
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .phase,
+            PresentationPhase::Detached | PresentationPhase::Parked { .. }
+        )
+    }
+
     pub(crate) fn install_always_renderable(
         window: &slint::Window,
         name: &'static str,
@@ -934,6 +953,31 @@ pub(crate) mod test_utils {
             name: "screen_result_position_test",
             contract: OverlayContract::Interactive,
         }
+    }
+
+    pub(crate) fn presented_presenter(window_handle: u64) -> OverlayPresenter {
+        let presenter = attached_presenter(window_handle);
+        {
+            let mut state = presenter
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ticket = state.begin_prepare().unwrap();
+            state.content_changed(true);
+            state.await_frame(ticket).unwrap();
+            assert_eq!(state.frame_rendered(), Some(ticket));
+            assert!(state.complete_reveal(ticket));
+        }
+        presenter
+    }
+
+    pub(crate) fn prepare_without_native(presenter: &OverlayPresenter) {
+        presenter
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_prepare()
+            .unwrap();
     }
 }
 

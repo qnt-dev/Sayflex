@@ -50,6 +50,8 @@ use rust_protocol::{
     GlossaryEntryDraft, GlossaryOrigin, OcrFailureKind, OcrLanguagePolicy, OcrPixelFormat,
     OcrWorkerCommand, OcrWorkerEvent, SourceContext,
 };
+#[cfg(all(feature = "inspect", feature = "screen-translation"))]
+use screen_replay::{ReplayPhase, ReplayStep, ScreenReplayProbe};
 #[cfg(feature = "screen-translation")]
 use screen_result::{
     DocumentError, MIN_ADMITTED_OCR_CONFIDENCE_MILLI, ScreenTranslationDocument,
@@ -95,7 +97,8 @@ use slint::{
 use source_context::ContextCollector;
 #[cfg(feature = "screen-translation")]
 use translation_editor::{
-    EditorDraftKey, EditorPhase, TranslationEditorState, host_editor_should_close,
+    EditorCommitScope, EditorDraftKey, EditorPhase, TranslationEditorState,
+    host_editor_should_close,
 };
 use translation_view::{
     StableParagraphStream, TranslationPreviewRegistry, TranslationPreviewSlot,
@@ -125,6 +128,8 @@ mod preview_modes;
 mod providers_view;
 mod pulse_matrix;
 mod resource_view;
+#[cfg(all(feature = "inspect", feature = "screen-translation"))]
+mod screen_replay;
 #[cfg(feature = "screen-translation")]
 mod screen_result;
 #[cfg(feature = "screen-translation")]
@@ -236,6 +241,8 @@ fn take_audio_level() -> Option<AudioLevelFrame> {
 
 enum RuntimeEvent {
     Input(InputHostEvent),
+    #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+    ScreenReplayTick,
     Speech {
         instance_id: u64,
         event: SpeechWorkerEvent,
@@ -422,6 +429,8 @@ struct RuntimeUi {
         Arc<rust_platform_windows::screen_capture::WindowsDesktopCaptureBackend>,
     #[cfg(feature = "screen-translation")]
     screenshot_store: Option<Arc<ScreenshotStore>>,
+    #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+    screen_replay: Option<Rc<RefCell<ScreenReplayProbe>>>,
 }
 
 #[cfg(feature = "screen-translation")]
@@ -611,6 +620,15 @@ struct CompactInstallOffer {
     catalog_id: String,
     display_name: String,
     size_bytes: u64,
+}
+
+fn take_pending_translation_install_offer(
+    install_offer: Option<CompactInstallOffer>,
+    pending: &mut Option<PendingTranslation>,
+) -> Option<(CompactInstallOffer, PendingTranslation)> {
+    let offer = install_offer?;
+    let pending_translation = pending.take()?;
+    Some((offer, pending_translation))
 }
 
 fn required_compact_install(
@@ -1207,6 +1225,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("{BUILD_COMMIT}");
         return Ok(());
     }
+    let replay_requested = env::args().any(|argument| argument == "--screen-replay");
+    #[cfg(not(all(feature = "inspect", feature = "screen-translation")))]
+    if replay_requested {
+        return Err(std::io::Error::other(
+            "--screen-replay requires inspect and screen-translation features",
+        )
+        .into());
+    }
+    #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+    let screen_replay = replay_requested
+        .then(ScreenReplayProbe::load_from_environment)
+        .transpose()
+        .map_err(std::io::Error::other)?
+        .map(|probe| Rc::new(RefCell::new(probe)));
     rust_platform_windows::configure_process_error_mode();
     rust_platform_windows::configure_safe_dll_search()?;
     // Before any window: the shell reads the application's identity when the
@@ -1673,7 +1705,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         #[cfg(feature = "screen-translation")]
         screen_capture_backend,
         #[cfg(feature = "screen-translation")]
-        screenshot_store: screenshot_store.clone(),
+        screenshot_store: {
+            #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+            if screen_replay.is_some() {
+                None
+            } else {
+                screenshot_store.clone()
+            }
+            #[cfg(not(all(feature = "inspect", feature = "screen-translation")))]
+            screenshot_store.clone()
+        },
+        #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+        screen_replay: screen_replay.clone(),
+    });
+    #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+    let screen_replay_timer = screen_replay.as_ref().map(|_| {
+        let timer = Timer::default();
+        timer.start(
+            TimerMode::Repeated,
+            std::time::Duration::from_millis(250),
+            || dispatch_runtime_event(RuntimeEvent::ScreenReplayTick),
+        );
+        timer
     });
     #[cfg(feature = "screen-translation")]
     {
@@ -1737,11 +1790,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     resource_timer.stop();
     #[cfg(feature = "screen-translation")]
     screenshot_cleanup_timer.stop();
+    #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+    if let Some(timer) = screen_replay_timer.as_ref() {
+        timer.stop();
+    }
     UI_EVENT_HANDLER.with(|handler| {
         handler.borrow_mut().take();
     });
     workers.shutdown();
     run_session.finish("event_loop_returned");
+    #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+    if let Some(replay) = screen_replay {
+        match replay.borrow_mut().final_result.take() {
+            Some(Ok(())) => {}
+            Some(Err(error)) => return Err(std::io::Error::other(error).into()),
+            None => {
+                return Err(std::io::Error::other("screen replay exited without a receipt").into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1769,6 +1836,325 @@ fn install_runtime_handler(runtime: RuntimeUi) {
             handle_runtime_event(event, &runtime);
         }));
     });
+}
+
+#[cfg(all(feature = "inspect", feature = "screen-translation"))]
+fn drive_screen_replay(runtime: &RuntimeUi) {
+    enum Action {
+        Start(RequestId),
+        Dismiss(u64),
+        OpenStored,
+    }
+    let Some(probe) = runtime.screen_replay.as_ref() else {
+        return;
+    };
+    let mut action = None;
+    {
+        let mut probe = probe.borrow_mut();
+        if probe.final_result.is_some() {
+            return;
+        }
+        if probe.started.elapsed() > std::time::Duration::from_secs(600) {
+            probe.finish(Err("replay exceeded its 10-minute deadline".into()));
+            return;
+        }
+        let Some(step) = probe.step() else {
+            probe.finish(Ok(()));
+            return;
+        };
+        let step_number = probe.index + 1;
+        match probe.phase {
+            ReplayPhase::Ready => {
+                let (ready, provider, selected_model, selected_tier, local_loaded) = {
+                    let state = runtime.state.borrow();
+                    let provider = state
+                        .translation_providers
+                        .iter()
+                        .filter(|status| status.enabled && status.available)
+                        .min_by_key(|status| status.position)
+                        .map(|status| status.id.clone())
+                        .unwrap_or_else(|| "local".to_owned());
+                    (
+                        state.translation_path_ready(),
+                        provider,
+                        state.selected_translation_model_id.clone(),
+                        state.selected_translation_tier,
+                        state.translation_ready,
+                    )
+                };
+                if !ready {
+                    return;
+                }
+                let loaded_model = probe.loaded_model_id.clone();
+                if provider != "local"
+                    || selected_model.is_none()
+                    || !local_loaded
+                    || loaded_model != selected_model
+                {
+                    probe.finish(Err(format!(
+                        "replay requires selected, loaded local model; provider={provider} model={selected_model:?} loaded_model={loaded_model:?} loaded={local_loaded}"
+                    )));
+                    return;
+                }
+                if probe.index == 0 {
+                    probe.record(format!("provider={provider} selected_model={selected_model:?} loaded_model={loaded_model:?} tier={selected_tier:?}"));
+                }
+                let request_id = RequestId::new();
+                probe.request_id = Some(request_id);
+                probe.completed = false;
+                probe.translation_dispatched = false;
+                probe.cancel_ack = false;
+                probe.failure_kind = None;
+                probe.failure = None;
+                probe.phase = ReplayPhase::Awaiting(Instant::now());
+                probe.record(format!(
+                    "step={step_number} kind={step:?} request={request_id} started"
+                ));
+                action = Some(Action::Start(request_id));
+            }
+            ReplayPhase::Awaiting(since) => {
+                let request_id = probe.request_id.expect("active replay request");
+                if since.elapsed() > std::time::Duration::from_secs(120) {
+                    probe.finish(Err(format!(
+                        "step={step_number} request={request_id} timed out"
+                    )));
+                    return;
+                }
+                match step {
+                    ReplayStep::Normal => {
+                        if let Some(failure) = probe.failure.as_ref() {
+                            let failure = failure.clone();
+                            probe.finish(Err(format!(
+                                "normal request={request_id} failed: {failure}"
+                            )));
+                            return;
+                        }
+                        let slot = runtime
+                            .screen_result_windows
+                            .borrow()
+                            .slot_for_request(request_id);
+                        if probe.completed
+                            && probe.translation_dispatched
+                            && let Some(slot) = slot
+                            && slot.window.get_prepared()
+                            && slot.handle() != 0
+                        {
+                            probe.record(format!(
+                                "step={step_number} request={request_id} result_presented hwnd={}",
+                                slot.handle()
+                            ));
+                            probe.phase = ReplayPhase::HoldingResult {
+                                since: Instant::now(),
+                                handle: slot.handle(),
+                            };
+                        }
+                    }
+                    ReplayStep::SelectionTimeout => {
+                        let slot = runtime
+                            .translation_previews
+                            .borrow()
+                            .slot_for_request(request_id);
+                        if let Some(slot) = slot
+                            && slot.preview.get_prepared()
+                            && slint_window_handle(slot.preview.window())
+                                .is_some_and(|handle| slot.presenter.is_presented_at(handle))
+                        {
+                            probe.record(format!("step={step_number} request={request_id} selection_timeout_presented"));
+                            probe.phase = ReplayPhase::RestoredAfterTimeout(Instant::now());
+                            action = Some(Action::OpenStored);
+                        }
+                    }
+                    ReplayStep::WorkerFailure => {
+                        if probe.completed {
+                            probe.finish(Err(format!(
+                                "worker-failure request={request_id} unexpectedly completed"
+                            )));
+                            return;
+                        }
+                        let slot = runtime
+                            .translation_previews
+                            .borrow()
+                            .slot_for_request(request_id);
+                        if probe.translation_dispatched
+                            && probe.failure_kind
+                                == Some(TranslationFailureKind::UnsupportedRequest)
+                            && let Some(slot) = slot
+                            && slot.preview.get_prepared()
+                        {
+                            let handle = slint_window_handle(slot.preview.window()).unwrap_or(0);
+                            if handle != 0 && slot.presenter.is_presented_at(handle) {
+                                probe.record(format!("step={step_number} request={request_id} failure_presented hwnd={handle}"));
+                                probe.phase = ReplayPhase::Closing(Instant::now());
+                                action = Some(Action::Dismiss(handle));
+                            }
+                        }
+                    }
+                    ReplayStep::CancelAfterDispatch => {
+                        if probe.completed {
+                            probe.finish(Err(format!(
+                                "cancel request={request_id} completed before dismissal"
+                            )));
+                            return;
+                        }
+                        let slot = runtime
+                            .translation_previews
+                            .borrow()
+                            .slot_for_request(request_id);
+                        if let Some(failure) = probe.failure.clone() {
+                            probe.finish(Err(format!(
+                                "cancel request={request_id} failed before dismissal: {failure}"
+                            )));
+                            return;
+                        }
+                        if probe.translation_dispatched
+                            && let Some(slot) = slot
+                        {
+                            let handle = slint_window_handle(slot.preview.window()).unwrap_or(0);
+                            if handle != 0 {
+                                probe.record(format!("step={step_number} request={request_id} dispatched_cancel hwnd={handle}"));
+                                probe.phase = ReplayPhase::CancelClosing(Instant::now());
+                                action = Some(Action::Dismiss(handle));
+                            }
+                        }
+                    }
+                }
+            }
+            ReplayPhase::RestoredAfterTimeout(since) => {
+                let compact_active = runtime
+                    .translation_previews
+                    .borrow()
+                    .current()
+                    .presenter
+                    .has_active_presentation();
+                let restored = runtime
+                    .screen_result_windows
+                    .borrow()
+                    .slot_for_request(probe.restored_request_id.expect("stored replay result"));
+                if !compact_active
+                    && let Some(restored) = restored
+                    && restored.window.get_prepared()
+                    && restored.handle() != 0
+                {
+                    let handle = restored.handle();
+                    probe.record(format!("step={step_number} restored_result_presented hwnd={handle} compact_retired=true"));
+                    probe.phase = ReplayPhase::HoldingResult {
+                        since: Instant::now(),
+                        handle,
+                    };
+                } else if since.elapsed() > std::time::Duration::from_secs(15) {
+                    probe.finish(Err(
+                        "stored result did not replace the stale compact preview".into(),
+                    ));
+                    return;
+                }
+            }
+            ReplayPhase::HoldingResult { since, handle } => {
+                let first_result_hold_ms = std::env::var("SAYFLEX_SCREEN_REPLAY_FIRST_HOLD_MS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(4_000)
+                    .clamp(1_000, 120_000);
+                let hold_ms = if probe.index == 0 {
+                    first_result_hold_ms
+                } else {
+                    4_000
+                };
+                if since.elapsed() >= std::time::Duration::from_millis(hold_ms) {
+                    probe.phase = ReplayPhase::Closing(Instant::now());
+                    action = Some(Action::Dismiss(handle));
+                }
+            }
+            ReplayPhase::Closing(since) | ReplayPhase::CancelClosing(since) => {
+                let request_id = probe.request_id.expect("closing replay request");
+                if step == ReplayStep::CancelAfterDispatch {
+                    if probe.completed || probe.failure.is_some() {
+                        probe.finish(Err(format!(
+                            "cancel request={request_id} received late completion or failure"
+                        )));
+                        return;
+                    }
+                    if since.elapsed() > std::time::Duration::from_secs(15) && !probe.cancel_ack {
+                        probe.finish(Err(format!("cancel request={request_id} received no matching worker Cancelled acknowledgment")));
+                        return;
+                    }
+                }
+                let result_request = if step == ReplayStep::SelectionTimeout {
+                    probe.restored_request_id.expect("stored replay result")
+                } else {
+                    request_id
+                };
+                let result_gone = runtime
+                    .screen_result_windows
+                    .borrow()
+                    .slot_for_request(result_request)
+                    .is_none();
+                let document_gone = runtime
+                    .screen_translation
+                    .borrow()
+                    .result_snapshot(request_id)
+                    .is_err()
+                    && (result_request == request_id
+                        || runtime
+                            .screen_translation
+                            .borrow()
+                            .result_snapshot(result_request)
+                            .is_err());
+                let compact_gone = runtime
+                    .translation_previews
+                    .borrow()
+                    .slot_for_request(request_id)
+                    .is_none();
+                if result_gone
+                    && document_gone
+                    && compact_gone
+                    && since.elapsed() >= std::time::Duration::from_secs(1)
+                    && (step != ReplayStep::CancelAfterDispatch || probe.cancel_ack)
+                {
+                    probe.record(format!("step={step_number} request={request_id} closed"));
+                    probe.index += 1;
+                    probe.request_id = None;
+                    probe.phase = ReplayPhase::Ready;
+                } else if since.elapsed() > std::time::Duration::from_secs(15) {
+                    probe.finish(Err(format!("step={step_number} request={request_id} retained a result, document, or compact preview")));
+                    return;
+                }
+            }
+        }
+    }
+    match action {
+        Some(Action::Start(request_id)) => handle_input_event(
+            InputHostEvent::ScreenCaptureRequested { request_id },
+            runtime,
+        ),
+        Some(Action::Dismiss(handle)) => {
+            if probe.borrow().step() == Some(ReplayStep::CancelAfterDispatch) {
+                let request_id = probe.borrow().request_id;
+                if let Some(request_id) = request_id {
+                    probe.borrow_mut().begin_cancel(request_id);
+                }
+            }
+            handle_runtime_event(RuntimeEvent::DismissTranslationPreview(handle), runtime)
+        }
+        Some(Action::OpenStored) => {
+            let restored = ScreenshotStore::open_default(ScreenshotRetention::default())
+                .and_then(|store| store.load_latest_result(unix_ms()))
+                .map_err(|error| error.to_string());
+            match restored {
+                Ok(Some(result)) => {
+                    let restored_request = result.0.request_id();
+                    probe.borrow_mut().restored_request_id = Some(restored_request);
+                    finish_open_latest_screen_translation(Ok(Some(result)), runtime)
+                }
+                Ok(None) => probe
+                    .borrow_mut()
+                    .finish(Err("stored completed result is unavailable".into())),
+                Err(error) => probe.borrow_mut().finish(Err(format!(
+                    "could not load stored completed result: {error}"
+                ))),
+            }
+        }
+        None => {}
+    }
 }
 
 #[cfg(feature = "screen-translation")]
@@ -2010,6 +2396,8 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
         RuntimeEvent::Input(event) => {
             handle_input_event(event, runtime);
         }
+        #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+        RuntimeEvent::ScreenReplayTick => drive_screen_replay(runtime),
         RuntimeEvent::ScreenSelectionPointer(event) => {
             let terminal = runtime.screen_selection.borrow_mut().handle_pointer(event);
             if let Some(terminal) = terminal {
@@ -2255,11 +2643,11 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                     }
                 },
             ) {
-                if let Some(cancellation) =
-                    runtime.screen_translation.borrow_mut().close(request_id)
-                {
-                    apply_screen_translation_cancellation(cancellation, runtime);
-                }
+                close_screen_translation_request(
+                    &runtime.screen_translation,
+                    request_id,
+                    |cancellation| apply_screen_translation_cancellation(cancellation, runtime),
+                );
                 return;
             }
             let slot = runtime
@@ -2276,11 +2664,12 @@ fn handle_runtime_event(event: RuntimeEvent, runtime: &RuntimeUi) {
                     .flatten();
                 let request_id = current_request;
                 retire_runtime_translation_preview(&slot, "click_away", runtime);
-                if let Some(request_id) = request_id
-                    && let Some(cancellation) =
-                        runtime.screen_translation.borrow_mut().close(request_id)
-                {
-                    apply_screen_translation_cancellation(cancellation, runtime);
+                if let Some(request_id) = request_id {
+                    close_screen_translation_request(
+                        &runtime.screen_translation,
+                        request_id,
+                        |cancellation| apply_screen_translation_cancellation(cancellation, runtime),
+                    );
                 }
                 if let Some(request_id) = request_id
                     && discard_matching_queued_model_translation(
@@ -2589,6 +2978,87 @@ fn retire_runtime_translation_preview(
 }
 
 #[cfg(feature = "screen-translation")]
+fn take_terminal_compact_before_screen_result(
+    previews: &Rc<RefCell<TranslationPreviewRegistry>>,
+    request_id: RequestId,
+    is_active_work: impl Fn(RequestId) -> bool,
+) -> Option<TranslationPreviewSlot> {
+    let (slot, current_request) = {
+        let previews = previews.borrow();
+        (previews.current(), previews.current_request)
+    };
+    if slot.preview.get_pinned() {
+        return None;
+    }
+    if current_request.is_some_and(|current| current != request_id && is_active_work(current)) {
+        return None;
+    }
+    if let Some(current) = current_request {
+        previews.borrow_mut().clear_current_request(current);
+    }
+    Some(slot)
+}
+
+#[cfg(feature = "screen-translation")]
+fn take_superseded_screen_compact(
+    previews: &Rc<RefCell<TranslationPreviewRegistry>>,
+    coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
+    old_screen_request: Option<RequestId>,
+    new_request: RequestId,
+) -> Option<TranslationPreviewSlot> {
+    let old_request = old_screen_request.filter(|old| *old != new_request)?;
+    let slot = {
+        let mut previews = previews.borrow_mut();
+        if previews.current_request != Some(old_request) || previews.current.preview.get_pinned() {
+            return None;
+        }
+        previews.clear_current_request(old_request);
+        previews.current()
+    };
+    coordinator.borrow_mut().close(old_request);
+    Some(slot)
+}
+
+#[cfg(feature = "screen-translation")]
+fn retire_terminal_compact_before_screen_result(request_id: RequestId, runtime: &RuntimeUi) {
+    let prior_request = runtime.translation_previews.borrow().current_request;
+    let slot = take_terminal_compact_before_screen_result(
+        &runtime.translation_previews,
+        request_id,
+        |current| {
+            runtime
+                .state
+                .borrow()
+                .pending_translations
+                .contains_key(&current)
+                || runtime
+                    .screen_translation
+                    .borrow()
+                    .is_active_work_request(current)
+        },
+    );
+    if let Some(slot) = slot {
+        retire_runtime_translation_preview(&slot, "screen_result_ready", runtime);
+        if let Some(prior_request) = prior_request.filter(|prior| *prior != request_id) {
+            close_screen_translation_request(
+                &runtime.screen_translation,
+                prior_request,
+                |cancellation| {
+                    apply_screen_translation_cancellation(cancellation, runtime);
+                },
+            );
+        }
+    }
+}
+
+#[cfg(feature = "screen-translation")]
+fn cloak_compact_previews_owned(
+    previews: &Rc<RefCell<TranslationPreviewRegistry>>,
+) -> Result<Vec<overlay_presenter::CaptureExcludedOverlay>, String> {
+    previews.borrow().cloak_presented_for_capture()
+}
+
+#[cfg(feature = "screen-translation")]
 fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime: &RuntimeUi) {
     let existing = runtime
         .active_screen_editor
@@ -2641,6 +3111,8 @@ fn open_screen_translation_editor(window_handle: u64, block_index: i32, runtime:
     );
     slot.window
         .set_screen_editor_original(block.source.clone().into());
+    slot.window
+        .set_screen_editor_block_source(block.source.clone().into());
     slot.window
         .set_screen_editor_baseline(block.translation.clone().into());
     slot.window
@@ -2695,6 +3167,24 @@ fn save_screen_translation_edit(
 }
 
 #[cfg(feature = "screen-translation")]
+fn apply_screen_translation_edit_for_scope(
+    coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
+    request_id: RequestId,
+    block_id: &rust_protocol::ScreenBlockId,
+    expected_revision: u64,
+    scope: EditorCommitScope,
+    text: String,
+) -> Result<Option<u64>, DocumentError> {
+    match scope {
+        EditorCommitScope::WholeBlock => {
+            save_screen_translation_edit(coordinator, request_id, block_id, expected_revision, text)
+                .map(Some)
+        }
+        EditorCommitScope::GlossaryTerm => Ok(None),
+    }
+}
+
+#[cfg(feature = "screen-translation")]
 fn expire_screen_translation_pixels(
     coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
     now_unix_ms: u64,
@@ -2727,6 +3217,7 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
         .trim()
         .to_owned();
     let source_phrase = slot.window.get_screen_editor_original().trim().to_owned();
+    let scope = EditorCommitScope::for_source(active.state.source(), &source_phrase);
     if edited.is_empty() || source_phrase.is_empty() {
         slot.window.set_screen_save_error(true);
         slot.window.set_screen_editor_saving(false);
@@ -2750,14 +3241,15 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
     };
 
     if edited != active.last_applied_translation {
-        match save_screen_translation_edit(
+        match apply_screen_translation_edit_for_scope(
             &runtime.screen_translation,
             active.state.key().request_id,
             &active.state.key().block_id,
             active.canonical_revision,
+            scope,
             edited.clone(),
         ) {
-            Ok(revision) => {
+            Ok(Some(revision)) => {
                 active.canonical_revision = revision;
                 active.last_applied_translation.clone_from(&edited);
                 let persisted_snapshot = runtime
@@ -2780,6 +3272,7 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
                     );
                 }
             }
+            Ok(None) => {}
             Err(error) => {
                 active.state.fail(operation_id, format!("{error:?}"), true);
                 slot.window.set_screen_save_error(true);
@@ -2801,7 +3294,7 @@ fn commit_screen_translation_editor(retry: bool, runtime: &RuntimeUi) {
         target_language: active.target_language,
         example,
         context: active.context.clone(),
-        origin: if active.state.changed() {
+        origin: if scope == EditorCommitScope::GlossaryTerm || active.state.changed() {
             GlossaryOrigin::Corrected
         } else {
             GlossaryOrigin::Confirmed
@@ -3480,6 +3973,17 @@ fn handle_worker_exit(
     }
 }
 
+fn close_screen_translation_request(
+    coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
+    request_id: RequestId,
+    mut on_cancel: impl FnMut(ScreenTranslationCancellation),
+) {
+    let cancellation = coordinator.borrow_mut().close(request_id);
+    if let Some(cancellation) = cancellation {
+        on_cancel(cancellation);
+    }
+}
+
 fn apply_screen_translation_cancellation(
     cancellation: ScreenTranslationCancellation,
     runtime: &RuntimeUi,
@@ -3801,6 +4305,16 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                 "ocr_worker request={request_id} outcome=recognized lines={} duration_ms={processing_duration_ms}",
                 lines.len()
             ));
+            #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+            if let Some(probe) = runtime.screen_replay.as_ref() {
+                let mut probe = probe.borrow_mut();
+                if probe.request_id == Some(request_id) {
+                    probe.record(format!(
+                        "request={request_id} real_ocr_lines={}",
+                        lines.len()
+                    ));
+                }
+            }
             match reconstruct_text(&lines, MIN_ADMITTED_OCR_CONFIDENCE_MILLI) {
                 Ok(reconstructed) => {
                     let Some(crop) = runtime
@@ -3916,13 +4430,36 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                         .screen_translation
                         .borrow_mut()
                         .insert_document(document);
-                    begin_screen_translation(
+                    let (source_language, target_language) = {
+                        #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+                        {
+                            let intentional_failure =
+                                runtime.screen_replay.as_ref().is_some_and(|probe| {
+                                    let probe = probe.borrow();
+                                    probe.request_id == Some(request_id)
+                                        && probe.step() == Some(ReplayStep::WorkerFailure)
+                                });
+                            if intentional_failure {
+                                (
+                                    Some(TranslationLanguage::English),
+                                    Some(TranslationLanguage::English),
+                                )
+                            } else {
+                                (None, None)
+                            }
+                        }
+                        #[cfg(not(all(feature = "inspect", feature = "screen-translation")))]
+                        {
+                            (None, None)
+                        }
+                    };
+                    let translation_dispatched = begin_screen_translation(
                         ScreenTranslationRequest {
                             request_id,
                             anchor,
                             request_started_unix_ms: created_unix_ms,
-                            source_language: None,
-                            target_language: None,
+                            source_language,
+                            target_language,
                         },
                         &runtime.settings,
                         &runtime.translation_previews,
@@ -3930,6 +4467,16 @@ fn handle_ocr_event(instance_id: u64, event: OcrWorkerEvent, runtime: &RuntimeUi
                         &runtime.workers,
                         &runtime.screen_translation,
                     );
+                    #[cfg(not(all(feature = "inspect", feature = "screen-translation")))]
+                    let _ = translation_dispatched;
+                    #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+                    if let Some(probe) = runtime.screen_replay.as_ref() {
+                        let mut probe = probe.borrow_mut();
+                        if probe.request_id == Some(request_id) {
+                            probe.translation_dispatched = translation_dispatched;
+                            probe.record(format!("request={request_id} translate_blocks_send_accepted={translation_dispatched}"));
+                        }
+                    }
                 }
                 Err(_) => {
                     runtime
@@ -4035,7 +4582,7 @@ fn begin_screen_translation(
     state: &Rc<RefCell<AppState>>,
     workers: &Rc<Workers>,
     screen_translation: &Rc<RefCell<ScreenTranslationCoordinator>>,
-) {
+) -> bool {
     let ScreenTranslationRequest {
         request_id,
         anchor,
@@ -4060,7 +4607,7 @@ fn begin_screen_translation(
             translation_previews,
             true,
         );
-        return;
+        return false;
     };
     let text = blocks
         .iter()
@@ -4097,7 +4644,7 @@ fn begin_screen_translation(
             translation_previews,
             true,
         );
-        return;
+        return false;
     }
     if !(path_ready || selected_tier.is_some() && waits_for_local) {
         screen_translation.borrow_mut().complete(request_id);
@@ -4109,7 +4656,7 @@ fn begin_screen_translation(
             translation_previews,
             true,
         );
-        return;
+        return false;
     }
     if !path_ready {
         state.borrow_mut().queued_screen_translation = Some(ScreenTranslationRequest {
@@ -4143,7 +4690,7 @@ fn begin_screen_translation(
                 translation_previews,
                 true,
             );
-            return;
+            return false;
         }
         show_screen_translation_preview(
             request_id,
@@ -4153,7 +4700,7 @@ fn begin_screen_translation(
             translation_previews,
             false,
         );
-        return;
+        return false;
     }
 
     let policy = {
@@ -4188,8 +4735,10 @@ fn begin_screen_translation(
             translation_previews,
             true,
         );
+        false
     } else {
         set_indicator_status(settings, state_text(state, UiText::TranslatingNow));
+        true
     }
 }
 
@@ -4236,6 +4785,13 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             rust_app_core::diagnostics::log_line(&format!(
                 "screen_translation request={request_id} stage=requested"
             ));
+            let old_screen_request = {
+                let old = runtime.translation_previews.borrow().current_request;
+                old.filter(|old| {
+                    let coordinator = runtime.screen_translation.borrow();
+                    coordinator.anchor(*old).is_some() || coordinator.source_text(*old).is_some()
+                })
+            };
             let begin = runtime.screen_translation.borrow_mut().begin(request_id);
             let ScreenTranslationBegin::Started(cancellation) = begin else {
                 let ScreenTranslationBegin::AlreadySelecting { active_request_id } = begin else {
@@ -4258,26 +4814,53 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
             {
                 close_screen_translation_editor(runtime, false);
             }
-            let old_request = runtime.translation_previews.borrow().current_request;
-            if old_request.is_some_and(|old_request| {
+            for retired_request in retired {
                 runtime
                     .screen_translation
-                    .borrow()
-                    .anchor(old_request)
-                    .is_some()
-            }) {
-                let slot = runtime.translation_previews.borrow().current();
+                    .borrow_mut()
+                    .close(retired_request);
+            }
+            if let Some(slot) = take_superseded_screen_compact(
+                &runtime.translation_previews,
+                &runtime.screen_translation,
+                old_screen_request,
+                request_id,
+            ) {
                 retire_runtime_translation_preview(&slot, "new_screen_translation", runtime);
-                runtime.translation_previews.borrow_mut().current_request = None;
             }
             if let Some(cancellation) = cancellation {
                 apply_screen_translation_cancellation(cancellation, runtime);
             }
-            let mut excluded_overlays = match runtime
-                .translation_previews
-                .borrow()
-                .cloak_presented_for_capture()
+            #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+            if let Some((rect, capture, timeout)) =
+                runtime.screen_replay.as_ref().and_then(|probe| {
+                    let probe = probe.borrow();
+                    (probe.request_id == Some(request_id)).then(|| {
+                        (
+                            probe.rect,
+                            probe.capture.clone(),
+                            probe.step() == Some(ReplayStep::SelectionTimeout),
+                        )
+                    })
+                })
             {
+                let terminal = if timeout {
+                    SelectionTerminal::Failed {
+                        request_id,
+                        error: SelectionFailure::Runtime("inspect replay selection timeout".into()),
+                    }
+                } else {
+                    SelectionTerminal::Selected {
+                        request_id,
+                        rect,
+                        capture,
+                    }
+                };
+                handle_screen_selection_terminal(terminal, runtime);
+                return;
+            }
+            let compact_exclusion = cloak_compact_previews_owned(&runtime.translation_previews);
+            let mut excluded_overlays = match compact_exclusion {
                 Ok(surfaces) => surfaces,
                 Err(error) => {
                     runtime.screen_translation.borrow_mut().complete(request_id);
@@ -5378,17 +5961,7 @@ fn show_screen_image_result(
     // The compact progress card and the screenshot result never share a
     // component or HWND. Retire any transient progress surface before the
     // dedicated result is created.
-    let compact = runtime
-        .translation_previews
-        .borrow()
-        .slot_for_request(request_id);
-    if let Some(compact) = compact {
-        retire_runtime_translation_preview(&compact, "screen_result_ready", runtime);
-        runtime
-            .translation_previews
-            .borrow_mut()
-            .clear_current_request(request_id);
-    }
+    retire_terminal_compact_before_screen_result(request_id, runtime);
     let slot = match get_or_create_screen_result_slot(
         &runtime.screen_result_windows,
         request_id,
@@ -5416,6 +5989,23 @@ fn show_screen_image_result(
             "screen_translation request={request_id} stage=result_present result=failed error={error}"
         ));
     }
+}
+
+#[cfg(feature = "screen-translation")]
+fn completed_screen_result_snapshot(
+    coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
+    request_id: RequestId,
+) -> Result<
+    (
+        screen_result::ScreenResultSnapshot,
+        TranslationLanguage,
+        TranslationLanguage,
+    ),
+    DocumentError,
+> {
+    let mut coordinator = coordinator.borrow_mut();
+    coordinator.complete(request_id);
+    coordinator.result_snapshot(request_id)
 }
 
 #[cfg(feature = "screen-translation")]
@@ -5475,6 +6065,16 @@ fn show_translation_preview_at(
     let translation_preview_presenter = &slot.presenter;
     let request_id_text = request_id.to_string();
     let first_show = preview.get_request_id().as_str() != request_id_text;
+    if first_show
+        && (!preview.get_request_id().is_empty()
+            || translation_preview_presenter.has_active_presentation())
+    {
+        // A new request can reuse the current slot after a terminal capture
+        // failure. The old preview is still Presented even if its screen
+        // coordinator no longer has an anchor, so park it before preparing
+        // the new content.
+        retire_translation_preview(&slot, "superseded_request");
+    }
     preview.set_model_offer_visible(false);
     preview.set_model_offer_action("".into());
     preview.set_pin_enabled(final_update);
@@ -6323,6 +6923,20 @@ retryable={retryable} message={message}"
     }
 }
 
+#[cfg(feature = "screen-translation")]
+fn finish_screen_translation_failure(
+    coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
+    request_id: RequestId,
+) -> Option<(PhysicalRect, String)> {
+    // Complete the request under one borrow, returning owned presentation data
+    // so no coordinator guard survives into the UI callbacks.
+    let mut coordinator = coordinator.borrow_mut();
+    let anchor = coordinator.anchor(request_id)?;
+    let source_text = coordinator.source_text(request_id)?;
+    coordinator.complete(request_id);
+    Some((anchor, source_text))
+}
+
 fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) {
     let settings = &runtime.settings;
     let translation_previews = &runtime.translation_previews;
@@ -6515,6 +7129,10 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             rust_app_core::diagnostics::log_line(&format!(
                 "translation_model state=ready catalog_id={catalog_id} tier={tier:?} load_ms={load_duration_ms}"
             ));
+            #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+            if let Some(probe) = runtime.screen_replay.as_ref() {
+                probe.borrow_mut().loaded_model_id = Some(catalog_id.clone());
+            }
             let (queued_selection_translation, queued_model_translation) = {
                 let mut state = state.borrow_mut();
                 state.selected_translation_model_id = Some(catalog_id.clone());
@@ -6638,7 +7256,7 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             }
             #[cfg(feature = "screen-translation")]
             if let Some(request) = queued_screen_translation {
-                begin_screen_translation(
+                let _ = begin_screen_translation(
                     request,
                     settings,
                     translation_previews,
@@ -6806,6 +7424,10 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             capabilities,
             processing_duration_ms,
         } => {
+            #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+            if let Some(probe) = runtime.screen_replay.as_ref() {
+                probe.borrow_mut().observe_raw_screen_completion(request_id);
+            }
             let (anchor, projection) = {
                 let mut coordinator = screen_translation.borrow_mut();
                 let anchor = coordinator.anchor(request_id);
@@ -6821,8 +7443,9 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             };
             match (anchor, projection) {
                 (Some(anchor), Ok(projection)) => {
-                    screen_translation.borrow_mut().complete(request_id);
-                    match screen_translation.borrow().result_snapshot(request_id) {
+                    let snapshot_result =
+                        completed_screen_result_snapshot(screen_translation, request_id);
+                    match snapshot_result {
                         Ok((snapshot, _, _)) => {
                             show_screen_image_result(request_id, anchor, &snapshot, runtime);
                             persist_completed_screen_snapshot(
@@ -6831,6 +7454,17 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
                                 target_language,
                                 runtime.screenshot_store.as_ref(),
                             );
+                            #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+                            if let Some(probe) = runtime.screen_replay.as_ref() {
+                                let mut probe = probe.borrow_mut();
+                                if probe.request_id == Some(request_id) {
+                                    probe.completed = true;
+                                    probe.record(format!(
+                                        "request={request_id} real_translation_blocks={}",
+                                        snapshot.blocks.len()
+                                    ));
+                                }
+                            }
                         }
                         Err(error) => {
                             show_screen_translation_preview(
@@ -6999,6 +7633,43 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             request_id,
             failure,
         } => {
+            #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+            if let Some(probe) = runtime.screen_replay.as_ref() {
+                let mut probe = probe.borrow_mut();
+                if probe.cancelled_request_ids.contains(&request_id) {
+                    probe.finish(Err(format!(
+                        "cancelled request={request_id} received late RequestFailed"
+                    )));
+                }
+                if probe.request_id == Some(request_id) {
+                    probe.failure_kind = Some(failure.kind.clone());
+                    let detail: String = failure.detail.chars().take(512).collect();
+                    probe.failure = Some(format!(
+                        "kind={:?} provider={:?} detail={detail:?}",
+                        failure.kind, failure.provider_id
+                    ));
+                    let recorded_failure = probe.failure.clone();
+                    probe.record(format!(
+                        "request={request_id} real_worker_failure={recorded_failure:?}"
+                    ));
+                    if probe.step() == Some(ReplayStep::WorkerFailure)
+                        && (failure.kind != TranslationFailureKind::UnsupportedRequest
+                            || !failure
+                                .detail
+                                .contains("source and target languages are the same"))
+                    {
+                        probe.finish(Err(format!("worker-failure request={request_id} did not return expected UnsupportedRequest")));
+                    }
+                }
+            }
+            // Keep the worker's original failure even if subsequent cleanup or
+            // presentation fails; otherwise a UI panic hides its trigger.
+            let diagnostic_detail: String = failure.detail.chars().take(512).collect();
+            rust_app_core::diagnostics::log_line(&format!(
+                "translation_pipeline request={request_id} stage=failed kind={:?} provider={} detail={diagnostic_detail:?}",
+                failure.kind,
+                failure.provider_id.as_deref().unwrap_or("none"),
+            ));
             let (mut pending, install_offer) = {
                 let mut app = state.borrow_mut();
                 let pending = app.pending_translations.remove(&request_id);
@@ -7011,7 +7682,9 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
                 });
                 (pending, install_offer)
             };
-            if let (Some(offer), Some(pending_translation)) = (install_offer, pending.take()) {
+            if let Some((offer, pending_translation)) =
+                take_pending_translation_install_offer(install_offer, &mut pending)
+            {
                 let origin = pending_translation.origin;
                 let source_text = pending_translation.source_text.clone();
                 let size = settings_projection::human_size(offer.size_bytes);
@@ -7134,11 +7807,9 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
                 }
                 None => {
                     #[cfg(feature = "screen-translation")]
-                    if let (Some(anchor), Some(source_text)) = (
-                        screen_translation.borrow().anchor(request_id),
-                        screen_translation.borrow().source_text(request_id),
-                    ) {
-                        screen_translation.borrow_mut().complete(request_id);
+                    if let Some((anchor, source_text)) =
+                        finish_screen_translation_failure(screen_translation, request_id)
+                    {
                         show_screen_translation_preview(
                             request_id,
                             anchor,
@@ -7159,11 +7830,6 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
                     set_status_problem(settings, &message);
                 }
             }
-            rust_app_core::diagnostics::log_line(&format!(
-                "translation_pipeline request={request_id} stage=failed kind={:?} provider={}",
-                failure.kind,
-                failure.provider_id.as_deref().unwrap_or("none")
-            ));
         }
         TranslationWorkerEvent::CredentialSaved {
             operation_id,
@@ -7204,6 +7870,16 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             sync_providers(settings, state);
         }
         TranslationWorkerEvent::Cancelled { request_id } => {
+            #[cfg(all(feature = "inspect", feature = "screen-translation"))]
+            if let Some(probe) = runtime.screen_replay.as_ref() {
+                let mut probe = probe.borrow_mut();
+                if probe.request_id == Some(request_id) {
+                    probe.cancel_ack = true;
+                    probe.record(format!(
+                        "request={request_id} matching_worker_cancelled=true"
+                    ));
+                }
+            }
             let pending = {
                 let mut app = state.borrow_mut();
                 app.selection_release_gates.remove(&request_id);
@@ -7351,11 +8027,9 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
                 _ => {
                     if let Some(request_id) = request_id {
                         #[cfg(feature = "screen-translation")]
-                        if let (Some(anchor), Some(source_text)) = (
-                            screen_translation.borrow().anchor(request_id),
-                            screen_translation.borrow().source_text(request_id),
-                        ) {
-                            screen_translation.borrow_mut().complete(request_id);
+                        if let Some((anchor, source_text)) =
+                            finish_screen_translation_failure(screen_translation, request_id)
+                        {
                             show_screen_translation_preview(
                                 request_id,
                                 anchor,
@@ -8612,6 +9286,423 @@ mod compact_model_install_tests {
             required_compact_install(&missing_report(), &[model(false)], queued.is_some())
                 .is_some()
         );
+    }
+}
+
+#[cfg(all(test, feature = "screen-translation"))]
+mod translation_failure_transition_tests {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+        sync::Arc,
+        time::Instant,
+    };
+
+    use rust_platform_windows::screen_capture::RgbaFrame;
+    use rust_protocol::{
+        PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext,
+        TranslationLanguagePolicy,
+    };
+
+    use super::{
+        CompactInstallOffer, PendingTranslation, ScreenTranslationCancellation,
+        ScreenTranslationCoordinator, ScreenTranslationDocument, TranslationOrigin,
+        TranslationPreview, TranslationPreviewRegistry, TranslationPreviewSlot,
+        apply_screen_translation_edit_for_scope, cloak_compact_previews_owned,
+        close_screen_translation_request, completed_screen_result_snapshot,
+        finish_screen_translation_failure, screen_translation::ScreenTranslationBegin,
+        show_translation_preview_at, take_pending_translation_install_offer,
+        take_superseded_screen_compact, take_terminal_compact_before_screen_result,
+    };
+    use crate::{
+        overlay_presenter::test_utils::{
+            attached_presenter, prepare_without_native, presented_presenter,
+        },
+        translation_editor::EditorCommitScope,
+        translation_view::retire_translation_preview,
+    };
+
+    fn recognized_request(
+        coordinator: &Rc<RefCell<ScreenTranslationCoordinator>>,
+        request_id: RequestId,
+    ) -> PhysicalRect {
+        let anchor = PhysicalRect {
+            x: 1909,
+            y: 611,
+            width: 1,
+            height: 1,
+        };
+        let crop = Arc::new(RgbaFrame::try_new(anchor, 4, vec![0, 0, 0, 255]).unwrap());
+        let document = ScreenTranslationDocument::new(
+            request_id,
+            crop,
+            vec![ScreenTextBlock {
+                block_id: ScreenBlockId::from("block-1"),
+                source_text: "Recognized screen text".to_owned(),
+                bounds: PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                fragments: Vec::new(),
+                confidence_milli: 937,
+            }],
+            SourceContext::default(),
+            1,
+            2,
+        )
+        .unwrap();
+        let mut coordinator = coordinator.borrow_mut();
+        assert!(matches!(
+            coordinator.begin(request_id),
+            ScreenTranslationBegin::Started(_)
+        ));
+        assert!(coordinator.selected(request_id, anchor));
+        assert_eq!(coordinator.recognized(request_id), Some(anchor));
+        coordinator.insert_document(document);
+        anchor
+    }
+
+    #[test]
+    fn screen_failure_returns_source_and_releases_borrows_before_the_next_request() {
+        let coordinator = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+        let failed_request = RequestId::new();
+        let anchor = recognized_request(&coordinator, failed_request);
+        assert!(coordinator.borrow().has_active_work());
+
+        assert_eq!(
+            finish_screen_translation_failure(&coordinator, failed_request),
+            Some((anchor, "Recognized screen text".to_owned())),
+        );
+        assert!(!coordinator.borrow().has_active_work());
+
+        let next_request = RequestId::new();
+        recognized_request(&coordinator, next_request);
+        assert!(coordinator.borrow().has_active_work());
+        assert_eq!(coordinator.borrow().anchor(next_request), Some(anchor));
+    }
+
+    #[test]
+    fn completed_screen_result_can_retire_another_terminal_compact_without_borrow_panic() {
+        use rust_protocol::{
+            BlockCompletion, TranslatedScreenBlock, TranslationBackendCapabilities,
+            TranslationLanguage,
+        };
+
+        i_slint_backend_testing::init_no_event_loop();
+        let coordinator = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+        let screen_b = RequestId::new();
+        recognized_request(&coordinator, screen_b);
+        coordinator
+            .borrow_mut()
+            .apply_completed(
+                screen_b,
+                0,
+                vec![TranslatedScreenBlock {
+                    block_id: ScreenBlockId::from("block-1"),
+                    translated_text: "Переведённый текст".into(),
+                    completion: BlockCompletion::Completed,
+                    failure_message: None,
+                }],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        let ordinary_a = RequestId::new();
+        let current = TranslationPreviewSlot {
+            preview: Rc::new(TranslationPreview::new().unwrap()),
+            presenter: attached_presenter(51),
+            attached: Rc::new(Cell::new(false)),
+        };
+        let previews = Rc::new(RefCell::new(TranslationPreviewRegistry {
+            current: current.clone(),
+            current_request: Some(ordinary_a),
+            pinned: Vec::new(),
+            blur_radius: 0,
+        }));
+
+        let (snapshot, _, _) = completed_screen_result_snapshot(&coordinator, screen_b).unwrap();
+        let retired = take_terminal_compact_before_screen_result(&previews, screen_b, |request| {
+            coordinator.borrow().is_active_work_request(request)
+        })
+        .unwrap();
+        retire_translation_preview(&retired, "screen_result_ready");
+        close_screen_translation_request(&coordinator, ordinary_a, |_| {});
+
+        assert_eq!(snapshot.request_id, screen_b);
+        assert_eq!(snapshot.blocks[0].translation, "Переведённый текст");
+        assert_eq!(previews.borrow().current_request, None);
+        assert!(!current.presenter.has_active_presentation());
+        assert!(coordinator.borrow().result_snapshot(screen_b).is_ok());
+    }
+
+    #[test]
+    fn stale_screen_failure_does_not_complete_a_newer_request() {
+        let coordinator = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+        let stale_request = RequestId::new();
+        recognized_request(&coordinator, stale_request);
+        let current_request = RequestId::new();
+        let anchor = recognized_request(&coordinator, current_request);
+
+        assert_eq!(
+            finish_screen_translation_failure(&coordinator, stale_request),
+            None
+        );
+        assert!(coordinator.borrow().has_active_work());
+        assert_eq!(coordinator.borrow().anchor(current_request), Some(anchor));
+    }
+
+    #[test]
+    fn dismissing_ocr_progress_releases_the_borrow_before_cancellation_cleanup() {
+        let coordinator = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+        let request_id = RequestId::new();
+        let anchor = PhysicalRect {
+            x: 1909,
+            y: 611,
+            width: 1,
+            height: 1,
+        };
+        coordinator.borrow_mut().begin(request_id);
+        assert!(coordinator.borrow_mut().selected(request_id, anchor));
+        let mut cancelled = false;
+
+        close_screen_translation_request(&coordinator, request_id, |cancellation| {
+            assert_eq!(cancellation, ScreenTranslationCancellation::Ocr(request_id));
+            coordinator.borrow_mut().discard_pending(request_id);
+            cancelled = true;
+        });
+
+        assert!(cancelled);
+        assert!(!coordinator.borrow().has_active_work());
+        let next_request = RequestId::new();
+        recognized_request(&coordinator, next_request);
+        assert_eq!(coordinator.borrow().anchor(next_request), Some(anchor));
+    }
+
+    fn pending_translation() -> PendingTranslation {
+        PendingTranslation {
+            origin: TranslationOrigin::Translator,
+            source_text: "Retain the failed request".to_owned(),
+            source_language: None,
+            target_language: None,
+            language_policy: TranslationLanguagePolicy::default(),
+            started: Instant::now(),
+            request_started_unix_ms: 1,
+            first_partial_shown: false,
+            stable_paragraphs: None,
+        }
+    }
+
+    #[test]
+    fn failed_cloak_releases_registry_and_empty_id_presenter_is_retired_before_reuse() {
+        i_slint_backend_testing::init_no_event_loop();
+        let stale = RequestId::new();
+        let next = RequestId::new();
+        let current = TranslationPreviewSlot {
+            preview: Rc::new(TranslationPreview::new().unwrap()),
+            presenter: presented_presenter(42),
+            attached: Rc::new(Cell::new(false)),
+        };
+        let pinned = TranslationPreviewSlot {
+            preview: Rc::new(TranslationPreview::new().unwrap()),
+            presenter: attached_presenter(43),
+            attached: Rc::new(Cell::new(false)),
+        };
+        pinned.preview.set_pinned(true);
+        let registry = Rc::new(RefCell::new(TranslationPreviewRegistry {
+            current: current.clone(),
+            current_request: Some(stale),
+            pinned: vec![pinned.clone()],
+            blur_radius: 0,
+        }));
+
+        assert!(cloak_compact_previews_owned(&registry).is_err());
+        assert!(registry.try_borrow_mut().is_ok());
+        current.preview.set_request_id("".into());
+        let retired = take_terminal_compact_before_screen_result(&registry, next, |_| false)
+            .expect("terminal unpinned preview must be retired even with empty request id");
+        retire_translation_preview(&retired, "test_result_ready");
+        assert!(!current.presenter.has_active_presentation());
+        assert_eq!(registry.borrow().pinned.len(), 1);
+        assert!(pinned.preview.get_pinned());
+
+        registry.borrow_mut().reserve_current(next);
+        prepare_without_native(&current.presenter);
+        show_translation_preview_at(next, None, "", "retry result", &registry, true);
+        assert_eq!(current.preview.get_request_id().as_str(), next.to_string());
+        assert!(!current.presenter.has_active_presentation());
+        prepare_without_native(&current.presenter);
+    }
+
+    #[test]
+    fn failed_screen_document_is_released_when_its_unpinned_compact_is_superseded() {
+        i_slint_backend_testing::init_no_event_loop();
+        let coordinator = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+        let failed = RequestId::new();
+        recognized_request(&coordinator, failed);
+        assert!(finish_screen_translation_failure(&coordinator, failed).is_some());
+        let current = TranslationPreviewSlot {
+            preview: Rc::new(TranslationPreview::new().unwrap()),
+            presenter: attached_presenter(45),
+            attached: Rc::new(Cell::new(false)),
+        };
+        let previews = Rc::new(RefCell::new(TranslationPreviewRegistry {
+            current: current.clone(),
+            current_request: Some(failed),
+            pinned: Vec::new(),
+            blur_radius: 0,
+        }));
+        let next = RequestId::new();
+        assert!(matches!(
+            coordinator.borrow_mut().begin(next),
+            ScreenTranslationBegin::Started(_)
+        ));
+        assert!(coordinator.borrow().source_text(failed).is_some());
+        let retired = take_superseded_screen_compact(&previews, &coordinator, Some(failed), next);
+        assert!(retired.is_some());
+        assert!(coordinator.borrow().source_text(failed).is_none());
+        assert_eq!(previews.borrow().current_request, None);
+        assert!(coordinator.borrow().is_selecting(next));
+
+        coordinator.borrow_mut().close(next);
+        let pinned = RequestId::new();
+        recognized_request(&coordinator, pinned);
+        assert!(finish_screen_translation_failure(&coordinator, pinned).is_some());
+        previews.borrow_mut().current_request = Some(pinned);
+        current.preview.set_pinned(true);
+        let later = RequestId::new();
+        assert!(matches!(
+            coordinator.borrow_mut().begin(later),
+            ScreenTranslationBegin::Started(_)
+        ));
+        assert!(
+            take_superseded_screen_compact(&previews, &coordinator, Some(pinned), later).is_none()
+        );
+        assert!(coordinator.borrow().source_text(pinned).is_some());
+    }
+
+    #[test]
+    fn glossary_term_save_never_replaces_the_whole_screen_block() {
+        use rust_protocol::{
+            BlockCompletion, TranslatedScreenBlock, TranslationBackendCapabilities,
+            TranslationLanguage,
+        };
+
+        let coordinator = Rc::new(RefCell::new(ScreenTranslationCoordinator::default()));
+        let request_id = RequestId::new();
+        recognized_request(&coordinator, request_id);
+        coordinator
+            .borrow_mut()
+            .apply_completed(
+                request_id,
+                0,
+                vec![TranslatedScreenBlock {
+                    block_id: ScreenBlockId::from("block-1"),
+                    translated_text: "Бросает молнию и наносит урон".into(),
+                    completion: BlockCompletion::Completed,
+                    failure_message: None,
+                }],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        let before = coordinator.borrow().result_snapshot(request_id).unwrap().0;
+        let id = ScreenBlockId::from("block-1");
+        assert_eq!(
+            apply_screen_translation_edit_for_scope(
+                &coordinator,
+                request_id,
+                &id,
+                before.revision,
+                EditorCommitScope::for_source("Recognized screen text", "lightning"),
+                "молния".into(),
+            )
+            .unwrap(),
+            None,
+        );
+        let after_term = coordinator.borrow().result_snapshot(request_id).unwrap().0;
+        assert_eq!(after_term.revision, before.revision);
+        assert_eq!(
+            after_term.blocks[0].translation,
+            before.blocks[0].translation
+        );
+        assert_eq!(
+            EditorCommitScope::for_source("Recognized screen text", " Recognized screen text "),
+            EditorCommitScope::GlossaryTerm,
+        );
+        assert_eq!(
+            apply_screen_translation_edit_for_scope(
+                &coordinator,
+                request_id,
+                &id,
+                before.revision,
+                EditorCommitScope::for_source("Recognized screen text", " Recognized screen text "),
+                "один термин".into(),
+            )
+            .unwrap(),
+            None,
+        );
+        assert_eq!(
+            coordinator
+                .borrow()
+                .result_snapshot(request_id)
+                .unwrap()
+                .0
+                .blocks[0]
+                .translation,
+            before.blocks[0].translation,
+        );
+
+        assert!(
+            apply_screen_translation_edit_for_scope(
+                &coordinator,
+                request_id,
+                &id,
+                before.revision,
+                EditorCommitScope::for_source("Recognized screen text", "Recognized screen text"),
+                "Исправленная строка".into(),
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(
+            coordinator
+                .borrow()
+                .result_snapshot(request_id)
+                .unwrap()
+                .0
+                .blocks[0]
+                .translation,
+            "Исправленная строка"
+        );
+    }
+
+    #[test]
+    fn ordinary_failure_keeps_pending_origin_when_no_install_is_offered() {
+        let mut pending = Some(pending_translation());
+        assert!(take_pending_translation_install_offer(None, &mut pending).is_none());
+        let retained = pending.expect("ordinary failure must retain its delivery origin");
+        assert!(matches!(retained.origin, TranslationOrigin::Translator));
+        assert_eq!(retained.source_text, "Retain the failed request");
+    }
+
+    #[test]
+    fn offered_install_takes_the_pending_request_once() {
+        let mut pending = Some(pending_translation());
+        let offer = CompactInstallOffer {
+            catalog_id: "compact-test".to_owned(),
+            display_name: "Compact test".to_owned(),
+            size_bytes: 7,
+        };
+        let (actual, transferred) =
+            take_pending_translation_install_offer(Some(offer.clone()), &mut pending).unwrap();
+        assert_eq!(actual, offer);
+        assert!(pending.is_none());
+        assert_eq!(transferred.source_text, "Retain the failed request");
+        assert!(take_pending_translation_install_offer(Some(offer), &mut pending).is_none());
     }
 }
 

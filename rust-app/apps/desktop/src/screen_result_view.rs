@@ -7,53 +7,12 @@ use crate::{
 };
 
 const MIN_FONT_SIZE: f32 = 12.0;
-const FONT_SIZES: [f32; 3] = [14.0, 13.0, MIN_FONT_SIZE];
-// The layout runs on the UI thread. A distant empty patch is less useful than
-// the guaranteed below-image fallback, so bound full pixel checks per row.
-const MAX_QUIET_CALLOUT_CANDIDATES: usize = 96;
-const MAX_QUIET_CANDIDATES_PER_LAYOUT: usize = 256;
-const MAX_QUIET_PIXELS_PER_LAYOUT: usize = 2_000_000;
+const BODY_FONT_SIZE: f32 = 14.0;
 type LayoutRect = (f32, f32, f32, f32);
-type OccupiedSource = (usize, LayoutRect);
-
-struct QuietSearchImage<'a> {
-    frame: &'a rust_platform_windows::screen_capture::RgbaFrame,
-    crop: CropPixelSize,
-    viewport: (f32, f32),
-}
-
-struct QuietSearchBudget {
-    candidates_left: usize,
-    pixels_left: usize,
-}
-
-impl QuietSearchBudget {
-    fn for_layout() -> Self {
-        Self {
-            candidates_left: MAX_QUIET_CANDIDATES_PER_LAYOUT,
-            pixels_left: MAX_QUIET_PIXELS_PER_LAYOUT,
-        }
-    }
-
-    fn take_candidate(&mut self) -> bool {
-        if self.candidates_left == 0 || self.pixels_left == 0 {
-            return false;
-        }
-        self.candidates_left -= 1;
-        true
-    }
-
-    fn take_pixels(&mut self, count: usize) -> bool {
-        if count > self.pixels_left {
-            return false;
-        }
-        self.pixels_left -= count;
-        true
-    }
-}
 const TEXT_HORIZONTAL_PADDING: f32 = 8.0;
-const TEXT_VERTICAL_PADDING: f32 = 6.0;
-const MAX_IMAGE_SCALE: f32 = 1.75;
+const TEXT_VERTICAL_PADDING: f32 = 2.0;
+const MAX_IMAGE_SCALE: f32 = 1.0;
+const MAX_VERTICAL_NUDGE: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultViewMode {
@@ -169,6 +128,7 @@ pub(crate) struct BlockLayout {
     pub(crate) block_id: ScreenBlockId,
     pub(crate) source: String,
     pub(crate) translation: String,
+    pub(crate) display_translation: String,
     pub(crate) x: f32,
     pub(crate) y: f32,
     pub(crate) width: f32,
@@ -182,6 +142,8 @@ pub(crate) struct BlockLayout {
     pub(crate) placed: bool,
     pub(crate) callout: bool,
     pub(crate) not_placeable: bool,
+    pub(crate) editable_source: bool,
+    pub(crate) overflow: bool,
     pub(crate) font_size: f32,
 }
 
@@ -314,482 +276,314 @@ pub(crate) fn plan_screen_result_layout_with_frame(
     projection: ResultViewMode,
     work_area: LogicalWorkArea,
     measurer: &dyn ScreenTextMeasurer,
-    frame: Option<&rust_platform_windows::screen_capture::RgbaFrame>,
-) -> ScreenResultLayoutPlan {
-    let mut budget = QuietSearchBudget::for_layout();
-    plan_screen_result_layout_with_budget(
-        crop,
-        blocks,
-        projection,
-        work_area,
-        measurer,
-        frame,
-        &mut budget,
-    )
-}
-
-fn plan_screen_result_layout_with_budget(
-    crop: CropPixelSize,
-    blocks: &[BlockLayoutInput],
-    projection: ResultViewMode,
-    work_area: LogicalWorkArea,
-    measurer: &dyn ScreenTextMeasurer,
-    frame: Option<&rust_platform_windows::screen_capture::RgbaFrame>,
-    quiet_search_budget: &mut QuietSearchBudget,
+    _frame: Option<&rust_platform_windows::screen_capture::RgbaFrame>,
 ) -> ScreenResultLayoutPlan {
     let (image_width, image_height) = fitted_viewport(crop, work_area);
+    let mut plan = ScreenResultLayoutPlan {
+        blocks: Vec::new(),
+        image_width,
+        image_height,
+        content_width: image_width,
+        content_height: image_height,
+        viewport_height: image_height,
+        masks: Vec::new(),
+        connectors: Vec::new(),
+        unplaceable_rows: Vec::new(),
+    };
     if crop.width == 0 || crop.height == 0 || image_width == 0 || image_height == 0 {
-        return ScreenResultLayoutPlan {
-            blocks: Vec::new(),
-            image_width,
-            image_height,
-            content_width: image_width,
-            content_height: image_height,
-            viewport_height: image_height,
-            masks: Vec::new(),
-            connectors: Vec::new(),
-            unplaceable_rows: Vec::new(),
-        };
+        return plan;
     }
     let scale_x = image_width as f32 / crop.width as f32;
     let scale_y = image_height as f32 / crop.height as f32;
     let viewport = (image_width as f32, image_height as f32);
-    let scaled_fragments = blocks
-        .iter()
-        .map(|block| {
+    let overlay_mode = matches!(projection, ResultViewMode::OnImage | ResultViewMode::Dual);
+    for (index, block) in blocks.iter().enumerate() {
+        let source = scale_rect(block.bounds, scale_x, scale_y, viewport);
+        let replace_source = overlay_mode
+            && block.complete
+            && translation_needs_visual_replacement(&block.source, &block.translation);
+        let mut row = BlockLayout {
+            block_id: block.block_id.clone(),
+            source: block.source.clone(),
+            translation: block.translation.clone(),
+            display_translation: block.translation.clone(),
+            x: source.0,
+            y: source.1,
+            width: source.2,
+            height: source.3,
+            source_x: source.0,
+            source_y: source.1,
+            source_width: source.2,
+            source_height: source.3,
+            low_confidence: block.confidence_milli < 650,
+            replace_source,
+            placed: false,
+            callout: false,
+            not_placeable: overlay_mode
+                && !block.complete
+                && block.source.chars().any(char::is_alphabetic),
+            editable_source: overlay_mode
+                && block.complete
+                && !replace_source
+                && block.source.chars().any(char::is_alphabetic),
+            overflow: false,
+            font_size: MIN_FONT_SIZE,
+        };
+        if replace_source {
+            let preferred = preferred_font_size(block, scale_y);
+            let adjacent_value = adjacent_unchanged_value(block, blocks.get(index + 1))
+                .map(|value| (value, &blocks[index + 1]));
+            let value_rect = adjacent_value
+                .map(|(_, value)| scale_rect(value.bounds, scale_x, scale_y, viewport));
+            let text_source = value_rect.map_or(source, |value| {
+                (
+                    source.0,
+                    source.1,
+                    source.2.min((value.0 - source.0).max(1.0)),
+                    source.3,
+                )
+            });
+            let (mut rect, mut font_size, mut fitted) = in_place_candidate(
+                &projected_text(&row, projection),
+                text_source,
+                viewport,
+                preferred,
+                measurer,
+            );
+            // Keep a nearby unchanged number in the screenshot when the label
+            // leaves it visible. If an edit already includes that value, mask
+            // the original even when the shorter label does not overlap it.
+            if let (Some((value, value_block)), Some(value_rect)) = (adjacent_value, value_rect) {
+                let overlaps_value = rectangles_overlap(rect, value_rect);
+                let includes_value = translation_ends_with_value(&block.translation, value);
+                if overlaps_value && !includes_value {
+                    row.display_translation = format!("{} {value}", block.translation);
+                    (rect, font_size, fitted) = in_place_candidate(
+                        &projected_text(&row, projection),
+                        text_source,
+                        viewport,
+                        preferred,
+                        measurer,
+                    );
+                }
+                if overlaps_value || includes_value {
+                    plan.masks.push(MaskLayout {
+                        block_id: value_block.block_id.clone(),
+                        x: value_rect.0,
+                        y: value_rect.1,
+                        width: value_rect.2,
+                        height: value_rect.3,
+                    });
+                }
+            }
+            if let Some(lower_edge) = plan
+                .blocks
+                .iter()
+                .filter(|prior| prior.placed && horizontal_overlap(rect, prior))
+                .filter(|prior| rect.1 < prior.y + prior.height && rect.1 + rect.3 > prior.y)
+                .map(|prior| prior.y + prior.height + 2.0)
+                .max_by(f32::total_cmp)
+                && lower_edge + rect.3 <= viewport.1
+                && lower_edge - source.1 <= MAX_VERTICAL_NUDGE
+            {
+                rect.1 = lower_edge;
+            }
+            row.x = rect.0;
+            row.y = rect.1;
+            row.width = rect.2;
+            row.height = rect.3;
+            row.font_size = font_size;
+            row.placed = true;
+            row.overflow = !fitted;
+
+            // Preserve the original glyph masks even if the new phrase is
+            // shorter. The label paints its own measured, local underlay.
             let fragments = if block.fragments.is_empty() {
                 std::slice::from_ref(&block.bounds)
             } else {
                 block.fragments.as_slice()
             };
-            fragments
-                .iter()
-                .map(|fragment| scale_rect(*fragment, scale_x, scale_y, viewport))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let occupied_source = scaled_fragments
-        .iter()
-        .enumerate()
-        .flat_map(|(row, fragments)| fragments.iter().copied().map(move |rect| (row, rect)))
-        .collect::<Vec<_>>();
-    let mut order = (0..blocks.len()).collect::<Vec<_>>();
-    order.sort_by(|left, right| {
-        blocks[*left]
-            .bounds
-            .y
-            .cmp(&blocks[*right].bounds.y)
-            .then_with(|| blocks[*left].bounds.x.cmp(&blocks[*right].bounds.x))
-    });
-    let mut placed_rects = Vec::<(f32, f32, f32, f32)>::new();
-    let mut layouts = blocks
-        .iter()
-        .map(|block| {
-            let source = scale_rect(block.bounds, scale_x, scale_y, viewport);
-            let translatable_source = block.source.chars().any(char::is_alphabetic);
-            let overlay_mode = matches!(projection, ResultViewMode::OnImage | ResultViewMode::Dual);
-            let replace_source = overlay_mode
-                && block.complete
-                && translation_needs_visual_replacement(&block.source, &block.translation);
-            BlockLayout {
-                block_id: block.block_id.clone(),
-                source: block.source.clone(),
-                translation: block.translation.clone(),
-                x: source.0,
-                y: source.1,
-                width: source.2,
-                height: source.3,
-                source_x: source.0,
-                source_y: source.1,
-                source_width: source.2,
-                source_height: source.3,
-                low_confidence: block.confidence_milli < 650,
-                replace_source,
-                placed: false,
-                callout: false,
-                not_placeable: overlay_mode && !block.complete && translatable_source,
-                font_size: MIN_FONT_SIZE,
-            }
-        })
-        .collect::<Vec<_>>();
-    let mut masks = Vec::new();
-    let mut unplaceable_rows = layouts
-        .iter()
-        .filter(|layout| layout.not_placeable)
-        .map(|layout| layout.block_id.clone())
-        .collect::<Vec<_>>();
-
-    for index in order {
-        if !layouts[index].replace_source {
-            continue;
-        }
-        let source = (
-            layouts[index].source_x,
-            layouts[index].source_y,
-            layouts[index].source_width,
-            layouts[index].source_height,
-        );
-        let measured_text = projected_text(&layouts[index], projection);
-        let candidate = FONT_SIZES.into_iter().find_map(|font_size| {
-            measured_candidate(&measured_text, source, font_size, measurer, viewport)
-                .filter(|candidate| {
-                    let source_collision = occupied_source.iter().any(|(owner, occupied)| {
-                        *owner != index && rectangles_overlap(*candidate, *occupied)
-                    });
-                    !source_collision
-                        && !placed_rects
-                            .iter()
-                            .any(|occupied| rectangles_overlap(*candidate, *occupied))
-                })
-                .map(|candidate| (candidate, font_size))
-        });
-        if let Some((candidate, font_size)) = candidate {
-            let row = &mut layouts[index];
-            row.x = candidate.0;
-            row.y = candidate.1;
-            row.width = candidate.2;
-            row.height = candidate.3;
-            row.font_size = font_size;
-            row.placed = true;
-            placed_rects.push(candidate);
-            masks.extend(scaled_fragments[index].iter().map(|fragment| MaskLayout {
-                block_id: row.block_id.clone(),
-                x: fragment.0,
-                y: fragment.1,
-                width: fragment.2,
-                height: fragment.3,
+            plan.masks.extend(fragments.iter().map(|fragment| {
+                let mut rect = scale_rect(*fragment, scale_x, scale_y, viewport);
+                if row.display_translation == row.translation
+                    && let Some(value) = value_rect
+                    && rect.0 < value.0
+                {
+                    rect.2 = rect.2.min((value.0 - rect.0).max(0.0));
+                }
+                MaskLayout {
+                    block_id: block.block_id.clone(),
+                    x: rect.0,
+                    y: rect.1,
+                    width: rect.2,
+                    height: rect.3,
+                }
             }));
         }
+        if row.not_placeable {
+            plan.unplaceable_rows.push(row.block_id.clone());
+        }
+        plan.blocks.push(row);
+    }
+    plan
+}
+
+fn adjacent_unchanged_value<'a>(
+    label: &BlockLayoutInput,
+    next: Option<&'a BlockLayoutInput>,
+) -> Option<&'a str> {
+    let value = next?;
+    if !label.source.trim_end().ends_with(':')
+        || !value.complete
+        || value.source != value.translation
+        || value.source.is_empty()
+        || !value
+            .source
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+    {
+        return None;
+    }
+    let label_right = label.bounds.x + label.bounds.width as i32;
+    let gap = value.bounds.x - label_right;
+    let baseline = value.bounds.y - label.bounds.y;
+    (-8..=20).contains(&gap).then_some(())?;
+    (-6..=6)
+        .contains(&baseline)
+        .then_some(value.source.as_str())
+}
+
+fn translation_ends_with_value(translation: &str, value: &str) -> bool {
+    let Some(prefix) = translation.trim_end().strip_suffix(value) else {
+        return false;
+    };
+    prefix.chars().last().is_none_or(|character| {
+        character.is_whitespace() || matches!(character, ':' | '=' | '(' | '[')
+    })
+}
+
+fn horizontal_overlap(rect: LayoutRect, prior: &BlockLayout) -> bool {
+    rect.0 < prior.x + prior.width && rect.0 + rect.2 > prior.x
+}
+
+fn rectangles_overlap(left: LayoutRect, right: LayoutRect) -> bool {
+    left.0 < right.0 + right.2
+        && left.0 + left.2 > right.0
+        && left.1 < right.1 + right.3
+        && left.1 + left.3 > right.1
+}
+
+fn preferred_font_size(block: &BlockLayoutInput, scale: f32) -> f32 {
+    let heading = block.source.chars().any(char::is_alphabetic)
+        && block
+            .source
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .all(char::is_uppercase)
+        && block.source.chars().count() <= 36
+        && block.bounds.width >= 100
+        && block.bounds.height >= 27;
+    if heading {
+        (20.0 * scale).max(MIN_FONT_SIZE)
+    } else {
+        (BODY_FONT_SIZE * scale).max(MIN_FONT_SIZE)
+    }
+}
+
+/// Prefer the source rectangle, then grow beside it. OCR rectangles may
+/// overlap already; another row is not a reason to detach this translation.
+fn in_place_candidate(
+    text: &str,
+    source: LayoutRect,
+    viewport: (f32, f32),
+    preferred_font_size: f32,
+    measurer: &dyn ScreenTextMeasurer,
+) -> (LayoutRect, f32, bool) {
+    let font_sizes = [
+        preferred_font_size,
+        (preferred_font_size - 2.0).max(MIN_FONT_SIZE),
+        BODY_FONT_SIZE.min(preferred_font_size),
+        MIN_FONT_SIZE,
+    ];
+    for font_size in font_sizes {
+        if let Some(rect) = measured_candidate(text, source, font_size, measurer, viewport) {
+            return (rect, font_size, true);
+        }
     }
 
-    // An OCR row is not a text-layout box: the translated phrase can be much
-    // longer than its original. Keep its source glyphs masked and give the
-    // translation readable space below the image when no in-place fit exists.
-    let mut content_height = image_height as f32;
-    for index in 0..layouts.len() {
-        if !layouts[index].replace_source || layouts[index].placed {
-            continue;
+    let remaining = (
+        (viewport.0 - source.0).max(1.0),
+        (viewport.1 - source.1).max(1.0),
+    );
+    for font_size in font_sizes {
+        if let Some(rect) = grown_candidate(text, source, remaining, font_size, measurer) {
+            return (rect, font_size, true);
         }
-        let font_size = FONT_SIZES[0];
-        let measured_text = projected_text(&layouts[index], projection);
-        let source = (
-            layouts[index].source_x,
-            layouts[index].source_y,
-            layouts[index].source_width,
-            layouts[index].source_height,
-        );
-        let quiet_candidate = frame.and_then(|frame| {
-            [520.0_f32, 360.0, 240.0]
-                .into_iter()
-                .filter_map(|preferred_width| {
-                    let width = preferred_width.min((image_width as f32 - 16.0).max(1.0));
-                    let measured = measurer.measure(
-                        &measured_text,
-                        (width - TEXT_HORIZONTAL_PADDING).max(1.0),
-                        font_size,
-                    );
-                    let height = measured.height + TEXT_VERTICAL_PADDING + 8.0;
-                    (measured.height.is_finite() && height <= image_height as f32 - 16.0)
-                        .then_some((width, height))
-                })
-                .find_map(|(width, height)| {
-                    find_quiet_callout(
-                        QuietSearchImage {
-                            frame,
-                            crop,
-                            viewport,
-                        },
-                        (width, height),
-                        source,
-                        &occupied_source,
-                        &placed_rects,
-                        quiet_search_budget,
-                    )
-                })
-        });
-        if let Some(candidate) = quiet_candidate {
-            let row = &mut layouts[index];
-            row.x = candidate.0;
-            row.y = candidate.1;
-            row.width = candidate.2;
-            row.height = candidate.3;
-            row.font_size = font_size;
-            row.placed = true;
-            row.callout = true;
-            placed_rects.push(candidate);
-            masks.extend(scaled_fragments[index].iter().map(|fragment| MaskLayout {
-                block_id: row.block_id.clone(),
-                x: fragment.0,
-                y: fragment.1,
-                width: fragment.2,
-                height: fragment.3,
-            }));
-            continue;
-        }
+    }
 
-        let width = (image_width as f32 - 16.0).clamp(1.0, 560.0);
-        let measured = measurer.measure(
-            &measured_text,
-            (width - TEXT_HORIZONTAL_PADDING).max(1.0),
-            font_size,
-        );
-        if !measured.height.is_finite() || measured.height <= 0.0 {
-            layouts[index].not_placeable = true;
-            unplaceable_rows.push(layouts[index].block_id.clone());
-            continue;
+    // At an image edge, move only as far as required to keep the complete
+    // measured label inside the image; it remains over its source region.
+    for font_size in font_sizes {
+        if let Some(mut rect) = grown_candidate(text, source, viewport, font_size, measurer) {
+            rect.0 = source.0.min((viewport.0 - rect.2).max(0.0));
+            rect.1 = source.1.min((viewport.1 - rect.3).max(0.0));
+            return (rect, font_size, true);
         }
-        let height = measured.height + TEXT_VERTICAL_PADDING + 8.0;
-        let x = layouts[index]
-            .source_x
-            .clamp(8.0, (image_width as f32 - width - 8.0).max(8.0));
-        content_height += 10.0;
-        let row = &mut layouts[index];
-        row.x = x;
-        row.y = content_height;
-        row.width = width;
-        row.height = height;
-        row.font_size = font_size;
-        row.placed = true;
-        row.callout = true;
-        masks.extend(scaled_fragments[index].iter().map(|fragment| MaskLayout {
-            block_id: row.block_id.clone(),
-            x: fragment.0,
-            y: fragment.1,
-            width: fragment.2,
-            height: fragment.3,
-        }));
-        content_height += height;
     }
-    if content_height > image_height as f32 {
-        content_height += 8.0;
-    }
-    let content_height = content_height.ceil().min(u32::MAX as f32) as u32;
-    let viewport_height = content_height.min((work_area.height - 70.0).max(1.0) as u32);
-    let connectors = layouts
-        .iter()
-        .filter(|row| row.callout)
-        .map(callout_connector)
-        .collect();
 
-    ScreenResultLayoutPlan {
-        blocks: layouts,
-        image_width,
-        image_height,
-        content_width: image_width,
-        content_height,
-        viewport_height,
-        masks,
-        connectors,
-        unplaceable_rows,
-    }
+    // A pathological paragraph can exceed the entire image at the readable
+    // minimum. Clip its local label, while retaining the complete string for
+    // the editor and text projection. Never create an external callout.
+    (
+        (source.0, source.1, remaining.0, remaining.1),
+        MIN_FONT_SIZE,
+        false,
+    )
+}
+
+fn grown_candidate(
+    text: &str,
+    source: LayoutRect,
+    available: (f32, f32),
+    font_size: f32,
+    measurer: &dyn ScreenTextMeasurer,
+) -> Option<LayoutRect> {
+    // Five bounded measurements find a compact local box without reading or
+    // searching screenshot pixels on the UI thread.
+    [1.0, 1.25, 1.5, 2.0, f32::INFINITY]
+        .into_iter()
+        .filter_map(|growth| {
+            let requested_width = (source.2 * growth).min(available.0).max(1.0);
+            let measured = measurer.measure(
+                text,
+                (requested_width - TEXT_HORIZONTAL_PADDING).max(1.0),
+                font_size,
+            );
+            let width = source
+                .2
+                .min(available.0)
+                .max(measured.width + TEXT_HORIZONTAL_PADDING);
+            let height = measured.height + TEXT_VERTICAL_PADDING;
+            (measured.width.is_finite()
+                && measured.height.is_finite()
+                && measured.height > 0.0
+                && width <= requested_width + 0.5
+                && width <= available.0
+                && height <= available.1)
+                .then_some((source.0, source.1, width, height))
+        })
+        .min_by(|left, right| {
+            left.3
+                .total_cmp(&right.3)
+                .then_with(|| (left.2 * left.3).total_cmp(&(right.2 * right.3)))
+        })
 }
 
 fn projected_text(row: &BlockLayout, projection: ResultViewMode) -> String {
     match projection {
-        ResultViewMode::Dual => format!("{}\n{}", row.source, row.translation),
-        _ => row.translation.clone(),
+        ResultViewMode::Dual => format!("{}\n{}", row.source, row.display_translation),
+        _ => row.display_translation.clone(),
     }
-}
-
-fn callout_connector(row: &BlockLayout) -> ConnectorLayout {
-    let source_centre_x = row.source_x + row.source_width / 2.0;
-    let source_centre_y = row.source_y + row.source_height / 2.0;
-    let target_centre_x = row.x + row.width / 2.0;
-    let target_centre_y = row.y + row.height / 2.0;
-    let horizontal =
-        (target_centre_x - source_centre_x).abs() > (target_centre_y - source_centre_y).abs();
-    let (start_x, start_y, end_x, end_y) = if horizontal {
-        if target_centre_x >= source_centre_x {
-            (
-                row.source_x + row.source_width,
-                source_centre_y,
-                row.x,
-                target_centre_y,
-            )
-        } else {
-            (
-                row.source_x,
-                source_centre_y,
-                row.x + row.width,
-                target_centre_y,
-            )
-        }
-    } else if target_centre_y >= source_centre_y {
-        (
-            source_centre_x,
-            row.source_y + row.source_height,
-            target_centre_x,
-            row.y,
-        )
-    } else {
-        (
-            source_centre_x,
-            row.source_y,
-            target_centre_x,
-            row.y + row.height,
-        )
-    };
-    ConnectorLayout {
-        block_id: row.block_id.clone(),
-        start_x,
-        start_y,
-        end_x,
-        end_y,
-    }
-}
-
-fn find_quiet_callout(
-    image: QuietSearchImage<'_>,
-    size: (f32, f32),
-    source: (f32, f32, f32, f32),
-    occupied_source: &[OccupiedSource],
-    placed: &[LayoutRect],
-    budget: &mut QuietSearchBudget,
-) -> Option<LayoutRect> {
-    let QuietSearchImage {
-        frame,
-        crop,
-        viewport,
-    } = image;
-    if budget.candidates_left == 0 || budget.pixels_left == 0 {
-        return None;
-    }
-    let max_x = (viewport.0 - size.0).floor() as i32;
-    let max_y = (viewport.1 - size.1).floor() as i32;
-    if max_x < 8 || max_y < 8 {
-        return None;
-    }
-    enum ProbeResult {
-        Found(LayoutRect),
-        Continue,
-        Exhausted,
-    }
-    let mut examined = 0;
-    let mut probe = |x: f32, y: f32| {
-        if examined >= MAX_QUIET_CALLOUT_CANDIDATES || !budget.take_candidate() {
-            return ProbeResult::Exhausted;
-        }
-        examined += 1;
-        let candidate = (x, y, size.0, size.1);
-        if x >= 8.0
-            && y >= 8.0
-            && x + size.0 <= viewport.0 - 8.0
-            && y + size.1 <= viewport.1 - 8.0
-            && !occupied_source
-                .iter()
-                .any(|(_, rect)| rectangles_overlap(candidate, *rect))
-            && !placed
-                .iter()
-                .any(|rect| rectangles_overlap(candidate, *rect))
-            && quiet_image_rect(frame, crop, viewport, candidate, budget)
-        {
-            ProbeResult::Found(candidate)
-        } else {
-            ProbeResult::Continue
-        }
-    };
-    let source_centre = (source.0 + source.2 / 2.0, source.1 + source.3 / 2.0);
-    let preferred = [
-        (source.0, source.1 + source.3 + 8.0),
-        (source.0, source.1 - size.1 - 8.0),
-        (source.0 + source.2 + 8.0, source.1),
-        (source.0 - size.0 - 8.0, source.1),
-    ];
-    for (x, y) in preferred {
-        match probe(x, y) {
-            ProbeResult::Found(rect) => return Some(rect),
-            ProbeResult::Exhausted => return None,
-            ProbeResult::Continue => {}
-        }
-    }
-    let anchor_x = (source_centre.0 - size.0 / 2.0).round() as i32;
-    let anchor_y = (source_centre.1 - size.1 / 2.0).round() as i32;
-    let max_radius = (viewport.0.max(viewport.1) / 16.0).ceil() as i32 + 2;
-    // Visit nearby positions in expanding rings. Never build and sort a full
-    // desktop-sized grid for every OCR row, and prefer the below-image fallback
-    // once the useful local search budget is exhausted.
-    for radius in 0..=max_radius {
-        if radius == 0 {
-            match probe(anchor_x as f32, anchor_y as f32) {
-                ProbeResult::Found(rect) => return Some(rect),
-                ProbeResult::Exhausted => return None,
-                ProbeResult::Continue => {}
-            }
-        } else {
-            for dx in -radius..=radius {
-                for y in [anchor_y - radius * 16, anchor_y + radius * 16] {
-                    match probe((anchor_x + dx * 16) as f32, y as f32) {
-                        ProbeResult::Found(rect) => return Some(rect),
-                        ProbeResult::Exhausted => return None,
-                        ProbeResult::Continue => {}
-                    }
-                }
-            }
-            for dy in (-radius + 1)..radius {
-                for x in [anchor_x - radius * 16, anchor_x + radius * 16] {
-                    match probe(x as f32, (anchor_y + dy * 16) as f32) {
-                        ProbeResult::Found(rect) => return Some(rect),
-                        ProbeResult::Exhausted => return None,
-                        ProbeResult::Continue => {}
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-fn quiet_image_rect(
-    frame: &rust_platform_windows::screen_capture::RgbaFrame,
-    crop: CropPixelSize,
-    viewport: (f32, f32),
-    rect: (f32, f32, f32, f32),
-    budget: &mut QuietSearchBudget,
-) -> bool {
-    if frame.rect.width != crop.width || frame.rect.height != crop.height {
-        return false;
-    }
-    let source_left = (rect.0 / viewport.0 * crop.width as f32).floor().max(0.0) as usize;
-    let source_top = (rect.1 / viewport.1 * crop.height as f32).floor().max(0.0) as usize;
-    let source_right = ((rect.0 + rect.2) / viewport.0 * crop.width as f32)
-        .ceil()
-        .min(crop.width as f32) as usize;
-    let source_bottom = ((rect.1 + rect.3) / viewport.1 * crop.height as f32)
-        .ceil()
-        .min(crop.height as f32) as usize;
-    if !budget.take_pixels(
-        source_right
-            .saturating_sub(source_left)
-            .saturating_mul(source_bottom.saturating_sub(source_top)),
-    ) {
-        return false;
-    }
-    let mut baseline: Option<[u8; 3]> = None;
-    for y in source_top..source_bottom {
-        for x in source_left..source_right {
-            let offset = y
-                .saturating_mul(frame.stride as usize)
-                .saturating_add(x.saturating_mul(4));
-            let Some(pixel) = frame.pixels.get(offset..offset.saturating_add(3)) else {
-                return false;
-            };
-            if pixel.iter().copied().max().unwrap_or(255) > 56 {
-                return false;
-            }
-            if let Some(base) = baseline {
-                if pixel
-                    .iter()
-                    .zip(base)
-                    .any(|(channel, base)| channel.abs_diff(base) > 10)
-                {
-                    return false;
-                }
-            } else {
-                baseline = Some([pixel[0], pixel[1], pixel[2]]);
-            }
-        }
-    }
-    true
 }
 
 fn scale_rect(
@@ -831,13 +625,6 @@ fn measured_candidate(
         && candidate.0 + width <= viewport.0 + 0.5
         && y + height <= viewport.1 + 0.5)
         .then_some((candidate.0, y, width, height))
-}
-
-fn rectangles_overlap(left: (f32, f32, f32, f32), right: (f32, f32, f32, f32)) -> bool {
-    left.0 < right.0 + right.2
-        && right.0 < left.0 + left.2
-        && left.1 < right.1 + right.3
-        && right.1 < left.1 + left.3
 }
 
 pub(crate) fn apply_snapshot(
@@ -890,7 +677,7 @@ pub(crate) fn apply_snapshot(
         .map(|block| ScreenBlockOverlay {
             block_id: block.block_id.as_str().into(),
             source: block.source.clone().into(),
-            translation: block.translation.clone().into(),
+            translation: block.display_translation.clone().into(),
             x: block.x,
             y: block.y,
             width: block.width,
@@ -904,6 +691,8 @@ pub(crate) fn apply_snapshot(
             placed: block.placed,
             callout: block.callout,
             not_placeable: block.not_placeable,
+            editable_source: block.editable_source,
+            overflow: block.overflow,
             font_size: block.font_size,
         })
         .collect::<Vec<_>>();
@@ -954,20 +743,21 @@ pub(crate) fn editor_position(
     block_index: usize,
 ) -> Option<(f32, f32)> {
     let block = window.get_screen_blocks().row_data(block_index)?;
-    let content_width = window.get_screen_content_width().max(1.0);
-    let content_height = window.get_screen_content_height().max(1.0);
-    let editor_width = 330.0_f32.min((content_width - 16.0).max(1.0));
-    let editor_height = 282.0_f32.min((content_height - 16.0).max(1.0));
-    let right_candidate = block.x + block.width + 8.0;
-    let left_candidate = block.x - editor_width - 8.0;
-    let x = if right_candidate + editor_width <= content_width {
+    let visible_width = window.get_screen_visible_width().max(1.0);
+    let visible_height = window.get_screen_visible_height().max(1.0);
+    let editor_width = 330.0_f32.min((visible_width - 16.0).max(1.0));
+    let editor_height = 282.0_f32.min((visible_height - 16.0).max(1.0));
+    let source_x = block.x - window.get_screen_scroll_x();
+    let right_candidate = source_x + block.width + 8.0;
+    let left_candidate = source_x - editor_width - 8.0;
+    let x = if right_candidate + editor_width <= visible_width {
         right_candidate
     } else {
         left_candidate
     }
-    .clamp(8.0, (content_width - editor_width - 8.0).max(8.0));
+    .clamp(8.0, (visible_width - editor_width - 8.0).max(8.0));
     let y = (block.y - window.get_screen_scroll_offset())
-        .clamp(8.0, (content_height - editor_height - 8.0).max(8.0));
+        .clamp(8.0, (visible_height - editor_height - 8.0).max(8.0));
     Some((x, y))
 }
 
@@ -1053,6 +843,122 @@ mod tests {
         }
     }
 
+    #[test]
+    fn in_place_arc_lightning_keeps_overlapping_ocr_rows_at_their_source() {
+        // Recorded Arc Lightning description: the OCR rectangles already overlap.
+        let blocks = [
+            BlockLayoutInput {
+                block_id: ScreenBlockId::from("description"),
+                source: "Hurls a bolt of lightning that leaps through nearby enemy units that"
+                    .into(),
+                translation:
+                    "Бросает молнию, которая перепрыгивает через nearby вражеские юниты, что".into(),
+                bounds: local_rect(134, 44, 506, 32),
+                fragments: vec![local_rect(134, 44, 506, 32)],
+                complete: true,
+                confidence_milli: 980,
+            },
+            BlockLayoutInput {
+                block_id: ScreenBlockId::from("damage"),
+                source: "deal damage.".into(),
+                translation: "наносит урон.".into(),
+                bounds: local_rect(133, 66, 108, 33),
+                fragments: vec![local_rect(133, 66, 108, 33)],
+                complete: true,
+                confidence_milli: 980,
+            },
+        ];
+        let plan = plan_screen_result_layout(
+            crop_size(673, 427),
+            &blocks,
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 705.0,
+                height: 497.0,
+            },
+            &normal_measurer(),
+        );
+
+        for (row, (x, y)) in plan.blocks.iter().zip([(134.0, 44.0), (133.0, 66.0)]) {
+            assert!(row.placed && !row.callout && !row.not_placeable);
+            assert_eq!(row.x, x);
+            assert!(row.y >= y && row.y - y < 12.0);
+        }
+        assert!(!overlaps(&plan.blocks[0], &plan.blocks[1]));
+        assert_eq!((plan.content_width, plan.content_height), (673, 427));
+        assert!(plan.connectors.is_empty());
+        assert_eq!(plan.masks.len(), 2);
+    }
+
+    #[test]
+    fn in_place_translation_grows_from_its_source_without_an_external_panel() {
+        let block = BlockLayoutInput {
+            block_id: ScreenBlockId::from("immunity"),
+            source: "PIERCES SPELL IMMUNITY: No".into(),
+            translation: "ПРОБИВАЕТ ИММУНИТЕТ К МАГИИ: Нет".into(),
+            bounds: local_rect(331, 153, 205, 23),
+            fragments: vec![local_rect(331, 153, 187, 23), local_rect(512, 158, 24, 15)],
+            complete: true,
+            confidence_milli: 980,
+        };
+        let plan = plan_screen_result_layout(
+            crop_size(673, 427),
+            &[block],
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 705.0,
+                height: 497.0,
+            },
+            &normal_measurer(),
+        );
+        let row = &plan.blocks[0];
+        assert!(row.placed && !row.callout && !row.not_placeable);
+        assert_eq!((row.x, row.y), (331.0, 153.0));
+        assert!(row.width > 205.0 || row.height > 23.0);
+        let measured = normal_measurer().measure(&row.translation, row.width - 8.0, row.font_size);
+        assert!(measured.height + super::TEXT_VERTICAL_PADDING <= row.height + 0.5);
+        assert!(row.x + row.width <= 673.0 && row.y + row.height <= 427.0);
+        assert_eq!((plan.content_width, plan.content_height), (673, 427));
+        assert!(plan.connectors.is_empty());
+    }
+
+    #[test]
+    fn source_headings_keep_a_larger_type_scale_on_native_size_images() {
+        let heading = BlockLayoutInput {
+            block_id: ScreenBlockId::from("arc-title"),
+            source: "ARC LIGHTNING".into(),
+            translation: "АРКОВЫЙ МОЛНИЯ".into(),
+            bounds: local_rect(136, 17, 211, 30),
+            fragments: vec![local_rect(136, 17, 211, 30)],
+            complete: true,
+            confidence_milli: 980,
+        };
+        let body = BlockLayoutInput {
+            block_id: ScreenBlockId::from("arc-body"),
+            source: "Hurls a bolt of lightning that leaps through nearby enemy units that".into(),
+            translation: "Бросает молнию, которая перепрыгивает через nearby вражеские юниты, что"
+                .into(),
+            bounds: local_rect(134, 44, 506, 32),
+            fragments: vec![local_rect(134, 44, 506, 32)],
+            complete: true,
+            confidence_milli: 980,
+        };
+        let plan = plan_screen_result_layout(
+            crop_size(673, 427),
+            &[heading, body],
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 1280.0,
+                height: 720.0,
+            },
+            &normal_measurer(),
+        );
+        assert_eq!((plan.image_width, plan.image_height), (673, 427));
+        assert!(plan.blocks[0].font_size >= 18.0);
+        assert!(plan.blocks[0].font_size > plan.blocks[1].font_size);
+        assert!(!overlaps(&plan.blocks[0], &plan.blocks[1]));
+    }
+
     struct RecordingMeasurer {
         measured: RefCell<Vec<String>>,
     }
@@ -1104,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_uses_a_separate_callout_without_covering_other_image_regions() {
+    fn overflow_grows_a_local_box_without_detaching_the_translation() {
         let long = "A translation that needs more room than its source region can safely provide"
             .repeat(4);
         let block = BlockLayoutInput {
@@ -1129,8 +1035,9 @@ mod tests {
         );
 
         let row = &plan.blocks[0];
-        assert!(row.placed && row.callout);
-        assert!(row.y >= plan.image_height as f32);
+        assert!(row.placed && !row.callout);
+        assert_eq!((row.x, row.y), (40.0, 40.0));
+        assert_eq!(plan.content_height, plan.image_height);
         assert_eq!(plan.masks.len(), 1);
         assert_eq!(plan.masks[0].x, row.source_x);
     }
@@ -1208,30 +1115,12 @@ mod tests {
                 .iter()
                 .all(|mask| mask.block_id.as_str() != "mana-number")
         );
-        assert_eq!(
-            plan.connectors.len(),
-            plan.blocks.iter().filter(|block| block.callout).count()
-        );
-        for connector in &plan.connectors {
-            let source = plan
-                .blocks
-                .iter()
-                .find(|block| block.block_id == connector.block_id)
-                .unwrap();
-            assert!(source.callout);
-            assert!(connector.start_x >= source.source_x);
-            assert!(connector.start_x <= source.source_x + source.source_width);
-            assert!(connector.start_y >= source.source_y);
-            assert!(connector.start_y <= source.source_y + source.source_height);
-            assert!(connector.end_x >= source.x);
-            assert!(connector.end_x <= source.x + source.width);
-            assert!(connector.end_y >= source.y);
-            assert!(connector.end_y <= source.y + source.height);
-        }
+        assert!(plan.connectors.is_empty());
+        assert!(plan.blocks.iter().all(|row| !row.callout));
     }
 
     #[test]
-    fn long_translation_uses_a_quiet_image_area_but_never_covers_bright_content() {
+    fn in_place_translation_does_not_search_for_a_distant_dark_patch() {
         let mut pixels = vec![16_u8; 400 * 250 * 4];
         for pixel in pixels.chunks_exact_mut(4) {
             pixel[3] = 255;
@@ -1276,17 +1165,15 @@ mod tests {
             Some(&frame),
         );
         let row = &plan.blocks[0];
-        assert!(row.callout && row.placed);
+        assert!(!row.callout && row.placed);
+        assert_eq!((row.x, row.y), (100.0, 25.0));
         assert!(row.y + row.height <= plan.image_height as f32);
         assert!(row.x >= 90.0 || row.y >= 90.0);
-        assert!(!super::rectangles_overlap(
-            (row.x, row.y, row.width, row.height),
-            (0.0, 0.0, 90.0, 90.0),
-        ));
+        assert_eq!(plan.content_height, plan.image_height);
     }
 
     #[test]
-    fn nonquiet_image_sends_overflow_below_the_original_pixels() {
+    fn bright_image_keeps_translation_at_the_source() {
         let mut pixels = vec![240_u8; 400 * 250 * 4];
         for pixel in pixels.chunks_exact_mut(4) {
             pixel[3] = 255;
@@ -1325,14 +1212,14 @@ mod tests {
             Some(&frame),
         );
         let row = &plan.blocks[0];
-        assert!(row.callout && row.placed);
-        assert!(row.y >= plan.image_height as f32);
-        assert!(plan.content_height > plan.image_height);
+        assert!(!row.callout && row.placed);
+        assert_eq!((row.x, row.y), (100.0, 25.0));
+        assert_eq!(plan.content_height, plan.image_height);
         assert!(plan.viewport_height <= 250);
     }
 
     #[test]
-    fn dual_callout_reserves_height_for_both_source_and_translation() {
+    fn dual_in_place_label_reserves_height_for_both_source_and_translation() {
         let block = BlockLayoutInput {
             block_id: ScreenBlockId::from("long-description"),
             source: "An English sentence that spans several lines when shown in a narrow card"
@@ -1354,7 +1241,7 @@ mod tests {
             &normal_measurer(),
         );
         let row = &plan.blocks[0];
-        assert!(row.callout);
+        assert!(row.placed && !row.callout);
         let rendered = format!("{}\n{}", row.source, row.translation);
         let measured = normal_measurer().measure(
             &rendered,
@@ -1363,12 +1250,12 @@ mod tests {
         );
         assert!(
             row.height >= measured.height + super::TEXT_VERTICAL_PADDING,
-            "dual callout must not clip the source or its translation"
+            "dual label must not clip the source or its translation"
         );
     }
 
     #[test]
-    fn dark_but_textured_content_is_not_treated_as_empty_space() {
+    fn textured_image_does_not_move_the_translation_away_from_its_source() {
         let mut pixels = vec![0_u8; 400 * 250 * 4];
         for y in 0..250 {
             for x in 0..400 {
@@ -1411,139 +1298,8 @@ mod tests {
             &normal_measurer(),
             Some(&frame),
         );
-        assert!(plan.blocks[0].callout);
-        assert!(plan.blocks[0].y >= plan.image_height as f32);
-    }
-
-    #[test]
-    fn quiet_area_check_detects_a_thin_bright_detail_between_grid_samples() {
-        let mut pixels = vec![16_u8; 100 * 100 * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = 255;
-        }
-        let detail = &mut pixels[(14 * 100 + 14) * 4..][..4];
-        detail[..3].fill(245);
-        let frame = RgbaFrame::try_new(
-            PhysicalRect {
-                x: 0,
-                y: 0,
-                width: 100,
-                height: 100,
-            },
-            100 * 4,
-            pixels,
-        )
-        .unwrap();
-
-        let mut budget = super::QuietSearchBudget::for_layout();
-        assert!(!super::quiet_image_rect(
-            &frame,
-            crop_size(100, 100),
-            (100.0, 100.0),
-            (10.0, 10.0, 50.0, 50.0),
-            &mut budget,
-        ));
-    }
-
-    #[test]
-    fn quiet_area_pixel_budget_is_shared_and_falls_back_conservatively() {
-        let mut pixels = vec![16_u8; 100 * 100 * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = 255;
-        }
-        let frame = RgbaFrame::try_new(
-            PhysicalRect {
-                x: 0,
-                y: 0,
-                width: 100,
-                height: 100,
-            },
-            100 * 4,
-            pixels,
-        )
-        .unwrap();
-        let mut budget = super::QuietSearchBudget {
-            candidates_left: 2,
-            pixels_left: 2_500,
-        };
-        let candidate = (0.0, 0.0, 50.0, 50.0);
-        assert!(super::quiet_image_rect(
-            &frame,
-            crop_size(100, 100),
-            (100.0, 100.0),
-            candidate,
-            &mut budget,
-        ));
-        assert_eq!(budget.pixels_left, 0);
-        assert!(!super::quiet_image_rect(
-            &frame,
-            crop_size(100, 100),
-            (100.0, 100.0),
-            candidate,
-            &mut budget,
-        ));
-        assert_eq!(budget.pixels_left, 0);
-        let mut candidate_budget = super::QuietSearchBudget {
-            candidates_left: 1,
-            pixels_left: 1,
-        };
-        assert!(candidate_budget.take_candidate());
-        assert!(!candidate_budget.take_candidate());
-    }
-
-    #[test]
-    fn dense_result_shares_one_candidate_budget_across_rows_and_widths() {
-        let mut pixels = vec![240_u8; 400 * 250 * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = 255;
-        }
-        let frame = RgbaFrame::try_new(
-            PhysicalRect {
-                x: 0,
-                y: 0,
-                width: 400,
-                height: 250,
-            },
-            400 * 4,
-            pixels,
-        )
-        .unwrap();
-        let blocks = [25, 100]
-            .into_iter()
-            .enumerate()
-            .map(|(index, y)| BlockLayoutInput {
-                block_id: ScreenBlockId::from(format!("row-{index}")),
-                source: "Short".to_owned(),
-                translation: "Длинный перевод, который не помещается в исходную строку".to_owned(),
-                bounds: local_rect(100, y, 100, 20),
-                fragments: vec![local_rect(100, y, 100, 20)],
-                complete: true,
-                confidence_milli: 980,
-            })
-            .collect::<Vec<_>>();
-        let mut budget = super::QuietSearchBudget {
-            candidates_left: 5,
-            pixels_left: 100_000,
-        };
-        let plan = super::plan_screen_result_layout_with_budget(
-            crop_size(400, 250),
-            &blocks,
-            ResultViewMode::OnImage,
-            LogicalWorkArea {
-                width: 432.0,
-                height: 320.0,
-            },
-            &normal_measurer(),
-            Some(&frame),
-            &mut budget,
-        );
-        assert_eq!(budget.candidates_left, 0);
-        assert_eq!(plan.connectors.len(), 2);
-        assert!(
-            plan.blocks
-                .iter()
-                .all(|row| row.callout && row.y >= plan.image_height as f32)
-        );
+        assert!(plan.blocks[0].placed && !plan.blocks[0].callout);
+        assert_eq!((plan.blocks[0].x, plan.blocks[0].y), (100.0, 25.0));
     }
 
     #[test]
@@ -1574,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_binds_a_visible_callout_and_scrollable_canvas_to_the_real_window() {
+    fn snapshot_renders_a_local_underlay_and_preserves_original_pixels() {
         use std::sync::Arc;
 
         use rust_protocol::{BlockCompletion, RequestId, SourceContext};
@@ -1607,7 +1363,7 @@ mod tests {
             blocks: vec![crate::screen_result::ScreenResultBlockSnapshot {
                 block_id: ScreenBlockId::from("overflow"),
                 source: "Short source".to_owned(),
-                translation: "Длинный перевод для читаемой выноски под исходным изображением "
+                translation: "Длинный перевод для читаемой строки на исходном изображении "
                     .repeat(4),
                 completion: BlockCompletion::Completed,
                 failure_message: None,
@@ -1633,40 +1389,88 @@ mod tests {
         super::apply_snapshot(&window, &snapshot).unwrap();
         let row = window.get_screen_blocks().row_data(0).unwrap();
 
-        assert!(row.placed && row.callout);
-        assert!(
-            window.get_screen_total_content_height() > window.get_screen_image_content_height()
+        assert!(row.placed && !row.callout);
+        assert_eq!(
+            window.get_screen_total_content_height(),
+            window.get_screen_image_content_height()
         );
-        assert!(window.get_screen_content_height() <= window.get_screen_total_content_height());
-        let connector = window.get_screen_connectors().row_data(0).unwrap();
+        assert_eq!(window.get_screen_connectors().row_count(), 0);
         window.show().unwrap();
         window.window().set_size(LogicalSize::new(
             window.get_screen_content_width(),
             window.get_screen_content_height() + 38.0,
         ));
         let rendered = window.window().take_snapshot().unwrap();
-        let x = ((connector.start_x + connector.end_x) / 2.0).round() as i32;
-        let y = ((connector.start_y + connector.end_y) / 2.0 + 38.0).round() as i32;
-        let pixels = rendered.as_bytes();
-        let mut found_line_pixel = false;
-        for py in (y - 4).max(0)..=(y + 4).min(rendered.height() as i32 - 1) {
-            for px in (x - 4).max(0)..=(x + 4).min(rendered.width() as i32 - 1) {
-                let offset = (py as usize * rendered.width() as usize + px as usize) * 4;
-                let pixel = &pixels[offset..offset + 3];
-                if pixel[0] > pixel[1].saturating_add(25) && pixel[1] > pixel[2].saturating_add(35)
-                {
-                    found_line_pixel = true;
-                }
-            }
-        }
+        let toolbar_pixel = (18 * rendered.width() as usize + 300) * 4;
+        assert_eq!(rendered.as_bytes()[toolbar_pixel + 3], 255);
+        // The measured label has an opaque local underlay; distant pixels are
+        // still the original screenshot, not a panel or connector background.
+        let sample = |image: &slint::SharedPixelBuffer<slint::Rgba8Pixel>, x: usize, y: usize| {
+            let offset = (y * image.width() as usize + x) * 4;
+            image.as_bytes()[offset..offset + 3].to_vec()
+        };
+        let label_x = (row.x + row.width - 3.0) as usize;
+        let label_y = (row.y + row.height - 3.0 + 38.0) as usize;
         assert!(
-            found_line_pixel,
-            "the source-to-callout line must be visibly painted"
+            sample(&rendered, label_x, label_y)
+                .into_iter()
+                .all(|channel| channel < 65)
+        );
+        // This corner is outside both the source glyph mask and even the
+        // expanded label. The bottom right can legitimately be underlaid by
+        // this deliberately oversized translation.
+        let outside_x = 10;
+        let outside_image_y = 10;
+        assert!(row.x > outside_x as f32 || row.y > outside_image_y as f32);
+        let outside_y = outside_image_y + 38;
+        assert_eq!(sample(&rendered, outside_x, outside_y), [240, 240, 240]);
+
+        window.set_screen_view_mode(1);
+        super::apply_snapshot(&window, &snapshot).unwrap();
+        let original = window.window().take_snapshot().unwrap();
+        assert_eq!(sample(&original, label_x, label_y), [240, 240, 240]);
+        assert_eq!(window.get_screen_masks().row_count(), 0);
+    }
+
+    #[test]
+    fn screen_result_southeast_corner_requests_resize() {
+        use std::{cell::Cell, rc::Rc};
+
+        use slint::{
+            ComponentHandle, LogicalPosition, LogicalSize,
+            platform::{PointerEventButton, WindowEvent},
+        };
+
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .unwrap();
+        let window = crate::ScreenTranslationWindow::new().unwrap();
+        let requested = Rc::new(Cell::new(false));
+        let requested_on_resize = Rc::clone(&requested);
+        window.on_begin_resize(move || requested_on_resize.set(true));
+        window.show().unwrap();
+        window.window().set_size(LogicalSize::new(400.0, 300.0));
+        let position = LogicalPosition::new(395.0, 295.0);
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        window.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        assert!(
+            requested.get(),
+            "the visible corner should initiate a resize"
         );
     }
 
     #[test]
-    fn block_geometry_scales_and_long_text_remains_readable_in_a_callout() {
+    fn block_geometry_scales_and_long_text_grows_within_the_image() {
         let blocks = vec![
             BlockLayoutInput {
                 block_id: ScreenBlockId::from("short"),
@@ -1698,7 +1502,9 @@ mod tests {
         );
         assert_eq!(laid_out[0].width, 100.0);
         assert!(laid_out[0].height >= MIN_FONT_SIZE);
-        assert!(laid_out[1].placed && laid_out[1].callout);
+        assert!(laid_out[1].placed && !laid_out[1].callout);
+        assert!(laid_out[1].x + laid_out[1].width <= 500.0);
+        assert!(laid_out[1].y + laid_out[1].height <= 250.0);
         assert!(laid_out[1].font_size >= MIN_FONT_SIZE);
         assert!(laid_out[1].low_confidence);
     }
@@ -1734,7 +1540,8 @@ mod tests {
         assert_eq!((laid_out[0].source_x, laid_out[0].source_y), (30.0, 13.0));
         assert_eq!((laid_out[1].source_x, laid_out[1].source_y), (30.0, 133.0));
         assert!(laid_out[0].source_y + laid_out[0].source_height <= laid_out[1].source_y);
-        assert!(!overlaps(&laid_out[0], &laid_out[1]));
+        assert_eq!((laid_out[0].x, laid_out[0].y), (30.0, 13.0));
+        assert_eq!((laid_out[1].x, laid_out[1].y), (30.0, 133.0));
     }
 
     #[test]
@@ -1749,13 +1556,13 @@ mod tests {
 
         assert!(width <= 1248);
         assert!(height <= 650);
-        assert_eq!((width, height), (534, 446));
+        assert_eq!((width, height), (305, 255));
     }
 
     #[test]
-    fn adjacent_long_translations_never_overlap_or_hide_unplaceable_source() {
+    fn adjacent_long_translations_remain_near_their_source_even_if_they_overlap() {
         let long =
-            "A translated paragraph that needs a readable callout instead of tiny text ".repeat(4);
+            "A translated paragraph that needs readable text near its original place ".repeat(4);
         let blocks = vec![
             BlockLayoutInput {
                 block_id: ScreenBlockId::from("first"),
@@ -1790,11 +1597,19 @@ mod tests {
                 .filter(|block| block.placed)
                 .all(|block| block.font_size >= MIN_FONT_SIZE)
         );
-        assert!(!overlaps(&laid_out[0], &laid_out[1]));
+        assert!(overlaps(&laid_out[0], &laid_out[1]));
+        assert_eq!((laid_out[0].x, laid_out[0].y), (20.0, 20.0));
+        assert_eq!(laid_out[1].x, 20.0);
+        assert!((45.0..=55.0).contains(&laid_out[1].y));
+        assert!(
+            laid_out
+                .iter()
+                .all(|row| !row.callout && !row.not_placeable)
+        );
     }
 
     #[test]
-    fn dense_results_place_every_complete_translation_in_the_scrollable_canvas() {
+    fn dense_results_keep_every_complete_translation_within_the_image() {
         let long = "A translated paragraph that cannot fit inside its source rectangle ".repeat(5);
         let blocks = (0..8)
             .map(|index| BlockLayoutInput {
@@ -1811,14 +1626,30 @@ mod tests {
         let laid_out = layout_blocks(crop_size(440, 320), 440, 320, &blocks);
 
         assert!(laid_out.iter().all(|block| block.placed));
-        assert!(laid_out.iter().any(|block| block.callout));
-        for (index, left) in laid_out.iter().enumerate() {
-            for right in laid_out.iter().skip(index + 1) {
-                if left.callout && right.callout {
-                    assert!(!overlaps(left, right));
-                }
-            }
-        }
+        assert!(laid_out.iter().all(|row| !row.callout));
+        assert!(laid_out.iter().all(|row| row.y + row.height <= 320.0));
+        assert!(laid_out.iter().all(|row| row.translation == long));
+    }
+
+    #[test]
+    fn dense_underlays_never_nudge_text_far_from_its_source() {
+        let blocks = (0..10)
+            .map(|index| BlockLayoutInput {
+                block_id: ScreenBlockId::from(format!("dense-{index}")),
+                source: format!("source {index}"),
+                translation: "A longer translation near the same source row".into(),
+                bounds: local_rect(20, index * 12, 180, 11),
+                fragments: vec![local_rect(20, index * 12, 180, 11)],
+                complete: true,
+                confidence_milli: 900,
+            })
+            .collect::<Vec<_>>();
+        let rows = layout_blocks(crop_size(240, 220), 240, 220, &blocks);
+        assert!(
+            rows.iter()
+                .all(|row| row.placed && row.y - row.source_y <= 10.0)
+        );
+        assert!(rows.iter().all(|row| row.y >= row.source_y));
     }
 
     #[test]
@@ -1868,6 +1699,31 @@ mod tests {
             "RADIUS: 450",
             "РАДИУС: 450"
         ));
+    }
+
+    #[test]
+    fn unchanged_alphabetic_text_keeps_pixels_and_an_edit_target() {
+        let plan = plan_screen_result_layout(
+            crop_size(300, 120),
+            &[BlockLayoutInput {
+                block_id: ScreenBlockId::from("proper-name"),
+                source: "Nimbus".into(),
+                translation: "Nimbus".into(),
+                bounds: local_rect(20, 20, 100, 24),
+                fragments: vec![local_rect(20, 20, 100, 24)],
+                complete: true,
+                confidence_milli: 970,
+            }],
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 500.0,
+                height: 300.0,
+            },
+            &normal_measurer(),
+        );
+        assert!(!plan.blocks[0].placed);
+        assert!(plan.blocks[0].editable_source);
+        assert!(plan.masks.is_empty());
     }
 
     fn nimbus_layout_inputs() -> Vec<BlockLayoutInput> {
@@ -1979,6 +1835,172 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_unchanged_nimbus_duration_remains_visible_with_translated_label() {
+        let inputs = nimbus_layout_inputs();
+        let plan = plan_screen_result_layout(
+            crop_size(682, 466),
+            &inputs,
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 740.0,
+                height: 540.0,
+            },
+            &normal_measurer(),
+        );
+        let label = &plan.blocks[7];
+        let value = &plan.blocks[8];
+        assert_eq!(label.translation, "ДЛИТЕЛЬНОСТЬ:");
+        assert_eq!(label.display_translation, "ДЛИТЕЛЬНОСТЬ: 30");
+        assert!(label.placed && !label.overflow);
+        assert_eq!(value.translation, "30");
+        assert!(!value.replace_source && !value.placed);
+        assert_eq!(
+            plan.masks
+                .iter()
+                .filter(|mask| mask.block_id == value.block_id)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn adjacent_number_is_only_repainted_when_the_image_label_covers_it() {
+        let mut inputs = nimbus_layout_inputs();
+        inputs[7].translation = "Длительность".into(); // User edit has no colon.
+        let long = plan_screen_result_layout(
+            crop_size(682, 466),
+            &inputs,
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 740.0,
+                height: 540.0,
+            },
+            &normal_measurer(),
+        );
+        assert_eq!(long.blocks[7].display_translation, "Длительность 30");
+        assert_eq!(
+            long.masks
+                .iter()
+                .filter(|mask| mask.block_id == long.blocks[8].block_id)
+                .count(),
+            1
+        );
+
+        inputs[7].translation = "Срок".into();
+        let short = plan_screen_result_layout(
+            crop_size(682, 466),
+            &inputs,
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 740.0,
+                height: 540.0,
+            },
+            &normal_measurer(),
+        );
+        assert_eq!(short.blocks[7].display_translation, "Срок");
+        assert!(
+            short
+                .masks
+                .iter()
+                .all(|mask| mask.block_id != short.blocks[8].block_id)
+        );
+
+        let text = plan_screen_result_layout(
+            crop_size(682, 466),
+            &inputs,
+            ResultViewMode::Translation,
+            LogicalWorkArea {
+                width: 740.0,
+                height: 540.0,
+            },
+            &normal_measurer(),
+        );
+        assert_eq!(text.blocks[7].display_translation, "Срок");
+        assert_eq!(text.blocks[8].display_translation, "30");
+        assert!(text.masks.is_empty());
+    }
+
+    #[test]
+    fn edited_label_with_its_own_adjacent_value_is_not_duplicated() {
+        let mut inputs = nimbus_layout_inputs();
+        for (translation, expected) in [
+            ("Продолжительность: 30", "Продолжительность: 30"),
+            ("Продолжительность:30", "Продолжительность:30"),
+            ("Продолжительность:130", "Продолжительность:130 30"),
+            ("Срок: 30", "Срок: 30"),
+            ("Срок:30", "Срок:30"),
+        ] {
+            inputs[7].translation = translation.into();
+            let plan = plan_screen_result_layout(
+                crop_size(682, 466),
+                &inputs,
+                ResultViewMode::OnImage,
+                LogicalWorkArea {
+                    width: 740.0,
+                    height: 540.0,
+                },
+                &normal_measurer(),
+            );
+            assert_eq!(plan.blocks[7].translation, translation);
+            assert_eq!(plan.blocks[7].display_translation, expected);
+            assert_eq!(plan.blocks[8].translation, "30");
+            if translation.starts_with("Срок:") {
+                let label = &plan.blocks[7];
+                let value = &plan.blocks[8];
+                assert!(!super::rectangles_overlap(
+                    (label.x, label.y, label.width, label.height),
+                    (
+                        value.source_x,
+                        value.source_y,
+                        value.source_width,
+                        value.source_height
+                    ),
+                ));
+            }
+            assert_eq!(
+                plan.masks
+                    .iter()
+                    .filter(|mask| mask.block_id == plan.blocks[8].block_id)
+                    .count(),
+                1
+            );
+        }
+
+        for translation in ["Продолжительность:30", "Срок:30"] {
+            inputs[7].translation = translation.into();
+            for mode in [
+                ResultViewMode::Translation,
+                ResultViewMode::Original,
+                ResultViewMode::Dual,
+            ] {
+                let plan = plan_screen_result_layout(
+                    crop_size(682, 466),
+                    &inputs,
+                    mode,
+                    LogicalWorkArea {
+                        width: 740.0,
+                        height: 540.0,
+                    },
+                    &normal_measurer(),
+                );
+                assert_eq!(plan.blocks[7].display_translation, translation);
+                assert_eq!(plan.blocks[8].translation, "30");
+                if mode == ResultViewMode::Dual {
+                    assert_eq!(
+                        plan.masks
+                            .iter()
+                            .filter(|mask| mask.block_id == plan.blocks[8].block_id)
+                            .count(),
+                        1
+                    );
+                } else {
+                    assert!(plan.masks.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn nimbus_capture_masks_only_detected_text_rows_and_keeps_numeric_icon_values() {
         let inputs = nimbus_layout_inputs();
 
@@ -2028,10 +2050,13 @@ mod tests {
     }
 
     #[test]
-    fn nimbus_renderer_measurement_sends_oversized_text_to_scrollable_callouts() {
+    fn impossible_measured_text_is_clipped_locally_without_discarding_its_data() {
+        let mut inputs = nimbus_layout_inputs();
+        inputs[0].translation =
+            "A pathological paragraph that cannot fit this screenshot ".repeat(80);
         let plan = plan_screen_result_layout(
             crop_size(682, 466),
-            &nimbus_layout_inputs(),
+            &inputs,
             ResultViewMode::OnImage,
             LogicalWorkArea {
                 width: 740.0,
@@ -2042,18 +2067,23 @@ mod tests {
             },
         );
 
-        assert!(plan.blocks.iter().any(|block| block.callout));
+        assert!(plan.blocks.iter().all(|block| !block.callout));
         assert!(
             plan.blocks
                 .iter()
                 .filter(|block| block.replace_source)
                 .all(|block| block.placed)
         );
-        assert!(plan.content_height > plan.viewport_height);
+        assert_eq!(plan.content_height, plan.image_height);
+        assert!(plan.blocks.iter().any(|block| block.overflow));
+        for (row, input) in plan.blocks.iter().zip(inputs) {
+            assert_eq!(row.translation, input.translation);
+            assert!(row.y + row.height <= plan.image_height as f32 + 0.5);
+        }
     }
 
     #[test]
-    fn nimbus_small_work_area_keeps_all_callouts_inside_a_scrollable_canvas() {
+    fn nimbus_small_work_area_keeps_all_translation_labels_inside_the_image() {
         let plan = plan_screen_result_layout(
             crop_size(682, 466),
             &nimbus_layout_inputs(),
@@ -2072,7 +2102,8 @@ mod tests {
                 .filter(|row| row.replace_source)
                 .all(|row| row.placed)
         );
-        assert!(plan.content_height > plan.viewport_height);
+        assert_eq!(plan.content_height, plan.image_height);
+        assert!(plan.blocks.iter().all(|row| !row.callout));
         assert!(plan.blocks.iter().filter(|row| row.placed).all(|row| {
             row.x >= 0.0
                 && row.y >= 0.0
@@ -2082,11 +2113,11 @@ mod tests {
     }
 
     #[test]
-    fn render_recorded_nimbus_result_when_requested() {
+    fn render_recorded_screen_result_when_requested() {
         use std::{fs, io::BufReader, io::BufWriter, sync::Arc};
 
         use rust_platform_windows::screen_capture::RgbaFrame;
-        use rust_protocol::{BlockCompletion, PhysicalRect, RequestId, SourceContext};
+        use rust_protocol::PhysicalRect;
         use slint::{ComponentHandle, LogicalSize};
 
         let Some(sample_path) = std::env::var_os("SAYFLEX_SCREEN_SAMPLE_PNG") else {
@@ -2116,61 +2147,86 @@ mod tests {
         assert_eq!(info.color_type, png::ColorType::Rgba);
         assert_eq!(info.bit_depth, png::BitDepth::Eight);
         pixels.truncate(info.buffer_size());
+        let metadata_path = std::env::var_os("SAYFLEX_SCREEN_SAMPLE_METADATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| sample_path.with_extension("json"));
+        let metadata: crate::screenshot_store::ScreenshotMetadata =
+            serde_json::from_reader(BufReader::new(
+                fs::File::open(&metadata_path).expect("matching screenshot metadata should open"),
+            ))
+            .expect("screenshot metadata should decode");
+        assert_eq!((metadata.width, metadata.height), (info.width, info.height));
+        assert!(
+            !metadata.translations.is_empty(),
+            "render evidence needs completed translations"
+        );
         let crop_rect = PhysicalRect {
-            x: 0,
-            y: 0,
+            x: metadata.crop_x,
+            y: metadata.crop_y,
             width: info.width,
             height: info.height,
         };
         let frame = RgbaFrame::try_new(crop_rect, info.width * 4, pixels)
             .expect("sample pixels should form a capture frame");
-        let inputs = nimbus_layout_inputs();
         let snapshot = crate::screen_result::ScreenResultSnapshot {
-            request_id: RequestId::new(),
-            revision: 1,
+            request_id: metadata.request_id,
+            revision: metadata.revision,
             crop: Some(Arc::new(frame)),
             crop_rect,
-            blocks: inputs
-                .into_iter()
-                .map(|input| crate::screen_result::ScreenResultBlockSnapshot {
-                    block_id: input.block_id,
-                    source: input.source,
-                    translation: input.translation,
-                    completion: BlockCompletion::Completed,
-                    failure_message: None,
-                    bounds: PhysicalRect {
-                        x: input.bounds.x,
-                        y: input.bounds.y,
-                        width: input.bounds.width,
-                        height: input.bounds.height,
-                    },
-                    fragments: vec![PhysicalRect {
-                        x: input.bounds.x,
-                        y: input.bounds.y,
-                        width: input.bounds.width,
-                        height: input.bounds.height,
-                    }],
-                    confidence_milli: input.confidence_milli,
+            blocks: metadata
+                .blocks
+                .iter()
+                .map(|block| {
+                    let translation = metadata
+                        .translations
+                        .iter()
+                        .find(|translation| translation.block_id == block.block_id)
+                        .expect("every recorded source block needs its translation result");
+                    crate::screen_result::ScreenResultBlockSnapshot {
+                        block_id: block.block_id.clone(),
+                        source: block.source_text.clone(),
+                        translation: translation.translated_text.clone(),
+                        completion: translation.completion,
+                        failure_message: translation.failure_message.clone(),
+                        bounds: block.bounds,
+                        fragments: block.fragments.clone(),
+                        confidence_milli: block.confidence_milli,
+                    }
                 })
                 .collect(),
-            context: SourceContext {
-                application_id: Some("dota2".to_owned()),
-                nearby_text: Some("Nimbus item card".to_owned()),
-                ..SourceContext::default()
-            },
-            created_unix_ms: 1,
-            expires_unix_ms: u64::MAX,
+            context: metadata.context.clone(),
+            created_unix_ms: metadata.created_unix_ms,
+            expires_unix_ms: metadata.expires_unix_ms,
         };
 
         let preview = crate::ScreenTranslationWindow::new().expect("preview should instantiate");
+        if let Ok(mode) = std::env::var("SAYFLEX_SCREEN_SAMPLE_MODE") {
+            let mode = match mode.as_str() {
+                "translation" => 0,
+                "original" => 1,
+                "dual" => 2,
+                "on-image" => 3,
+                _ => panic!("unknown sample view mode: {mode}"),
+            };
+            preview.set_screen_view_mode(mode);
+        }
         super::apply_snapshot(&preview, &snapshot).expect("snapshot should bind to the real view");
         preview
             .show()
             .expect("preview should show on testing backend");
-        preview.window().set_size(LogicalSize::new(
-            preview.get_screen_content_width(),
-            preview.get_screen_content_height() + 38.0,
-        ));
+        let qa_viewport = std::env::var("SAYFLEX_SCREEN_SAMPLE_VIEWPORT")
+            .ok()
+            .and_then(|value| {
+                let (width, height) = value.split_once('x')?;
+                Some((width.parse::<f32>().ok()?, height.parse::<f32>().ok()?))
+            })
+            .unwrap_or((
+                preview.get_screen_content_width(),
+                preview.get_screen_content_height() + 38.0,
+            ));
+        preview
+            .window()
+            .set_size(LogicalSize::new(qa_viewport.0, qa_viewport.1));
         let rendered = preview
             .window()
             .take_snapshot()
@@ -2178,9 +2234,9 @@ mod tests {
 
         let output_dir = std::path::Path::new(&output_dir);
         fs::create_dir_all(output_dir).expect("sample output directory should be creatable");
-        fs::copy(sample_path, output_dir.join("nimbus-original.png"))
+        fs::copy(sample_path, output_dir.join("screen-original.png"))
             .expect("original evidence should copy");
-        let file = fs::File::create(output_dir.join("nimbus-result.png"))
+        let file = fs::File::create(output_dir.join("screen-result.png"))
             .expect("result evidence should be creatable");
         let mut encoder =
             png::Encoder::new(BufWriter::new(file), rendered.width(), rendered.height());

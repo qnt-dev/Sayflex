@@ -1,4 +1,5 @@
 import { Theme } from "overlay_theme.slint";
+import { ScrollRail } from "controls.slint";
 
 export struct ScreenBlockOverlay {
     block-id: string,
@@ -16,6 +17,8 @@ export struct ScreenBlockOverlay {
     replace-source: bool,
     placed: bool,
     not-placeable: bool,
+    editable-source: bool,
+    overflow: bool,
     callout: bool,
     font-size: float,
 }
@@ -78,6 +81,7 @@ component TranslatedLabel inherits Rectangle {
     in property <bool> selected-label: false;
     in property <bool> dimmed: false;
     in property <bool> callout: false;
+    in property <bool> overflow: false;
     in property <length> text-size: 12px;
     out property <length> measured-content-height: translated-text-item.preferred-height + 8px;
     callback selected();
@@ -85,9 +89,10 @@ component TranslatedLabel inherits Rectangle {
 
     border-radius: 3px;
     forward-focus: key-focus;
-    border-width: root.callout || root.selected-label || touch.has-hover ? 1px : 0px;
-    border-color: root.selected-label ? Theme.red : root.callout ? #d7a45b : #f3e9cf80;
-    background: root.callout ? #171a20f5 : touch.has-hover ? #25170f88 : transparent;
+    border-width: root.selected-label || touch.has-hover ? 1px : 0px;
+    border-color: root.selected-label ? Theme.red : #f3e9cf80;
+    background: touch.has-hover ? #25170fff : #120e09ff;
+    clip: true;
     opacity: root.dimmed ? 0.38 : 1;
     accessible-role: button;
     accessible-label: @tr("Editable translated image text");
@@ -106,7 +111,16 @@ component TranslatedLabel inherits Rectangle {
         font-weight: 570;
         wrap: word-wrap;
         horizontal-alignment: left;
-        vertical-alignment: center;
+        vertical-alignment: top;
+    }
+    if root.overflow: Rectangle {
+        x: parent.width - 20px;
+        y: parent.height - 18px;
+        width: 18px;
+        height: 16px;
+        background: #9b5b20ff;
+        border-radius: 3px;
+        Text { text: "…"; color: white; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
     }
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -127,6 +141,8 @@ component TranslatedLabel inherits Rectangle {
 
 export component TranslationCorrectionPanel inherits Rectangle {
     in-out property <string> original-text: "End Turn";
+    in property <string> block-source: "End Turn";
+    property <bool> term-mode: root.original-text != root.block-source;
     in property <string> context-text: "Battle for Wesnoth · game interface";
     in property <string> baseline-translation: "Завершить ход";
     in property <bool> save-error: false;
@@ -148,7 +164,7 @@ export component TranslationCorrectionPanel inherits Rectangle {
 
     Text {
         x: 14px; y: 12px;
-        text: @tr("Correct translation");
+        text: root.term-mode ? @tr("Glossary") : @tr("Correct translation");
         color: Theme.text;
         font-size: 14px;
         font-weight: 620;
@@ -212,7 +228,7 @@ export component TranslationCorrectionPanel inherits Rectangle {
                 }
                 if event.modifiers.control && event.text == Key.Return {
                     if root.save-error { root.retry-requested(); }
-                    else if root.edited-translation == root.baseline-translation { root.confirm-requested(); }
+                    else if !root.term-mode && root.edited-translation == root.baseline-translation { root.confirm-requested(); }
                     else { root.save-requested(); }
                     return accept;
                 }
@@ -244,11 +260,11 @@ export component TranslationCorrectionPanel inherits Rectangle {
             width: root.save-error ? 64px : 70px;
             label: root.save-error
                 ? @tr("Retry")
-                : root.edited-translation == root.baseline-translation ? @tr("Confirm") : @tr("Save");
+                : !root.term-mode && root.edited-translation == root.baseline-translation ? @tr("Confirm") : @tr("Save");
             active: true;
             clicked => {
                 if root.save-error { root.retry-requested(); }
-                else if root.edited-translation == root.baseline-translation { root.confirm-requested(); }
+                else if !root.term-mode && root.edited-translation == root.baseline-translation { root.confirm-requested(); }
                 else { root.save-requested(); }
             }
         }
@@ -274,6 +290,7 @@ export component ScreenImageResult inherits Rectangle {
     in property <float> image-content-height: root.height / 1px;
     in property <float> total-content-height: root.height / 1px;
     out property <float> scroll-offset: -result-scroll.viewport-y / 1px;
+    out property <float> scroll-x: -result-scroll.viewport-x / 1px;
     in property <float> editor-panel-x: 488;
     in property <float> editor-panel-y: 292;
     in property <length> minimum-overlay-font-size: 12px;
@@ -283,6 +300,7 @@ export component ScreenImageResult inherits Rectangle {
     in property <string> unit-translation: "Кочевник · быстрый, стойкий";
     in property <string> end-turn-translation: "Завершить ход";
     in-out property <string> editor-original: "End Turn";
+    in property <string> editor-block-source: "End Turn";
     in property <string> editor-context: "Battle for Wesnoth · game interface";
     in property <string> editor-direction: "EN → RU";
     in property <string> editor-baseline: "Завершить ход";
@@ -325,6 +343,7 @@ export component ScreenImageResult inherits Rectangle {
         image-fit: fill;
         opacity: 0.07;
     }
+    Rectangle { x: 0px; y: 0px; width: parent.width; height: 38px; background: #0d1219ff; }
 
     TouchArea {
         x: 0px; y: 0px; width: parent.width; height: 38px;
@@ -428,33 +447,6 @@ export component ScreenImageResult inherits Rectangle {
                 background: #120e09ff;
                 border-radius: 2px;
             }
-            // Every moved translation has a persistent visual link to the
-            // exact OCR row that supplied it, including below-image overflow.
-            for connector in root.connectors: Path {
-                visible: !root.use-fixture-blocks && root.view-mode != 1;
-                width: root.image-content-width * 1px;
-                height: root.total-content-height * 1px;
-                viewbox-x: 0;
-                viewbox-y: 0;
-                viewbox-width: root.image-content-width;
-                viewbox-height: root.total-content-height;
-                fill: transparent;
-                stroke: #d7a45b;
-                stroke-width: 1.5px;
-                MoveTo { x: connector.start-x; y: connector.start-y; }
-                LineTo { x: connector.end-x; y: connector.end-y; }
-            }
-            for block in root.blocks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.placed && block.callout;
-                x: block.source-x * 1px;
-                y: block.source-y * 1px;
-                width: block.source-width * 1px;
-                height: block.source-height * 1px;
-                background: transparent;
-                border-width: 1px;
-                border-color: #d7a45b;
-                border-radius: 2px;
-            }
             for block[index] in root.blocks: TranslatedLabel {
                 visible: !root.use-fixture-blocks && root.view-mode != 1 && block.placed;
                 x: block.x * 1px;
@@ -467,10 +459,27 @@ export component ScreenImageResult inherits Rectangle {
                 selected-label: root.selected-block == index;
                 dimmed: root.dim-other-blocks && root.selected-block != index;
                 callout: block.callout;
+                overflow: block.overflow;
                 text-size: max(root.minimum-overlay-font-size, block.font-size * 1px);
                 border-color: block.low-confidence && !self.selected-label ? #d7a45b : Theme.red;
                 selected => { root.block-selected(index); }
                 edit-requested => { root.block-edit-requested(index); }
+            }
+
+            // Unchanged alphabetic text keeps its pixels, but can still be
+            // selected and confirmed in the glossary.
+            for block[index] in root.blocks: Rectangle {
+                visible: !root.use-fixture-blocks && root.view-mode != 1 && block.editable-source;
+                x: block.source-x * 1px; y: block.source-y * 1px;
+                width: block.source-width * 1px; height: block.source-height * 1px;
+                background: transparent;
+                border-width: root.selected-block == index || source-touch.has-hover ? 1px : 0px;
+                border-color: #f3e9cf80;
+                source-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.block-selected(index); }
+                    double-clicked => { root.block-edit-requested(index); }
+                }
             }
 
             // Unplaceable text keeps every original pixel intact. The small
@@ -495,12 +504,31 @@ export component ScreenImageResult inherits Rectangle {
 
         }
 
+        ScrollRail {
+            visible: result-scroll.visible && result-scroll.viewport-height > result-scroll.height + 0.5px;
+            x: parent.width - 7px; y: 0px;
+            track: result-scroll.height;
+            content: result-scroll.viewport-height; shown: result-scroll.height;
+            offset: -result-scroll.viewport-y;
+            scrolled(next) => { result-scroll.viewport-y = -next; }
+        }
+        ScrollRail {
+            visible: result-scroll.visible && result-scroll.viewport-width > result-scroll.width + 0.5px;
+            horizontal: true;
+            x: 0px; y: parent.height - 7px;
+            track: result-scroll.width;
+            content: result-scroll.viewport-width; shown: result-scroll.width;
+            offset: -result-scroll.viewport-x;
+            scrolled(next) => { result-scroll.viewport-x = -next; }
+        }
+
         if root.editor-visible: inline-editor := TranslationCorrectionPanel {
-            x: root.editor-panel-x * 1px;
-            y: root.editor-panel-y * 1px;
-            width: min(330px, parent.width - self.x - 8px);
-            height: min(282px, parent.height - self.y - 8px);
+            x: max(8px, min(root.editor-panel-x * 1px, parent.width - self.width - 8px));
+            y: max(8px, min(root.editor-panel-y * 1px, parent.height - self.height - 8px));
+            width: min(330px, parent.width - 16px);
+            height: min(282px, parent.height - 16px);
             original-text <=> root.editor-original;
+            block-source: root.editor-block-source;
             context-text: root.editor-context;
             direction-text: root.editor-direction;
             baseline-translation: root.editor-baseline;
@@ -590,8 +618,8 @@ export component ScreenTranslationWindow inherits Window {
     title: @tr("Screen translation result");
     preferred-width: root.screen-content-width * 1px;
     preferred-height: (root.screen-content-height + 38) * 1px;
-    min-width: 320px;
-    min-height: 220px;
+    min-width: 380px;
+    min-height: 340px;
     no-frame: true;
     always-on-top: false;
     background: transparent;
@@ -611,6 +639,9 @@ export component ScreenTranslationWindow inherits Window {
     in-out property <float> screen-image-content-height: 576;
     in-out property <float> screen-total-content-height: 576;
     out property <float> screen-scroll-offset: image-view.scroll-offset;
+    out property <float> screen-scroll-x: image-view.scroll-x;
+    out property <float> screen-visible-width: root.width / 1px;
+    out property <float> screen-visible-height: (root.height - 38px) / 1px;
     in-out property <int> screen-view-mode: 3;
     in-out property <int> screen-selected-block: -1;
     in-out property <bool> screen-editor-visible: false;
@@ -618,6 +649,7 @@ export component ScreenTranslationWindow inherits Window {
     in-out property <bool> screen-saved: false;
     in-out property <bool> screen-save-error: false;
     in-out property <string> screen-editor-original;
+    in-out property <string> screen-editor-block-source;
     in-out property <string> screen-editor-context;
     in-out property <string> screen-editor-direction;
     in-out property <string> screen-editor-baseline;
@@ -632,6 +664,7 @@ export component ScreenTranslationWindow inherits Window {
     out property <float> measured-text-height: measure-item.preferred-height / 1px;
 
     callback begin-drag();
+    callback begin-resize();
     callback pin-state-changed(bool);
     callback screen-block-selected(int);
     callback screen-block-edit-requested(int);
@@ -677,6 +710,7 @@ export component ScreenTranslationWindow inherits Window {
         masks: root.screen-masks;
         connectors: root.screen-connectors;
         editor-original <=> root.screen-editor-original;
+        editor-block-source: root.screen-editor-block-source;
         editor-context: root.screen-editor-context;
         editor-direction: root.screen-editor-direction;
         editor-baseline: root.screen-editor-baseline;
@@ -711,6 +745,18 @@ export component ScreenTranslationWindow inherits Window {
         confirm-requested => { root.screen-editor-confirm-requested(); }
         cancel-requested => { root.screen-editor-cancel-requested(); }
         retry-requested => { root.screen-editor-retry-requested(); }
+    }
+    resize-corner := TouchArea {
+        x: parent.width - 10px;
+        y: parent.height - 10px;
+        width: 10px;
+        height: 10px;
+        mouse-cursor: nwse-resize;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.begin-resize();
+            }
+        }
     }
 }
 

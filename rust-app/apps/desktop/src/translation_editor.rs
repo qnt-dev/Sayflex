@@ -16,6 +16,22 @@ pub(crate) enum EditorPhase {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditorCommitScope {
+    WholeBlock,
+    GlossaryTerm,
+}
+
+impl EditorCommitScope {
+    pub(crate) fn for_source(block_source: &str, edited_source: &str) -> Self {
+        if block_source == edited_source {
+            Self::WholeBlock
+        } else {
+            Self::GlossaryTerm
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TranslationEditorState {
     key: EditorDraftKey,

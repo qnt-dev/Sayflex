@@ -76,6 +76,16 @@ fn topology_requires_rebuild(
     cached != current
 }
 
+fn replace_session<T, E>(
+    slot: &mut Option<T>,
+    create: impl FnOnce() -> Result<T, E>,
+) -> Result<(), E> {
+    // Release every old duplication before DuplicateOutput is called again.
+    drop(slot.take());
+    *slot = Some(create()?);
+    Ok(())
+}
+
 pub struct DxgiDesktopCaptureBackend {
     session: Mutex<Option<DxgiCaptureSession>>,
 }
@@ -124,7 +134,7 @@ impl DesktopCaptureBackend for DxgiDesktopCaptureBackend {
             .as_ref()
             .is_none_or(|session| topology_requires_rebuild(&session.topology, &topology))
         {
-            *session = Some(DxgiCaptureSession::create()?);
+            replace_session(&mut session, DxgiCaptureSession::create)?;
         }
         let result = session
             .as_mut()
@@ -137,7 +147,7 @@ impl DesktopCaptureBackend for DxgiDesktopCaptureBackend {
         // Desktop Duplication objects are invalid after a mode switch, UAC
         // transition, driver reset, or output reconfiguration. Rebuild once in
         // place so the next request does not inherit the lost session.
-        *session = Some(DxgiCaptureSession::create()?);
+        replace_session(&mut session, DxgiCaptureSession::create)?;
         session
             .as_mut()
             .expect("DXGI session was just recreated")
@@ -180,14 +190,15 @@ impl DxgiCaptureSession {
         // SAFETY: DXGI returns reference-counted COM interfaces. Each is owned by
         // its Rust wrapper and released automatically after the copied CPU frame is
         // detached into Vec<u8> storage.
-        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(map_dxgi_error)?;
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
+            .map_err(|error| map_dxgi_error_at("CreateDXGIFactory1", error))?;
         let mut outputs = Vec::new();
         let mut adapter_index = 0;
         loop {
             let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
                 Ok(adapter) => adapter,
                 Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
-                Err(error) => return Err(map_dxgi_error(error)),
+                Err(error) => return Err(map_dxgi_error_at("EnumAdapters1", error)),
             };
             append_adapter_outputs(&adapter, &mut outputs)?;
             adapter_index += 1;
@@ -291,15 +302,19 @@ fn append_adapter_outputs(
         let output = match unsafe { adapter.EnumOutputs(output_index) } {
             Ok(output) => output,
             Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
-            Err(error) => return Err(map_dxgi_error(error)),
+            Err(error) => return Err(map_dxgi_error_at("EnumOutputs", error)),
         };
         output_index += 1;
-        let description = unsafe { output.GetDesc() }.map_err(map_dxgi_error)?;
+        let description = unsafe { output.GetDesc() }
+            .map_err(|error| map_dxgi_error_at("IDXGIOutput::GetDesc", error))?;
         if !description.AttachedToDesktop.as_bool() {
             continue;
         }
-        let output: IDXGIOutput1 = output.cast().map_err(map_dxgi_error)?;
-        let duplication = unsafe { output.DuplicateOutput(&device) }.map_err(map_dxgi_error)?;
+        let output: IDXGIOutput1 = output
+            .cast()
+            .map_err(|error| map_dxgi_error_at("IDXGIOutput1 cast", error))?;
+        let duplication = unsafe { output.DuplicateOutput(&device) }
+            .map_err(|error| map_dxgi_error_at("DuplicateOutput", error))?;
         let desktop_width = u32::try_from(
             description.DesktopCoordinates.right - description.DesktopCoordinates.left,
         )
@@ -560,6 +575,18 @@ fn map_dxgi_error(error: WindowsError) -> CaptureError {
     }
 }
 
+fn map_dxgi_error_at(stage: &str, error: WindowsError) -> CaptureError {
+    match map_dxgi_error(error) {
+        CaptureError::BackendFailure(detail) => {
+            CaptureError::BackendFailure(format!("{stage}: {detail}"))
+        }
+        CaptureError::TemporaryUnavailable(detail) => {
+            CaptureError::TemporaryUnavailable(format!("{stage}: {detail}"))
+        }
+        typed => typed,
+    }
+}
+
 struct AcquiredFrame<'a> {
     duplication: &'a IDXGIOutputDuplication,
     active: bool,
@@ -609,15 +636,68 @@ impl Drop for MappedTexture<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        cell::Cell,
+        rc::Rc,
+        time::{Duration, Instant},
+    };
 
     use rust_protocol::PhysicalRect;
 
     use super::{
-        BootstrapFrameDisposition, CachedFrame, CaptureTopologyEntry, classify_bootstrap_frame,
-        topology_requires_rebuild,
+        BootstrapFrameDisposition, CachedFrame, CaptureTopologyEntry, DxgiDesktopCaptureBackend,
+        classify_bootstrap_frame, lock, replace_session, topology_requires_rebuild,
     };
-    use crate::screen_capture::{CAPTURE_REUSE_TTL, CapturedOutput, Rotation};
+    use crate::screen_capture::{
+        CAPTURE_REUSE_TTL, CapturedOutput, DesktopCaptureBackend, Rotation,
+    };
+
+    #[test]
+    fn rebuilding_releases_old_duplication_before_create_and_clears_failed_slot() {
+        struct Session(Rc<Cell<bool>>);
+        impl Drop for Session {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let live = Rc::new(Cell::new(true));
+        let mut slot = Some(Session(live.clone()));
+        replace_session(&mut slot, || {
+            assert!(!live.get(), "old duplication must be gone before create");
+            live.set(true);
+            Ok::<_, ()>(Session(live.clone()))
+        })
+        .unwrap();
+        assert!(live.get());
+        assert!(
+            replace_session(&mut slot, || {
+                assert!(!live.get());
+                Err::<Session, _>("DuplicateOutput failed")
+            })
+            .is_err()
+        );
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    #[ignore = "opt-in real DXGI capture; does not store desktop pixels"]
+    fn real_topology_rebuild_releases_duplication_before_recreating_it() {
+        assert_eq!(std::env::var("SAYFLEX_DXGI_REAL_PROBE").as_deref(), Ok("1"));
+        let backend = DxgiDesktopCaptureBackend::default();
+        let first = backend.capture().expect("initial DXGI capture");
+        assert!(first.output_bounds().len() > 0);
+        drop(first);
+        lock(&backend.session)
+            .as_mut()
+            .expect("session exists")
+            .topology
+            .clear();
+        let rebuilt = backend.capture().expect("DXGI topology rebuild");
+        assert!(rebuilt.output_bounds().len() > 0);
+        drop(rebuilt);
+        let repeated = backend.capture().expect("DXGI capture after rebuild");
+        assert!(repeated.output_bounds().len() > 0);
+    }
 
     #[test]
     fn a_fresh_duplication_retries_the_zero_timestamp_frame_but_accepts_the_next_present() {
