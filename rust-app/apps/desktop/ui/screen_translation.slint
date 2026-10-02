@@ -541,11 +541,21 @@ export component ScreenImageResult inherits Rectangle {
             retry-requested => { root.retry-requested(); }
         }
 
-        if root.view-mode == 0: Rectangle {
-            x: 18px; y: 18px; width: parent.width - 36px; height: parent.height - 36px;
-            background: transparent;
-            VerticalLayout {
-                width: parent.width;
+        // Text mode is reached by clicking the active view button again while
+        // the picture is still available, so a long result must scroll here
+        // exactly as it does over the image.
+        text-scroll := Flickable {
+            visible: root.view-mode == 0;
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            viewport-width: self.width;
+            viewport-height: max(self.height, text-column.preferred-height + 36px);
+            text-column := VerticalLayout {
+                x: 18px;
+                y: 18px;
+                width: text-scroll.width - 36px;
                 spacing: 12px;
                 if root.use-fixture-blocks: Text { text: root.menu-translation + " · " + root.actions-translation + " · " + root.encampment-translation; color: Theme.text; font-size: 14px; font-weight: 470; }
                 if root.use-fixture-blocks: Text { text: root.unit-translation; color: Theme.text; font-size: 14px; font-weight: 470; }
@@ -559,6 +569,14 @@ export component ScreenImageResult inherits Rectangle {
                     wrap: word-wrap;
                 }
             }
+        }
+        ScrollRail {
+            visible: text-scroll.visible && text-scroll.viewport-height > text-scroll.height + 0.5px;
+            x: parent.width - 7px; y: 0px;
+            track: text-scroll.height;
+            content: text-scroll.viewport-height; shown: text-scroll.height;
+            offset: -text-scroll.viewport-y;
+            scrolled(next) => { text-scroll.viewport-y = -next; }
         }
 
         if root.image-expired: Rectangle {
@@ -629,6 +647,8 @@ export component ScreenTranslationWindow inherits Window {
     in-out property <bool> prepared: false;
     in-out property <bool> pinned: false;
     in-out property <bool> pin-enabled: true;
+    // Set when the input host confirms the copy, cleared with new content.
+    in-out property <bool> screen-copied: false;
     in-out property <image> screen-crop-image;
     in-out property <[ScreenBlockOverlay]> screen-blocks;
     in-out property <[ScreenMaskOverlay]> screen-masks;
@@ -699,6 +719,7 @@ export component ScreenTranslationWindow inherits Window {
         selected-block: root.screen-selected-block;
         editor-visible: root.screen-editor-visible;
         image-expired: root.screen-image-expired;
+        copied: root.screen-copied;
         saved: root.screen-saved;
         save-error: root.screen-save-error;
         dim-other-blocks: root.screen-editor-visible;

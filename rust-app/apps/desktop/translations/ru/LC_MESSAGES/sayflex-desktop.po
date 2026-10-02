@@ -358,8 +358,8 @@ msgstr "Диктовать"
 msgid "Dictation"
 msgstr "Диктовка"
 
-msgid "Dictation {session} is still processing; it will be inserted here when ready."
-msgstr "Диктовка {session} ещё обрабатывается; она будет вставлена сюда после завершения."
+msgid "The dictation is still processing; it will be inserted here when ready."
+msgstr "Диктовка ещё обрабатывается; она будет вставлена сюда после завершения."
 
 msgid "DICTATION LANGUAGE"
 msgstr "ЯЗЫК ДИКТОВКИ"
@@ -519,11 +519,11 @@ msgstr "Протокол процесса ввода не совпадает. П
 msgid "Insert latest dictation"
 msgstr "Вставить последнюю диктовку"
 
-msgid "Inserted {delivery} after the target read the private transaction in {milliseconds} ms"
-msgstr "Вставлено {delivery} после чтения приватной транзакции целевым окном за {milliseconds} мс"
+msgid "Inserted; the target read the text in {milliseconds} ms"
+msgstr "Вставлено: окно прочитало текст за {milliseconds} мс"
 
-msgid "Inserted {delivery} through the target adapter in {milliseconds} ms"
-msgstr "Вставлено {delivery} через адаптер целевого окна за {milliseconds} мс"
+msgid "Inserted through the target adapter in {milliseconds} ms"
+msgstr "Вставлено через адаптер окна за {milliseconds} мс"
 
 msgid "Install"
 msgstr "Установить"
@@ -579,8 +579,8 @@ msgstr "Исправление раскладки клавиатуры откл�
 msgid "Korean"
 msgstr "Корейский"
 
-msgid "Latest transcript {session} copied. Shift+Insert is ready."
-msgstr "Последняя расшифровка {session} скопирована. Shift+Insert готово."
+msgid "Latest transcript copied. Shift+Insert is ready."
+msgstr "Последняя расшифровка скопирована. Shift+Insert готово."
 
 msgid "Less GPU and battery, slightly slower"
 msgstr "Меньше нагрузки на графический процессор и аккумулятор, немного медленнее"
@@ -802,8 +802,8 @@ msgstr "Обзор"
 msgid "PALETTE"
 msgstr "ПАЛИТРА"
 
-msgid "Paste dispatched {delivery} without target verification in {milliseconds} ms"
-msgstr "Вставка {delivery} отправлена без проверки целевого окна за {milliseconds} мс"
+msgid "Pasted; the target did not confirm it ({milliseconds} ms)"
+msgstr "Вставлено без подтверждения окна ({milliseconds} мс)"
 
 msgid "Paste the key"
 msgstr "Вставить ключ"
@@ -1305,8 +1305,8 @@ msgstr "Используйте букву, цифру, функциональн�
 msgid "Value"
 msgstr "Значение"
 
-msgid "Verified insertion {delivery} in {milliseconds} ms"
-msgstr "Проверена вставка {delivery} за {milliseconds} мс"
+msgid "Inserted and verified in {milliseconds} ms"
+msgstr "Вставлено и проверено за {milliseconds} мс"
 
 msgid "VERSION"
 msgstr "ВЕРСИЯ"

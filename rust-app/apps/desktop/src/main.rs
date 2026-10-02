@@ -898,6 +898,9 @@ struct AppState {
     pending_translations: HashMap<RequestId, PendingTranslation>,
     /// A "Clear history" request waiting for both workers to answer.
     history_clear: Option<HistoryClear>,
+    /// Copy requests sent from a screen result window, by the window that
+    /// asked, so the input host's confirmation can mark that window copied.
+    screen_copy_requests: HashMap<RequestId, u64>,
     /// A user request that discovered its exact compact language pack was not
     /// installed. The installer owns the model operation; this keeps the one
     /// original request so it can resume without making the user click twice.
@@ -1022,6 +1025,7 @@ impl AppState {
             selection_release_gates: HashMap::new(),
             pending_translations: HashMap::new(),
             history_clear: None,
+            screen_copy_requests: HashMap::new(),
             queued_model_translation: None,
             queued_selection_translation: None,
             #[cfg(feature = "screen-translation")]
@@ -3363,14 +3367,21 @@ fn copy_screen_translation(window_handle: u64, runtime: &RuntimeUi) {
         return;
     };
     let request_id = slot.request_id();
-    match runtime.screen_translation.borrow().copy_text(request_id) {
+    let copied = runtime.screen_translation.borrow().copy_text(request_id);
+    match copied {
         Ok(text) => {
+            let copy_request = RequestId::new();
             if let Err(error) = runtime.workers.input.send(&InputHostCommand::CopyText {
-                request_id: RequestId::new(),
+                request_id: copy_request,
                 text,
             }) {
                 set_status_problem(&runtime.settings, &error.to_string());
             } else {
+                runtime
+                    .state
+                    .borrow_mut()
+                    .screen_copy_requests
+                    .insert(copy_request, window_handle);
                 set_indicator_status(
                     &runtime.settings,
                     state_text(&runtime.state, UiText::CopiedToClipboard),
@@ -5489,11 +5500,7 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     ));
                     set_indicator_status(
                         settings,
-                        &state_message(
-                            state,
-                            UiText::DictationStillProcessing,
-                            &[("session", &short_id(session_id))],
-                        ),
+                        state_text(state, UiText::DictationStillProcessing),
                     );
                 }
                 InsertLastResolution::LoadHistory => {
@@ -5706,48 +5713,56 @@ speculative_reuse={} method={} delivery={}",
                 ));
             }
             let elapsed = total_after_release_ms.unwrap_or(dispatch_duration_ms);
-            let session = short_id(session_id);
+            // User-facing status carries no internal session id.
             let elapsed = elapsed.to_string();
             let status = match delivery {
                 rust_protocol::InsertionDelivery::Committed => state_message(
                     state,
                     UiText::InsertedTargetAdapter,
-                    &[("delivery", &session), ("milliseconds", &elapsed)],
+                    &[("milliseconds", &elapsed)],
                 ),
                 rust_protocol::InsertionDelivery::PayloadRead => state_message(
                     state,
                     UiText::InsertedPrivateTransaction,
-                    &[("delivery", &session), ("milliseconds", &elapsed)],
+                    &[("milliseconds", &elapsed)],
                 ),
                 rust_protocol::InsertionDelivery::Verified => state_message(
                     state,
                     UiText::VerifiedInsertion,
-                    &[("delivery", &session), ("milliseconds", &elapsed)],
+                    &[("milliseconds", &elapsed)],
                 ),
                 rust_protocol::InsertionDelivery::Dispatched => state_message(
                     state,
                     UiText::PasteDispatched,
-                    &[("delivery", &session), ("milliseconds", &elapsed)],
+                    &[("milliseconds", &elapsed)],
                 ),
             };
             set_indicator_status(settings, &status);
         }
-        InputHostEvent::Recovered { session_id } => {
-            set_indicator_status(
-                settings,
-                &state_message(
-                    state,
-                    UiText::LatestTranscriptCopied,
-                    &[("session", &short_id(session_id))],
-                ),
-            );
+        InputHostEvent::Recovered { session_id: _ } => {
+            set_indicator_status(settings, state_text(state, UiText::LatestTranscriptCopied));
         }
         InputHostEvent::SelectionReplaced { request_id } => {
             let _ = request_id;
             set_indicator_status(settings, state_text(state, UiText::ReplacementSent));
         }
-        InputHostEvent::TextCopied { .. } => {
+        InputHostEvent::TextCopied { request_id } => {
             set_indicator_status(settings, state_text(state, UiText::TranslationCopied));
+            #[cfg(feature = "screen-translation")]
+            {
+                let window_handle = state.borrow_mut().screen_copy_requests.remove(&request_id);
+                let slot = window_handle.and_then(|window_handle| {
+                    runtime
+                        .screen_result_windows
+                        .borrow()
+                        .slot_by_handle(window_handle)
+                });
+                if let Some(slot) = slot {
+                    slot.window.set_screen_copied(true);
+                }
+            }
+            #[cfg(not(feature = "screen-translation"))]
+            let _ = request_id;
         }
         InputHostEvent::Failed {
             session_id,
@@ -8817,10 +8832,6 @@ fn native_window_handle(window: &slint::winit_030::winit::window::Window) -> Opt
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as u64),
         _ => None,
     }
-}
-
-fn short_id(session_id: SessionId) -> String {
-    session_id.to_string().chars().take(8).collect()
 }
 
 /// Ends a download, whatever ended it.

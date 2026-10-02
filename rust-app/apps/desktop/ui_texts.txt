@@ -216,11 +216,11 @@ InputPaused|Input features paused. Use the pause shortcut again to resume.
 InputResumed|Input features resumed.
 SpeechServiceStarting|Speech service is still starting.
 SpeechModelPreparing|Speech model is still being prepared.
-DictationStillProcessing|Dictation {session} is still processing; it will be inserted here when ready.
-InsertedTargetAdapter|Inserted {delivery} through the target adapter in {milliseconds} ms
-InsertedPrivateTransaction|Inserted {delivery} after the target read the private transaction in {milliseconds} ms
-VerifiedInsertion|Verified insertion {delivery} in {milliseconds} ms
-PasteDispatched|Paste dispatched {delivery} without target verification in {milliseconds} ms
+DictationStillProcessing|The dictation is still processing; it will be inserted here when ready.
+InsertedTargetAdapter|Inserted through the target adapter in {milliseconds} ms
+InsertedPrivateTransaction|Inserted; the target read the text in {milliseconds} ms
+VerifiedInsertion|Inserted and verified in {milliseconds} ms
+PasteDispatched|Pasted; the target did not confirm it ({milliseconds} ms)
 InputProtocolMismatch|Input worker protocol mismatch. Reinstall the complete application.
 SpeechProtocolMismatch|Speech worker protocol mismatch. Reinstall the complete application.
 CloudSpeechLocalDisabled|Cloud speech is ready. The local speech engine is disabled.
@@ -253,7 +253,7 @@ CompanionOrbStatus|Companion Orb: {message}
 CompanionOrbRestarted|Companion Orb restarted. Dictation continued normally.
 CompanionOrbUnavailable|Companion Orb is unavailable: {error}
 ListeningCompanionUnavailable|Listening; Companion Orb unavailable: {error}
-LatestTranscriptCopied|Latest transcript {session} copied. Shift+Insert is ready.
+LatestTranscriptCopied|Latest transcript copied. Shift+Insert is ready.
 ChooseTranslationRoute|Choose a local translation model or configure a text service in Settings first.
 LatestDictationCancelled|The latest dictation was cancelled and cannot be inserted.
 WarmingBackend|Warming up on {backend}. If it fails, the search moves to the next one down.

@@ -358,8 +358,8 @@ msgstr "Dicter"
 msgid "Dictation"
 msgstr "Dictée"
 
-msgid "Dictation {session} is still processing; it will be inserted here when ready."
-msgstr "La dictée {session} est encore traitée ; elle sera insérée ici lorsqu’elle sera prête."
+msgid "The dictation is still processing; it will be inserted here when ready."
+msgstr "La dictée est encore traitée ; elle sera insérée ici lorsqu’elle sera prête."
 
 msgid "DICTATION LANGUAGE"
 msgstr "LANGUE DE DICTÉE"
@@ -519,11 +519,11 @@ msgstr "Le protocole du processus de saisie ne correspond pas. Réinstallez enti
 msgid "Insert latest dictation"
 msgstr "Insérer la dernière dictée"
 
-msgid "Inserted {delivery} after the target read the private transaction in {milliseconds} ms"
-msgstr "{delivery} inséré après lecture de la transaction privée par la cible en {milliseconds} ms"
+msgid "Inserted; the target read the text in {milliseconds} ms"
+msgstr "Inséré ; la cible a lu le texte en {milliseconds} ms"
 
-msgid "Inserted {delivery} through the target adapter in {milliseconds} ms"
-msgstr "{delivery} inséré via l’adaptateur cible en {milliseconds} ms"
+msgid "Inserted through the target adapter in {milliseconds} ms"
+msgstr "Inséré via l’adaptateur cible en {milliseconds} ms"
 
 msgid "Install"
 msgstr "Installer"
@@ -579,8 +579,8 @@ msgstr "La correction de disposition du clavier est désactivée."
 msgid "Korean"
 msgstr "Coréen"
 
-msgid "Latest transcript {session} copied. Shift+Insert is ready."
-msgstr "Dernier relevé de notes {session} copié. Maj+Inser est prêt."
+msgid "Latest transcript copied. Shift+Insert is ready."
+msgstr "Dernière transcription copiée. Maj+Inser est prêt."
 
 msgid "Less GPU and battery, slightly slower"
 msgstr "Moins de GPU et d'autonomie, légèrement plus lent"
@@ -802,8 +802,8 @@ msgstr "Présentation"
 msgid "PALETTE"
 msgstr "PALETTE"
 
-msgid "Paste dispatched {delivery} without target verification in {milliseconds} ms"
-msgstr "Collage {delivery} envoyé sans vérification de la cible en {milliseconds} ms"
+msgid "Pasted; the target did not confirm it ({milliseconds} ms)"
+msgstr "Collé ; la cible ne l’a pas confirmé ({milliseconds} ms)"
 
 msgid "Paste the key"
 msgstr "Coller la clé"
@@ -1305,8 +1305,8 @@ msgstr "Utilisez une lettre, un chiffre, une touche de fonction, un espace, une 
 msgid "Value"
 msgstr "Valeur"
 
-msgid "Verified insertion {delivery} in {milliseconds} ms"
-msgstr "Insertion {delivery} vérifiée en {milliseconds} ms"
+msgid "Inserted and verified in {milliseconds} ms"
+msgstr "Inséré et vérifié en {milliseconds} ms"
 
 msgid "VERSION"
 msgstr "VERSION"

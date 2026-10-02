@@ -93,6 +93,9 @@ export struct HotkeyRow {
     detail: string,
     state: string,
     tone: string,
+    // The detail reports a problem with this shortcut (Windows refused it,
+    // or the previous one was kept). It is shown in full, never elided.
+    problem: bool,
     enabled: bool,
     toggle-enabled: bool,
     is-default: bool,

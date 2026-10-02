@@ -204,9 +204,14 @@ export component ListRow inherits Rectangle {
     in property <bool> orderable: false;
     in property <bool> can-rise: true;
     in property <bool> can-fall: true;
+    // A detail that reports a problem the user has to act on wraps instead of
+    // being cut off; the row grows for it. Ordinary details keep one line.
+    in property <bool> wrap-detail: false;
     callback moved(int);
 
-    height: Sheet.row-height;
+    height: root.wrap-detail
+        ? max(Sheet.row-height, identity.preferred-height + 22px)
+        : Sheet.row-height;
 
     Rectangle {
         y: parent.height - 1px;
@@ -277,6 +282,7 @@ export component ListRow inherits Rectangle {
                 text: root.detail;
                 color: Sheet.muted;
                 font-size: Sheet.detail-size;
+                wrap: root.wrap-detail ? word-wrap : no-wrap;
                 overflow: elide;
             }
         }

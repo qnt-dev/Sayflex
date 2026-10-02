@@ -358,8 +358,8 @@ msgstr "Dettare"
 msgid "Dictation"
 msgstr "Dettatura"
 
-msgid "Dictation {session} is still processing; it will be inserted here when ready."
-msgstr "La dettatura {session} è ancora in elaborazione; verrà inserita qui quando sarà pronta."
+msgid "The dictation is still processing; it will be inserted here when ready."
+msgstr "La dettatura è ancora in elaborazione; verrà inserita qui quando sarà pronta."
 
 msgid "DICTATION LANGUAGE"
 msgstr "LINGUA DI DETTATURA"
@@ -519,11 +519,11 @@ msgstr "Il protocollo del processo di input non corrisponde. Reinstalla completa
 msgid "Insert latest dictation"
 msgstr "Inserisci l’ultima dettatura"
 
-msgid "Inserted {delivery} after the target read the private transaction in {milliseconds} ms"
-msgstr "{delivery} inserito dopo la lettura della transazione privata da parte della destinazione in {milliseconds} ms"
+msgid "Inserted; the target read the text in {milliseconds} ms"
+msgstr "Inserito; la destinazione ha letto il testo in {milliseconds} ms"
 
-msgid "Inserted {delivery} through the target adapter in {milliseconds} ms"
-msgstr "{delivery} inserito tramite l’adattatore di destinazione in {milliseconds} ms"
+msgid "Inserted through the target adapter in {milliseconds} ms"
+msgstr "Inserito tramite l’adattatore di destinazione in {milliseconds} ms"
 
 msgid "Install"
 msgstr "Installa"
@@ -579,8 +579,8 @@ msgstr "La correzione del layout della tastiera è disattivata."
 msgid "Korean"
 msgstr "Coreano"
 
-msgid "Latest transcript {session} copied. Shift+Insert is ready."
-msgstr "Ultima trascrizione {session} copiata. Maiusc+Ins è pronto."
+msgid "Latest transcript copied. Shift+Insert is ready."
+msgstr "Ultima trascrizione copiata. Maiusc+Ins è pronto."
 
 msgid "Less GPU and battery, slightly slower"
 msgstr "Meno GPU e batteria, leggermente più lento"
@@ -802,8 +802,8 @@ msgstr "Panoramica"
 msgid "PALETTE"
 msgstr "Tavolozza"
 
-msgid "Paste dispatched {delivery} without target verification in {milliseconds} ms"
-msgstr "Incollaggio {delivery} inviato senza verifica della destinazione in {milliseconds} ms"
+msgid "Pasted; the target did not confirm it ({milliseconds} ms)"
+msgstr "Incollato; la destinazione non l’ha confermato ({milliseconds} ms)"
 
 msgid "Paste the key"
 msgstr "Incolla la chiave"
@@ -1305,8 +1305,8 @@ msgstr "Utilizzare una lettera, un numero, un tasto funzione, uno spazio, un tas
 msgid "Value"
 msgstr "Valore"
 
-msgid "Verified insertion {delivery} in {milliseconds} ms"
-msgstr "Inserimento {delivery} verificato in {milliseconds} ms"
+msgid "Inserted and verified in {milliseconds} ms"
+msgstr "Inserito e verificato in {milliseconds} ms"
 
 msgid "VERSION"
 msgstr "VERSIONE"

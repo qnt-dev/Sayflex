@@ -632,6 +632,7 @@ pub(crate) fn apply_snapshot(
     snapshot: &ScreenResultSnapshot,
 ) -> Result<Vec<BlockLayout>, String> {
     let requested_mode = preview.get_screen_view_mode();
+    preview.set_screen_copied(false);
     let crop_size = CropPixelSize::from_screen_rect(snapshot.crop_rect);
     let inputs = snapshot
         .blocks
@@ -1430,6 +1431,39 @@ mod tests {
         let original = window.window().take_snapshot().unwrap();
         assert_eq!(sample(&original, label_x, label_y), [240, 240, 240]);
         assert_eq!(window.get_screen_masks().row_count(), 0);
+    }
+
+    #[test]
+    fn an_expired_result_says_copied_once_the_copy_is_confirmed() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::ComponentHandle;
+
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .unwrap();
+        let window = crate::ScreenTranslationWindow::new().unwrap();
+        window.set_screen_image_expired(true);
+        window.show().unwrap();
+        assert!(
+            ElementHandle::find_by_accessible_label(&window, "COPY TEXT")
+                .next()
+                .is_some()
+        );
+
+        // What the desktop does when the input host answers TextCopied.
+        window.set_screen_copied(true);
+
+        assert!(
+            ElementHandle::find_by_accessible_label(&window, "COPIED")
+                .next()
+                .is_some(),
+            "the production window must show the confirmation"
+        );
     }
 
     #[test]

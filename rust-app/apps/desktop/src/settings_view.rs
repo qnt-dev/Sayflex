@@ -718,6 +718,7 @@ fn hotkey_rows(state: &AppState) -> Vec<HotkeyRow> {
                 keys: format_hotkey(binding.spec).into(),
                 name: name.into(),
                 detail: detail.into(),
+                problem: rejection.is_some() && !pending,
                 state: if pending {
                     text(locale, UiText::Applying).into()
                 } else {
@@ -3786,5 +3787,99 @@ mod wheel_motion_tests {
     fn wheel_destinations_are_clamped_to_both_ends_of_the_page() {
         assert_eq!(immediate_wheel_position(-490.0, -500.0, 0.0, -60.0), -500.0);
         assert_eq!(immediate_wheel_position(-10.0, -500.0, 0.0, 60.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod settings_render_evidence {
+    use std::{fs, io::BufWriter};
+
+    use rust_protocol::{HotkeyAction, HotkeyRejection, SpeechOutputMode};
+    use slint::{ComponentHandle, LogicalSize, ModelRc, VecModel};
+
+    use super::{hotkey_rows, hotkeys_summary};
+    use crate::{
+        AppState, SavedSettings, SpeechBackend,
+        localization::{UiLocale, UiText, render},
+    };
+
+    /// Renders the Shortcuts page with a refused pause chord and an
+    /// unconfirmed paste in the footer, the two states the review found
+    /// truncated. Runs only when SAYFLEX_SETTINGS_RENDER_OUTPUT names a PNG.
+    #[test]
+    fn render_hotkeys_page_when_requested() {
+        let Some(output) = std::env::var_os("SAYFLEX_SETTINGS_RENDER_OUTPUT") else {
+            return;
+        };
+        let code = std::env::var("SAYFLEX_SETTINGS_RENDER_LOCALE").unwrap_or_else(|_| "ru".into());
+        let locale = match code.as_str() {
+            "en" => UiLocale::English,
+            "ru" => UiLocale::Russian,
+            "de" => UiLocale::German,
+            other => panic!("add {other} to the render harness"),
+        };
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .unwrap();
+        let seed = crate::SettingsWindow::new().unwrap();
+        if code != "en" {
+            slint::select_bundled_translation(&code).unwrap();
+        }
+        let settings = crate::SettingsWindow::new().unwrap();
+
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        );
+        state.ui_locale = locale;
+        state.hotkey_errors.insert(
+            HotkeyAction::PauseResume,
+            HotkeyRejection::RegistrationFailed,
+        );
+        state.registered_hotkeys.pause_resume.enabled = false;
+        // A refused edit whose previous chord still works: the longest hint.
+        state.hotkey_errors.insert(
+            HotkeyAction::CorrectLayout,
+            HotkeyRejection::RegistrationFailed,
+        );
+        settings.set_hotkey_rows(ModelRc::new(VecModel::from(hotkey_rows(&state))));
+        settings.set_hotkeys_summary(hotkeys_summary(&state).into());
+        settings.set_hotkeys_summary_signal(true);
+        let footer = render(
+            locale,
+            UiText::PasteDispatched,
+            &[("delivery", "b1780a9e"), ("milliseconds", "2783")],
+        );
+        settings.set_indicator_status(footer.into());
+        settings.set_active_page(8);
+        settings.show().unwrap();
+        settings.window().set_size(LogicalSize::new(1016.0, 890.0));
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(500));
+        let shot = settings.window().take_snapshot().unwrap();
+
+        let output = std::path::PathBuf::from(output);
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut encoder = png::Encoder::new(
+            BufWriter::new(fs::File::create(&output).unwrap()),
+            shot.width(),
+            shot.height(),
+        );
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(shot.as_bytes())
+            .unwrap();
+        drop(seed);
     }
 }
