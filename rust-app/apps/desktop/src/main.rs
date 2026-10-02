@@ -3710,6 +3710,79 @@ fn handle_session_end(event: rust_platform_windows::SessionEndEvent, runtime: &R
     }
 }
 
+/// Whether a worker's exit ends the dictation in progress.
+const fn worker_exit_affects_dictation(kind: WorkerKind) -> bool {
+    matches!(kind, WorkerKind::Input | WorkerKind::Speech)
+}
+
+/// Ends a translation request whose worker exited before answering.
+fn fail_orphaned_translation(
+    request_id: RequestId,
+    pending: PendingTranslation,
+    runtime: &RuntimeUi,
+) {
+    runtime
+        .state
+        .borrow_mut()
+        .selection_release_gates
+        .remove(&request_id);
+    let message = state_text(&runtime.state, UiText::WorkerUnavailable);
+    match pending.origin {
+        TranslationOrigin::Translator => {
+            if let Some(translator) = runtime.translator.upgrade() {
+                translator.set_processing(false);
+                translator.set_presentation_state(4);
+                translator.set_notice_headline(message.into());
+                translator.set_notice_detail("".into());
+                translator.set_status_text(message.into());
+            }
+        }
+        TranslationOrigin::Selection { target, .. } => {
+            if runtime
+                .translation_previews
+                .borrow()
+                .slot_for_request(request_id)
+                .is_none()
+            {
+                runtime
+                    .translation_previews
+                    .borrow_mut()
+                    .reserve_current(request_id);
+            }
+            show_selection_translation_preview(
+                request_id,
+                target,
+                &pending.source_text,
+                message,
+                &runtime.translation_previews,
+                true,
+            );
+        }
+        // Screen requests are ended by the screen coordinator above.
+        TranslationOrigin::ScreenRegion { .. } => {}
+    }
+    rust_app_core::diagnostics::log_line(&format!(
+        "translation_pipeline request={request_id} stage=failed kind=WorkerExit"
+    ));
+}
+
+/// The translator window shows one request at a time. A new submission
+/// replaces whatever it was still waiting for: the older request leaves the
+/// pending table, so its late cancel, failure or result cannot reset the
+/// window while the new one runs.
+fn supersede_translator_requests(state: &mut AppState) -> Vec<RequestId> {
+    let superseded = state
+        .pending_translations
+        .iter()
+        .filter(|(_, pending)| matches!(pending.origin, TranslationOrigin::Translator))
+        .map(|(request_id, _)| *request_id)
+        .collect::<Vec<_>>();
+    for request_id in &superseded {
+        state.pending_translations.remove(request_id);
+    }
+    superseded
+}
+
 fn handle_worker_exit(
     kind: WorkerKind,
     instance_id: u64,
@@ -3815,11 +3888,17 @@ fn handle_worker_exit(
         return;
     }
 
-    if runtime
-        .state
-        .borrow()
-        .active_visualizer_style
-        .is_some_and(VisualizerStyle::uses_external_renderer)
+    // Only the input host and the speech worker take part in a dictation.
+    // The translation worker never does — even translate-to-English is the
+    // speech model's own task — so its exit must leave a recording, its
+    // overlay and the healthy speech worker alone, as Companion and OCR do.
+    let affects_dictation = worker_exit_affects_dictation(kind);
+    if affects_dictation
+        && runtime
+            .state
+            .borrow()
+            .active_visualizer_style
+            .is_some_and(VisualizerStyle::uses_external_renderer)
     {
         let _ = runtime
             .workers
@@ -3838,8 +3917,9 @@ fn handle_worker_exit(
     #[cfg(not(feature = "screen-translation"))]
     let failed_screen_translation: Option<(RequestId, PhysicalRect, String)> = None;
 
-    let active_session = {
+    let (active_session, orphaned_translations) = {
         let mut state = runtime.state.borrow_mut();
+        let mut orphaned = Vec::new();
         match kind {
             WorkerKind::Input => state.input_ready = false,
             WorkerKind::Speech => {
@@ -3849,21 +3929,31 @@ fn handle_worker_exit(
             WorkerKind::Translation => {
                 state.translation_worker_ready = false;
                 state.translation_ready = false;
-                state.pending_translations.clear();
+                orphaned = state.pending_translations.drain().collect::<Vec<_>>();
             }
             #[cfg(feature = "screen-translation")]
             WorkerKind::Ocr => {}
             WorkerKind::Companion => {}
         }
-        let active = state.indicator_session.take();
-        state.active_visualizer_style = None;
-        if let Some(session_id) = active {
-            let _ = state.registry.fail(session_id);
-            state.targets.remove(&session_id);
-            state.release_started.remove(&session_id);
-        }
-        active
+        let active = if affects_dictation {
+            let active = state.indicator_session.take();
+            state.active_visualizer_style = None;
+            if let Some(session_id) = active {
+                let _ = state.registry.fail(session_id);
+                state.targets.remove(&session_id);
+                state.release_started.remove(&session_id);
+            }
+            active
+        } else {
+            None
+        };
+        (active, orphaned)
     };
+    // Requests the dead worker can no longer answer end visibly instead of
+    // leaving the translator busy or a selection card waiting forever.
+    for (request_id, pending) in orphaned_translations {
+        fail_orphaned_translation(request_id, pending, runtime);
+    }
     if let Some((request_id, anchor, source_text)) = failed_screen_translation {
         runtime.screen_translation.borrow_mut().complete(request_id);
         show_screen_translation_preview(
@@ -3883,8 +3973,10 @@ fn handle_worker_exit(
             .speech
             .send(&SpeechWorkerCommand::Cancel { session_id });
     }
-    runtime.indicator_animation.borrow_mut().stop();
-    runtime.recording_overlays.retire_all("worker_exit");
+    if affects_dictation {
+        runtime.indicator_animation.borrow_mut().stop();
+        runtime.recording_overlays.retire_all("worker_exit");
+    }
 
     match runtime.workers.recover(kind, instance_id, exit) {
         Ok(WorkerRecovery::Restarted) => {
@@ -9989,5 +10081,79 @@ mod screen_translation_outcome_tests {
             screen_outcome_for_capture_error(&CaptureError::NoOutputs),
             ScreenTranslationOutcome::CaptureUnavailable
         );
+    }
+}
+
+#[cfg(test)]
+mod worker_exit_isolation_tests {
+    use std::time::Instant;
+
+    use rust_protocol::{
+        PhysicalRect, RequestId, SpeechOutputMode, TranslationLanguage, TranslationLanguagePolicy,
+    };
+
+    use super::{
+        AppState, PendingTranslation, SavedSettings, SpeechBackend, TranslationOrigin, WorkerKind,
+        supersede_translator_requests, worker_exit_affects_dictation,
+    };
+
+    fn pending(origin: TranslationOrigin) -> PendingTranslation {
+        PendingTranslation {
+            origin,
+            source_text: "Hallo".to_owned(),
+            source_language: None,
+            target_language: None,
+            language_policy: TranslationLanguagePolicy {
+                primary: TranslationLanguage::English,
+                secondary: TranslationLanguage::Russian,
+            },
+            started: Instant::now(),
+            request_started_unix_ms: 0,
+            first_partial_shown: false,
+            stable_paragraphs: None,
+        }
+    }
+
+    #[test]
+    fn only_the_input_host_and_the_speech_worker_end_a_dictation() {
+        assert!(worker_exit_affects_dictation(WorkerKind::Input));
+        assert!(worker_exit_affects_dictation(WorkerKind::Speech));
+        assert!(!worker_exit_affects_dictation(WorkerKind::Translation));
+        assert!(!worker_exit_affects_dictation(WorkerKind::Companion));
+        #[cfg(feature = "screen-translation")]
+        assert!(!worker_exit_affects_dictation(WorkerKind::Ocr));
+    }
+
+    #[test]
+    fn a_new_translator_request_supersedes_only_older_translator_requests() {
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        );
+        let older = RequestId::new();
+        let screen = RequestId::new();
+        state
+            .pending_translations
+            .insert(older, pending(TranslationOrigin::Translator));
+        state.pending_translations.insert(
+            screen,
+            pending(TranslationOrigin::ScreenRegion {
+                anchor: PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                },
+            }),
+        );
+
+        let superseded = supersede_translator_requests(&mut state);
+
+        assert_eq!(superseded, vec![older]);
+        // The replaced request's late cancel finds nothing to reset.
+        assert!(!state.pending_translations.contains_key(&older));
+        assert!(state.pending_translations.contains_key(&screen));
     }
 }

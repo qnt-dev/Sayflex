@@ -3208,6 +3208,15 @@ pub(crate) fn wire_translator(
                 return;
             };
             discard_matching_queued_model_translation(&state, QueuedModelMatch::Translator);
+            // Ctrl+Enter restarts a running translation with the current
+            // text. The request it replaces must not reset the window when
+            // its cancellation arrives while this one is still working.
+            let superseded = crate::supersede_translator_requests(&mut state.borrow_mut());
+            for request_id in superseded {
+                let _ = workers
+                    .translation
+                    .send(&TranslationWorkerCommand::Cancel { request_id });
+            }
             translator.set_model_offer_visible(false);
             translator.set_model_offer_action("".into());
             let source_text = translator.get_source_text().trim().to_owned();
