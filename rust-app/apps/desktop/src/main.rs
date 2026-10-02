@@ -896,6 +896,8 @@ struct AppState {
     pending_selection_captures: HashMap<RequestId, u64>,
     selection_release_gates: HashMap<RequestId, SelectionReleaseGate>,
     pending_translations: HashMap<RequestId, PendingTranslation>,
+    /// A "Clear history" request waiting for both workers to answer.
+    history_clear: Option<HistoryClear>,
     /// A user request that discovered its exact compact language pack was not
     /// installed. The installer owns the model operation; this keeps the one
     /// original request so it can resume without making the user click twice.
@@ -1019,6 +1021,7 @@ impl AppState {
             pending_selection_captures: HashMap::new(),
             selection_release_gates: HashMap::new(),
             pending_translations: HashMap::new(),
+            history_clear: None,
             queued_model_translation: None,
             queued_selection_translation: None,
             #[cfg(feature = "screen-translation")]
@@ -3710,6 +3713,116 @@ fn handle_session_end(event: rust_platform_windows::SessionEndEvent, runtime: &R
     }
 }
 
+/// Applies the translation worker's report of what is resident.
+///
+/// With keep-warm off the worker loads the model for each request and drops it
+/// afterwards, so "not loaded" is its resting state, not a reason to refuse
+/// the next translation: the model loads on demand.
+fn apply_local_translation_model_state(
+    app: &mut AppState,
+    catalog_id: Option<String>,
+    loaded: bool,
+) {
+    app.translation_loaded_model_id = loaded.then_some(catalog_id).flatten();
+    let loads_on_demand = !app.translation_keep_warm && app.translation_worker_ready;
+    app.translation_ready = (loaded || loads_on_demand) && app.local_translation_enabled();
+    app.translation_unloading = false;
+    if loaded {
+        app.translation_reload_on_next_use = false;
+    }
+}
+
+/// Which worker answered a "Clear history" request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryOwner {
+    Speech,
+    Translation,
+}
+
+/// Each worker owns one history file. "History cleared" may only be said once
+/// both have answered and neither failed; a worker that could not remove its
+/// file keeps its entries and says why.
+#[derive(Debug, Default)]
+struct HistoryClear {
+    /// `None` while waiting; `Some(None)` cleared; `Some(Some(error))` failed.
+    speech: Option<Option<String>>,
+    translation: Option<Option<String>>,
+}
+
+impl HistoryClear {
+    fn answer(&mut self, owner: HistoryOwner, error: Option<String>) {
+        let slot = match owner {
+            HistoryOwner::Speech => &mut self.speech,
+            HistoryOwner::Translation => &mut self.translation,
+        };
+        if slot.is_none() {
+            *slot = Some(error);
+        }
+    }
+
+    fn is_waiting_for(&self, owner: HistoryOwner) -> bool {
+        match owner {
+            HistoryOwner::Speech => self.speech.is_none(),
+            HistoryOwner::Translation => self.translation.is_none(),
+        }
+    }
+
+    /// `None` while an answer is outstanding; otherwise the joined failures.
+    fn outcome(&self) -> Option<Result<(), String>> {
+        let (Some(speech), Some(translation)) = (&self.speech, &self.translation) else {
+            return None;
+        };
+        let failures = [speech, translation]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        Some(if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        })
+    }
+}
+
+/// Records one worker's answer and, once both have answered, tells the user
+/// what actually happened.
+fn record_history_clear_answer(
+    settings: &slint::Weak<SettingsWindow>,
+    state: &Rc<RefCell<AppState>>,
+    owner: HistoryOwner,
+    error: Option<String>,
+) {
+    let outcome = {
+        let mut state = state.borrow_mut();
+        let Some(progress) = state.history_clear.as_mut() else {
+            return;
+        };
+        progress.answer(owner, error);
+        let Some(outcome) = progress.outcome() else {
+            return;
+        };
+        state.history_clear = None;
+        if outcome.is_ok() {
+            state.transcripts.clear();
+            state.latest_history_session = None;
+            state.history_loaded = true;
+        }
+        outcome
+    };
+    sync_history(settings, state);
+    match outcome {
+        Ok(()) => set_indicator_status(settings, state_text(state, UiText::HistoryCleared)),
+        Err(error) => {
+            rust_app_core::diagnostics::log_line("history clear result=failed");
+            set_status_problem(
+                settings,
+                &state_message(state, UiText::CouldNotClearHistory, &[("error", &error)]),
+            );
+        }
+    }
+}
+
 /// Whether a worker's exit ends the dictation in progress.
 const fn worker_exit_affects_dictation(kind: WorkerKind) -> bool {
     matches!(kind, WorkerKind::Input | WorkerKind::Speech)
@@ -3949,6 +4062,26 @@ fn handle_worker_exit(
         };
         (active, orphaned)
     };
+    let history_owner = match kind {
+        WorkerKind::Speech => Some(HistoryOwner::Speech),
+        WorkerKind::Translation => Some(HistoryOwner::Translation),
+        _ => None,
+    };
+    if let Some(owner) = history_owner
+        && runtime
+            .state
+            .borrow()
+            .history_clear
+            .as_ref()
+            .is_some_and(|progress| progress.is_waiting_for(owner))
+    {
+        record_history_clear_answer(
+            &runtime.settings,
+            &runtime.state,
+            owner,
+            Some("the worker stopped before confirming".to_owned()),
+        );
+    }
     // Requests the dead worker can no longer answer end visibly instead of
     // leaving the translator busy or a selection card waiting forever.
     for (request_id, pending) in orphaned_translations {
@@ -6886,6 +7019,9 @@ delivery={} target_pid={}",
                 );
             }
         }
+        SpeechWorkerEvent::HistoryCleared { error } => {
+            record_history_clear_answer(settings, state, HistoryOwner::Speech, error);
+        }
         SpeechWorkerEvent::History { entries } => {
             {
                 let mut state = state.borrow_mut();
@@ -7177,15 +7313,7 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             sync_action_settings(settings, state);
         }
         TranslationWorkerEvent::LocalModelState { catalog_id, loaded } => {
-            {
-                let mut app = state.borrow_mut();
-                app.translation_loaded_model_id = loaded.then_some(catalog_id).flatten();
-                app.translation_ready = loaded && app.local_translation_enabled();
-                app.translation_unloading = false;
-                if loaded {
-                    app.translation_reload_on_next_use = false;
-                }
-            }
+            apply_local_translation_model_state(&mut state.borrow_mut(), catalog_id, loaded);
             sync_translation_models(settings, state);
             sync_action_settings(settings, state);
         }
@@ -8052,6 +8180,9 @@ fn handle_translation_event(event: TranslationWorkerEvent, runtime: &RuntimeUi) 
             } else {
                 Vec::new()
             };
+        }
+        TranslationWorkerEvent::HistoryCleared { error } => {
+            record_history_clear_answer(settings, state, HistoryOwner::Translation, error);
         }
         TranslationWorkerEvent::Failed {
             request_id,
@@ -10155,5 +10286,95 @@ mod worker_exit_isolation_tests {
         // The replaced request's late cancel finds nothing to reset.
         assert!(!state.pending_translations.contains_key(&older));
         assert!(state.pending_translations.contains_key(&screen));
+    }
+}
+
+#[cfg(test)]
+mod history_clear_tests {
+    use super::{HistoryClear, HistoryOwner};
+
+    #[test]
+    fn cleared_is_reported_only_after_both_workers_answer() {
+        let mut progress = HistoryClear::default();
+        assert_eq!(progress.outcome(), None);
+
+        progress.answer(HistoryOwner::Speech, None);
+        assert_eq!(progress.outcome(), None, "translation has not answered");
+
+        progress.answer(HistoryOwner::Translation, None);
+        assert_eq!(progress.outcome(), Some(Ok(())));
+    }
+
+    #[test]
+    fn one_failed_worker_makes_the_whole_clear_a_failure() {
+        let mut progress = HistoryClear::default();
+        progress.answer(HistoryOwner::Translation, None);
+        progress.answer(
+            HistoryOwner::Speech,
+            Some("history.json is in use by another process".to_owned()),
+        );
+
+        assert_eq!(
+            progress.outcome(),
+            Some(Err("history.json is in use by another process".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_late_second_answer_does_not_overwrite_the_first() {
+        let mut progress = HistoryClear::default();
+        progress.answer(HistoryOwner::Speech, Some("in use".to_owned()));
+        progress.answer(HistoryOwner::Speech, None);
+        assert!(!progress.is_waiting_for(HistoryOwner::Speech));
+        assert!(progress.is_waiting_for(HistoryOwner::Translation));
+        progress.answer(HistoryOwner::Translation, None);
+
+        assert_eq!(progress.outcome(), Some(Err("in use".to_owned())));
+    }
+}
+
+#[cfg(test)]
+mod local_translation_model_state_tests {
+    use rust_protocol::SpeechOutputMode;
+
+    use super::{AppState, SavedSettings, SpeechBackend, apply_local_translation_model_state};
+
+    fn state(keep_warm: bool) -> AppState {
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".to_owned(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        );
+        state.translation_keep_warm = keep_warm;
+        state.translation_worker_ready = true;
+        state
+    }
+
+    #[test]
+    fn a_per_request_release_shows_the_model_as_unloaded_but_ready() {
+        let mut app = state(false);
+        apply_local_translation_model_state(&mut app, Some("qwen35-9b-q4".to_owned()), true);
+        assert_eq!(
+            app.translation_loaded_model_id.as_deref(),
+            Some("qwen35-9b-q4")
+        );
+
+        apply_local_translation_model_state(&mut app, Some("qwen35-9b-q4".to_owned()), false);
+
+        assert_eq!(
+            app.translation_loaded_model_id, None,
+            "Resources must not say loaded"
+        );
+        assert_eq!(app.translation_ready, app.local_translation_enabled());
+    }
+
+    #[test]
+    fn with_keep_warm_on_an_unloaded_model_is_not_ready() {
+        let mut app = state(true);
+        apply_local_translation_model_state(&mut app, Some("qwen35-9b-q4".to_owned()), false);
+
+        assert_eq!(app.translation_loaded_model_id, None);
+        assert!(!app.translation_ready);
     }
 }

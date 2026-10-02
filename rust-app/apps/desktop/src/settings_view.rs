@@ -2128,26 +2128,31 @@ pub(crate) fn wire_settings(
         let state = Rc::clone(state);
         let workers = Rc::clone(workers);
         settings.on_clear_history(move || {
-            let _ = workers.speech.send(&SpeechWorkerCommand::ClearHistory);
-            let _ = workers
-                .translation
-                .send(&TranslationWorkerCommand::ClearHistory);
-            {
-                let mut state = state.borrow_mut();
-                state.history.clear();
-                state.translation_history.clear();
-                state.transcripts.clear();
-                state.latest_history_session = None;
-                state.history_loaded = true;
+            // "History cleared" is said only after both workers confirm that
+            // their files are gone; the list updates from what they report.
+            if state.borrow().history_clear.is_some() {
+                return;
             }
-            sync_history(&settings_weak, &state);
-            set_indicator_status(
-                &settings_weak,
-                text(
-                    active_locale(state.borrow().ui_locale),
-                    UiText::HistoryCleared,
-                ),
-            );
+            state.borrow_mut().history_clear = Some(crate::HistoryClear::default());
+            if let Err(error) = workers.speech.send(&SpeechWorkerCommand::ClearHistory) {
+                crate::record_history_clear_answer(
+                    &settings_weak,
+                    &state,
+                    crate::HistoryOwner::Speech,
+                    Some(error.to_string()),
+                );
+            }
+            if let Err(error) = workers
+                .translation
+                .send(&TranslationWorkerCommand::ClearHistory)
+            {
+                crate::record_history_clear_answer(
+                    &settings_weak,
+                    &state,
+                    crate::HistoryOwner::Translation,
+                    Some(error.to_string()),
+                );
+            }
         });
     }
     {

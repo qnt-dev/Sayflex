@@ -401,12 +401,20 @@ impl NetworkJob {
                 }
             }
             RouteOutcome::Exhausted { ref attempts } => {
+                // This message reaches the desktop log and the status line,
+                // so it carries the same redaction as the per-attempt report.
                 let message = if attempts.is_empty() {
                     "Every transcription provider is switched off.".to_owned()
                 } else {
                     attempts.last().map_or_else(
                         || "No provider could transcribe the recording.".to_owned(),
-                        |attempt| format!("{}: {}", attempt.provider, attempt.reason()),
+                        |attempt| {
+                            format!(
+                                "{}: {}",
+                                attempt.provider,
+                                redacted_reason(attempt, &self.secrets)
+                            )
+                        },
                     )
                 };
                 if !watcher.try_publish(|| {
@@ -433,12 +441,22 @@ impl NetworkJob {
     }
 }
 
+/// An attempt's reason with that provider's key removed. Every diagnostic
+/// that leaves the router goes through here.
+fn redacted_reason(
+    attempt: &rust_cloud_speech::Attempt,
+    secrets: &HashMap<String, String>,
+) -> String {
+    let reason = attempt.reason();
+    match secrets.get(attempt.provider.as_str()) {
+        Some(secret) => rust_cloud_speech::redact_secret(&reason, secret),
+        None => reason,
+    }
+}
+
 fn report_attempts(outcome: &RouteOutcome, secrets: &HashMap<String, String>) {
     for attempt in outcome_attempts(outcome) {
-        let mut reason = attempt.reason();
-        if let Some(secret) = secrets.get(attempt.provider.as_str()) {
-            reason = rust_cloud_speech::redact_secret(&reason, secret);
-        }
+        let reason = redacted_reason(attempt, secrets);
         eprintln!(
             "transcription provider={} result=not_used reason={reason}",
             attempt.provider
@@ -734,5 +752,35 @@ mod network_shutdown_tests {
         // A real worker process exits here; release this synthetic operation so
         // the detached test thread does not outlive the test process.
         let _ = release.send(());
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use std::collections::HashMap;
+
+    use rust_cloud_speech::{
+        ProviderFailure,
+        provider::ProviderId,
+        router::{Attempt, AttemptOutcome},
+    };
+
+    use super::redacted_reason;
+
+    #[test]
+    fn the_final_failure_message_carries_no_provider_key() {
+        let key = "gsk_live_0123456789abcdef";
+        let attempt = Attempt {
+            provider: ProviderId::new("custom"),
+            outcome: AttemptOutcome::Failed(ProviderFailure::Credential(format!(
+                "invalid key {key}"
+            ))),
+        };
+        let secrets = HashMap::from([("custom".to_owned(), key.to_owned())]);
+
+        let reason = redacted_reason(&attempt, &secrets);
+
+        assert!(!reason.contains(key), "{reason}");
+        assert!(reason.contains("<redacted>"), "{reason}");
     }
 }

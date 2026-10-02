@@ -20,7 +20,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 32;
+pub const PROTOCOL_VERSION: u32 = 33;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -1624,6 +1624,12 @@ pub enum TranslationWorkerEvent {
     History {
         entries: Vec<TranslationHistoryEntry>,
     },
+    /// The answer to `ClearHistory`. `error` is set when the history file
+    /// could not be removed; the entries that remain are sent as `History`.
+    HistoryCleared {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// The ordered list with each row's availability, after any change.
     TranslationProviders {
         statuses: Vec<TranslationProviderStatus>,
@@ -1792,6 +1798,12 @@ pub enum SpeechWorkerEvent {
     },
     History {
         entries: Vec<HistoryEntry>,
+    },
+    /// The answer to `ClearHistory`. `error` is set when the history file
+    /// could not be removed; the entries that remain are sent as `History`.
+    HistoryCleared {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// The ordered list with each row's availability, after any change.
     TranscriptionProviders {
@@ -2437,6 +2449,7 @@ pub fn translation_event_name(event: &TranslationWorkerEvent) -> &'static str {
         TranslationWorkerEvent::Completed { .. } => "completed",
         TranslationWorkerEvent::Cancelled { .. } => "cancelled",
         TranslationWorkerEvent::History { .. } => "history",
+        TranslationWorkerEvent::HistoryCleared { .. } => "history_cleared",
         TranslationWorkerEvent::TranslationProviders { .. } => "translation_providers",
         TranslationWorkerEvent::CredentialSaved { .. } => "credential_saved",
         TranslationWorkerEvent::RequestFailed { .. } => "request_failed",
@@ -2461,6 +2474,7 @@ pub fn speech_event_name(event: &SpeechWorkerEvent) -> &'static str {
         SpeechWorkerEvent::Completed { .. } => "completed",
         SpeechWorkerEvent::Cancelled { .. } => "cancelled",
         SpeechWorkerEvent::History { .. } => "history",
+        SpeechWorkerEvent::HistoryCleared { .. } => "history_cleared",
         SpeechWorkerEvent::TranscriptionProviders { .. } => "transcription_providers",
         SpeechWorkerEvent::CredentialSaved { .. } => "credential_saved",
         SpeechWorkerEvent::TranscribedRemotely { .. } => "transcribed_remotely",
@@ -2597,8 +2611,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 32,
-            "every fingerprint below was written for protocol 32: if a shape \
+            PROTOCOL_VERSION, 33,
+            "every fingerprint below was written for protocol 33: if a shape \
              changes, this number changes with it"
         );
     }
@@ -3453,6 +3467,9 @@ mod complete_wire_schema_tests {
                     created_unix_ms: 1,
                 }],
             },
+            TranslationWorkerEvent::HistoryCleared {
+                error: Some("history file is in use".to_owned()),
+            },
             TranslationWorkerEvent::TranslationProviders {
                 statuses: vec![translation_status()],
             },
@@ -3594,6 +3611,9 @@ mod complete_wire_schema_tests {
                     created_unix_ms: 1,
                 }],
             },
+            SpeechWorkerEvent::HistoryCleared {
+                error: Some("history file is in use".to_owned()),
+            },
             SpeechWorkerEvent::TranscriptionProviders {
                 statuses: vec![transcription_status()],
             },
@@ -3709,7 +3729,7 @@ mod complete_wire_schema_tests {
         TranslationWorkerEvent::Completed { .. } => 14, TranslationWorkerEvent::Cancelled { .. } => 15,
         TranslationWorkerEvent::History { .. } => 16, TranslationWorkerEvent::TranslationProviders { .. } => 17,
         TranslationWorkerEvent::CredentialSaved { .. } => 18, TranslationWorkerEvent::RequestFailed { .. } => 19,
-        TranslationWorkerEvent::Failed { .. } => 20
+        TranslationWorkerEvent::Failed { .. } => 20, TranslationWorkerEvent::HistoryCleared { .. } => 21
     );
     index_fn!(speech_command_index, SpeechWorkerCommand,
         SpeechWorkerCommand::Initialize { .. } => 0, SpeechWorkerCommand::Begin { .. } => 1,
@@ -3732,7 +3752,7 @@ mod complete_wire_schema_tests {
         SpeechWorkerEvent::Completed { .. } => 10, SpeechWorkerEvent::Cancelled { .. } => 11,
         SpeechWorkerEvent::History { .. } => 12, SpeechWorkerEvent::TranscriptionProviders { .. } => 13,
         SpeechWorkerEvent::CredentialSaved { .. } => 14, SpeechWorkerEvent::TranscribedRemotely { .. } => 15,
-        SpeechWorkerEvent::Failed { .. } => 16
+        SpeechWorkerEvent::Failed { .. } => 16, SpeechWorkerEvent::HistoryCleared { .. } => 17
     );
     index_fn!(companion_command_index, CompanionRendererCommand,
         CompanionRendererCommand::SetEnabled { .. } => 0, CompanionRendererCommand::SetHomePosition { .. } => 1,
@@ -3826,9 +3846,9 @@ mod complete_wire_schema_tests {
         assert_complete(&ocr_commands, ocr_command_index, 3);
         assert_complete(&ocr_events, ocr_event_index, 4);
         assert_complete(&translation_commands, translation_command_index, 20);
-        assert_complete(&translation_events, translation_event_index, 21);
+        assert_complete(&translation_events, translation_event_index, 22);
         assert_complete(&speech_commands, speech_command_index, 19);
-        assert_complete(&speech_events, speech_event_index, 17);
+        assert_complete(&speech_events, speech_event_index, 18);
         assert_complete(&companion_commands, companion_command_index, 8);
         assert_complete(&companion_events, companion_event_index, 3);
 
@@ -3847,7 +3867,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x455a_83b8_d340_12ec,
+            0x1e8c_74dc_9ac8_7925,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

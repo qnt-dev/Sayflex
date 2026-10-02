@@ -44,10 +44,14 @@ impl TranslationHistoryActor {
                         HistoryCommand::Append(entry) if enabled => history.push(entry),
                         HistoryCommand::Append(_) => {}
                         HistoryCommand::Clear { writer } => {
-                            history.clear();
-                            let _ = writer.send(&TranslationWorkerEvent::History {
-                                entries: Vec::new(),
+                            let error = history.clear().err().map(|error| {
+                                eprintln!("translation history clear failed: {error}");
+                                error.to_string()
                             });
+                            let _ = writer.send(&TranslationWorkerEvent::History {
+                                entries: history.recent(250),
+                            });
+                            let _ = writer.send(&TranslationWorkerEvent::HistoryCleared { error });
                         }
                         HistoryCommand::Shutdown => break,
                     }

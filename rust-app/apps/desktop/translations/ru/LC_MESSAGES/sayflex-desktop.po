@@ -4,6 +4,9 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
+msgid "History was not fully cleared: {error}"
+msgstr "История очищена не полностью: {error}"
+
 msgid "{backend} verified by warm-up. The preference above is where the search starts."
 msgstr "{backend} проверен путем прогрева. Предпочтение выше — это то, с чего начинается поиск."
 

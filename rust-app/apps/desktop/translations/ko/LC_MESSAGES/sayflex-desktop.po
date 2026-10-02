@@ -4,6 +4,9 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
+msgid "History was not fully cleared: {error}"
+msgstr "기록이 완전히 삭제되지 않았습니다: {error}"
+
 msgid "{backend} verified by warm-up. The preference above is where the search starts."
 msgstr "{backend}은 워밍업으로 확인되었습니다. 위의 기본 설정은 검색이 시작되는 위치입니다."
 

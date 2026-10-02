@@ -279,6 +279,7 @@ FlowPaletteUpdated|Flow Sphere palette updated for the next dictation.
 PulseMatrixPaletteUpdated|Pulse Matrix palette updated for the next dictation.
 SlateSurfaceUpdated|Writing Slate surface updated for the next dictation.
 HistoryCleared|Local voice and translation history cleared.
+CouldNotClearHistory|History was not fully cleared: {error}
 ProviderKeyNeededForOnly|Add and save this provider's key before making it the only route.
 InstallCancelled|Install cancelled. The partial file is kept.
 CouldNotCancelInstall|Could not cancel the install: {error}

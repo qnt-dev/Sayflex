@@ -45,11 +45,12 @@ impl TranslationHistory {
         self.entries.iter().take(limit).cloned().collect()
     }
 
-    pub fn clear(&mut self) {
+    /// Removes the history file, then the entries it held. A failed removal
+    /// keeps both, so the history shown is the history still on disk.
+    pub fn clear(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        remove_history_artifacts(&self.path)?;
         self.entries.clear();
-        if let Err(error) = remove_history_artifacts(&self.path) {
-            eprintln!("translation history clear failed: {error}");
-        }
+        Ok(())
     }
 }
 
@@ -209,6 +210,54 @@ mod tests {
 
     use super::TranslationHistory;
 
+    /// Another process (an indexer, a backup tool) holding the file without
+    /// delete sharing is the ordinary way removal fails on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn a_clear_that_cannot_remove_the_file_keeps_and_reports_the_history() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("translation-history.json");
+        let mut history = TranslationHistory::load(path.clone());
+        history.push(TranslationHistoryEntry {
+            result: TranslationResult {
+                request_id: RequestId::new(),
+                source_text: "hello".into(),
+                translated_text: "привет".into(),
+                source_language: TranslationLanguage::English,
+                target_language: TranslationLanguage::Russian,
+                tier: Some(TranslationTier::Tiny),
+                provider: None,
+                attempts: Vec::new(),
+                processing_duration_ms: 1,
+                first_token_duration_ms: 1,
+                backend_request_count: 1,
+                tokenize_duration_ms: 0,
+                chunk_count: 1,
+            },
+            created_unix_ms: 2,
+        });
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+
+        assert!(history.clear().is_err());
+        assert_eq!(
+            history.recent(10).len(),
+            1,
+            "what is still on disk stays shown"
+        );
+        assert!(path.exists());
+
+        drop(lock);
+        history.clear().unwrap();
+        assert!(history.recent(10).is_empty());
+        assert!(!path.exists());
+    }
+
     #[test]
     fn clear_removes_translation_history_file() {
         let directory = tempdir().unwrap();
@@ -239,7 +288,7 @@ mod tests {
         fs::write(&temporary, b"temporary").unwrap();
         fs::write(&previous, b"previous").unwrap();
         fs::write(&corrupt, b"corrupt").unwrap();
-        history.clear();
+        history.clear().unwrap();
         assert!(history.recent(10).is_empty());
         assert!(!path.exists());
         assert!(!temporary.exists());

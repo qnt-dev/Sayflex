@@ -48,8 +48,10 @@ impl HistoryStore {
     }
 
     pub fn clear(&mut self) -> Result<()> {
-        self.entries.clear();
+        // Disk first: if the file cannot be removed, the entries it still
+        // holds stay visible instead of reappearing after a restart.
         remove_history_artifacts(&self.path)?;
+        self.entries.clear();
         Ok(())
     }
 }
@@ -235,6 +237,50 @@ mod tests {
 
         let reopened = HistoryStore::open(path).unwrap();
         assert_eq!(reopened.latest(1)[0].transcript, second);
+    }
+
+    /// Another process (an indexer, a backup tool) holding the file without
+    /// delete sharing is the ordinary way removal fails on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn a_clear_that_cannot_remove_the_file_keeps_and_reports_the_history() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("history.json");
+        let mut store = HistoryStore::open(path.clone()).unwrap();
+        store
+            .append(
+                Transcript {
+                    session_id: SessionId::new(),
+                    text: "private".into(),
+                    language: "en".into(),
+                    audio_duration_ms: 1,
+                    processing_duration_ms: 2,
+                    provider: None,
+                    latency: Default::default(),
+                },
+                10,
+            )
+            .unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+
+        assert!(store.clear().is_err());
+        assert_eq!(
+            store.latest(10).len(),
+            1,
+            "what is still on disk stays shown"
+        );
+        assert!(path.exists());
+
+        drop(lock);
+        store.clear().unwrap();
+        assert!(store.latest(10).is_empty());
+        assert!(!path.exists());
     }
 
     #[test]

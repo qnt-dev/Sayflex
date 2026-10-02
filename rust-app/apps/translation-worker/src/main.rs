@@ -1610,10 +1610,7 @@ fn translate_blocks_request(
         output.capabilities,
         &is_current,
     )?;
-    if !state.keep_warm {
-        state.engine = None;
-    }
-    Ok(())
+    release_engine_unless_warm(state.keep_warm, &mut state.engine, writer)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1659,6 +1656,28 @@ fn publish_screen_blocks(
     })
 }
 
+/// With keep-warm off the engine lives for one request. Dropping it without a
+/// word left the desktop showing the model as loaded (Resources, Models) long
+/// after its memory was returned.
+fn release_engine_unless_warm(
+    keep_warm: bool,
+    engine: &mut Option<TranslationEngine>,
+    writer: &EventWriter,
+) -> Result<()> {
+    if keep_warm {
+        return Ok(());
+    }
+    let Some(engine) = engine.take() else {
+        return Ok(());
+    };
+    let catalog_id = engine.catalog_id().to_owned();
+    drop(engine);
+    writer.send(&TranslationWorkerEvent::LocalModelState {
+        catalog_id: Some(catalog_id),
+        loaded: false,
+    })
+}
+
 /// Records a finished translation and tells the desktop about it.
 ///
 /// Shared by both paths so that a translation from a service is kept, reported
@@ -1674,10 +1693,7 @@ fn finish(state: &mut WorkerState, writer: &EventWriter, result: TranslationResu
         result,
         created_unix_ms,
     })?;
-    if !state.keep_warm {
-        state.engine = None;
-    }
-    Ok(())
+    release_engine_unless_warm(state.keep_warm, &mut state.engine, writer)
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -2163,5 +2179,60 @@ mod local_model_policy_tests {
         );
         assert!(slot.is_none());
         assert_eq!(release_resident_resource(&mut slot), None);
+    }
+}
+
+#[cfg(test)]
+mod keep_warm_release_tests {
+    use std::sync::mpsc;
+
+    use rust_protocol::TranslationWorkerEvent;
+    use rust_translation_engine::{TranslationCatalog, TranslationEngine};
+
+    use super::{EventWriter, release_engine_unless_warm};
+
+    fn engine() -> TranslationEngine {
+        let catalog = TranslationCatalog::load().unwrap();
+        let pack = catalog.packs.first().unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        TranslationEngine::new(
+            pack,
+            root.path().join("models"),
+            root.path().join("runtimes"),
+        )
+    }
+
+    #[test]
+    fn a_cold_engine_is_released_after_the_request_and_the_desktop_is_told() {
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let mut slot = Some(engine());
+        let catalog_id = slot.as_ref().unwrap().catalog_id().to_owned();
+
+        release_engine_unless_warm(false, &mut slot, &writer).unwrap();
+
+        assert!(slot.is_none());
+        match received.try_recv().unwrap() {
+            TranslationWorkerEvent::LocalModelState {
+                catalog_id: released,
+                loaded,
+            } => {
+                assert_eq!(released.as_deref(), Some(catalog_id.as_str()));
+                assert!(!loaded);
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_warm_engine_stays_and_nothing_is_announced() {
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let mut slot = Some(engine());
+
+        release_engine_unless_warm(true, &mut slot, &writer).unwrap();
+
+        assert!(slot.is_some());
+        assert!(received.try_recv().is_err());
     }
 }

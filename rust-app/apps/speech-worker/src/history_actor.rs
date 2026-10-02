@@ -59,12 +59,14 @@ pub fn start(path: PathBuf, events: Sender<SpeechWorkerEvent>) -> Result<Sender<
                         enabled = value;
                     }
                     HistoryCommand::Clear => {
-                        if let Err(error) = store.clear() {
+                        let error = store.clear().err().map(|error| {
                             eprintln!("history clear failed: {error:#}");
-                        }
-                        let _ = events.send(SpeechWorkerEvent::History {
-                            entries: Vec::new(),
+                            format!("{error:#}")
                         });
+                        let _ = events.send(SpeechWorkerEvent::History {
+                            entries: store.latest(250),
+                        });
+                        let _ = events.send(SpeechWorkerEvent::HistoryCleared { error });
                     }
                     HistoryCommand::Shutdown => break,
                 }

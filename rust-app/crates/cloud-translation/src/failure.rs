@@ -237,11 +237,27 @@ fn mentions_exhausted_allowance(body: &str) -> bool {
 /// echoes the key back would otherwise put it in the log.
 #[must_use]
 pub fn redact_secret(text: &str, secret: &str) -> String {
-    if secret.len() < 4 {
+    if secret.len() < MIN_SECRET_FRAGMENT {
         return text.to_owned();
     }
-    text.replace(secret, "<redacted>")
+    let mut redacted = text.replace(secret, "<redacted>");
+    // `summarize` keeps the first characters of a reply and marks the cut with
+    // an ellipsis. A key that straddled that limit survives only as a prefix,
+    // which the whole-key replacement above cannot match.
+    if let Some(kept) = redacted.strip_suffix('…') {
+        let fragment = (MIN_SECRET_FRAGMENT..secret.len())
+            .rev()
+            .filter(|length| secret.is_char_boundary(*length))
+            .find(|length| kept.ends_with(&secret[..*length]));
+        if let Some(length) = fragment {
+            redacted = format!("{}<redacted>…", &kept[..kept.len() - length]);
+        }
+    }
+    redacted
 }
+
+/// The shortest key prefix treated as a secret when a reply was cut inside it.
+const MIN_SECRET_FRAGMENT: usize = 4;
 
 /// Keeps a diagnostic short and free of anything that looks like a key.
 fn summarize(body: &str) -> String {
@@ -361,5 +377,26 @@ mod tests {
 
         assert!(!redacted.contains("279a2e9d"));
         assert!(redacted.contains("<redacted>"));
+    }
+}
+
+#[cfg(test)]
+mod truncated_secret_tests {
+    use super::{classify_response, redact_secret};
+
+    #[test]
+    fn a_key_cut_by_the_summary_limit_is_still_redacted() {
+        let key = "279a2e9d-83b3-c416-7e2d-f721593e42a0:fx";
+        let body = format!("{}{key} was rejected", "x".repeat(180));
+        let detail = match classify_response(crate::ProviderId::DEEPL, 401, None, &body) {
+            crate::ProviderFailure::Credential(detail) => detail,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert!(detail.ends_with('…'), "the summary was cut inside the key");
+
+        let redacted = redact_secret(&detail, key);
+
+        assert!(!redacted.contains("279a2e9d"), "{redacted}");
+        assert!(redacted.ends_with("<redacted>…"), "{redacted}");
     }
 }
