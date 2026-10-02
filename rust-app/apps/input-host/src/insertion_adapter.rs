@@ -113,11 +113,13 @@ pub fn deliver(
     .map(|receipt| {
         let delivery = match receipt.disposition {
             clipboard::ClipboardPasteDisposition::VerifiedAndRestored
-            | clipboard::ClipboardPasteDisposition::VerifiedAndSuperseded => {
+            | clipboard::ClipboardPasteDisposition::VerifiedAndSuperseded
+            | clipboard::ClipboardPasteDisposition::VerifiedRestoreFailed => {
                 InsertionDelivery::Verified
             }
             clipboard::ClipboardPasteDisposition::PayloadReadAndRestored
-            | clipboard::ClipboardPasteDisposition::PayloadReadAndSuperseded => {
+            | clipboard::ClipboardPasteDisposition::PayloadReadAndSuperseded
+            | clipboard::ClipboardPasteDisposition::PayloadReadRestoreFailed => {
                 InsertionDelivery::PayloadRead
             }
             clipboard::ClipboardPasteDisposition::DispatchedUnverifiedAndRestored => {

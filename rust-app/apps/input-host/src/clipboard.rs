@@ -838,9 +838,15 @@ pub enum ClipboardPasteDisposition {
     VerifiedAndRestored,
     /// The target was verified, then a newer clipboard owner took over.
     VerifiedAndSuperseded,
+    /// The target was verified; restoring the previous clipboard then failed.
+    /// The text is delivered.
+    VerifiedRestoreFailed,
     /// The target process requested the exact delayed-rendered payload and the
     /// previous IDataObject was restored without overwriting a newer Copy.
     PayloadReadAndRestored,
+    /// The target read the payload; restoring the previous clipboard then
+    /// failed. The text is delivered.
+    PayloadReadRestoreFailed,
     /// The target requested the payload, then another clipboard owner took
     /// over. Its newer contents are preserved and must never be overwritten.
     PayloadReadAndSuperseded,
@@ -918,40 +924,11 @@ pub fn dispatch_paste(
         }
     };
     let disposition = match outcome {
-        ClipboardReadOutcome::TargetVerified => {
-            if host.restore_snapshot_if_owned(&snapshot, publication)? {
-                ClipboardPasteDisposition::VerifiedAndRestored
-            } else {
-                ClipboardPasteDisposition::VerifiedAndSuperseded
-            }
-        }
-        ClipboardReadOutcome::TargetRead => {
-            if host.restore_snapshot_if_owned(&snapshot, publication)? {
-                ClipboardPasteDisposition::PayloadReadAndRestored
-            } else {
-                // A newer clipboard owner is user/external state. Never overwrite
-                // it merely to reconstruct our earlier snapshot.
-                ClipboardPasteDisposition::PayloadReadAndSuperseded
-            }
-        }
-        ClipboardReadOutcome::DispatchedUnverified => {
-            if host.restore_snapshot_if_owned(&snapshot, publication)? {
-                ClipboardPasteDisposition::DispatchedUnverifiedAndRestored
-            } else {
-                return Err(ClipboardError::Superseded);
-            }
-        }
-        ClipboardReadOutcome::TargetChanged => {
-            let _ = host.restore_snapshot_if_owned(&snapshot, publication)?;
-            return Err(ClipboardError::TargetChanged);
-        }
-        ClipboardReadOutcome::TimedOut => {
-            if host.restore_snapshot_if_owned(&snapshot, publication)? {
-                return Err(ClipboardError::NotDelivered);
-            }
-            return Err(ClipboardError::Superseded);
-        }
         ClipboardReadOutcome::Superseded => return Err(ClipboardError::Superseded),
+        outcome => settled_disposition(
+            outcome,
+            host.restore_snapshot_if_owned(&snapshot, publication),
+        )?,
     };
 
     Ok(ClipboardPasteReceipt {
@@ -960,6 +937,62 @@ pub fn dispatch_paste(
         settled_sequence: unsafe { GetClipboardSequenceNumber() },
         disposition,
     })
+}
+
+/// What a finished paste means once the attempt to restore the user's
+/// previous clipboard is known.
+///
+/// Once the target has read the payload the words are delivered. Failing to
+/// put the previous clipboard back afterwards is a separate problem: it is
+/// logged and reported as such, never as "not delivered" — that told the
+/// user to paste again and produced the text twice.
+fn settled_disposition(
+    outcome: ClipboardReadOutcome,
+    restored: Result<bool, ClipboardError>,
+) -> Result<ClipboardPasteDisposition, ClipboardError> {
+    match outcome {
+        ClipboardReadOutcome::TargetVerified => Ok(match restored {
+            Ok(true) => ClipboardPasteDisposition::VerifiedAndRestored,
+            Ok(false) => ClipboardPasteDisposition::VerifiedAndSuperseded,
+            Err(error) => {
+                crate::diagnostic_line(&format!(
+                    "clipboard_transaction restore=failed after=verified error={error}"
+                ));
+                ClipboardPasteDisposition::VerifiedRestoreFailed
+            }
+        }),
+        ClipboardReadOutcome::TargetRead => Ok(match restored {
+            Ok(true) => ClipboardPasteDisposition::PayloadReadAndRestored,
+            // A newer clipboard owner is user/external state. Never overwrite
+            // it merely to reconstruct our earlier snapshot.
+            Ok(false) => ClipboardPasteDisposition::PayloadReadAndSuperseded,
+            Err(error) => {
+                crate::diagnostic_line(&format!(
+                    "clipboard_transaction restore=failed after=payload_read error={error}"
+                ));
+                ClipboardPasteDisposition::PayloadReadRestoreFailed
+            }
+        }),
+        ClipboardReadOutcome::DispatchedUnverified => {
+            if restored? {
+                Ok(ClipboardPasteDisposition::DispatchedUnverifiedAndRestored)
+            } else {
+                Err(ClipboardError::Superseded)
+            }
+        }
+        ClipboardReadOutcome::TargetChanged => {
+            restored?;
+            Err(ClipboardError::TargetChanged)
+        }
+        ClipboardReadOutcome::TimedOut => {
+            if restored? {
+                Err(ClipboardError::NotDelivered)
+            } else {
+                Err(ClipboardError::Superseded)
+            }
+        }
+        ClipboardReadOutcome::Superseded => Err(ClipboardError::Superseded),
+    }
 }
 
 struct ClipboardFormatSnapshot {
@@ -1412,5 +1445,56 @@ mod tests {
         assert_ne!(first[0].handle, original);
         assert_ne!(second[0].handle, original);
         assert_ne!(first[0].handle, second[0].handle);
+    }
+}
+
+#[cfg(test)]
+mod settled_disposition_tests {
+    use super::{
+        ClipboardError, ClipboardPasteDisposition, ClipboardReadOutcome, settled_disposition,
+    };
+
+    #[test]
+    fn a_restore_failure_after_a_verified_paste_is_still_delivered() {
+        assert!(matches!(
+            settled_disposition(
+                ClipboardReadOutcome::TargetVerified,
+                Err(ClipboardError::Busy)
+            ),
+            Ok(ClipboardPasteDisposition::VerifiedRestoreFailed)
+        ));
+        assert!(matches!(
+            settled_disposition(ClipboardReadOutcome::TargetRead, Err(ClipboardError::Busy)),
+            Ok(ClipboardPasteDisposition::PayloadReadRestoreFailed)
+        ));
+    }
+
+    #[test]
+    fn the_other_outcomes_keep_their_meaning() {
+        assert!(matches!(
+            settled_disposition(ClipboardReadOutcome::TargetVerified, Ok(true)),
+            Ok(ClipboardPasteDisposition::VerifiedAndRestored)
+        ));
+        assert!(matches!(
+            settled_disposition(ClipboardReadOutcome::TargetRead, Ok(false)),
+            Ok(ClipboardPasteDisposition::PayloadReadAndSuperseded)
+        ));
+        assert!(matches!(
+            settled_disposition(ClipboardReadOutcome::DispatchedUnverified, Ok(false)),
+            Err(ClipboardError::Superseded)
+        ));
+        assert!(matches!(
+            settled_disposition(ClipboardReadOutcome::TimedOut, Ok(true)),
+            Err(ClipboardError::NotDelivered)
+        ));
+        // Without proof of delivery a restore failure is still a failure.
+        assert!(matches!(
+            settled_disposition(ClipboardReadOutcome::TimedOut, Err(ClipboardError::Busy)),
+            Err(ClipboardError::Busy)
+        ));
+        assert!(matches!(
+            settled_disposition(ClipboardReadOutcome::TargetChanged, Ok(true)),
+            Err(ClipboardError::TargetChanged)
+        ));
     }
 }
