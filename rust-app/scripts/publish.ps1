@@ -153,6 +153,7 @@ $previousLibclangPath = $env:LIBCLANG_PATH
 $previousGeneratorInstance = $env:CMAKE_GENERATOR_INSTANCE
 $previousBuildCommit = $env:SAYFLEX_BUILD_COMMIT
 $previousOcrBundle = $env:SAYFLEX_OCR_BUNDLE
+$previousRequireSimd = $env:FXTRANSLATE_REQUIRE_SIMD
 $publishSucceeded = $false
 
 try {
@@ -163,6 +164,9 @@ try {
     $env:LIBCLANG_PATH = Split-Path -Parent $libclang
     $env:CMAKE_GENERATOR_INSTANCE = $visualStudioInstance
     $env:SAYFLEX_BUILD_COMMIT = $gitCommit
+    # The compact translator's int8 SIMD kernel must be compiled in. Without
+    # this, a C++ build failure silently shipped the ~8x slower scalar kernel.
+    $env:FXTRANSLATE_REQUIRE_SIMD = '1'
     New-Item -ItemType Directory -Force -Path $output | Out-Null
     Get-ChildItem -LiteralPath $output -Force -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force
@@ -339,6 +343,7 @@ finally {
     $env:LIBCLANG_PATH = $previousLibclangPath
     $env:CMAKE_GENERATOR_INSTANCE = $previousGeneratorInstance
     $env:SAYFLEX_BUILD_COMMIT = $previousBuildCommit
+    $env:FXTRANSLATE_REQUIRE_SIMD = $previousRequireSimd
     $env:SAYFLEX_OCR_BUNDLE = $previousOcrBundle
     if (-not $KeepBuildArtifacts) {
         foreach ($target in $temporaryTargets) {

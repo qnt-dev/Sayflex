@@ -11,6 +11,13 @@ crates.io, plus the narrow completion-reporting patch used by SayFlex.
   pivot APIs return the text together with every segment termination. Existing
   upstream APIs remain source-compatible and return only the text.
 
+- SayFlex change (2026-10-02): the gemmology SIMD shim builds with MSVC.
+  `build.rs` passes `/arch:AVX2` to MSVC instead of the GCC-style `-mavx2`
+  (which MSVC ignores), and `src/gemmology_shim.cpp` allocates its 64-byte
+  aligned buffers with `_aligned_malloc` / `_aligned_free` under MSVC, whose
+  C runtime has no `std::aligned_alloc`. Before this, every Windows build
+  silently fell back to the scalar kernel.
+
 To update, download the newly selected crate version, verify its crates.io
 checksum, replace this directory with that exact source, then reapply and review
 only the completion-reporting diff before updating the workspace patch and lock

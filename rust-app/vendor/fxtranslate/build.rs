@@ -94,6 +94,21 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XSIMD_INCLUDE_DIR");
 
     let mut build = cc::Build::new();
+    // MSVC ignores GCC-style -m flags (warning D9002) and then has no AVX2
+    // code generation; it spells the same baseline /arch:AVX2. aarch64 MSVC
+    // has no equivalent -march switch, so it keeps the scalar fallback there.
+    // [SayFlex patch]
+    let arch_flag = if build.get_compiler().is_like_msvc() {
+        match arch.as_str() {
+            "x86_64" => "/arch:AVX2",
+            _ => {
+                bail(format!("no MSVC SIMD flag wired for `{arch}` yet"));
+                return;
+            }
+        }
+    } else {
+        arch_flag
+    };
     build
         .cpp(true)
         .std("c++17")
