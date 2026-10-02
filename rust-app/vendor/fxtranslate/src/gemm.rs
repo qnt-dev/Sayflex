@@ -169,9 +169,18 @@ mod imp {
     // `gemmology_shim.cpp`), so it holds no shared mutable state. Concurrent calls
     // on the same `&PreparedB` from multiple threads therefore only perform
     // disjoint reads, which is sound. This lets an `Engine` be shared across worker
-    // threads (feature `threads`) without duplicating the packed weights. Not
-    // `Send`: ownership/drop should stay on the thread that created it.
+    // threads (feature `threads`) without duplicating the packed weights.
     unsafe impl Sync for PreparedB {}
+
+    // SAFETY: [SayFlex patch] `handle` owns plain heap memory — the packed
+    // weights and their bookkeeping struct — allocated by `gemmology_prepare_b`
+    // and released by `gemmology_free_b` with the C runtime's (aligned) free,
+    // which has no thread affinity. The shim keeps no per-thread state for it:
+    // the prepared-bytes counter is atomic and every matmul allocates its own
+    // scratch. Moving ownership to another thread, and dropping it there, is
+    // therefore sound. SayFlex's translation worker keeps its engine behind a
+    // `Mutex` shared between threads, which requires `Send`.
+    unsafe impl Send for PreparedB {}
 }
 
 /// Pure-Rust wasm SIMD128 int8 kernel (`core::arch::wasm32`). A third `PreparedB`

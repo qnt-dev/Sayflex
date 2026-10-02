@@ -17,6 +17,10 @@ crates.io, plus the narrow completion-reporting patch used by SayFlex.
   aligned buffers with `_aligned_malloc` / `_aligned_free` under MSVC, whose
   C runtime has no `std::aligned_alloc`. Before this, every Windows build
   silently fell back to the scalar kernel.
+- `src/gemm.rs`: `PreparedB` is `Send`. It owns plain heap memory freed with
+  the C runtime's (aligned) free, and the shim keeps no per-thread state; the
+  SayFlex translation worker holds its engine in a `Mutex` shared between
+  threads, which needs `Send` once the SIMD kernel is live.
 
 To update, download the newly selected crate version, verify its crates.io
 checksum, replace this directory with that exact source, then reapply and review
