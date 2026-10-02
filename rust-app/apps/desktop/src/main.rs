@@ -4300,7 +4300,7 @@ fn handle_screen_selection_terminal(terminal: SelectionTerminal, runtime: &Runti
                     .take_inventory(request_id)
                     .as_ref()
                     .map(|inventory| ContextCollector::from_inventory(inventory, rect))
-                    .unwrap_or_default();
+                    .unwrap_or_else(ContextCollector::without_window);
                 runtime
                     .screen_translation
                     .borrow_mut()

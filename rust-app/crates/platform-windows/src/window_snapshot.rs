@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, mem::size_of, path::Path, time::Instant};
+use std::{collections::HashMap, ffi::OsStr, mem::size_of, path::Path, time::Instant};
 
 use rust_protocol::PhysicalRect;
 use thiserror::Error;
@@ -84,6 +84,7 @@ impl WindowInventory {
             current_process_id: std::process::id(),
             desktop_bounds,
             candidates: Vec::new(),
+            processes: HashMap::new(),
             timed_out: false,
         };
         // SAFETY: the callback is synchronous. `state` remains alive and
@@ -202,7 +203,16 @@ struct EnumerationState {
     current_process_id: u32,
     desktop_bounds: PhysicalRect,
     candidates: Vec<SnapshotCandidate>,
+    /// Executable name and start time per process: one OpenProcess per
+    /// application instead of two per window.
+    processes: HashMap<u32, ProcessFacts>,
     timed_out: bool,
+}
+
+#[derive(Clone)]
+struct ProcessFacts {
+    executable_name: Option<String>,
+    started_100ns: u64,
 }
 
 unsafe extern "system" fn enumerate_window(hwnd: HWND, state: LPARAM) -> i32 {
@@ -221,32 +231,52 @@ unsafe extern "system" fn enumerate_window(hwnd: HWND, state: LPARAM) -> i32 {
     1
 }
 
-fn snapshot_window(hwnd: HWND, state: &EnumerationState) -> Option<SnapshotCandidate> {
+/// The cheapest facts first. Most top-level windows are hidden, cloaked or
+/// tool windows; and asking one of SayFlex's own windows for its caption sends
+/// WM_GETTEXT to the UI thread and waits for it — while that thread is busy
+/// presenting the selection, which is exactly when this runs.
+fn classify(hwnd: HWND, current_process_id: u32) -> (CandidateDisposition, u32) {
     // SAFETY: HWND is supplied by EnumWindows and is valid for the duration of
     // this callback. Every query tolerates a window disappearing concurrently.
-    let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+    if unsafe { IsWindowVisible(hwnd) } == 0 {
+        return (CandidateDisposition::Invisible, 0);
+    }
+    if window_is_cloaked(hwnd) {
+        return (CandidateDisposition::Cloaked, 0);
+    }
+    if (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW) != 0 {
+        return (CandidateDisposition::ToolWindow, 0);
+    }
     let mut process_id = 0_u32;
     unsafe { GetWindowThreadProcessId(hwnd, &raw mut process_id) };
-    let tool = (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW) != 0;
-    let cloaked = window_is_cloaked(hwnd);
-    let disposition = if !visible {
-        CandidateDisposition::Invisible
-    } else if cloaked {
-        CandidateDisposition::Cloaked
-    } else if tool {
-        CandidateDisposition::ToolWindow
-    } else if process_id == state.current_process_id {
-        CandidateDisposition::SayFlexOwned
-    } else {
-        CandidateDisposition::Eligible
-    };
+    if process_id == current_process_id {
+        return (CandidateDisposition::SayFlexOwned, process_id);
+    }
+    (CandidateDisposition::Eligible, process_id)
+}
+
+fn snapshot_window(hwnd: HWND, state: &mut EnumerationState) -> Option<SnapshotCandidate> {
+    let (disposition, process_id) = classify(hwnd, state.current_process_id);
+    // The inventory keeps eligible windows only. Stopping here, before the
+    // per-process and caption queries, is what keeps the snapshot inside its
+    // deadline and away from SayFlex's own message loop.
+    if disposition != CandidateDisposition::Eligible {
+        return None;
+    }
     let bounds = window_bounds(hwnd).and_then(|bounds| intersect(bounds, state.desktop_bounds))?;
-    let executable_name = process_executable_name(process_id);
-    let application_id = executable_name.as_deref().and_then(application_id);
+    let facts = state
+        .processes
+        .entry(process_id)
+        .or_insert_with(|| ProcessFacts {
+            executable_name: process_executable_name(process_id),
+            started_100ns: process_started_100ns(process_id).unwrap_or_default(),
+        })
+        .clone();
+    let application_id = facts.executable_name.as_deref().and_then(application_id);
     let identity = WindowIdentity {
         hwnd: hwnd as usize as u64,
         process_id,
-        process_started_100ns: process_started_100ns(process_id).unwrap_or_default(),
+        process_started_100ns: facts.started_100ns,
     };
     Some(SnapshotCandidate {
         snapshot: WindowSnapshot {
@@ -254,7 +284,7 @@ fn snapshot_window(hwnd: HWND, state: &EnumerationState) -> Option<SnapshotCandi
             z_order: state.candidates.len() as u32,
             bounds,
             region: window_region(hwnd, bounds),
-            executable_name,
+            executable_name: facts.executable_name,
             window_title: window_text(hwnd),
             application_id,
             partial: false,
@@ -527,6 +557,96 @@ mod tests {
     use super::{
         CandidateDisposition, SnapshotCandidate, WindowIdentity, WindowInventory, WindowSnapshot,
     };
+
+    /// SayFlex's own overlays are hidden top-level windows on its UI thread.
+    /// Asking such a window for its caption sends WM_GETTEXT to that thread
+    /// and waits; while the UI thread is busy presenting the selection, every
+    /// one of them stalled the snapshot, which then missed its deadline on
+    /// every capture in the field (24 of 24).
+    #[test]
+    fn a_hidden_window_on_a_busy_thread_of_this_process_does_not_stall_the_snapshot() {
+        use std::{
+            ptr,
+            sync::mpsc,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_OVERLAPPED,
+        };
+
+        let (created, window) = mpsc::channel();
+        let busy = thread::spawn(move || {
+            let class = "STATIC\0".encode_utf16().collect::<Vec<_>>();
+            let title = "SayFlex overlay\0".encode_utf16().collect::<Vec<_>>();
+            // SAFETY: plain hidden top-level STATIC window owned by this thread.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    title.as_ptr(),
+                    WS_OVERLAPPED,
+                    0,
+                    0,
+                    10,
+                    10,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            };
+            created.send(hwnd as usize).unwrap();
+            // Busy: this thread does not pump messages for a while.
+            thread::sleep(Duration::from_millis(700));
+            // SAFETY: destroyed on the thread that created it.
+            unsafe { DestroyWindow(hwnd) };
+        });
+        assert_ne!(window.recv().unwrap(), 0, "test window should exist");
+
+        let started = Instant::now();
+        let result = WindowInventory::capture(
+            1,
+            rect(-32_000, -32_000, 64_000, 64_000),
+            Instant::now() + Duration::from_millis(120),
+        );
+        let elapsed = started.elapsed();
+        busy.join().unwrap();
+
+        assert!(result.is_ok(), "snapshot failed after {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(120), "took {elapsed:?}");
+    }
+
+    /// Times the real snapshot on this desktop. It only enumerates windows;
+    /// nothing is clicked, focused or captured.
+    #[test]
+    #[ignore = "opt-in: times the source-window snapshot on this desktop"]
+    fn real_desktop_snapshot_fits_its_deadline() {
+        use std::time::{Duration, Instant};
+
+        let desktop = rect(-32_000, -32_000, 64_000, 64_000);
+        let mut timings = Vec::new();
+        let mut windows = 0;
+        for _ in 0..5 {
+            let started = Instant::now();
+            let inventory =
+                WindowInventory::capture(1, desktop, Instant::now() + Duration::from_secs(10))
+                    .expect("enumeration should finish");
+            timings.push(started.elapsed());
+            windows = inventory.len();
+        }
+        timings.sort();
+        eprintln!(
+            "window snapshot: {windows} eligible windows, fastest {:?}, median {:?}, slowest {:?}",
+            timings[0], timings[2], timings[4]
+        );
+        assert!(
+            timings[2] < Duration::from_millis(120),
+            "median {:?} exceeds the 120 ms budget",
+            timings[2]
+        );
+    }
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {
         PhysicalRect {

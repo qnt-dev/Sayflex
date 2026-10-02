@@ -14,7 +14,18 @@ impl ContextCollector {
             .source_for(selection)
             .as_ref()
             .map(Self::from_snapshot)
-            .unwrap_or_default()
+            .unwrap_or_else(Self::without_window)
+    }
+
+    /// No source window could be identified (the snapshot was unavailable or
+    /// no window owned the selection). Only the recognised text will be
+    /// attached, which is partial context and is reported as such — the log
+    /// used to say `context_partial=false` for exactly these requests.
+    pub(crate) fn without_window() -> SourceContext {
+        SourceContext {
+            partial: true,
+            ..SourceContext::default()
+        }
     }
 
     pub(crate) fn from_snapshot(source: &WindowSnapshot) -> SourceContext {
@@ -211,5 +222,22 @@ mod tests {
         assert_eq!(context.executable_name.as_deref(), Some("game.exe"));
         assert_eq!(context.site_url, None);
         assert_eq!(context.nearby_text, None);
+    }
+}
+
+#[cfg(test)]
+mod partial_context_tests {
+    use super::ContextCollector;
+
+    #[test]
+    fn context_without_a_source_window_is_reported_as_partial() {
+        let context = ContextCollector::attach_nearby_text(
+            ContextCollector::without_window(),
+            "DURATION: 30",
+        );
+
+        assert!(context.partial);
+        assert_eq!(context.nearby_text.as_deref(), Some("DURATION: 30"));
+        assert!(context.application_id.is_none() && context.window_title.is_none());
     }
 }
