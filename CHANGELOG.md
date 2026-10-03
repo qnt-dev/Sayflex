@@ -7,7 +7,23 @@ new entries belong here.
 Format: newest first, grouped by product. Dates are the day the work landed,
 not the day it shipped.
 
-## 0.8.10 - 2026-10-03
+## 0.8.11 - 2026-10-03
+
+### SayFlex (rust-app)
+
+Follow-up to the installed 0.8.10; details and the verification boundary are
+in `rust-app/RELEASE_0.8.11.md`.
+
+- Settings: the page list scrolls with the mouse wheel in a short window.
+- Screen OCR: the detector works at up to 2560 px, so small letter-spaced
+  captions are read; rows join only across gaps of at most half their height,
+  so neighbouring card titles and a caption with its link stay apart.
+- Screen translation on the picture: the source text is rebuilt from its
+  background and the translation drawn straight on it, without plates, in the
+  source's size, weight, colour and baseline; capitals stay capitals and
+  Cyrillic gets guillemets; quotes left outside the OCR box are cleared.
+  DUAL keeps a plate.
+
 
 ### SayFlex (rust-app)
 

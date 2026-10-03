@@ -10,7 +10,7 @@ Describe 'SayFlex public repository presentation' {
 
         $content | Should Match '(?m)^# SayFlex$'
         $content | Should Not Match '(?m)^# Keyboop for Windows$'
-        $content | Should Match '0\.8\.10'
+        $content | Should Match '0\.8\.11'
         $content | Should Match 'rust-app'
     }
 
@@ -22,17 +22,17 @@ Describe 'SayFlex public repository presentation' {
         $license | Should Match '(?m)^Copyright \(c\) 2026 SayFlex contributors\r?$'
     }
 
-    It 'keeps the 0.8.10 product version aligned across source installer and public notes' {
+    It 'keeps the 0.8.11 product version aligned across source installer and public notes' {
         $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
         $repositoryReadme = Get-Content -LiteralPath (Join-Path $rustRoot '..\README.md') -Raw
         $workspace = Get-Content -LiteralPath (Join-Path $rustRoot 'Cargo.toml') -Raw
         $installer = Get-Content -LiteralPath (Join-Path $rustRoot 'installer\SayFlex.iss') -Raw
-        $releaseNotes = Join-Path $rustRoot 'RELEASE_0.8.10.md'
+        $releaseNotes = Join-Path $rustRoot 'RELEASE_0.8.11.md'
 
-        $workspace | Should Match '(?m)^version = "0\.8\.10"\r?$'
-        $installer | Should Match '(?m)^\s*#define AppVersion "0\.8\.10"\r?$'
-        $repositoryReadme | Should Match 'version \*\*0\.8\.10\*\*'
-        $repositoryReadme | Should Match 'rust-app/RELEASE_0\.8\.10\.md'
+        $workspace | Should Match '(?m)^version = "0\.8\.11"\r?$'
+        $installer | Should Match '(?m)^\s*#define AppVersion "0\.8\.11"\r?$'
+        $repositoryReadme | Should Match 'version \*\*0\.8\.11\*\*'
+        $repositoryReadme | Should Match 'rust-app/RELEASE_0\.8\.11\.md'
         $releaseNotes | Should Exist
     }
 
@@ -151,7 +151,7 @@ Describe 'SayFlex public repository presentation' {
         $notice = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\THIRD_PARTY_NOTICES.md') -Raw
 
         $publish | Should Match "'sayflex-ocr-worker\.exe'\s*=\s*'SayFlex\.Ocr\.exe'"
-        $publish | Should Match "SayFlex\.Ocr\.exe'\)\s+--install-models"
+        $publish | Should Match "SayFlex\.Ocr\.exe'\)[\s``]+-ArgumentList '--install-models'"
         $validator | Should Match "'SayFlex\.Ocr\.exe'"
         $validator | Should Match "ocr-models\\screen-ocr-ppocrv5-mobile-v3\.9\.2\\bundle\.verified\.json"
         $validator | Should Match '(?s)Every process that speaks the protocol.*SayFlex\.Ocr\.exe'
