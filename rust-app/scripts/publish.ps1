@@ -221,8 +221,14 @@ try {
 
         $env:CUDA_PATH = $cudaRoot
         $env:CMAKE_CUDA_ARCHITECTURES = $cudaArchitectures
+        # cargo hands its job count to whisper.cpp's CMake build as --parallel.
+        # At 24 jobs, two dozen nvcc processes compile ggml's heaviest kernels
+        # for six GPU architectures at once; on 2026-10-03 one of them (mmvq.cu)
+        # exited 1 without a diagnostic. Eight is enough to keep the GPU build
+        # short without that pressure.
+        $cudaJobs = [Math]::Max(1, [Math]::Min(8, [Environment]::ProcessorCount))
         & $cargoPath build --locked --target-dir $cudaTarget --profile $profile `
-            -p sayflex-speech-worker --features cuda
+            --jobs $cudaJobs -p sayflex-speech-worker --features cuda
         if ($LASTEXITCODE -ne 0) { throw 'The CUDA speech worker build failed.' }
         Copy-Item -LiteralPath (Join-Path $cudaTarget "$profile\sayflex-speech-worker.exe") `
             -Destination (Join-Path $output 'SayFlex.Speech.Cuda.exe')
