@@ -83,6 +83,9 @@ windows-sys = { version = "0.61.2", features = [
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+# MSVC writes debug information to a separate PDB, which is never shipped:
+# line tables let a crash's module offsets resolve to a file and line.
+debug = "line-tables-only"
 
 [patch.crates-io]
 fxtranslate = { path = "vendor/fxtranslate" }

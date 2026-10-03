@@ -194,6 +194,18 @@ try {
             Copy-Item -LiteralPath (Join-Path $cpuTarget "$profile\$sourceName") `
                 -Destination (Join-Path $output $binaryMap[$sourceName])
         }
+        # Symbols stay beside the payload, never inside it: panic logs record
+        # module offsets, and these PDBs from the same build resolve them.
+        $symbolsOutput = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'dist\symbols'))
+        New-Item -ItemType Directory -Force -Path $symbolsOutput | Out-Null
+        Get-ChildItem -LiteralPath $symbolsOutput -Force -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force
+        foreach ($sourceName in $binaryMap.Keys) {
+            $pdb = Join-Path $cpuTarget ("$profile\" + ($sourceName -replace '-', '_' -replace '\.exe$', '.pdb'))
+            if (Test-Path -LiteralPath $pdb) {
+                Copy-Item -LiteralPath $pdb -Destination $symbolsOutput
+            }
+        }
 
         $env:SAYFLEX_OCR_BUNDLE = Join-Path $output `
             'ocr-models\screen-ocr-ppocrv5-mobile-v3.9.2'

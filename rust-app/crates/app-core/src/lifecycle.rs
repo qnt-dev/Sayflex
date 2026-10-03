@@ -122,12 +122,76 @@ pub fn install_panic_hook() {
             })
             .unwrap_or("non-string panic payload");
         diagnostics::log_line(&format!(
-            "desktop lifecycle=panic location={location} payload={payload} backtrace={}",
+            "desktop lifecycle=panic location={location} payload={payload} frames={} backtrace={}",
+            module_relative_frames(),
             Backtrace::force_capture()
         ));
         let _ = diagnostics::flush();
         previous(information);
     }));
+}
+
+/// The panicking thread's return addresses as `module+0xoffset`.
+///
+/// Release binaries carry no symbols, so `Backtrace` prints only `<unknown>`
+/// frames — no names and no addresses to look up later. A module-relative
+/// offset resolves against the PDBs kept from the same build (publish.ps1
+/// copies them to dist\symbols), e.g. `llvm-symbolizer --obj=SayFlex.exe`.
+#[cfg(windows)]
+fn module_relative_frames() -> String {
+    use windows_sys::Win32::System::{
+        Diagnostics::Debug::RtlCaptureStackBackTrace,
+        LibraryLoader::{
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            GetModuleFileNameW, GetModuleHandleExW,
+        },
+    };
+
+    let mut frames = [std::ptr::null_mut(); 48];
+    // SAFETY: the buffer holds `frames.len()` pointers; the hash is optional.
+    let captured = usize::from(unsafe {
+        RtlCaptureStackBackTrace(
+            0,
+            frames.len() as u32,
+            frames.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
+    });
+    frames[..captured.min(frames.len())]
+        .iter()
+        .map(|&address| {
+            let mut module = std::ptr::null_mut();
+            // SAFETY: FROM_ADDRESS treats the name argument as an address inside
+            // a loaded module; UNCHANGED_REFCOUNT leaves no handle to release.
+            let found = unsafe {
+                GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                        | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    address.cast_const().cast(),
+                    &raw mut module,
+                )
+            } != 0;
+            if !found {
+                return format!("{address:p}");
+            }
+            let mut name = [0_u16; 260];
+            // SAFETY: the buffer length is passed; the module handle is live.
+            let length = unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) }
+                as usize;
+            let path = String::from_utf16_lossy(&name[..length.min(name.len())]);
+            let file = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+            format!(
+                "{file}+0x{:x}",
+                (address as usize).wrapping_sub(module as usize)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(not(windows))]
+fn module_relative_frames() -> String {
+    String::new()
 }
 
 fn write_marker(path: &Path, contents: &str) -> io::Result<()> {
@@ -171,5 +235,18 @@ mod tests {
         assert!(current.contains("version=test"));
         assert!(!current.contains("pid=old"));
         session.finish("test_complete");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod frame_tests {
+    #[test]
+    fn panic_frames_are_module_relative_offsets() {
+        let frames = super::module_relative_frames();
+        let first = frames.split(' ').next().unwrap_or_default();
+        assert!(
+            first.contains(".exe+0x") || first.contains(".dll+0x"),
+            "expected module+offset, got {frames}"
+        );
     }
 }
