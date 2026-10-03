@@ -211,6 +211,13 @@ try {
             'ocr-models\screen-ocr-ppocrv5-mobile-v3.9.2'
         & (Join-Path $output 'SayFlex.Ocr.exe') --install-models
         if ($LASTEXITCODE -ne 0) { throw 'The verified OCR model bundle could not be staged.' }
+        # The exit code alone is not proof: when PowerShell aborts a native call
+        # (for example its stderr redirected under ErrorActionPreference=Stop),
+        # $LASTEXITCODE keeps the previous command's 0. On 2026-10-03 that let a
+        # half-downloaded bundle into the payload and its manifest.
+        if (-not (Test-Path -LiteralPath (Join-Path $env:SAYFLEX_OCR_BUNDLE 'bundle.verified.json'))) {
+            throw 'The OCR model bundle was not staged completely.'
+        }
 
         Copy-Item -LiteralPath (Join-Path $rustRoot '..\LICENSE') `
             -Destination (Join-Path $output 'LICENSE.txt')
