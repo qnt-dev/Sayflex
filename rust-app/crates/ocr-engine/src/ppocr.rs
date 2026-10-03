@@ -541,6 +541,21 @@ mod detection_limit_probe {
                     for text in texts {
                         eprintln!("    {text}");
                     }
+                    // Visual rows exactly as the desktop builds its screen
+                    // blocks, as tab-separated text for fixture scripts.
+                    let reconstructed = crate::reconstruct_text(&document.lines, 350).unwrap();
+                    for row in crate::reconstruct_visual_rows(&reconstructed.elements) {
+                        let rect = |r: &rust_protocol::PhysicalRect| {
+                            format!("{},{},{},{}", r.x, r.y, r.width, r.height)
+                        };
+                        eprintln!(
+                            "ROW	{}	{}	{}	{}",
+                            row.text,
+                            rect(&row.bounds),
+                            row.fragments.iter().map(rect).collect::<Vec<_>>().join(";"),
+                            row.confidence_milli
+                        );
+                    }
                 }
             }
         }

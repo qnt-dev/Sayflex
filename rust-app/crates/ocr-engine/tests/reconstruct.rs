@@ -95,6 +95,19 @@ fn titles_of_neighbouring_cards_stay_separate_rows() {
 }
 
 #[test]
+fn a_caption_and_the_link_beside_it_stay_separate_rows() {
+    // dota2.com at 2560 px detection: 15 px between the boxes at 21 px.
+    let caption = element("LATEST NEWS", 834, 693, 136, 21, 990);
+    let link = element("VIEW ALL", 985, 693, 93, 21, 976);
+
+    let rows = reconstruct_visual_rows(&[caption, link]);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].text, "LATEST NEWS");
+    assert_eq!(rows[1].text, "VIEW ALL");
+}
+
+#[test]
 fn a_word_split_by_the_detector_still_joins_its_row() {
     let first = element("Lightning Bolt", 40, 100, 120, 20, 980);
     let second = element("base cooldown", 172, 101, 118, 20, 980);

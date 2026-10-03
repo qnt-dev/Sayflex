@@ -102,11 +102,13 @@ impl VisualRowBuilder {
         } else {
             0
         };
-        // A word space is a fraction of the text height, and the detector
-        // rarely splits a line inside one. One and a half heights joined the
-        // titles of two neighbouring news cards (51 px apart at 41 px) into a
-        // single row, so one card was given the other's translation.
-        let maximum_gap = 12_i64.max(smaller_height.saturating_mul(4) / 5);
+        // A word space is a fraction of the text height, and where the
+        // detector does split a phrase its boxes touch or overlap. One and a
+        // half heights joined the titles of two neighbouring news cards (51 px
+        // apart at 41 px) and a caption with the link beside it (LATEST NEWS,
+        // VIEW ALL: 15 px at 21 px) into single rows, so each was translated
+        // as one phrase.
+        let maximum_gap = 12_i64.max(smaller_height / 2);
         horizontal_gap <= maximum_gap
     }
 
