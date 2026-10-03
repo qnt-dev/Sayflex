@@ -209,12 +209,21 @@ try {
 
         $env:SAYFLEX_OCR_BUNDLE = Join-Path $output `
             'ocr-models\screen-ocr-ppocrv5-mobile-v3.9.2'
-        & (Join-Path $output 'SayFlex.Ocr.exe') --install-models
-        if ($LASTEXITCODE -ne 0) { throw 'The verified OCR model bundle could not be staged.' }
-        # The exit code alone is not proof: when PowerShell aborts a native call
-        # (for example its stderr redirected under ErrorActionPreference=Stop),
-        # $LASTEXITCODE keeps the previous command's 0. On 2026-10-03 that let a
-        # half-downloaded bundle into the payload and its manifest.
+        # Run the installer as its own process. Called inline, its progress on
+        # stderr went through PowerShell's error stream under
+        # ErrorActionPreference=Stop, and when this script's output was
+        # redirected the call was cut short mid-download while $LASTEXITCODE
+        # still held cargo's 0 (2026-10-03). Its log stays outside the payload.
+        $ocrLog = [System.IO.Path]::GetTempFileName()
+        $ocrInstall = Start-Process -FilePath (Join-Path $output 'SayFlex.Ocr.exe') `
+            -ArgumentList '--install-models' -NoNewWindow -Wait -PassThru `
+            -RedirectStandardError $ocrLog
+        if ($ocrInstall.ExitCode -ne 0) {
+            throw "The verified OCR model bundle could not be staged: $(Get-Content -LiteralPath $ocrLog -Tail 3)"
+        }
+        Remove-Item -LiteralPath $ocrLog -Force -ErrorAction SilentlyContinue
+        # The exit code alone is not proof; bundle.verified.json is written only
+        # after every file of the bundle is verified.
         if (-not (Test-Path -LiteralPath (Join-Path $env:SAYFLEX_OCR_BUNDLE 'bundle.verified.json'))) {
             throw 'The OCR model bundle was not staged completely.'
         }
