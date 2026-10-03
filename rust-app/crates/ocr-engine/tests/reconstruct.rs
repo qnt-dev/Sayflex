@@ -81,6 +81,31 @@ fn distant_icon_counters_never_merge_into_one_visual_row() {
 }
 
 #[test]
+fn titles_of_neighbouring_cards_stay_separate_rows() {
+    // Two news cards side by side (dota2.com): 51 px between their titles at
+    // a 41 px text height.
+    let second_card = element("The International Main Event", 1251, 938, 349, 41, 980);
+    let third_card = element("Secret Shop, and More", 1651, 940, 272, 41, 980);
+
+    let rows = reconstruct_visual_rows(&[second_card.clone(), third_card.clone()]);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].text, "The International Main Event");
+    assert_eq!(rows[1].text, "Secret Shop, and More");
+}
+
+#[test]
+fn a_word_split_by_the_detector_still_joins_its_row() {
+    let first = element("Lightning Bolt", 40, 100, 120, 20, 980);
+    let second = element("base cooldown", 172, 101, 118, 20, 980);
+
+    let rows = reconstruct_visual_rows(&[first, second]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "Lightning Bolt base cooldown");
+}
+
+#[test]
 fn low_confidence_symbol_is_not_absorbed_into_a_label() {
     let label = element("DAMAGE TYPE", 30, 180, 100, 21, 990);
     let uncertain_symbol = element("&", 133, 184, 9, 15, 420);

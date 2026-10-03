@@ -102,7 +102,11 @@ impl VisualRowBuilder {
         } else {
             0
         };
-        let maximum_gap = 12_i64.max(smaller_height.saturating_mul(3) / 2);
+        // A word space is a fraction of the text height, and the detector
+        // rarely splits a line inside one. One and a half heights joined the
+        // titles of two neighbouring news cards (51 px apart at 41 px) into a
+        // single row, so one card was given the other's translation.
+        let maximum_gap = 12_i64.max(smaller_height.saturating_mul(4) / 5);
         horizontal_gap <= maximum_gap
     }
 

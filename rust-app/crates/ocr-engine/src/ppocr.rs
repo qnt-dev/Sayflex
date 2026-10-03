@@ -146,8 +146,21 @@ struct FamilyRecognition {
     average_confidence: f32,
 }
 
+/// Longest image side the text detector works at. Larger images are scaled
+/// down to it before detection. At 960 a 2152x1037 web page lost its small
+/// letter-spaced captions ("LATEST NEWS", "VIEW ALL", "DOWNLOAD ON STEAM");
+/// 2560 finds them for about 0.25 s more on the build machine (two languages).
+pub const DETECTION_SIDE_LIMIT: u32 = 2560;
+
 impl PpOcrAdapter {
     pub fn load(paths: &PpOcrModelPaths) -> Result<Self, OcrError> {
+        Self::load_with_detector(paths, detector_config(DETECTION_SIDE_LIMIT))
+    }
+
+    fn load_with_detector(
+        paths: &PpOcrModelPaths,
+        detector_config: TextDetectionConfig,
+    ) -> Result<Self, OcrError> {
         let detector = paths.detector();
         if !detector.is_file() {
             return Err(OcrError::ModelUnavailable);
@@ -159,13 +172,6 @@ impl PpOcrAdapter {
                 return Err(OcrError::ModelUnavailable);
             }
         }
-        let detector_config = TextDetectionConfig {
-            unclip_ratio: 2.0,
-            limit_side_len: Some(960),
-            limit_type: Some(LimitType::Max),
-            max_side_len: Some(4000),
-            ..TextDetectionConfig::default()
-        };
         let detector = TextDetectionAdapterBuilder::new()
             .with_config(detector_config)
             .build(detector)
@@ -280,6 +286,16 @@ impl PpOcrAdapter {
             lines,
             average_confidence,
         })
+    }
+}
+
+fn detector_config(side_limit: u32) -> TextDetectionConfig {
+    TextDetectionConfig {
+        unclip_ratio: 2.0,
+        limit_side_len: Some(side_limit),
+        limit_type: Some(LimitType::Max),
+        max_side_len: Some(4000),
+        ..TextDetectionConfig::default()
     }
 }
 
@@ -446,5 +462,87 @@ mod tests {
                 ("ru".into(), ModelFamily::EasternSlavic),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod detection_limit_probe {
+    use std::{sync::Arc, time::Instant};
+
+    use rust_protocol::OcrLanguagePolicy;
+
+    use super::{PpOcrAdapter, PpOcrModelPaths, detector_config};
+    use crate::{CancellationToken, OcrEngine};
+
+    fn list(name: &str, default: &str) -> Vec<String> {
+        std::env::var(name)
+            .unwrap_or_else(|_| default.to_owned())
+            .split(',')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Opt-in: runs the real models on one image with several detector
+    /// settings. SAYFLEX_OCR_PROBE_BUNDLE = installed OCR bundle,
+    /// SAYFLEX_OCR_PROBE_IMAGE = PNG; optional SAYFLEX_OCR_PROBE_LIMITS,
+    /// SAYFLEX_OCR_PROBE_BOX (box thresholds), SAYFLEX_OCR_PROBE_SCORE and
+    /// SAYFLEX_OCR_PROBE_LANGS (comma lists; empty LANGS = automatic).
+    #[test]
+    #[ignore = "opt-in: needs the OCR model bundle and a probe image"]
+    fn compare_detection_limits_on_a_probe_image() {
+        let bundle = std::env::var_os("SAYFLEX_OCR_PROBE_BUNDLE").expect("bundle");
+        let image = std::env::var_os("SAYFLEX_OCR_PROBE_IMAGE").expect("image");
+        let image = image::open(image).expect("probe image").to_rgba8();
+        let paths = PpOcrModelPaths::from_bundle_root(bundle.into());
+        let languages = list("SAYFLEX_OCR_PROBE_LANGS", "")
+            .into_iter()
+            .filter(|language| !language.is_empty())
+            .collect::<Vec<_>>();
+        let policy = if languages.is_empty() {
+            OcrLanguagePolicy::Auto
+        } else {
+            OcrLanguagePolicy::Prefer(languages)
+        };
+        for limit in list("SAYFLEX_OCR_PROBE_LIMITS", "960,1600,2560") {
+            for box_threshold in list("SAYFLEX_OCR_PROBE_BOX", "0.6") {
+                for score_threshold in list("SAYFLEX_OCR_PROBE_SCORE", "0.3") {
+                    let mut config = detector_config(limit.parse().unwrap());
+                    config.box_threshold = box_threshold.parse().unwrap();
+                    config.score_threshold = score_threshold.parse().unwrap();
+                    let adapter = PpOcrAdapter::load_with_detector(&paths, config).unwrap();
+                    let engine = OcrEngine::new(Arc::new(adapter));
+                    // Warm-up, then timed run.
+                    let _ = engine.recognize(&image, &policy, &CancellationToken::default());
+                    let started = Instant::now();
+                    let document = engine
+                        .recognize(&image, &policy, &CancellationToken::default())
+                        .unwrap();
+                    let elapsed = started.elapsed();
+                    let mut texts = document
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            format!(
+                                "{}@{},{}w{}h{} c{}",
+                                line.text,
+                                line.bounds.x,
+                                line.bounds.y,
+                                line.bounds.width,
+                                line.bounds.height,
+                                line.confidence_milli
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    texts.sort();
+                    eprintln!(
+                        "limit {limit} box {box_threshold} score {score_threshold}: {} lines in {elapsed:?}",
+                        document.lines.len()
+                    );
+                    for text in texts {
+                        eprintln!("    {text}");
+                    }
+                }
+            }
+        }
     }
 }
