@@ -128,6 +128,8 @@ mod preview_modes;
 mod providers_view;
 mod pulse_matrix;
 mod resource_view;
+#[cfg(feature = "screen-translation")]
+mod screen_inpaint;
 #[cfg(all(feature = "inspect", feature = "screen-translation"))]
 mod screen_replay;
 #[cfg(feature = "screen-translation")]

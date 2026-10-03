@@ -21,19 +21,13 @@ export struct ScreenBlockOverlay {
     overflow: bool,
     callout: bool,
     font-size: float,
-    // Read from the picture around the label, so a translation sits on the
-    // colour it replaced; the design's dark plate where there is no picture.
+    font-weight: int,
+    // On the picture the text is drawn straight onto the rebuilt background
+    // in the source's colour; DUAL's source-and-translation pair sits on a
+    // plate of the background's colour.
     plate: color,
     ink: color,
-}
-
-export struct ScreenMaskOverlay {
-    block-id: string,
-    x: float,
-    y: float,
-    width: float,
-    height: float,
-    fill: color,
+    shadow: color,
 }
 
 export struct ScreenConnectorOverlay {
@@ -88,8 +82,11 @@ component TranslatedLabel inherits Rectangle {
     in property <bool> callout: false;
     in property <bool> overflow: false;
     in property <length> text-size: 12px;
+    in property <int> text-weight: 570;
+    in property <bool> plated: true;
     in property <color> plate: #120e09;
     in property <color> ink: #f3e9cf;
+    in property <color> shadow: transparent;
     out property <length> measured-content-height: translated-text-item.preferred-height + 8px;
     callback selected();
     callback edit-requested();
@@ -98,24 +95,39 @@ component TranslatedLabel inherits Rectangle {
     forward-focus: key-focus;
     border-width: root.selected-label || touch.has-hover ? 1px : 0px;
     border-color: root.selected-label ? Theme.red : root.ink.with-alpha(0.5);
-    background: touch.has-hover ? root.plate.mix(root.ink, 0.88) : root.plate;
+    background: root.plated
+        ? (touch.has-hover ? root.plate.mix(root.ink, 0.88) : root.plate)
+        : (touch.has-hover ? root.ink.with-alpha(0.1) : transparent);
     clip: true;
     opacity: root.dimmed ? 0.38 : 1;
     accessible-role: button;
     accessible-label: @tr("Editable translated image text");
     accessible-action-default => { root.edit-requested(); }
 
-    translated-text-item := Text {
-        x: 4px;
+    if root.shadow.alpha > 0: Text {
+        x: 5px;
         y: 2px;
         width: parent.width - 8px;
-        height: parent.height - 4px;
+        height: parent.height - 3px;
+        text: translated-text-item.text;
+        color: root.shadow;
+        font-size: translated-text-item.font-size;
+        font-weight: root.text-weight;
+        wrap: word-wrap;
+        horizontal-alignment: left;
+        vertical-alignment: top;
+    }
+    translated-text-item := Text {
+        x: 4px;
+        y: 1px;
+        width: parent.width - 8px;
+        height: parent.height - 2px;
         text: root.dual
             ? root.source-text + "\n" + root.translated-text
             : root.translated-text;
         color: root.ink;
         font-size: max(12px, root.text-size);
-        font-weight: 570;
+        font-weight: root.text-weight;
         wrap: word-wrap;
         horizontal-alignment: left;
         vertical-alignment: top;
@@ -280,6 +292,10 @@ export component TranslationCorrectionPanel inherits Rectangle {
 
 export component ScreenImageResult inherits Rectangle {
     in property <image> crop-image;
+    // The capture with the replaced text rebuilt from its background, shown
+    // under the translations; ORIG always shows the capture itself.
+    in property <image> repaired-image;
+    in property <bool> use-repaired-image: false;
     in property <int> view-mode: 3;
     in property <bool> pinned: false;
     in property <int> selected-block: 4;
@@ -291,7 +307,6 @@ export component ScreenImageResult inherits Rectangle {
     in property <bool> dim-other-blocks: false;
     in property <bool> use-fixture-blocks: true;
     in property <[ScreenBlockOverlay]> blocks;
-    in property <[ScreenMaskOverlay]> masks;
     in property <[ScreenConnectorOverlay]> connectors;
     in property <float> image-content-width: root.width / 1px;
     in property <float> image-content-height: root.height / 1px;
@@ -393,7 +408,12 @@ export component ScreenImageResult inherits Rectangle {
                 width: root.image-content-width * 1px;
                 height: root.image-content-height * 1px;
                 clip: true;
-                Image { width: parent.width; height: parent.height; source: root.crop-image; image-fit: fill; }
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.use-repaired-image && root.view-mode != 1 ? root.repaired-image : root.crop-image;
+                    image-fit: fill;
+                }
             }
 
             if root.use-fixture-blocks && root.view-mode != 1: TranslatedLabel {
@@ -443,17 +463,6 @@ export component ScreenImageResult inherits Rectangle {
                 edit-requested => { root.block-edit-requested(4); }
             }
 
-            // Mask only the glyph fragments that contributed to a successfully
-            // placed row. Paragraph unions are never used as paint regions.
-            for mask in root.masks: Rectangle {
-                visible: !root.use-fixture-blocks && root.view-mode != 1;
-                x: mask.x * 1px;
-                y: mask.y * 1px;
-                width: mask.width * 1px;
-                height: mask.height * 1px;
-                background: mask.fill;
-                border-radius: 2px;
-            }
             for block[index] in root.blocks: TranslatedLabel {
                 visible: !root.use-fixture-blocks && root.view-mode != 1 && block.placed;
                 x: block.x * 1px;
@@ -468,8 +477,11 @@ export component ScreenImageResult inherits Rectangle {
                 callout: block.callout;
                 overflow: block.overflow;
                 text-size: max(root.minimum-overlay-font-size, block.font-size * 1px);
+                text-weight: block.font-weight;
+                plated: block.callout || root.view-mode == 2;
                 plate: block.plate;
                 ink: block.ink;
+                shadow: block.shadow;
                 border-color: block.low-confidence && !self.selected-label ? #d7a45b : Theme.red;
                 selected => { root.block-selected(index); }
                 edit-requested => { root.block-edit-requested(index); }
@@ -659,8 +671,9 @@ export component ScreenTranslationWindow inherits Window {
     // Set when the input host confirms the copy, cleared with new content.
     in-out property <bool> screen-copied: false;
     in-out property <image> screen-crop-image;
+    in-out property <image> screen-repaired-image;
+    in-out property <bool> screen-use-repaired-image: false;
     in-out property <[ScreenBlockOverlay]> screen-blocks;
-    in-out property <[ScreenMaskOverlay]> screen-masks;
     in-out property <[ScreenConnectorOverlay]> screen-connectors;
     in-out property <float> screen-content-width: 960;
     in-out property <float> screen-content-height: 576;
@@ -689,6 +702,7 @@ export component ScreenTranslationWindow inherits Window {
     in-out property <string> measure-text;
     in-out property <float> measure-width: 180;
     in-out property <float> measure-font-size: 12;
+    in-out property <int> measure-font-weight: 570;
     out property <float> measured-text-width: measure-item.preferred-width / 1px;
     out property <float> measured-text-height: measure-item.preferred-height / 1px;
 
@@ -715,7 +729,7 @@ export component ScreenTranslationWindow inherits Window {
         height: 0px;
         text: root.measure-text;
         font-size: root.measure-font-size * 1px;
-        font-weight: 570;
+        font-weight: root.measure-font-weight;
         wrap: word-wrap;
     }
 
@@ -723,6 +737,8 @@ export component ScreenTranslationWindow inherits Window {
         width: parent.width;
         height: parent.height;
         crop-image: root.screen-crop-image;
+        repaired-image: root.screen-repaired-image;
+        use-repaired-image: root.screen-use-repaired-image;
         view-mode: root.screen-view-mode;
         pinned: root.pinned;
         selected-block: root.screen-selected-block;
@@ -737,7 +753,6 @@ export component ScreenTranslationWindow inherits Window {
         total-content-height: root.screen-total-content-height;
         use-fixture-blocks: false;
         blocks: root.screen-blocks;
-        masks: root.screen-masks;
         connectors: root.screen-connectors;
         editor-original <=> root.screen-editor-original;
         editor-block-source: root.screen-editor-block-source;

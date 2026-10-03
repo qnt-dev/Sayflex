@@ -342,6 +342,9 @@ pub(crate) fn retire_screen_result(slot: &ScreenResultWindowSlot, reason: &str) 
         .set(slot.retire_count.get().saturating_add(1));
     slot.window.set_screen_editor_visible(false);
     slot.window.set_screen_crop_image(slint::Image::default());
+    slot.window.set_screen_use_repaired_image(false);
+    slot.window
+        .set_screen_repaired_image(slint::Image::default());
     slot.window.set_prepared(false);
     if let Some(presenter) = &slot.presenter {
         presenter.retire(slot.window.window(), reason);

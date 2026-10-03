@@ -353,14 +353,15 @@ mod tests {
         assert!(SOURCE.contains("inline-editor := TranslationCorrectionPanel"));
         assert!(!SOURCE.contains("overflow-panel"));
         assert!(!SOURCE.contains("dense-panel"));
-        assert!(SOURCE.contains("for mask in root.masks"));
-        // The fill is sampled from the picture and always opaque (alpha 255,
-        // see screen_result_view::slint_color), so the original glyphs stay
-        // fully hidden while the mask matches the page around them.
+        // Replaced text is rebuilt from its background in a copy of the
+        // capture (screen_inpaint); ORIG always shows the capture itself.
         assert!(
-            SOURCE.contains("background: mask.fill;"),
-            "replacement masks must fully hide the original glyphs"
+            SOURCE.contains(
+                "source: root.use-repaired-image && root.view-mode != 1 ? root.repaired-image : root.crop-image;"
+            ),
+            "translations must sit on the rebuilt picture, the original stays one click away"
         );
+        assert!(!SOURCE.contains("for mask in root.masks"));
         assert!(SOURCE.contains("double-clicked => { root.edit-requested(); }"));
         assert!(
             !SOURCE.contains("Double-click a translation to edit"),

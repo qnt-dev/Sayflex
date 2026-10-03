@@ -1,18 +1,39 @@
 use rust_protocol::{BlockCompletion, PhysicalRect, ScreenBlockId};
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
+use crate::screen_inpaint::{GlyphMetrics, PixelRect, glyph_metrics, repaired_pixels};
 use crate::screen_result::ScreenResultSnapshot;
-use crate::{
-    ScreenBlockOverlay, ScreenConnectorOverlay, ScreenMaskOverlay, ScreenTranslationWindow,
-};
+use crate::{ScreenBlockOverlay, ScreenConnectorOverlay, ScreenTranslationWindow};
 
 const MIN_FONT_SIZE: f32 = 12.0;
-const BODY_FONT_SIZE: f32 = 14.0;
+const MAX_FONT_SIZE: f32 = 120.0;
 type LayoutRect = (f32, f32, f32, f32);
 const TEXT_HORIZONTAL_PADDING: f32 = 8.0;
 const TEXT_VERTICAL_PADDING: f32 = 2.0;
 const MAX_IMAGE_SCALE: f32 = 1.0;
 const MAX_VERTICAL_NUDGE: f32 = 10.0;
+/// Share of a label's height that a neighbour's line box may cover: the
+/// leading above and below the glyphs.
+const LEADING_OVERLAP: f32 = 0.25;
+/// Step-downs from the source's own type size before the translation wraps.
+const FONT_LADDER: [f32; 6] = [1.0, 0.94, 0.88, 0.82, 0.76, 0.7];
+/// A translation may run this much wider than its source when nothing else
+/// is in the way.
+const WIDTH_ALLOWANCE: f32 = 1.05;
+/// Width given to the measurer for a line that must not wrap.
+const UNBOUNDED_WIDTH: f32 = 100_000.0;
+const REGULAR_WEIGHT: i32 = 560;
+const BOLD_WEIGHT: i32 = 700;
+/// Median stroke run over the em size from which the source reads as bold,
+/// and the fewest pixels that can (anti-aliasing spreads a thin stem over
+/// two).
+const BOLD_STROKE_RATIO: f32 = 0.11;
+const BOLD_STROKE_MINIMUM: f32 = 3.0;
+/// The labels' font (Segoe UI): capital height, x-height and the ascent's
+/// share of the line height, in ems.
+const CAPITAL_HEIGHT: f32 = 0.70;
+const X_HEIGHT: f32 = 0.52;
+const ASCENT_SHARE: f32 = 0.811;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultViewMode {
@@ -145,6 +166,10 @@ pub(crate) struct BlockLayout {
     pub(crate) editable_source: bool,
     pub(crate) overflow: bool,
     pub(crate) font_size: f32,
+    pub(crate) bold: bool,
+    /// The source text's own colours, when the picture shows them.
+    pub(crate) source_ink: Option<[u8; 3]>,
+    pub(crate) source_background: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,7 +216,7 @@ pub(crate) struct LogicalTextSize {
 }
 
 pub(crate) trait ScreenTextMeasurer {
-    fn measure(&self, text: &str, width: f32, font_size: f32) -> LogicalTextSize;
+    fn measure(&self, text: &str, width: f32, font_size: f32, bold: bool) -> LogicalTextSize;
 }
 
 struct SlintScreenTextMeasurer<'a> {
@@ -199,11 +224,13 @@ struct SlintScreenTextMeasurer<'a> {
 }
 
 impl ScreenTextMeasurer for SlintScreenTextMeasurer<'_> {
-    fn measure(&self, text: &str, width: f32, font_size: f32) -> LogicalTextSize {
+    fn measure(&self, text: &str, width: f32, font_size: f32, bold: bool) -> LogicalTextSize {
         self.window.set_measure_text(text.into());
         self.window.set_measure_width(width.max(1.0));
         self.window
             .set_measure_font_size(font_size.max(MIN_FONT_SIZE));
+        self.window
+            .set_measure_font_weight(if bold { BOLD_WEIGHT } else { REGULAR_WEIGHT });
         LogicalTextSize {
             width: self.window.get_measured_text_width(),
             height: self.window.get_measured_text_height(),
@@ -216,7 +243,7 @@ struct ApproximateTextMeasurer;
 
 #[cfg(test)]
 impl ScreenTextMeasurer for ApproximateTextMeasurer {
-    fn measure(&self, text: &str, width: f32, font_size: f32) -> LogicalTextSize {
+    fn measure(&self, text: &str, width: f32, font_size: f32, _bold: bool) -> LogicalTextSize {
         let glyph_width = font_size * 0.56;
         let natural_width = text.chars().count() as f32 * glyph_width;
         let lines = (natural_width / width.max(1.0)).ceil().max(1.0);
@@ -276,7 +303,7 @@ pub(crate) fn plan_screen_result_layout_with_frame(
     projection: ResultViewMode,
     work_area: LogicalWorkArea,
     measurer: &dyn ScreenTextMeasurer,
-    _frame: Option<&rust_platform_windows::screen_capture::RgbaFrame>,
+    frame: Option<&rust_platform_windows::screen_capture::RgbaFrame>,
 ) -> ScreenResultLayoutPlan {
     let (image_width, image_height) = fitted_viewport(crop, work_area);
     let mut plan = ScreenResultLayoutPlan {
@@ -328,26 +355,60 @@ pub(crate) fn plan_screen_result_layout_with_frame(
                 && block.source.chars().any(char::is_alphabetic),
             overflow: false,
             font_size: MIN_FONT_SIZE,
+            bold: false,
+            source_ink: None,
+            source_background: None,
         };
         if replace_source {
-            let preferred = preferred_font_size(block, scale_y);
+            // The source glyphs, when the picture is at hand, set the size,
+            // weight and colour of the translation and where it starts.
+            let metrics = frame.and_then(|frame| {
+                glyph_metrics(
+                    frame,
+                    pixel_rect(block.bounds),
+                    horizontal_reach(index, blocks),
+                )
+            });
+            let em = source_em(&block.source, block.bounds, metrics.as_ref());
+            let preferred = (em * scale_y).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+            let glyphs = metrics.as_ref().map_or(source, |metrics| {
+                scale_pixel_rect(metrics.extent, scale_x, scale_y, viewport)
+            });
+            row.bold = metrics.as_ref().is_some_and(|metrics| {
+                metrics.stroke >= (em * BOLD_STROKE_RATIO).max(BOLD_STROKE_MINIMUM)
+            });
+            row.source_ink = metrics.as_ref().map(|metrics| metrics.ink);
+            row.source_background = metrics.as_ref().map(|metrics| metrics.background);
+            let presented = presented_translation(&block.source, &block.translation);
+            row.display_translation.clone_from(&presented);
             let adjacent_value = adjacent_unchanged_value(block, blocks.get(index + 1))
                 .map(|value| (value, &blocks[index + 1]));
             let value_rect = adjacent_value
                 .map(|(_, value)| scale_rect(value.bounds, scale_x, scale_y, viewport));
-            let text_source = value_rect.map_or(source, |value| {
-                (
-                    source.0,
-                    source.1,
-                    source.2.min((value.0 - source.0).max(1.0)),
-                    source.3,
-                )
-            });
+            let free_placement = Placement::new(
+                index,
+                blocks,
+                source,
+                metrics.as_ref().map(|metrics| Glyphs {
+                    rect: glyphs,
+                    baseline: metrics.core.1 as f32 * scale_y,
+                    continues_right: metrics.continues.1,
+                    free_right: metrics.free_right as f32 * scale_x,
+                }),
+                (scale_x, scale_y),
+                viewport,
+                projection == ResultViewMode::Dual,
+            );
+            let mut placement = free_placement;
+            if let Some(value) = value_rect {
+                placement.right = placement.right.min(value.0 - 2.0).max(placement.x + 1.0);
+            }
             let (mut rect, mut font_size, mut fitted) = in_place_candidate(
                 &projected_text(&row, projection),
-                text_source,
+                &placement,
                 viewport,
                 preferred,
+                row.bold,
                 measurer,
             );
             // Keep a nearby unchanged number in the screenshot when the label
@@ -357,12 +418,13 @@ pub(crate) fn plan_screen_result_layout_with_frame(
                 let overlaps_value = rectangles_overlap(rect, value_rect);
                 let includes_value = translation_ends_with_value(&block.translation, value);
                 if overlaps_value && !includes_value {
-                    row.display_translation = format!("{} {value}", block.translation);
+                    row.display_translation = format!("{presented} {value}");
                     (rect, font_size, fitted) = in_place_candidate(
                         &projected_text(&row, projection),
-                        text_source,
+                        &free_placement,
                         viewport,
                         preferred,
+                        row.bold,
                         measurer,
                     );
                 }
@@ -376,15 +438,23 @@ pub(crate) fn plan_screen_result_layout_with_frame(
                     });
                 }
             }
+            // Line boxes of close rows share their leading, which is
+            // invisible on a transparent label; only a real overlap of the
+            // text moves a label down. DUAL's plates are opaque.
+            let leading = placement.leading_overlap();
             if let Some(lower_edge) = plan
                 .blocks
                 .iter()
                 .filter(|prior| prior.placed && horizontal_overlap(rect, prior))
-                .filter(|prior| rect.1 < prior.y + prior.height && rect.1 + rect.3 > prior.y)
+                .filter(|prior| {
+                    let shared =
+                        (rect.1 + rect.3).min(prior.y + prior.height) - rect.1.max(prior.y);
+                    shared > leading * rect.3.min(prior.height)
+                })
                 .map(|prior| prior.y + prior.height + 2.0)
                 .max_by(f32::total_cmp)
                 && lower_edge + rect.3 <= viewport.1
-                && lower_edge - source.1 <= MAX_VERTICAL_NUDGE
+                && lower_edge - rect.1 <= placement.largest_nudge(rect.3)
             {
                 rect.1 = lower_edge;
             }
@@ -397,7 +467,7 @@ pub(crate) fn plan_screen_result_layout_with_frame(
             row.overflow = !fitted;
 
             // Preserve the original glyph masks even if the new phrase is
-            // shorter. The label paints its own measured, local underlay.
+            // shorter; the background under them is rebuilt from the picture.
             let fragments = if block.fragments.is_empty() {
                 std::slice::from_ref(&block.bounds)
             } else {
@@ -405,7 +475,7 @@ pub(crate) fn plan_screen_result_layout_with_frame(
             };
             plan.masks.extend(fragments.iter().map(|fragment| {
                 let mut rect = scale_rect(*fragment, scale_x, scale_y, viewport);
-                if row.display_translation == row.translation
+                if row.display_translation == presented
                     && let Some(value) = value_rect
                     && rect.0 < value.0
                 {
@@ -419,6 +489,25 @@ pub(crate) fn plan_screen_result_layout_with_frame(
                     height: rect.3,
                 }
             }));
+            // Marks of the same text just outside the OCR box (quotes, a
+            // closing dot, a descender) go with it instead of being left
+            // behind.
+            if let Some(metrics) = &metrics {
+                let bounds = pixel_rect(block.bounds);
+                if metrics.extent.left < bounds.left
+                    || metrics.extent.right > bounds.right
+                    || metrics.extent.top < bounds.top
+                    || metrics.extent.bottom > bounds.bottom
+                {
+                    plan.masks.push(MaskLayout {
+                        block_id: block.block_id.clone(),
+                        x: glyphs.0,
+                        y: glyphs.1,
+                        width: glyphs.2,
+                        height: glyphs.3,
+                    });
+                }
+            }
         }
         if row.not_placeable {
             plan.unplaceable_rows.push(row.block_id.clone());
@@ -426,6 +515,469 @@ pub(crate) fn plan_screen_result_layout_with_frame(
         plan.blocks.push(row);
     }
     plan
+}
+
+fn pixel_rect(rect: CropLocalRect) -> PixelRect {
+    let left = i64::from(rect.x);
+    let top = i64::from(rect.y);
+    PixelRect {
+        left,
+        top,
+        right: left + i64::from(rect.width),
+        bottom: top + i64::from(rect.height),
+    }
+}
+
+fn scale_pixel_rect(
+    rect: PixelRect,
+    scale_x: f32,
+    scale_y: f32,
+    viewport: (f32, f32),
+) -> LayoutRect {
+    scale_rect(
+        CropLocalRect {
+            x: i32::try_from(rect.left).unwrap_or(i32::MAX),
+            y: i32::try_from(rect.top).unwrap_or(i32::MAX),
+            width: u32::try_from(rect.width()).unwrap_or(0),
+            height: u32::try_from(rect.height()).unwrap_or(0),
+        },
+        scale_x,
+        scale_y,
+        viewport,
+    )
+}
+
+/// How far, in capture pixels, marks beside row `index` may belong to it:
+/// up to the rows on its left and right on the same line.
+fn horizontal_reach(index: usize, blocks: &[BlockLayoutInput]) -> (i64, i64) {
+    let row = pixel_rect(blocks[index].bounds);
+    let mut reach = (0, i64::MAX);
+    for (other_index, other) in blocks.iter().enumerate() {
+        if other_index == index {
+            continue;
+        }
+        let other = pixel_rect(other.bounds);
+        if row.bottom.min(other.bottom) - row.top.max(other.top) <= 0 {
+            continue;
+        }
+        if other.right <= row.left {
+            reach.0 = reach.0.max(other.right);
+        } else if other.left >= row.right {
+            reach.1 = reach.1.min(other.left);
+        }
+    }
+    reach
+}
+
+/// The em size, in capture pixels, of the font that drew the source, such
+/// that the translation's capitals (or lowercase) are as tall as the
+/// source's.
+fn source_em(source: &str, bounds: CropLocalRect, metrics: Option<&GlyphMetrics>) -> f32 {
+    match metrics {
+        Some(metrics) => {
+            let core = (metrics.core.1 - metrics.core.0) as f32;
+            // Ink above the densest band, a quarter of it or more: the band
+            // is the x-height under capitals and ascenders.
+            let shelf = (metrics.core.0 - metrics.extent.top) as f32 >= core / 4.0;
+            core / core_height(source, shelf)
+        }
+        // Without the picture: an OCR box is roughly twice its text's em.
+        None => bounds.height as f32 * 0.55,
+    }
+}
+
+/// What the densest band of the source's rows measures, in ems: the
+/// x-height of mostly lowercase text, where the picture shows the taller
+/// letters above it or the text has none; the capital height otherwise.
+/// Glyphs of uncased scripts fill most of the em.
+fn core_height(text: &str, shelf: bool) -> f32 {
+    const ASCENDERS: &str = "bdfhkltбф";
+    let letters = text
+        .chars()
+        .filter(|character| character.is_alphabetic())
+        .collect::<Vec<_>>();
+    let lowercase = letters
+        .iter()
+        .filter(|letter| letter.is_lowercase())
+        .count();
+    let cased = letters
+        .iter()
+        .filter(|letter| letter.is_lowercase() || letter.is_uppercase())
+        .count();
+    let tall = text.chars().any(|character| {
+        character.is_uppercase() || character.is_ascii_digit() || ASCENDERS.contains(character)
+    });
+    if !letters.is_empty() && cased == 0 {
+        0.88
+    } else if lowercase > 0 && lowercase * 2 >= letters.len() && (shelf || !tall) {
+        X_HEIGHT
+    } else {
+        CAPITAL_HEIGHT
+    }
+}
+
+/// The translation as drawn on the picture: in capitals when the source is
+/// set in capitals, with typographic quotes in Cyrillic text.
+fn presented_translation(source: &str, translation: &str) -> String {
+    let letters = source
+        .chars()
+        .filter(|character| character.is_alphabetic())
+        .collect::<Vec<_>>();
+    let capitals = letters.len() >= 2 && letters.iter().all(|letter| letter.is_uppercase());
+    let text = if capitals {
+        translation.to_uppercase()
+    } else {
+        translation.to_owned()
+    };
+    let cyrillic = text
+        .chars()
+        .any(|character| matches!(character, '\u{0400}'..='\u{04ff}'));
+    if !cyrillic {
+        return text;
+    }
+    let mut presented = String::with_capacity(text.len());
+    let mut previous: Option<char> = None;
+    for character in text.chars() {
+        let replacement = match character {
+            '"' | '\u{201c}' | '\u{201d}' | '\u{201e}' => {
+                if previous.is_none_or(|previous| {
+                    previous.is_whitespace() || matches!(previous, '(' | '[' | '\u{ab}')
+                }) {
+                    '\u{ab}'
+                } else {
+                    '\u{bb}'
+                }
+            }
+            other => other,
+        };
+        presented.push(replacement);
+        previous = Some(replacement);
+    }
+    presented
+}
+
+/// The measured ink of a source row, in layout coordinates.
+#[derive(Debug, Clone, Copy)]
+struct Glyphs {
+    rect: LayoutRect,
+    baseline: f32,
+    /// More text of the same line follows, unrecognised.
+    continues_right: bool,
+    /// The plain background beside the text ends here.
+    free_right: f32,
+}
+
+/// Where a translation may go: from `x`, its first line on the source's
+/// baseline (or on its box, `band_top` and `band_height`, without the
+/// picture), no further right than `right` and no lower than `bottom`.
+/// `stacked` labels (DUAL: source over translation, on a plate) start at
+/// the top of the source's box instead.
+#[derive(Debug, Clone, Copy)]
+struct Placement {
+    x: f32,
+    top: f32,
+    band_top: f32,
+    band_height: f32,
+    baseline: Option<f32>,
+    right: f32,
+    bottom: f32,
+    source_height: f32,
+    stacked: bool,
+}
+
+impl Placement {
+    fn new(
+        index: usize,
+        blocks: &[BlockLayoutInput],
+        source: LayoutRect,
+        glyphs: Option<Glyphs>,
+        (scale_x, scale_y): (f32, f32),
+        viewport: (f32, f32),
+        stacked: bool,
+    ) -> Self {
+        let (x, glyph_right) = match glyphs {
+            Some(Glyphs { rect, .. }) => (
+                (rect.0 - TEXT_HORIZONTAL_PADDING / 2.0).max(0.0),
+                rect.0 + rect.2 + TEXT_HORIZONTAL_PADDING / 2.0,
+            ),
+            None => (source.0, source.0 + source.2),
+        };
+        let band = glyphs.map_or(source, |glyphs| glyphs.rect);
+        let width = (source.0 + source.2).max(glyph_right) - x;
+        let mut right = match glyphs {
+            // Text the OCR missed follows on the same line: stay within the
+            // source's own glyphs rather than draw over it.
+            Some(Glyphs {
+                continues_right: true,
+                ..
+            }) => glyph_right,
+            // Plain background beside the text takes a longer translation
+            // at the source's size.
+            Some(Glyphs { free_right, .. }) => (x + width * WIDTH_ALLOWANCE).max(free_right),
+            None => x + width * WIDTH_ALLOWANCE,
+        }
+        .min(viewport.0);
+        let mut bottom = viewport.1;
+        for (other_index, other) in blocks.iter().enumerate() {
+            if other_index == index {
+                continue;
+            }
+            let other = scale_rect(other.bounds, scale_x, scale_y, viewport);
+            let shared_height =
+                (source.1 + source.3).min(other.1 + other.3) - source.1.max(other.1);
+            if shared_height >= 0.45 * source.3.min(other.3) {
+                if other.0 >= source.0 + source.2 - 1.0 {
+                    right = right.min(other.0 - 4.0);
+                }
+            } else if other.1 >= source.1 + source.3 / 2.0
+                && other.0 < right
+                && other.0 + other.2 > x
+            {
+                bottom = bottom.min(other.1);
+            }
+        }
+        Self {
+            x,
+            top: source.1,
+            band_top: band.1,
+            band_height: band.3,
+            baseline: glyphs.map(|glyphs| glyphs.baseline),
+            right: right.max(x + 1.0),
+            bottom,
+            source_height: source.3,
+            stacked,
+        }
+    }
+
+    /// How far a label may move down to clear the one above: a little on
+    /// the picture, where it must stay on its source; a whole label in
+    /// DUAL, where an opaque plate would otherwise hide the line above.
+    fn largest_nudge(&self, height: f32) -> f32 {
+        if self.stacked {
+            height.max(MAX_VERTICAL_NUDGE)
+        } else {
+            MAX_VERTICAL_NUDGE
+        }
+    }
+
+    /// Share of a label's height the next row may cover.
+    fn leading_overlap(&self) -> f32 {
+        if self.stacked { 0.0 } else { LEADING_OVERLAP }
+    }
+
+    /// Top of a label whose text lines are `line` high: its first baseline
+    /// on the source's. Without the picture, one line of the source's
+    /// height is centred on its box and a taller box is followed from its
+    /// top.
+    fn label_top(&self, line: f32) -> f32 {
+        if self.stacked {
+            return self.top;
+        }
+        if let Some(baseline) = self.baseline {
+            return baseline - line * ASCENT_SHARE - TEXT_VERTICAL_PADDING / 2.0;
+        }
+        let padded = line + TEXT_VERTICAL_PADDING;
+        if self.band_height <= padded {
+            self.band_top + self.band_height / 2.0 - padded / 2.0
+        } else {
+            self.band_top
+        }
+    }
+}
+
+/// The source's type size first, a little smaller next, then wrapped at the
+/// source's width, then smaller still. Overlapping OCR rows are not a reason
+/// to detach a translation from its source.
+fn in_place_candidate(
+    text: &str,
+    placement: &Placement,
+    viewport: (f32, f32),
+    preferred_font_size: f32,
+    bold: bool,
+    measurer: &dyn ScreenTextMeasurer,
+) -> (LayoutRect, f32, bool) {
+    let mut sizes = FONT_LADDER
+        .iter()
+        .map(|factor| (preferred_font_size * factor).max(MIN_FONT_SIZE))
+        .collect::<Vec<_>>();
+    sizes.dedup();
+    for &size in &sizes {
+        if let Some(rect) = single_line(text, placement, viewport, size, bold, measurer) {
+            return (rect, size, true);
+        }
+    }
+    for &size in &sizes {
+        if let Some(rect) = wrapped(text, placement, viewport, size, bold, measurer) {
+            return (rect, size, true);
+        }
+    }
+    let mut size = sizes.last().copied().unwrap_or(MIN_FONT_SIZE) * 0.9;
+    while size > MIN_FONT_SIZE {
+        if let Some(rect) = single_line(text, placement, viewport, size, bold, measurer) {
+            return (rect, size, true);
+        }
+        size *= 0.9;
+    }
+    for wrap in [false, true] {
+        let candidate = if wrap {
+            wrapped(text, placement, viewport, MIN_FONT_SIZE, bold, measurer)
+        } else {
+            single_line(text, placement, viewport, MIN_FONT_SIZE, bold, measurer)
+        };
+        if let Some(rect) = candidate {
+            return (rect, MIN_FONT_SIZE, true);
+        }
+    }
+
+    // Nothing fits beside the source: grow downwards within the image.
+    let source = (
+        placement.x,
+        placement.top,
+        (placement.right - placement.x).max(1.0),
+        placement.source_height,
+    );
+    let remaining = (
+        (viewport.0 - source.0).max(1.0),
+        (viewport.1 - source.1).max(1.0),
+    );
+    if let Some(rect) = grown_candidate(text, source, remaining, MIN_FONT_SIZE, bold, measurer) {
+        return (rect, MIN_FONT_SIZE, true);
+    }
+    // At an image edge, move only as far as required to keep the complete
+    // measured label inside the image; it remains over its source region.
+    if let Some(mut rect) = grown_candidate(text, source, viewport, MIN_FONT_SIZE, bold, measurer) {
+        rect.0 = source.0.min((viewport.0 - rect.2).max(0.0));
+        rect.1 = source.1.min((viewport.1 - rect.3).max(0.0));
+        return (rect, MIN_FONT_SIZE, true);
+    }
+
+    // A pathological paragraph can exceed the entire image at the readable
+    // minimum. Clip its local label, while retaining the complete string for
+    // the editor and text projection. Never create an external callout.
+    (
+        (source.0, source.1, remaining.0, remaining.1),
+        MIN_FONT_SIZE,
+        false,
+    )
+}
+
+/// The text on one line (or its own explicit lines), centred on the source.
+fn single_line(
+    text: &str,
+    placement: &Placement,
+    viewport: (f32, f32),
+    font_size: f32,
+    bold: bool,
+    measurer: &dyn ScreenTextMeasurer,
+) -> Option<LayoutRect> {
+    let measured = measurer.measure(text, UNBOUNDED_WIDTH, font_size, bold);
+    let width = measured.width + TEXT_HORIZONTAL_PADDING;
+    let height = measured.height + TEXT_VERTICAL_PADDING;
+    let lines = text.lines().count().max(1) as f32;
+    let y = placement
+        .label_top(measured.height / lines)
+        .clamp(0.0, (viewport.1 - height).max(0.0));
+    // The row below may share this label's leading, not its text.
+    let clear_below = y + height <= placement.bottom + placement.leading_overlap() * height + 0.5;
+    (measured.width.is_finite()
+        && measured.height.is_finite()
+        && measured.height > 0.0
+        && placement.x + width <= placement.right + 0.5
+        && height <= viewport.1
+        && clear_below)
+        .then_some((placement.x, y, width, height))
+}
+
+/// The text wrapped within the source's width, its first line where the
+/// source line was, if the lines below stay clear of the next row.
+fn wrapped(
+    text: &str,
+    placement: &Placement,
+    viewport: (f32, f32),
+    font_size: f32,
+    bold: bool,
+    measurer: &dyn ScreenTextMeasurer,
+) -> Option<LayoutRect> {
+    let available = placement.right - placement.x;
+    let measured = measurer.measure(
+        text,
+        (available - TEXT_HORIZONTAL_PADDING).max(1.0),
+        font_size,
+        bold,
+    );
+    let line = measurer
+        .measure("Ag", UNBOUNDED_WIDTH, font_size, bold)
+        .height;
+    let width = measured.width + TEXT_HORIZONTAL_PADDING;
+    let height = measured.height + TEXT_VERTICAL_PADDING;
+    let y = placement.label_top(line).max(0.0);
+    (measured.width.is_finite()
+        && measured.height.is_finite()
+        && measured.height > 0.0
+        && width <= available + 0.5
+        && y + height <= placement.bottom.min(viewport.1) + 0.5
+        && height <= (placement.source_height * 2.2).max(2.0 * line + TEXT_VERTICAL_PADDING) + 0.5)
+        .then_some((placement.x, y, width, height))
+}
+
+fn grown_candidate(
+    text: &str,
+    source: LayoutRect,
+    available: (f32, f32),
+    font_size: f32,
+    bold: bool,
+    measurer: &dyn ScreenTextMeasurer,
+) -> Option<LayoutRect> {
+    // Five bounded measurements find a compact local box without reading or
+    // searching screenshot pixels on the UI thread.
+    [1.0, 1.25, 1.5, 2.0, f32::INFINITY]
+        .into_iter()
+        .filter_map(|growth| {
+            let requested_width = (source.2 * growth).min(available.0).max(1.0);
+            let measured = measurer.measure(
+                text,
+                (requested_width - TEXT_HORIZONTAL_PADDING).max(1.0),
+                font_size,
+                bold,
+            );
+            let width = (measured.width + TEXT_HORIZONTAL_PADDING).min(available.0);
+            let height = measured.height + TEXT_VERTICAL_PADDING;
+            (measured.width.is_finite()
+                && measured.height.is_finite()
+                && measured.height > 0.0
+                && width <= requested_width + 0.5
+                && height <= available.1)
+                .then_some((source.0, source.1, width, height))
+        })
+        .min_by(|left, right| {
+            left.3
+                .total_cmp(&right.3)
+                .then_with(|| (left.2 * left.3).total_cmp(&(right.2 * right.3)))
+        })
+}
+
+fn projected_text(row: &BlockLayout, projection: ResultViewMode) -> String {
+    match projection {
+        ResultViewMode::Dual => format!("{}\n{}", row.source, row.display_translation),
+        _ => row.display_translation.clone(),
+    }
+}
+
+fn scale_rect(
+    rect: CropLocalRect,
+    scale_x: f32,
+    scale_y: f32,
+    viewport: (f32, f32),
+) -> (f32, f32, f32, f32) {
+    let x = (rect.x as f32 * scale_x).clamp(0.0, viewport.0);
+    let y = (rect.y as f32 * scale_y).clamp(0.0, viewport.1);
+    let width = (rect.width as f32 * scale_x)
+        .max(1.0)
+        .min((viewport.0 - x).max(0.0));
+    let height = (rect.height as f32 * scale_y)
+        .max(1.0)
+        .min((viewport.1 - y).max(0.0));
+    (x, y, width, height)
 }
 
 fn adjacent_unchanged_value<'a>(
@@ -471,160 +1023,6 @@ fn rectangles_overlap(left: LayoutRect, right: LayoutRect) -> bool {
         && left.0 + left.2 > right.0
         && left.1 < right.1 + right.3
         && left.1 + left.3 > right.1
-}
-
-fn preferred_font_size(block: &BlockLayoutInput, scale: f32) -> f32 {
-    let heading = block.source.chars().any(char::is_alphabetic)
-        && block
-            .source
-            .chars()
-            .filter(|character| character.is_alphabetic())
-            .all(char::is_uppercase)
-        && block.source.chars().count() <= 36
-        && block.bounds.width >= 100
-        && block.bounds.height >= 27;
-    if heading {
-        (20.0 * scale).max(MIN_FONT_SIZE)
-    } else {
-        (BODY_FONT_SIZE * scale).max(MIN_FONT_SIZE)
-    }
-}
-
-/// Prefer the source rectangle, then grow beside it. OCR rectangles may
-/// overlap already; another row is not a reason to detach this translation.
-fn in_place_candidate(
-    text: &str,
-    source: LayoutRect,
-    viewport: (f32, f32),
-    preferred_font_size: f32,
-    measurer: &dyn ScreenTextMeasurer,
-) -> (LayoutRect, f32, bool) {
-    let font_sizes = [
-        preferred_font_size,
-        (preferred_font_size - 2.0).max(MIN_FONT_SIZE),
-        BODY_FONT_SIZE.min(preferred_font_size),
-        MIN_FONT_SIZE,
-    ];
-    for font_size in font_sizes {
-        if let Some(rect) = measured_candidate(text, source, font_size, measurer, viewport) {
-            return (rect, font_size, true);
-        }
-    }
-
-    let remaining = (
-        (viewport.0 - source.0).max(1.0),
-        (viewport.1 - source.1).max(1.0),
-    );
-    for font_size in font_sizes {
-        if let Some(rect) = grown_candidate(text, source, remaining, font_size, measurer) {
-            return (rect, font_size, true);
-        }
-    }
-
-    // At an image edge, move only as far as required to keep the complete
-    // measured label inside the image; it remains over its source region.
-    for font_size in font_sizes {
-        if let Some(mut rect) = grown_candidate(text, source, viewport, font_size, measurer) {
-            rect.0 = source.0.min((viewport.0 - rect.2).max(0.0));
-            rect.1 = source.1.min((viewport.1 - rect.3).max(0.0));
-            return (rect, font_size, true);
-        }
-    }
-
-    // A pathological paragraph can exceed the entire image at the readable
-    // minimum. Clip its local label, while retaining the complete string for
-    // the editor and text projection. Never create an external callout.
-    (
-        (source.0, source.1, remaining.0, remaining.1),
-        MIN_FONT_SIZE,
-        false,
-    )
-}
-
-fn grown_candidate(
-    text: &str,
-    source: LayoutRect,
-    available: (f32, f32),
-    font_size: f32,
-    measurer: &dyn ScreenTextMeasurer,
-) -> Option<LayoutRect> {
-    // Five bounded measurements find a compact local box without reading or
-    // searching screenshot pixels on the UI thread.
-    [1.0, 1.25, 1.5, 2.0, f32::INFINITY]
-        .into_iter()
-        .filter_map(|growth| {
-            let requested_width = (source.2 * growth).min(available.0).max(1.0);
-            let measured = measurer.measure(
-                text,
-                (requested_width - TEXT_HORIZONTAL_PADDING).max(1.0),
-                font_size,
-            );
-            let width = source
-                .2
-                .min(available.0)
-                .max(measured.width + TEXT_HORIZONTAL_PADDING);
-            let height = measured.height + TEXT_VERTICAL_PADDING;
-            (measured.width.is_finite()
-                && measured.height.is_finite()
-                && measured.height > 0.0
-                && width <= requested_width + 0.5
-                && width <= available.0
-                && height <= available.1)
-                .then_some((source.0, source.1, width, height))
-        })
-        .min_by(|left, right| {
-            left.3
-                .total_cmp(&right.3)
-                .then_with(|| (left.2 * left.3).total_cmp(&(right.2 * right.3)))
-        })
-}
-
-fn projected_text(row: &BlockLayout, projection: ResultViewMode) -> String {
-    match projection {
-        ResultViewMode::Dual => format!("{}\n{}", row.source, row.display_translation),
-        _ => row.display_translation.clone(),
-    }
-}
-
-fn scale_rect(
-    rect: CropLocalRect,
-    scale_x: f32,
-    scale_y: f32,
-    viewport: (f32, f32),
-) -> (f32, f32, f32, f32) {
-    let x = (rect.x as f32 * scale_x).clamp(0.0, viewport.0);
-    let y = (rect.y as f32 * scale_y).clamp(0.0, viewport.1);
-    let width = (rect.width as f32 * scale_x)
-        .max(1.0)
-        .min((viewport.0 - x).max(0.0));
-    let height = (rect.height as f32 * scale_y)
-        .max(1.0)
-        .min((viewport.1 - y).max(0.0));
-    (x, y, width, height)
-}
-
-fn measured_candidate(
-    text: &str,
-    candidate: (f32, f32, f32, f32),
-    font_size: f32,
-    measurer: &dyn ScreenTextMeasurer,
-    viewport: (f32, f32),
-) -> Option<(f32, f32, f32, f32)> {
-    let text_width = (candidate.2 - TEXT_HORIZONTAL_PADDING).max(1.0);
-    let measured = measurer.measure(text, text_width, font_size);
-    if !measured.width.is_finite() || !measured.height.is_finite() {
-        return None;
-    }
-    let width = candidate.2.max(measured.width + TEXT_HORIZONTAL_PADDING);
-    let height = measured.height + TEXT_VERTICAL_PADDING;
-    let y = candidate.1;
-    (width <= viewport.0
-        && height <= viewport.1
-        && width <= candidate.2 + 0.5
-        && height <= candidate.3 + 0.5
-        && candidate.0 + width <= viewport.0 + 0.5
-        && y + height <= viewport.1 + 0.5)
-        .then_some((candidate.0, y, width, height))
 }
 
 pub(crate) fn apply_snapshot(
@@ -680,62 +1078,45 @@ pub(crate) fn apply_snapshot(
             plan.image_height as f32 / frame.rect.height.max(1) as f32,
         )
     });
-    let plate_at = |rect: LayoutRect| {
-        frame
-            .zip(scale)
-            .and_then(|(frame, scale)| surrounding_color(frame, rect, scale))
-            .unwrap_or(DEFAULT_PLATE)
-    };
     let rows = layouts
         .iter()
         .map(|block| {
-            let plate = plate_at((block.x, block.y, block.width, block.height));
-            (block, plate)
-        })
-        .map(|(block, plate)| ScreenBlockOverlay {
-            block_id: block.block_id.as_str().into(),
-            source: block.source.clone().into(),
-            translation: block.display_translation.clone().into(),
-            x: block.x,
-            y: block.y,
-            width: block.width,
-            height: block.height,
-            source_x: block.source_x,
-            source_y: block.source_y,
-            source_width: block.source_width,
-            source_height: block.source_height,
-            low_confidence: block.low_confidence,
-            replace_source: block.replace_source,
-            placed: block.placed,
-            callout: block.callout,
-            not_placeable: block.not_placeable,
-            editable_source: block.editable_source,
-            overflow: block.overflow,
-            font_size: block.font_size,
-            plate: slint_color(plate),
-            ink: slint_color(ink_for(plate)),
-        })
-        .collect::<Vec<_>>();
-    let masks = plan
-        .masks
-        .iter()
-        .map(|mask| {
-            // One pixel of margin covers the anti-aliased fringe of the
-            // glyphs the OCR box stops at; painted in the surrounding colour
-            // it is invisible, where a bright edge pixel used to remain.
-            let (x, y) = (
-                (mask.x - MASK_FRINGE).max(0.0),
-                (mask.y - MASK_FRINGE).max(0.0),
-            );
-            let width = mask.width + (mask.x - x) + MASK_FRINGE;
-            let height = mask.height + (mask.y - y) + MASK_FRINGE;
-            ScreenMaskOverlay {
-                block_id: mask.block_id.as_str().into(),
-                x,
-                y,
-                width,
-                height,
-                fill: slint_color(plate_at((mask.x, mask.y, mask.width, mask.height))),
+            let background = block.source_background.or_else(|| {
+                frame.zip(scale).and_then(|(frame, scale)| {
+                    surrounding_color(frame, (block.x, block.y, block.width, block.height), scale)
+                })
+            });
+            let ink = label_ink(block.source_ink, background);
+            ScreenBlockOverlay {
+                block_id: block.block_id.as_str().into(),
+                source: block.source.clone().into(),
+                translation: block.display_translation.clone().into(),
+                x: block.x,
+                y: block.y,
+                width: block.width,
+                height: block.height,
+                source_x: block.source_x,
+                source_y: block.source_y,
+                source_width: block.source_width,
+                source_height: block.source_height,
+                low_confidence: block.low_confidence,
+                replace_source: block.replace_source,
+                placed: block.placed,
+                callout: block.callout,
+                not_placeable: block.not_placeable,
+                editable_source: block.editable_source,
+                overflow: block.overflow,
+                font_size: block.font_size,
+                font_weight: if block.bold {
+                    BOLD_WEIGHT
+                } else {
+                    REGULAR_WEIGHT
+                },
+                // Shown behind DUAL's two lines, which take more room than
+                // the source and must stay readable over what they cover.
+                plate: slint_color(background.unwrap_or(DEFAULT_PLATE)),
+                ink: slint_color(ink),
+                shadow: shadow_for(ink),
             }
         })
         .collect::<Vec<_>>();
@@ -750,8 +1131,11 @@ pub(crate) fn apply_snapshot(
             end_y: connector.end_y,
         })
         .collect::<Vec<_>>();
+    let repaired = frame
+        .zip(scale)
+        .filter(|_| !plan.masks.is_empty())
+        .map(|(frame, scale)| repaired_image(frame, &plan, scale));
     preview.set_screen_blocks(ModelRc::new(VecModel::from(rows)));
-    preview.set_screen_masks(ModelRc::new(VecModel::from(masks)));
     preview.set_screen_connectors(ModelRc::new(VecModel::from(connectors)));
     preview.set_screen_image_content_width(plan.image_width as f32);
     preview.set_screen_image_content_height(plan.image_height as f32);
@@ -767,15 +1151,71 @@ pub(crate) fn apply_snapshot(
         Some(frame) => frame_image(frame)?,
         None => Image::default(),
     });
+    preview.set_screen_use_repaired_image(repaired.is_some());
+    preview.set_screen_repaired_image(repaired.unwrap_or_default());
     Ok(layouts.to_vec())
+}
+
+/// The capture with the replaced text rebuilt from its background: under the
+/// source glyphs, with a margin for their anti-aliased edges, except where
+/// text that stays unchanged is drawn. A wider translation is drawn over the
+/// untouched picture beside it.
+fn repaired_image(
+    frame: &rust_platform_windows::screen_capture::RgbaFrame,
+    plan: &ScreenResultLayoutPlan,
+    scale: (f32, f32),
+) -> Image {
+    let to_pixels = |(x, y, width, height): LayoutRect| PixelRect {
+        left: (x / scale.0).floor() as i64,
+        top: (y / scale.1).floor() as i64,
+        right: ((x + width) / scale.0).ceil() as i64,
+        bottom: ((y + height) / scale.1).ceil() as i64,
+    };
+    let regions = plan
+        .masks
+        .iter()
+        .map(|mask| {
+            to_pixels((mask.x, mask.y, mask.width, mask.height)).inflate(MASK_MARGIN, MASK_MARGIN)
+        })
+        .collect::<Vec<_>>();
+    let protected = plan
+        .blocks
+        .iter()
+        .filter(|block| !block.replace_source)
+        .filter(|block| {
+            plan.masks
+                .iter()
+                .all(|mask| mask.block_id != block.block_id)
+        })
+        .map(|block| {
+            to_pixels((
+                block.source_x,
+                block.source_y,
+                block.source_width,
+                block.source_height,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let pixels = repaired_pixels(frame, &regions, &protected);
+    Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        &pixels,
+        frame.rect.width,
+        frame.rect.height,
+    ))
 }
 
 /// The design's plate, kept where the picture offers no colour: a callout
 /// placed below the image, or a result whose pixels have expired.
 const DEFAULT_PLATE: [u8; 3] = [0x12, 0x0e, 0x09];
-const MASK_FRINGE: f32 = 1.0;
+/// Pixels added around a rebuilt text area for the anti-aliased fringe of
+/// glyphs the OCR box stops at. Detection boxes already keep a margin; a
+/// wider one would eat the background between close rows.
+const MASK_MARGIN: i64 = 2;
 const DARK_INK: [u8; 3] = [0x14, 0x14, 0x14];
 const LIGHT_INK: [u8; 3] = [0xf3, 0xe9, 0xcf];
+/// Luminance difference from which the source's own text colour still reads
+/// on the rebuilt background.
+const MIN_INK_CONTRAST: f32 = 0.3;
 
 /// The colour around `rect` (layout coordinates) in the captured picture: the
 /// median of a two-pixel ring just outside it. A fixed dark plate looked like
@@ -822,16 +1262,37 @@ fn surrounding_color(
     }))
 }
 
+fn luminance(color: [u8; 3]) -> f32 {
+    (0.2126 * f32::from(color[0]) + 0.7152 * f32::from(color[1]) + 0.0722 * f32::from(color[2]))
+        / 255.0
+}
+
 /// Dark ink on a light plate, the design's cream on a dark one.
 fn ink_for(plate: [u8; 3]) -> [u8; 3] {
-    let luminance = (0.2126 * f32::from(plate[0])
-        + 0.7152 * f32::from(plate[1])
-        + 0.0722 * f32::from(plate[2]))
-        / 255.0;
-    if luminance > 0.55 {
+    if luminance(plate) > 0.55 {
         DARK_INK
     } else {
         LIGHT_INK
+    }
+}
+
+/// The source's own text colour where it still reads on its background;
+/// otherwise the plain ink for that background.
+fn label_ink(source_ink: Option<[u8; 3]>, background: Option<[u8; 3]>) -> [u8; 3] {
+    let background = background.unwrap_or(DEFAULT_PLATE);
+    match source_ink {
+        Some(ink) if (luminance(ink) - luminance(background)).abs() >= MIN_INK_CONTRAST => ink,
+        _ => ink_for(background),
+    }
+}
+
+/// Light text drawn straight on a picture keeps a soft dark edge, so it
+/// stays readable where the rebuilt background is busy.
+fn shadow_for(ink: [u8; 3]) -> slint::Color {
+    if luminance(ink) > 0.5 {
+        slint::Color::from_argb_u8(140, 0, 0, 0)
+    } else {
+        slint::Color::from_argb_u8(0, 0, 0, 0)
     }
 }
 
@@ -926,7 +1387,7 @@ mod tests {
     }
 
     impl ScreenTextMeasurer for FakeMeasurer {
-        fn measure(&self, text: &str, width: f32, font_size: f32) -> LogicalTextSize {
+        fn measure(&self, text: &str, width: f32, font_size: f32, _bold: bool) -> LogicalTextSize {
             let glyph_width = font_size * 0.56;
             let lines = ((text.chars().count() as f32 * glyph_width) / width.max(1.0))
                 .ceil()
@@ -985,7 +1446,7 @@ mod tests {
             assert_eq!(row.x, x);
             assert!(row.y >= y && row.y - y < 12.0);
         }
-        assert!(!overlaps(&plan.blocks[0], &plan.blocks[1]));
+        assert!(!text_collides(&plan.blocks[0], &plan.blocks[1]));
         assert_eq!((plan.content_width, plan.content_height), (673, 427));
         assert!(plan.connectors.is_empty());
         assert_eq!(plan.masks.len(), 2);
@@ -1016,35 +1477,52 @@ mod tests {
         assert!(row.placed && !row.callout && !row.not_placeable);
         assert_eq!((row.x, row.y), (331.0, 153.0));
         assert!(row.width > 205.0 || row.height > 23.0);
-        let measured = normal_measurer().measure(&row.translation, row.width - 8.0, row.font_size);
+        let measured =
+            normal_measurer().measure(&row.translation, row.width - 8.0, row.font_size, false);
         assert!(measured.height + super::TEXT_VERTICAL_PADDING <= row.height + 0.5);
         assert!(row.x + row.width <= 673.0 && row.y + row.height <= 427.0);
         assert_eq!((plan.content_width, plan.content_height), (673, 427));
         assert!(plan.connectors.is_empty());
     }
 
+    /// A dark capture with light vertical strokes standing in for glyphs.
+    fn strokes(width: u32, height: u32, rows: &[(u32, u32, u32, u32, u32)]) -> RgbaFrame {
+        let mut frame = page(width, height, [18, 20, 26]);
+        for &(top, bottom, left, right, stroke) in rows {
+            for y in top..bottom {
+                for x in (left..right).filter(|x| (x - left) % 10 < stroke) {
+                    let offset = (y * frame.stride + x * 4) as usize;
+                    frame.pixels[offset..offset + 3].copy_from_slice(&[236, 232, 222]);
+                }
+            }
+        }
+        frame
+    }
+
     #[test]
-    fn source_headings_keep_a_larger_type_scale_on_native_size_images() {
+    fn translations_take_the_size_and_weight_of_the_source_glyphs() {
+        // A capitals heading with 21 px glyphs and heavy strokes above body
+        // text with 12 px glyphs (ascenders and descenders) and thin ones.
+        let frame = strokes(673, 427, &[(20, 41, 140, 340, 4), (54, 66, 140, 600, 1)]);
         let heading = BlockLayoutInput {
             block_id: ScreenBlockId::from("arc-title"),
             source: "ARC LIGHTNING".into(),
-            translation: "АРКОВЫЙ МОЛНИЯ".into(),
-            bounds: local_rect(136, 17, 211, 30),
-            fragments: vec![local_rect(136, 17, 211, 30)],
+            translation: "Дуговая молния".into(),
+            bounds: local_rect(136, 14, 211, 33),
+            fragments: vec![local_rect(136, 14, 211, 33)],
             complete: true,
             confidence_milli: 980,
         };
         let body = BlockLayoutInput {
             block_id: ScreenBlockId::from("arc-body"),
-            source: "Hurls a bolt of lightning that leaps through nearby enemy units that".into(),
-            translation: "Бросает молнию, которая перепрыгивает через nearby вражеские юниты, что"
-                .into(),
-            bounds: local_rect(134, 44, 506, 32),
-            fragments: vec![local_rect(134, 44, 506, 32)],
+            source: "Hurls a bolt of lightning that leaps through nearby enemy units".into(),
+            translation: "Бросает молнию, которая перепрыгивает через ближайших врагов".into(),
+            bounds: local_rect(134, 49, 470, 22),
+            fragments: vec![local_rect(134, 49, 470, 22)],
             complete: true,
             confidence_milli: 980,
         };
-        let plan = plan_screen_result_layout(
+        let plan = plan_screen_result_layout_with_frame(
             crop_size(673, 427),
             &[heading, body],
             ResultViewMode::OnImage,
@@ -1053,11 +1531,30 @@ mod tests {
                 height: 720.0,
             },
             &normal_measurer(),
+            Some(&frame),
         );
         assert_eq!((plan.image_width, plan.image_height), (673, 427));
-        assert!(plan.blocks[0].font_size >= 18.0);
-        assert!(plan.blocks[0].font_size > plan.blocks[1].font_size);
-        assert!(!overlaps(&plan.blocks[0], &plan.blocks[1]));
+        let (heading, body) = (&plan.blocks[0], &plan.blocks[1]);
+        // 21 px capitals are a 29 px font; it may step down to fit.
+        assert!(
+            heading.font_size >= 0.7 * 21.0 / 0.72,
+            "{}",
+            heading.font_size
+        );
+        assert!(heading.font_size > body.font_size);
+        assert!(heading.bold && !body.bold);
+        assert_eq!(heading.display_translation, "ДУГОВАЯ МОЛНИЯ");
+        assert_eq!(heading.source_ink, Some([236, 232, 222]));
+        // Each label starts where its glyphs start and sits on their
+        // baseline (one line: the label's height is that line plus padding).
+        assert_eq!(heading.x, 136.0);
+        let line = heading.height - super::TEXT_VERTICAL_PADDING;
+        let baseline = heading.y + super::TEXT_VERTICAL_PADDING / 2.0 + super::ASCENT_SHARE * line;
+        assert!(
+            (baseline - 41.0).abs() <= 1.0,
+            "heading baseline {baseline}"
+        );
+        assert!(!text_collides(heading, body));
     }
 
     struct RecordingMeasurer {
@@ -1065,12 +1562,12 @@ mod tests {
     }
 
     impl ScreenTextMeasurer for RecordingMeasurer {
-        fn measure(&self, text: &str, width: f32, font_size: f32) -> LogicalTextSize {
+        fn measure(&self, text: &str, width: f32, font_size: f32, bold: bool) -> LogicalTextSize {
             self.measured.borrow_mut().push(text.to_owned());
             FakeMeasurer {
                 height_multiplier: 1.0,
             }
-            .measure(text, width, font_size)
+            .measure(text, width, font_size, bold)
         }
     }
 
@@ -1348,6 +1845,7 @@ mod tests {
             &rendered,
             (row.width - super::TEXT_HORIZONTAL_PADDING).max(1.0),
             row.font_size,
+            false,
         );
         assert!(
             row.height >= measured.height + super::TEXT_VERTICAL_PADDING,
@@ -1431,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_renders_a_local_underlay_and_preserves_original_pixels() {
+    fn snapshot_rebuilds_the_background_under_replaced_text_and_keeps_the_original() {
         use std::sync::Arc;
 
         use rust_protocol::{BlockCompletion, RequestId, SourceContext};
@@ -1517,38 +2015,40 @@ mod tests {
             let offset = (y * image.width() as usize + x) * 4;
             image.as_bytes()[offset..offset + 3].to_vec()
         };
-        let label_x = (row.x + row.width - 3.0) as usize;
-        let label_y = (row.y + row.height - 3.0 + 38.0) as usize;
-        // The underlay is opaque and takes the page's own colour, so the
-        // dark source glyphs under the label are gone: no dark sticker on a
-        // light page, and no original text showing through.
-        assert_eq!(row.plate, slint::Color::from_rgb_u8(240, 240, 240));
-        // Left of the overflow badge, which owns the label's last 20 px.
-        let plate_x = (row.x + row.width - 30.0) as usize;
-        assert_eq!(sample(&rendered, plate_x, label_y), [240, 240, 240]);
-        // The mask over the dark source glyphs is painted in the page colour.
-        let mask = window.get_screen_masks().row_data(0).unwrap();
-        assert_eq!(mask.fill, slint::Color::from_rgb_u8(240, 240, 240));
+        // The picture under the translation is the capture with the source
+        // glyphs rebuilt from the page around them: no plate, no dark text.
+        assert!(window.get_screen_use_repaired_image());
+        let repaired = window
+            .get_screen_repaired_image()
+            .to_rgba8()
+            .expect("the rebuilt capture is a pixel buffer");
+        for (x, y) in [(110, 30), (190, 36), (269, 41)] {
+            assert_eq!(
+                sample(&repaired, x, y),
+                [240, 240, 240],
+                "glyph pixel ({x},{y})"
+            );
+        }
+        // The translation is drawn straight on it in the source's own ink.
+        assert_eq!(row.ink, slint::Color::from_rgb_u8(30, 30, 30));
         assert_eq!(
-            mask.fill.alpha(),
-            255,
-            "a mask must hide the glyphs completely"
+            row.shadow.alpha(),
+            0,
+            "dark ink on a light page needs no shadow"
         );
-        assert!(mask.x <= 110.0 && mask.x + mask.width >= 270.0);
-        // This corner is outside both the source glyph mask and even the
-        // expanded label. The bottom right can legitimately be underlaid by
-        // this deliberately oversized translation.
+        // This corner is outside both the source glyphs and the label.
         let outside_x = 10;
         let outside_image_y = 10;
         assert!(row.x > outside_x as f32 || row.y > outside_image_y as f32);
         let outside_y = outside_image_y + 38;
         assert_eq!(sample(&rendered, outside_x, outside_y), [240, 240, 240]);
 
+        // ORIG shows the capture itself, glyphs included.
         window.set_screen_view_mode(1);
         super::apply_snapshot(&window, &snapshot).unwrap();
         let original = window.window().take_snapshot().unwrap();
-        assert_eq!(sample(&original, label_x, label_y), [240, 240, 240]);
-        assert_eq!(window.get_screen_masks().row_count(), 0);
+        assert!(!window.get_screen_use_repaired_image());
+        assert_eq!(sample(&original, 190, 36 + 38), [30, 30, 30]);
     }
 
     fn page(width: u32, height: u32, background: [u8; 3]) -> RgbaFrame {
@@ -1706,7 +2206,8 @@ mod tests {
             (laid_out[0].source_width, laid_out[0].source_height),
             (100.0, 40.0)
         );
-        assert_eq!(laid_out[0].width, 100.0);
+        // The label is as wide as its text, never a plate the width of the box.
+        assert!(laid_out[0].width < 100.0 && laid_out[0].width > 8.0);
         assert!(laid_out[0].height >= MIN_FONT_SIZE);
         assert!(laid_out[1].placed && !laid_out[1].callout);
         assert!(laid_out[1].x + laid_out[1].width <= 500.0);
@@ -1851,11 +2352,16 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let rows = layout_blocks(crop_size(240, 220), 240, 220, &blocks);
+        // Labels taller than these 11 px rows are centred on them, so a label
+        // may start above its row, but never by more than half its height.
         assert!(
             rows.iter()
                 .all(|row| row.placed && row.y - row.source_y <= 10.0)
         );
-        assert!(rows.iter().all(|row| row.y >= row.source_y));
+        assert!(
+            rows.iter()
+                .all(|row| row.y >= row.source_y - row.height / 2.0)
+        );
     }
 
     #[test]
@@ -2083,7 +2589,8 @@ mod tests {
             },
             &normal_measurer(),
         );
-        assert_eq!(long.blocks[7].display_translation, "Длительность 30");
+        // The source label is set in capitals, so is its translation.
+        assert_eq!(long.blocks[7].display_translation, "ДЛИТЕЛЬНОСТЬ 30");
         assert_eq!(
             long.masks
                 .iter()
@@ -2103,7 +2610,7 @@ mod tests {
             },
             &normal_measurer(),
         );
-        assert_eq!(short.blocks[7].display_translation, "Срок");
+        assert_eq!(short.blocks[7].display_translation, "СРОК");
         assert!(
             short
                 .masks
@@ -2148,7 +2655,8 @@ mod tests {
                 &normal_measurer(),
             );
             assert_eq!(plan.blocks[7].translation, translation);
-            assert_eq!(plan.blocks[7].display_translation, expected);
+            // Drawn in capitals like the source label.
+            assert_eq!(plan.blocks[7].display_translation, expected.to_uppercase());
             assert_eq!(plan.blocks[8].translation, "30");
             if translation.starts_with("Срок:") {
                 let label = &plan.blocks[7];
@@ -2189,7 +2697,12 @@ mod tests {
                     },
                     &normal_measurer(),
                 );
-                assert_eq!(plan.blocks[7].display_translation, translation);
+                let shown = if mode == ResultViewMode::Dual {
+                    translation.to_uppercase()
+                } else {
+                    translation.to_owned()
+                };
+                assert_eq!(plan.blocks[7].display_translation, shown);
                 assert_eq!(plan.blocks[8].translation, "30");
                 if mode == ResultViewMode::Dual {
                     assert_eq!(
@@ -2416,7 +2929,43 @@ mod tests {
             };
             preview.set_screen_view_mode(mode);
         }
-        super::apply_snapshot(&preview, &snapshot).expect("snapshot should bind to the real view");
+        let layouts = super::apply_snapshot(&preview, &snapshot)
+            .expect("snapshot should bind to the real view");
+        if let Some(frame) = snapshot.crop.as_deref() {
+            for (index, (block, layout)) in snapshot.blocks.iter().zip(&layouts).enumerate() {
+                let inputs = snapshot
+                    .blocks
+                    .iter()
+                    .map(|block| super::BlockLayoutInput {
+                        block_id: block.block_id.clone(),
+                        source: block.source.clone(),
+                        translation: block.translation.clone(),
+                        bounds: super::CropLocalRect::from_ocr_bounds(block.bounds),
+                        fragments: Vec::new(),
+                        complete: true,
+                        confidence_milli: block.confidence_milli,
+                    })
+                    .collect::<Vec<_>>();
+                let metrics = crate::screen_inpaint::glyph_metrics(
+                    frame,
+                    super::pixel_rect(inputs[index].bounds),
+                    super::horizontal_reach(index, &inputs),
+                );
+                eprintln!(
+                    "{:?} box={:?} glyphs={:?} -> label=({:.0},{:.0},{:.0},{:.0}) font={:.1} bold={} text={:?}",
+                    block.source,
+                    block.bounds,
+                    metrics,
+                    layout.x,
+                    layout.y,
+                    layout.width,
+                    layout.height,
+                    layout.font_size,
+                    layout.bold,
+                    layout.display_translation
+                );
+            }
+        }
         preview
             .show()
             .expect("preview should show on testing backend");
@@ -2460,6 +3009,13 @@ mod tests {
             && right.x < left.x + left.width
             && left.y < right.y + right.height
             && right.y < left.y + left.height
+    }
+
+    /// Whether two labels' text collides, beyond the leading their line
+    /// boxes may share.
+    fn text_collides(left: &super::BlockLayout, right: &super::BlockLayout) -> bool {
+        let shared = (left.y + left.height).min(right.y + right.height) - left.y.max(right.y);
+        overlaps(left, right) && shared > super::LEADING_OVERLAP * left.height.min(right.height)
     }
 
     #[test]
