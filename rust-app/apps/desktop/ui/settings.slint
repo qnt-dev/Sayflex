@@ -404,11 +404,17 @@ export component SettingsWindow inherits Window {
             // Otherwise the page draws past a 474px viewport, the last rows are
             // clipped, and the rail quite truthfully believes there is nowhere
             // to scroll.
+            // The navigation is taller than most pages; in a short window its
+            // last items (Resources, About) were below the scroll extent and
+            // could not be reached at all.
             viewport-height: self.page-owns-scroll
                 ? self.height
                 : max(
                     self.height,
-                    max(Sheet.workspace-min-height, page.preferred-height + 30px)
+                    max(
+                        Sheet.workspace-min-height,
+                        max(page.preferred-height, form-navigation.preferred-height) + 30px
+                    )
                 );
 
         HorizontalLayout {
@@ -419,7 +425,7 @@ export component SettingsWindow inherits Window {
             padding-top: 30px;
             spacing: Sheet.workspace-gap;
 
-            SettingsNavigation {
+            form-navigation := SettingsNavigation {
                 active-page: root.active-page;
                 select-page(index) => {
                     root.active-page = index;
@@ -670,12 +676,24 @@ export component SettingsWindow inherits Window {
                     padding-top: 30px;
                     spacing: Sheet.workspace-gap;
 
-                    SettingsNavigation {
-                        active-page: root.active-page;
-                        select-page(index) => {
-                            root.active-page = index;
-                            work.viewport-x = 0px;
-                            work.viewport-y = 0px;
+                    // List pages scroll only their rows, so the navigation
+                    // beside them scrolls on its own: in a short window its
+                    // last items were cut off and the wheel over it did
+                    // nothing.
+                    list-navigation := Flickable {
+                        width: Sheet.nav-width;
+                        viewport-width: self.width;
+                        viewport-height: max(self.height, list-navigation-items.preferred-height);
+
+                        list-navigation-items := SettingsNavigation {
+                            width: list-navigation.width;
+                            height: list-navigation.viewport-height;
+                            active-page: root.active-page;
+                            select-page(index) => {
+                                root.active-page = index;
+                                work.viewport-x = 0px;
+                                work.viewport-y = 0px;
+                            }
                         }
                     }
 

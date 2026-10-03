@@ -3883,3 +3883,82 @@ mod settings_render_evidence {
         drop(seed);
     }
 }
+
+#[cfg(test)]
+mod navigation_scroll_tests {
+    use i_slint_backend_testing::ElementHandle;
+    use slint::{ComponentHandle, LogicalPosition, LogicalSize, platform::WindowEvent};
+
+    /// Where the last navigation item is, if it is inside the visible area at
+    /// all (clipped elements are not found).
+    fn about_item_y(settings: &crate::SettingsWindow) -> Option<f32> {
+        ElementHandle::find_by_accessible_label(settings, "About")
+            .next()
+            .map(|item| item.absolute_position().y)
+    }
+
+    /// List pages (Models, Providers, History, Glossary, Hotkeys) scroll their
+    /// own rows; the navigation beside them sat in a clipped, non-scrolling
+    /// column, so in a short window its last items were cut off and the wheel
+    /// over it did nothing.
+    #[test]
+    fn the_navigation_scrolls_with_the_wheel_in_a_short_window_on_every_page() {
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .unwrap();
+        let seed = crate::SettingsWindow::new().unwrap();
+        slint::select_bundled_translation("en").unwrap();
+        let settings = crate::SettingsWindow::new().unwrap();
+        settings.show().unwrap();
+        settings.window().set_size(LogicalSize::new(1000.0, 420.0));
+
+        let over_navigation = LogicalPosition::new(120.0, 300.0);
+        let wheel = |settings: &crate::SettingsWindow, delta_y: f32| {
+            // Hit-testing needs a rendered frame, as in the running window.
+            let _ = settings.window().take_snapshot();
+            settings.window().dispatch_event(WindowEvent::PointerMoved {
+                position: over_navigation,
+            });
+            for _ in 0..10 {
+                settings
+                    .window()
+                    .dispatch_event(WindowEvent::PointerScrolled {
+                        position: over_navigation,
+                        delta_x: 0.0,
+                        delta_y,
+                    });
+            }
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(500));
+            slint::platform::update_timers_and_animations();
+            let _ = settings.window().take_snapshot();
+        };
+
+        for page in [0, 3, 4, 6, 7, 8] {
+            settings.set_active_page(page);
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(50));
+            // Wheel up first: list pages share one navigation, which keeps its
+            // position between them.
+            wheel(&settings, 120.0);
+            let before = about_item_y(&settings);
+            assert!(
+                before.is_none(),
+                "page {page}: About should be below a short window, found at {before:?}"
+            );
+
+            wheel(&settings, -120.0);
+            let after = about_item_y(&settings);
+
+            // Found means rendered and not clipped by the footer or the window.
+            assert!(
+                after.is_some(),
+                "page {page}: the wheel over the navigation must bring About into view"
+            );
+        }
+        drop(seed);
+    }
+}
