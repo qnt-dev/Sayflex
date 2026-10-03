@@ -150,7 +150,7 @@ HY-MT2 and other benchmark-only candidates are not shipped.
 | cfg-if | 1.0.4 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | cfg_aliases | 0.2.2 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | cgl | 0.3.2 | MIT / Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| chacha20 | 0.10.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | chrono | 0.4.45 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | clang-sys | 1.8.1 | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | clap | 4.6.7 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |

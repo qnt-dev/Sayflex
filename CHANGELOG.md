@@ -7,6 +7,24 @@ new entries belong here.
 Format: newest first, grouped by product. Dates are the day the work landed,
 not the day it shipped.
 
+## 0.8.10 - 2026-10-03
+
+### SayFlex (rust-app)
+
+Fixes from the review of the installed 0.8.9; details and the verification
+boundary are in `rust-app/RELEASE_0.8.10.md`.
+
+- Shortcuts: the chosen chords are saved instead of what Windows registered;
+  a chord held by another application no longer resets the table or locks
+  the editor.
+- A translation-worker exit no longer cancels the dictation in progress; the
+  translator window and history clearing report what actually happened.
+- Screen translation: picture-coloured labels, scrollable text mode, working
+  source-window context, confirmed copy.
+- No part of a provider key reaches the log; panic logs carry resolvable frames.
+- The compact translator's SIMD kernel builds on Windows (about 8x faster).
+- `cargo deny check` passes; worker protocol 33.
+
 ## 0.7.2 - 2026-09-11
 
 ### Localized state correctness

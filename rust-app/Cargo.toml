@@ -22,7 +22,7 @@ resolver = "3"
 exclude = ["vendor/fxtranslate"]
 
 [workspace.package]
-version = "0.8.9"
+version = "0.8.10"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
