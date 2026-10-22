@@ -65,6 +65,13 @@ Describe 'Local NVIDIA test payload boundary' {
         Remove-Item -LiteralPath (Join-Path $nested 'cublas64_13.dll')
         { Assert-TestNvidiaPayload -AppDirectory $app -Manifest $manifest } | Should Not Throw
     }
+
+    It 'rejects a CUDA worker with NVIDIA''s static loader linked in' {
+        Set-Content -LiteralPath (Join-Path $app 'SayFlex.Speech.Cuda.exe') -Value 'worker fixture with cuGetExportTable and nvcuda.dll'
+        { Assert-NoBundledNvidiaRuntime -AppDirectory $app } | Should Throw 'cudart64'
+        Set-Content -LiteralPath (Join-Path $app 'SayFlex.Speech.Cuda.exe') -Value 'cudart64_13.dll plus nvcudart_hybrid64.dll'
+        { Assert-NoBundledNvidiaRuntime -AppDirectory $app } | Should Throw 'static CUDA loader'
+    }
 }
 
 Describe 'Compiled local test installer policy' {

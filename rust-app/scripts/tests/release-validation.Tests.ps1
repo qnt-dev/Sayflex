@@ -10,7 +10,7 @@ Describe 'SayFlex public repository presentation' {
 
         $content | Should Match '(?m)^# SayFlex$'
         $content | Should Not Match '(?m)^# Keyboop for Windows$'
-        $content | Should Match '0\.8\.11'
+        $content | Should Match '0\.8\.12'
         $content | Should Match 'rust-app'
     }
 

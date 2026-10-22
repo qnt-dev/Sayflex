@@ -35,4 +35,6 @@ serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
+# Finds lib.exe for the CUDA runtime import library (cuda_import.rs).
+cc = "1.2"
 winresource = "0.1.23"

@@ -1,6 +1,8 @@
 include!("../../build/windows_manifest.rs");
 include!("../../build/windows_version.rs");
 mod build_metadata;
+#[cfg(windows)]
+mod cuda_import;
 
 fn main() {
     embed_windows_manifest();
@@ -14,10 +16,7 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_CUDA").is_some()
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
     {
-        // nvcc marks every object with a default-library request for the
-        // static CUDA runtime. Refuse it so the import library for
-        // cudart64_*.dll wins: no NVIDIA runtime code is linked into this
-        // executable, and the user downloads the DLL from NVIDIA on opt-in.
-        println!("cargo:rustc-link-arg=/NODEFAULTLIB:cudart_static.lib");
+        #[cfg(windows)]
+        cuda_import::link_dynamic_cuda_runtime();
     }
 }

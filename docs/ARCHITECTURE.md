@@ -83,7 +83,9 @@ downloads, and verifies size and SHA-256 before a file is used. Data lives in
 `%LOCALAPPDATA%\SayFlex` (see `rust-app/PRIVACY.md`).
 
 The installer contains no NVIDIA files. The CUDA worker links `cudart64_13.dll`
-dynamically; the NVIDIA runtime (cuBLAS and cudart from CUDA 13.3.1) is
+and the driver's `nvcuda.dll` dynamically through import libraries made at
+build time (`apps/speech-worker/cuda_import.rs`: CUDA 13's own `cudart.lib`
+and `cuda.lib` are static loaders); the NVIDIA runtime (cuBLAS and cudart from CUDA 13.3.1) is
 downloaded inside the app only after the user accepts the NVIDIA EULA
 (`crates/model-manager/src/cuda_runtime.rs`).
 

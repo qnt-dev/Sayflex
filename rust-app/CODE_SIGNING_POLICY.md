@@ -35,8 +35,13 @@ full texts in `THIRD_PARTY_NOTICES.md`, except:
 
 The installer contains **no NVIDIA files**. The CUDA speech worker is compiled
 from open source (whisper.cpp/ggml, MIT) and links the CUDA runtime
-**dynamically** (`cudart64_13.dll`); the release validator rejects a CUDA worker
-that does not import it and any package that contains NVIDIA DLLs.
+**dynamically** (`cudart64_13.dll`). It also imports `nvcuda.dll`, which is part
+of the user's NVIDIA display driver. No NVIDIA library is linked into it: in
+CUDA 13 the Toolkit's `cudart.lib` and `cuda.lib` are static loaders, so the
+build makes import libraries from the two DLLs' export tables
+(`apps/speech-worker/cuda_import.rs`). The release validator rejects a CUDA
+worker that does not import `cudart64_13.dll`, one that contains NVIDIA's
+static loader, and any package that contains NVIDIA DLLs.
 
 NVIDIA runtime files are **not downloaded during setup**. Inside the running
 application, Settings → Dictation shows optional NVIDIA acceleration. Only when

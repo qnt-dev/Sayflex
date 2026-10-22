@@ -380,6 +380,8 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
         $cudaJobs = [Math]::Max(1, [Math]::Min(8, [Environment]::ProcessorCount))
         # Link the CUDA runtime dynamically: the installer then carries no
         # NVIDIA code, and cudart64_13.dll comes with the opt-in download.
+        # The worker's build script makes the import libraries that this
+        # needs since CUDA 13 (apps/speech-worker/cuda_import.rs).
         $env:CMAKE_CUDA_RUNTIME_LIBRARY = 'Shared'
         & $cargoPath build --locked --target-dir $cudaTarget --profile $profile `
             --jobs $cudaJobs -p sayflex-speech-worker --features cuda

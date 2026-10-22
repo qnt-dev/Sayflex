@@ -81,8 +81,10 @@ function Assert-NoBundledNvidiaRuntime {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$AppDirectory)
     # SignPath Foundation signs only OSI-licensed payloads: no installer may
-    # carry NVIDIA runtime files, nor link the static CUDA runtime into the
-    # CUDA worker. The user downloads both from NVIDIA inside the app.
+    # carry NVIDIA runtime files, nor link NVIDIA's static loaders into the
+    # CUDA worker (CUDA 13's cudart.lib and cuda.lib are such loaders; see
+    # apps/speech-worker/cuda_import.rs). The user downloads the runtime from
+    # NVIDIA inside the app.
     $bundledNvidia = @(Get-ChildItem -LiteralPath $AppDirectory -File -Recurse | Where-Object {
         $_.Name -match '(?i)^(cublas|cudart|cufft|curand|cusolver|cusparse|nvrtc|nvjitlink|nvfatbin|nvcuda|nvcudart).*\.dll$'
     })
@@ -95,6 +97,11 @@ function Assert-NoBundledNvidiaRuntime {
         $text = [System.Text.Encoding]::ASCII.GetString($bytes)
         if ($text -notmatch '(?i)cudart64_\d+\.dll') {
             throw 'SayFlex.Speech.Cuda.exe must import cudart64_*.dll; the static CUDA runtime must not be linked.'
+        }
+        # Names only NVIDIA's static runtime and driver loaders contain.
+        $loader = [regex]::Match($text, 'nvcudart_hybrid64\.dll|cuGetExportTable')
+        if ($loader.Success) {
+            throw "SayFlex.Speech.Cuda.exe contains NVIDIA's static CUDA loader ($($loader.Value))."
         }
     }
 }
