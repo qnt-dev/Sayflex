@@ -519,11 +519,11 @@ msgstr "Le protocole du processus de saisie ne correspond pas. Réinstallez enti
 msgid "Insert latest dictation"
 msgstr "Insérer la dernière dictée"
 
-msgid "Inserted; the target read the text in {milliseconds} ms"
-msgstr "Inséré ; la cible a lu le texte en {milliseconds} ms"
+msgid "Inserted; the application received the text."
+msgstr "Inséré : l'application a reçu le texte."
 
-msgid "Inserted through the target adapter in {milliseconds} ms"
-msgstr "Inséré via l’adaptateur cible en {milliseconds} ms"
+msgid "Inserted."
+msgstr "Inséré."
 
 msgid "Install"
 msgstr "Installer"
@@ -802,8 +802,8 @@ msgstr "Présentation"
 msgid "PALETTE"
 msgstr "PALETTE"
 
-msgid "Paste requested; delivery not confirmed ({milliseconds} ms)"
-msgstr "Collage demandé ; résultat non confirmé ({milliseconds} ms)"
+msgid "Paste sent; the application did not confirm it."
+msgstr "Collage envoyé ; l'application ne l'a pas confirmé."
 
 msgid "Paste the key"
 msgstr "Coller la clé"
@@ -1263,8 +1263,8 @@ msgstr "La traduction est désactivée dans Actions."
 msgid "Translation is on, but no text route is ready yet."
 msgstr "La traduction est activée, mais aucun parcours de texte n’est encore prêt."
 
-msgid "Translation model ready in {milliseconds} ms."
-msgstr "Modèle de traduction prêt en {milliseconds} ms."
+msgid "Translation model ready."
+msgstr "Modèle de traduction prêt."
 
 msgid "Translation preview"
 msgstr "Aperçu de la traduction"
@@ -1305,8 +1305,8 @@ msgstr "Utilisez une lettre, un chiffre, une touche de fonction, un espace, une 
 msgid "Value"
 msgstr "Valeur"
 
-msgid "Inserted and verified in {milliseconds} ms"
-msgstr "Inséré et vérifié en {milliseconds} ms"
+msgid "Inserted and verified."
+msgstr "Inséré et vérifié."
 
 msgid "VERSION"
 msgstr "VERSION"
@@ -1846,3 +1846,9 @@ msgstr "Garder la fenêtre au premier plan"
 
 msgid "Unpin window"
 msgstr "Désépingler la fenêtre"
+
+msgid "The speech model loads when you start dictating."
+msgstr "Le modèle vocal se charge quand vous commencez à dicter."
+
+msgid "Details and cancel are in Models."
+msgstr "Les détails et l'annulation se trouvent dans Modèles."

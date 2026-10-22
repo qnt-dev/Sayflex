@@ -1117,18 +1117,21 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
             text(locale, UiText::OverviewSelectedSpeechMissing).to_owned(),
             model_name.to_owned(),
         )
+    } else if speech_waits_for_local && state.speech_reload_on_next_use {
+        // Released to free memory, not starting: nothing runs until the user
+        // dictates, and then the model loads.
+        (
+            text(locale, UiText::ReadyTitle).to_owned(),
+            text(locale, UiText::OverviewLoadsOnFirstDictation).to_owned(),
+        )
     } else if speech_waits_for_local {
         (
             text(locale, UiText::StartingUp).to_owned(),
-            if state.speech_reload_on_next_use {
-                text(locale, UiText::SelectedUnloaded).to_owned()
-            } else {
-                render(
-                    locale,
-                    UiText::OverviewSpeechPreparing,
-                    &[("model", model_name)],
-                )
-            },
+            render(
+                locale,
+                UiText::OverviewSpeechPreparing,
+                &[("model", model_name)],
+            ),
         )
     } else {
         (
@@ -1144,7 +1147,14 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
     if let Some((_, detail)) = selected_download {
         // A working cloud route stays ready above; its optional local download
         // still has visible progress here. The action only opens Models.
-        settings.set_overview_note(detail.into());
+        // Without a ready route the statement above already shows the
+        // progress, so the note does not repeat it.
+        let note = if speech_path_ready {
+            detail
+        } else {
+            text(locale, UiText::OverviewDownloadInModels).to_owned()
+        };
+        settings.set_overview_note(note.into());
         settings.set_overview_note_action(text(locale, UiText::OverviewViewDownload).into());
         settings.set_overview_note_signal(false);
     } else if speech_waits_for_local && !installed_speech {

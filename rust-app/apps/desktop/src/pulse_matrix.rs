@@ -70,9 +70,7 @@ impl PulseMatrixRenderer {
                         request.palette,
                         request.opacity,
                     );
-                    let rendered = RenderedFrame {
-                        pixels: frame,
-                    };
+                    let rendered = RenderedFrame { pixels: frame };
                     match frame_tx.try_send(rendered) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {

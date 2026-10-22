@@ -382,7 +382,9 @@ mod tests {
 
     #[test]
     fn the_hook_follows_the_popups() {
-        let _registry = REGISTRY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _registry = REGISTRY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut hook = None;
         deactivate_all_popup_dismiss();
         super::sync_hook(&mut hook);
@@ -397,7 +399,9 @@ mod tests {
 
     #[test]
     fn rendered_refresh_preserves_pin_and_other_popups() {
-        let _registry = REGISTRY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _registry = REGISTRY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         deactivate_all_popup_dismiss();
         activate_popup_dismiss(42);
         set_popup_pinned(42, true);

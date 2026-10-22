@@ -519,11 +519,11 @@ msgstr "Протокол процесу введення не збігаєтьс
 msgid "Insert latest dictation"
 msgstr "Вставити останнє диктування"
 
-msgid "Inserted; the target read the text in {milliseconds} ms"
-msgstr "Вставлено: вікно прочитало текст за {milliseconds} мс"
+msgid "Inserted; the application received the text."
+msgstr "Вставлено: програма отримала текст."
 
-msgid "Inserted through the target adapter in {milliseconds} ms"
-msgstr "Вставлено через адаптер вікна за {milliseconds} мс"
+msgid "Inserted."
+msgstr "Вставлено."
 
 msgid "Install"
 msgstr "Встановити"
@@ -802,8 +802,8 @@ msgstr "Огляд"
 msgid "PALETTE"
 msgstr "ПАЛІТРА"
 
-msgid "Paste requested; delivery not confirmed ({milliseconds} ms)"
-msgstr "Вставлення надіслано, результат не підтверджено ({milliseconds} мс)"
+msgid "Paste sent; the application did not confirm it."
+msgstr "Вставлення надіслано; програма його не підтвердила."
 
 msgid "Paste the key"
 msgstr "Вставити ключ"
@@ -1263,8 +1263,8 @@ msgstr "Переклад вимкнено в розділі дій."
 msgid "Translation is on, but no text route is ready yet."
 msgstr "Переклад увімкнено, але жоден маршрут обробки тексту ще не готовий."
 
-msgid "Translation model ready in {milliseconds} ms."
-msgstr "Модель перекладу готова за {milliseconds} мс."
+msgid "Translation model ready."
+msgstr "Модель перекладу готова."
 
 msgid "Translation preview"
 msgstr "Попередній перегляд перекладу"
@@ -1305,8 +1305,8 @@ msgstr "Використовуйте літеру, цифру, функціон�
 msgid "Value"
 msgstr "Значення"
 
-msgid "Inserted and verified in {milliseconds} ms"
-msgstr "Вставлено й перевірено за {milliseconds} мс"
+msgid "Inserted and verified."
+msgstr "Вставлено й перевірено."
 
 msgid "VERSION"
 msgstr "ВЕРСІЯ"
@@ -1846,3 +1846,9 @@ msgstr "Закріпити вікно поверх інших"
 
 msgid "Unpin window"
 msgstr "Відкріпити вікно"
+
+msgid "The speech model loads when you start dictating."
+msgstr "Мовна модель завантажиться, коли ви почнете диктувати."
+
+msgid "Details and cancel are in Models."
+msgstr "Подробиці та скасування — у розділі «Моделі»."

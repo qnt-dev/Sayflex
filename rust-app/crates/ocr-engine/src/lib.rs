@@ -8,7 +8,10 @@ use image::RgbaImage;
 use rust_protocol::{OcrLanguagePolicy, OcrLine};
 use thiserror::Error;
 
+mod homoglyphs;
 mod reconstruct;
+
+pub use homoglyphs::normalize_homoglyphs;
 
 pub use reconstruct::{
     ReconstructedBlock, ReconstructedElement, ReconstructedText, ReconstructedVisualRow,

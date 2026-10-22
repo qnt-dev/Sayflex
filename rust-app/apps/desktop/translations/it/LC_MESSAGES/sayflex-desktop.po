@@ -519,11 +519,11 @@ msgstr "Il protocollo del processo di input non corrisponde. Reinstalla completa
 msgid "Insert latest dictation"
 msgstr "Inserisci l’ultima dettatura"
 
-msgid "Inserted; the target read the text in {milliseconds} ms"
-msgstr "Inserito; la destinazione ha letto il testo in {milliseconds} ms"
+msgid "Inserted; the application received the text."
+msgstr "Inserito: l'applicazione ha ricevuto il testo."
 
-msgid "Inserted through the target adapter in {milliseconds} ms"
-msgstr "Inserito tramite l’adattatore di destinazione in {milliseconds} ms"
+msgid "Inserted."
+msgstr "Inserito."
 
 msgid "Install"
 msgstr "Installa"
@@ -802,8 +802,8 @@ msgstr "Panoramica"
 msgid "PALETTE"
 msgstr "Tavolozza"
 
-msgid "Paste requested; delivery not confirmed ({milliseconds} ms)"
-msgstr "Incolla richiesto; risultato non confermato ({milliseconds} ms)"
+msgid "Paste sent; the application did not confirm it."
+msgstr "Incolla inviato; l'applicazione non l'ha confermato."
 
 msgid "Paste the key"
 msgstr "Incolla la chiave"
@@ -1263,8 +1263,8 @@ msgstr "La traduzione è disattivata in Azioni."
 msgid "Translation is on, but no text route is ready yet."
 msgstr "La traduzione è attiva, ma nessun percorso di testo è ancora pronto."
 
-msgid "Translation model ready in {milliseconds} ms."
-msgstr "Modello di traduzione pronto in {milliseconds} ms."
+msgid "Translation model ready."
+msgstr "Modello di traduzione pronto."
 
 msgid "Translation preview"
 msgstr "Anteprima della traduzione"
@@ -1305,8 +1305,8 @@ msgstr "Utilizzare una lettera, un numero, un tasto funzione, uno spazio, un tas
 msgid "Value"
 msgstr "Valore"
 
-msgid "Inserted and verified in {milliseconds} ms"
-msgstr "Inserito e verificato in {milliseconds} ms"
+msgid "Inserted and verified."
+msgstr "Inserito e verificato."
 
 msgid "VERSION"
 msgstr "VERSIONE"
@@ -1846,3 +1846,9 @@ msgstr "Mantieni la finestra in primo piano"
 
 msgid "Unpin window"
 msgstr "Sblocca la finestra"
+
+msgid "The speech model loads when you start dictating."
+msgstr "Il modello vocale si carica quando inizi a dettare."
+
+msgid "Details and cancel are in Models."
+msgstr "Dettagli e annullamento sono in Modelli."

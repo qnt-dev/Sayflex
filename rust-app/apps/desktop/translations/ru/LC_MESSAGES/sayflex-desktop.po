@@ -519,11 +519,11 @@ msgstr "Протокол процесса ввода не совпадает. П
 msgid "Insert latest dictation"
 msgstr "Вставить последнюю диктовку"
 
-msgid "Inserted; the target read the text in {milliseconds} ms"
-msgstr "Вставлено: окно прочитало текст за {milliseconds} мс"
+msgid "Inserted; the application received the text."
+msgstr "Вставлено: приложение получило текст."
 
-msgid "Inserted through the target adapter in {milliseconds} ms"
-msgstr "Вставлено через адаптер окна за {milliseconds} мс"
+msgid "Inserted."
+msgstr "Вставлено."
 
 msgid "Install"
 msgstr "Установить"
@@ -802,8 +802,8 @@ msgstr "Обзор"
 msgid "PALETTE"
 msgstr "ПАЛИТРА"
 
-msgid "Paste requested; delivery not confirmed ({milliseconds} ms)"
-msgstr "Вставка отправлена, результат не подтверждён ({milliseconds} мс)"
+msgid "Paste sent; the application did not confirm it."
+msgstr "Вставка отправлена; приложение её не подтвердило."
 
 msgid "Paste the key"
 msgstr "Вставить ключ"
@@ -1263,8 +1263,8 @@ msgstr "Перевод отключён в разделе действий."
 msgid "Translation is on, but no text route is ready yet."
 msgstr "Перевод включён, но ни один маршрут обработки текста ещё не готов."
 
-msgid "Translation model ready in {milliseconds} ms."
-msgstr "Модель перевода готова за {milliseconds} мс."
+msgid "Translation model ready."
+msgstr "Модель перевода готова."
 
 msgid "Translation preview"
 msgstr "Предварительный просмотр перевода"
@@ -1305,8 +1305,8 @@ msgstr "Используйте букву, цифру, функциональн�
 msgid "Value"
 msgstr "Значение"
 
-msgid "Inserted and verified in {milliseconds} ms"
-msgstr "Вставлено и проверено за {milliseconds} мс"
+msgid "Inserted and verified."
+msgstr "Вставлено и проверено."
 
 msgid "VERSION"
 msgstr "ВЕРСИЯ"
@@ -1846,3 +1846,9 @@ msgstr "Закрепить окно поверх других"
 
 msgid "Unpin window"
 msgstr "Открепить окно"
+
+msgid "The speech model loads when you start dictating."
+msgstr "Речевая модель загрузится, когда вы начнёте диктовать."
+
+msgid "Details and cancel are in Models."
+msgstr "Подробности и отмена — в разделе «Модели»."

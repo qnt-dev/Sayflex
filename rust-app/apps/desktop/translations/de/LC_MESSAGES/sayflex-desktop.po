@@ -519,11 +519,11 @@ msgstr "Das Protokoll des Eingabe-Workers stimmt nicht überein. Installieren Si
 msgid "Insert latest dictation"
 msgstr "Letztes Diktat einfügen"
 
-msgid "Inserted; the target read the text in {milliseconds} ms"
-msgstr "Eingefügt; das Ziel hat den Text in {milliseconds} ms gelesen"
+msgid "Inserted; the application received the text."
+msgstr "Eingefügt: Die Anwendung hat den Text erhalten."
 
-msgid "Inserted through the target adapter in {milliseconds} ms"
-msgstr "Über den Zieladapter in {milliseconds} ms eingefügt"
+msgid "Inserted."
+msgstr "Eingefügt."
 
 msgid "Install"
 msgstr "Installieren"
@@ -802,8 +802,8 @@ msgstr "Übersicht"
 msgid "PALETTE"
 msgstr "PALETTE"
 
-msgid "Paste requested; delivery not confirmed ({milliseconds} ms)"
-msgstr "Einfügen angefordert; Ergebnis unbestätigt ({milliseconds} ms)"
+msgid "Paste sent; the application did not confirm it."
+msgstr "Einfügen gesendet; die Anwendung hat es nicht bestätigt."
 
 msgid "Paste the key"
 msgstr "Schlüssel einfügen"
@@ -1263,8 +1263,8 @@ msgstr "Die Übersetzung ist unter Aktionen deaktiviert."
 msgid "Translation is on, but no text route is ready yet."
 msgstr "Die Übersetzung ist aktiviert, aber noch kein Textweg ist bereit."
 
-msgid "Translation model ready in {milliseconds} ms."
-msgstr "Übersetzungsmodell in {milliseconds} ms bereit."
+msgid "Translation model ready."
+msgstr "Übersetzungsmodell bereit."
 
 msgid "Translation preview"
 msgstr "Übersetzungsvorschau"
@@ -1305,8 +1305,8 @@ msgstr "Verwenden Sie einen Buchstaben, eine Zahl, eine Funktionstaste, die Leer
 msgid "Value"
 msgstr "Wert"
 
-msgid "Inserted and verified in {milliseconds} ms"
-msgstr "In {milliseconds} ms eingefügt und bestätigt"
+msgid "Inserted and verified."
+msgstr "Eingefügt und überprüft."
 
 msgid "VERSION"
 msgstr "VERSION"
@@ -1846,3 +1846,9 @@ msgstr "Fenster im Vordergrund halten"
 
 msgid "Unpin window"
 msgstr "Fenster lösen"
+
+msgid "The speech model loads when you start dictating."
+msgstr "Das Sprachmodell wird geladen, sobald Sie zu diktieren beginnen."
+
+msgid "Details and cancel are in Models."
+msgstr "Details und Abbrechen finden Sie unter Modelle."

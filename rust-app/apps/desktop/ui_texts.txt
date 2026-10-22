@@ -226,10 +226,10 @@ InputResumed|Input features resumed.
 SpeechServiceStarting|Speech service is still starting.
 SpeechModelPreparing|Speech model is still being prepared.
 DictationStillProcessing|The dictation is still processing; it will be inserted here when ready.
-InsertedTargetAdapter|Inserted through the target adapter in {milliseconds} ms
-InsertedPrivateTransaction|Inserted; the target read the text in {milliseconds} ms
-VerifiedInsertion|Inserted and verified in {milliseconds} ms
-PasteDispatched|Paste requested; delivery not confirmed ({milliseconds} ms)
+InsertedTargetAdapter|Inserted.
+InsertedPrivateTransaction|Inserted; the application received the text.
+VerifiedInsertion|Inserted and verified.
+PasteDispatched|Paste sent; the application did not confirm it.
 InputProtocolMismatch|Input worker protocol mismatch. Reinstall the complete application.
 SpeechProtocolMismatch|Speech worker protocol mismatch. Reinstall the complete application.
 CloudSpeechLocalDisabled|Cloud speech is ready. The local speech engine is disabled.
@@ -238,7 +238,7 @@ BackendVerificationFailed|Speech backend verification failed: {error}
 NoCompatibleBackend|No compatible speech backend is available: {error}
 CloudTranslationStarting|Cloud translation is starting. The local model is disabled.
 CloudTranslationReady|Cloud translation ready. The local model is disabled.
-TranslationModelReady|Translation model ready in {milliseconds} ms.
+TranslationModelReady|Translation model ready.
 ReadyDirectionDetected|Ready · language direction is detected locally.
 TranslatingLocallyProgress|Translating locally… {chunk}/{total}
 TranslatingLocally|Translating locally…
@@ -374,3 +374,5 @@ InsertFailedNotDelivered|The application did not accept the text.
 InsertFailedModifiersBusy|A key was still held down, so the text was not pasted.
 InsertFailedProtectedField|This is a password field or a window without a text field. SayFlex does not paste dictation there.
 TranslationCheckNumbers|Check the numbers, dates and links: the translation may differ from the original.
+OverviewLoadsOnFirstDictation|The speech model loads when you start dictating.
+OverviewDownloadInModels|Details and cancel are in Models.

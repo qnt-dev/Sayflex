@@ -519,11 +519,11 @@ msgstr "입력 작업 프로세스의 프로토콜이 일치하지 않습니다.
 msgid "Insert latest dictation"
 msgstr "최근 받아쓰기 삽입"
 
-msgid "Inserted; the target read the text in {milliseconds} ms"
-msgstr "삽입했습니다. 대상이 {milliseconds}ms 만에 텍스트를 읽었습니다"
+msgid "Inserted; the application received the text."
+msgstr "삽입했습니다. 애플리케이션이 텍스트를 받았습니다."
 
-msgid "Inserted through the target adapter in {milliseconds} ms"
-msgstr "대상 어댑터를 통해 {milliseconds}ms 만에 삽입했습니다"
+msgid "Inserted."
+msgstr "삽입했습니다."
 
 msgid "Install"
 msgstr "설치"
@@ -802,8 +802,8 @@ msgstr "개요"
 msgid "PALETTE"
 msgstr "팔레트"
 
-msgid "Paste requested; delivery not confirmed ({milliseconds} ms)"
-msgstr "붙여넣기 요청됨; 결과 확인 안 됨 ({milliseconds}ms)"
+msgid "Paste sent; the application did not confirm it."
+msgstr "붙여넣기를 보냈지만 애플리케이션이 확인하지 않았습니다."
 
 msgid "Paste the key"
 msgstr "키 붙여넣기"
@@ -1263,8 +1263,8 @@ msgstr "동작에서 번역이 비활성화되어 있습니다."
 msgid "Translation is on, but no text route is ready yet."
 msgstr "번역이 켜져 있지만 아직 사용할 수 있는 텍스트 경로가 없습니다."
 
-msgid "Translation model ready in {milliseconds} ms."
-msgstr "번역 모델이 {milliseconds}ms 만에 준비되었습니다."
+msgid "Translation model ready."
+msgstr "번역 모델이 준비되었습니다."
 
 msgid "Translation preview"
 msgstr "번역 미리보기"
@@ -1305,8 +1305,8 @@ msgstr "문자, 숫자, 기능 키, Space, Tab, Enter 또는 화살표 키를 �
 msgid "Value"
 msgstr "값"
 
-msgid "Inserted and verified in {milliseconds} ms"
-msgstr "{milliseconds}ms 만에 삽입하고 확인했습니다"
+msgid "Inserted and verified."
+msgstr "삽입하고 확인했습니다."
 
 msgid "VERSION"
 msgstr "버전"
@@ -1846,3 +1846,9 @@ msgstr "창을 항상 위에 표시"
 
 msgid "Unpin window"
 msgstr "창 고정 해제"
+
+msgid "The speech model loads when you start dictating."
+msgstr "받아쓰기를 시작하면 음성 모델이 로드됩니다."
+
+msgid "Details and cancel are in Models."
+msgstr "세부 정보와 취소는 모델에 있습니다."

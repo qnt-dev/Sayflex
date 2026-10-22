@@ -140,11 +140,16 @@ struct CroppedLine {
     image: Arc<image::RgbImage>,
 }
 
+/// One family's reading of every detected line, in detection order. `None`
+/// where the family read nothing.
 #[derive(Debug)]
 struct FamilyRecognition {
-    lines: Vec<OcrLine>,
+    lines: Vec<Option<OcrLine>>,
     average_confidence: f32,
 }
+
+/// A tall line read below this confidence is read again upside down.
+const ROTATION_RETRY_CONFIDENCE_MILLI: u16 = 600;
 
 /// Longest image side the text detector works at. Larger images are scaled
 /// down to it before detection. At 960 a 2152x1037 web page lost its small
@@ -236,6 +241,45 @@ impl PpOcrAdapter {
                 average_confidence: -1.0,
             });
         }
+        let readings = self.read_images(
+            family,
+            crops.iter().map(|crop| Arc::clone(&crop.image)).collect(),
+            cancellation,
+        )?;
+        let lines = crops
+            .iter()
+            .zip(readings)
+            .map(|(crop, (text, confidence))| {
+                (!text.is_empty()).then(|| OcrLine {
+                    text,
+                    bounds: bounds_for(&crop.bounds, image_width, image_height),
+                    quad: quad_for(&crop.bounds, image_width, image_height),
+                    confidence_milli: confidence_milli(Some(confidence)),
+                })
+            })
+            .collect::<Vec<_>>();
+        let read = lines.iter().flatten().collect::<Vec<_>>();
+        let average_confidence = if read.is_empty() {
+            -1.0
+        } else {
+            read.iter()
+                .map(|line| f32::from(line.confidence_milli) / 1000.0)
+                .sum::<f32>()
+                / read.len() as f32
+        };
+        Ok(FamilyRecognition {
+            lines,
+            average_confidence,
+        })
+    }
+
+    /// Text and confidence for each image, read with one family's model.
+    fn read_images(
+        &self,
+        family: ModelFamily,
+        images: Vec<Arc<image::RgbImage>>,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<(String, f32)>, OcrError> {
         let mut recognizers = self.recognizers.lock().map_err(|_| OcrError::Engine)?;
         if let std::collections::hash_map::Entry::Vacant(entry) = recognizers.entry(family) {
             let dictionary = std::fs::read_to_string(self.paths.dictionary(family))
@@ -246,48 +290,140 @@ impl PpOcrAdapter {
                 .map_err(|_| OcrError::Engine)?;
             entry.insert(recognizer);
         }
+        let count = images.len();
         let recognition: TextRecognitionOutput = recognizers
             .get(&family)
             .ok_or(OcrError::Engine)?
-            .execute(
-                ImageTaskInput::from_arc_images(
-                    crops.iter().map(|crop| Arc::clone(&crop.image)).collect(),
-                ),
-                None,
-            )
+            .execute(ImageTaskInput::from_arc_images(images), None)
             .map_err(|_| OcrError::Engine)?;
         drop(recognizers);
         if cancellation.is_cancelled() {
             return Err(OcrError::Cancelled);
         }
-        let lines = crops
+        let mut readings = recognition
+            .texts
             .iter()
-            .zip(recognition.texts.iter())
             .zip(recognition.scores.iter())
-            .filter_map(|((crop, text), confidence)| {
-                let text = postprocess_text(family, text);
-                (!text.is_empty()).then(|| OcrLine {
-                    text,
-                    bounds: bounds_for(&crop.bounds, image_width, image_height),
-                    quad: quad_for(&crop.bounds, image_width, image_height),
-                    confidence_milli: confidence_milli(Some(*confidence)),
-                })
+            .map(|(text, confidence)| {
+                (
+                    crate::normalize_homoglyphs(&postprocess_text(family, text)),
+                    *confidence,
+                )
             })
             .collect::<Vec<_>>();
-        let average_confidence = if lines.is_empty() {
-            -1.0
-        } else {
-            lines
-                .iter()
-                .map(|line| f32::from(line.confidence_milli) / 1000.0)
-                .sum::<f32>()
-                / lines.len() as f32
-        };
-        Ok(FamilyRecognition {
-            lines,
-            average_confidence,
-        })
+        readings.resize(count, (String::new(), 0.0));
+        Ok(readings)
     }
+
+    /// A tall crop is turned 90 degrees before recognition, which reads text
+    /// written top-to-bottom upside down; text rotated the other way stayed
+    /// unread (CER 0.63 in the audit). Read weak tall lines again at 180
+    /// degrees and keep the better reading.
+    fn retry_rotated_lines(
+        &self,
+        crops: &[CroppedLine],
+        lines: &mut [Option<(ModelFamily, OcrLine)>],
+        cancellation: &CancellationToken,
+    ) -> Result<(), OcrError> {
+        for family in ModelFamily::ALL {
+            let candidates = crops
+                .iter()
+                .zip(lines.iter())
+                .enumerate()
+                .filter(|(_, (crop, line))| {
+                    let tall = crop.image.width() > 0 && is_tall(&crop.bounds);
+                    tall && line.as_ref().is_some_and(|(line_family, line)| {
+                        *line_family == family
+                            && line.confidence_milli < ROTATION_RETRY_CONFIDENCE_MILLI
+                    })
+                })
+                .map(|(index, (crop, _))| {
+                    (
+                        index,
+                        Arc::new(image::imageops::rotate180(crop.image.as_ref())),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                continue;
+            }
+            let readings = self.read_images(
+                family,
+                candidates
+                    .iter()
+                    .map(|(_, image)| Arc::clone(image))
+                    .collect(),
+                cancellation,
+            )?;
+            for ((index, _), (text, confidence)) in candidates.into_iter().zip(readings) {
+                let confidence = confidence_milli(Some(confidence));
+                if let Some((_, line)) = lines[index].as_mut()
+                    && !text.is_empty()
+                    && confidence > line.confidence_milli
+                {
+                    line.text = text;
+                    line.confidence_milli = confidence;
+                    // The reading axes turned with the image.
+                    if let Some(quad) = line.quad.as_mut() {
+                        quad.points.rotate_left(2);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_tall(bounds: &BoundingBox) -> bool {
+    let xs = bounds.points.iter().map(|point| point.x);
+    let ys = bounds.points.iter().map(|point| point.y);
+    let width = xs.clone().fold(f32::NEG_INFINITY, f32::max) - xs.fold(f32::INFINITY, f32::min);
+    let height = ys.clone().fold(f32::NEG_INFINITY, f32::max) - ys.fold(f32::INFINITY, f32::min);
+    height >= width * 1.5
+}
+
+/// For each line the reading with the highest confidence among the families,
+/// and the family that won most lines. One family per region read the Latin
+/// words of a Russian screenshot with the Cyrillic model ("Status: rotoBo").
+fn best_reading_per_line(
+    readings: Vec<(ModelFamily, FamilyRecognition)>,
+    line_count: usize,
+) -> (Vec<Option<(ModelFamily, OcrLine)>>, Option<ModelFamily>) {
+    let mut best: Vec<Option<(ModelFamily, OcrLine)>> = vec![None; line_count];
+    let order = readings
+        .iter()
+        .map(|(family, _)| *family)
+        .collect::<Vec<_>>();
+    for (family, recognition) in readings {
+        for (slot, line) in best.iter_mut().zip(recognition.lines) {
+            let Some(line) = line else {
+                continue;
+            };
+            if slot
+                .as_ref()
+                .is_none_or(|(_, current)| line.confidence_milli > current.confidence_milli)
+            {
+                *slot = Some((family, line));
+            }
+        }
+    }
+    let winner = order
+        .iter()
+        .copied()
+        .max_by_key(|family| {
+            let wins = best
+                .iter()
+                .flatten()
+                .filter(|(winner, _)| winner == family)
+                .count();
+            // On a tie the earlier, more preferred family wins.
+            (
+                wins,
+                std::cmp::Reverse(order.iter().position(|f| f == family)),
+            )
+        })
+        .filter(|family| best.iter().flatten().any(|(winner, _)| winner == family));
+    (best, winner)
 }
 
 fn detector_config(side_limit: u32) -> TextDetectionConfig {
@@ -301,12 +437,12 @@ fn detector_config(side_limit: u32) -> TextDetectionConfig {
 }
 
 fn better_family(
-    best: Option<FamilyRecognition>,
-    candidate: FamilyRecognition,
-) -> Option<FamilyRecognition> {
+    best: Option<(ModelFamily, FamilyRecognition)>,
+    candidate: (ModelFamily, FamilyRecognition),
+) -> Option<(ModelFamily, FamilyRecognition)> {
     if best
         .as_ref()
-        .is_none_or(|best| candidate.average_confidence > best.average_confidence)
+        .is_none_or(|(_, best)| candidate.1.average_confidence > best.average_confidence)
     {
         Some(candidate)
     } else {
@@ -323,28 +459,43 @@ impl InferenceAdapter for PpOcrAdapter {
     ) -> Result<OcrDocument, OcrError> {
         let rgb = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
         let crops = self.detect_lines(&rgb, cancellation)?;
-        let (language, result) = match language_policy {
+        let (language, mut lines) = match language_policy {
             OcrLanguagePolicy::Prefer(languages) => {
-                let mut best: Option<(String, FamilyRecognition)> = None;
-                for (language, family) in preferred_model_families(languages) {
-                    let candidate = self.recognize_family(
-                        family,
-                        &crops,
-                        image.width(),
-                        image.height(),
-                        cancellation,
-                    )?;
-                    if best.as_ref().is_none_or(|(_, best)| {
-                        candidate.average_confidence > best.average_confidence
-                    }) {
-                        best = Some((language, candidate));
-                    }
+                // The user's languages: each line takes the family that reads
+                // it best.
+                let families = preferred_model_families(languages);
+                if families.is_empty() {
+                    return Err(OcrError::LanguageUnavailable);
                 }
-                let (language, result) = best.ok_or(OcrError::LanguageUnavailable)?;
-                (Some(language), result)
+                let mut readings = Vec::with_capacity(families.len());
+                for (_, family) in &families {
+                    readings.push((
+                        *family,
+                        self.recognize_family(
+                            *family,
+                            &crops,
+                            image.width(),
+                            image.height(),
+                            cancellation,
+                        )?,
+                    ));
+                }
+                let (lines, winner) = best_reading_per_line(readings, crops.len());
+                let language = winner
+                    .and_then(|winner| {
+                        families
+                            .iter()
+                            .find(|(_, family)| *family == winner)
+                            .map(|(language, _)| language.clone())
+                    })
+                    .or_else(|| families.first().map(|(language, _)| language.clone()));
+                (language, lines)
             }
             OcrLanguagePolicy::Auto => {
-                let mut best: Option<FamilyRecognition> = None;
+                // Without a hint every family competes; mixing them line by
+                // line would let an unrelated model win a line with a
+                // confident misreading, so one family reads the region.
+                let mut best: Option<(ModelFamily, FamilyRecognition)> = None;
                 for family in ModelFamily::ALL {
                     let candidate = self.recognize_family(
                         family,
@@ -353,16 +504,25 @@ impl InferenceAdapter for PpOcrAdapter {
                         image.height(),
                         cancellation,
                     )?;
-                    best = better_family(best, candidate);
+                    best = better_family(best, (family, candidate));
                 }
-                (None, best.ok_or(OcrError::Engine)?)
+                let (family, result) = best.ok_or(OcrError::Engine)?;
+                (
+                    None,
+                    result
+                        .lines
+                        .into_iter()
+                        .map(|line| line.map(|line| (family, line)))
+                        .collect(),
+                )
             }
         };
+        self.retry_rotated_lines(&crops, &mut lines, cancellation)?;
         if cancellation.is_cancelled() {
             return Err(OcrError::Cancelled);
         }
         Ok(OcrDocument {
-            lines: result.lines,
+            lines: lines.into_iter().flatten().map(|(_, line)| line).collect(),
             language,
         })
     }
@@ -548,6 +708,52 @@ mod tests {
             ]
         );
         assert!(quad.is_within(super::bounds_for(&bounds, 100, 200)));
+    }
+
+    fn line(text: &str, confidence_milli: u16) -> Option<rust_protocol::OcrLine> {
+        Some(rust_protocol::OcrLine {
+            text: text.into(),
+            bounds: rust_protocol::PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            quad: None,
+            confidence_milli,
+        })
+    }
+
+    #[test]
+    fn each_line_takes_the_family_that_reads_it_best() {
+        let english = super::FamilyRecognition {
+            lines: vec![line("Status: rotoBo", 610), line("Settings", 970), None],
+            average_confidence: 0.79,
+        };
+        let slavic = super::FamilyRecognition {
+            lines: vec![
+                line("Status: готово", 930),
+                line("Settings", 900),
+                line("Готово", 880),
+            ],
+            average_confidence: 0.90,
+        };
+        let (lines, winner) = super::best_reading_per_line(
+            vec![
+                (ModelFamily::English, english),
+                (ModelFamily::EasternSlavic, slavic),
+            ],
+            3,
+        );
+        let texts = lines
+            .iter()
+            .map(|line| line.as_ref().map(|(_, line)| line.text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            [Some("Status: готово"), Some("Settings"), Some("Готово")]
+        );
+        assert_eq!(winner, Some(ModelFamily::EasternSlavic));
     }
 
     #[test]

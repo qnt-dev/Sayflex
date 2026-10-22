@@ -623,9 +623,11 @@ export component MenuButton inherits Rectangle {
                                 root.active-index = index;
                             }
                         }
+                        // A note gets two lines: translated notes were cut
+                        // off after a few words.
                         height: option.separator
                             ? 9px
-                            : (option.note == "" && option.reason == "" ? 32px : 46px);
+                            : (option.note == "" && option.reason == "" ? 32px : 60px);
 
                         if option.separator : Rectangle {
                             height: 1px;
@@ -672,6 +674,7 @@ export component MenuButton inherits Rectangle {
                                 VerticalLayout {
                                     alignment: center;
                                     spacing: 3px;
+                                    horizontal-stretch: 1;
                                     Text {
                                         text: option.label;
                                         color: option.reason != ""
@@ -684,11 +687,10 @@ export component MenuButton inherits Rectangle {
                                         text: option.reason != "" ? option.reason : option.note;
                                         color: option.reason != "" ? Sheet.signal-text : Sheet.muted;
                                         font-size: Sheet.label-size;
-                                        wrap: no-wrap;
+                                        wrap: word-wrap;
                                         overflow: elide;
                                     }
                                 }
-                                Rectangle { horizontal-stretch: 1; }
                             }
 
                             item-touch := TouchArea {

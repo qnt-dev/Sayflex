@@ -424,6 +424,26 @@ impl Candidate for WorkerCandidate {
     }
 }
 
+/// The text the application builds from the worker's lines: the same
+/// confidence floor and the same row and paragraph reconstruction as screen
+/// translation. Joining raw lines measured a reading order the user never sees.
+fn application_text(lines: &[rust_protocol::OcrLine]) -> String {
+    /// `MIN_ADMITTED_OCR_CONFIDENCE_MILLI` in the desktop.
+    const MIN_ADMITTED_OCR_CONFIDENCE_MILLI: u16 = 350;
+    let Ok(reconstructed) =
+        rust_ocr_engine::reconstruct_text(lines, MIN_ADMITTED_OCR_CONFIDENCE_MILLI)
+    else {
+        return String::new();
+    };
+    rust_ocr_engine::reconstruct_visual_paragraphs(&rust_ocr_engine::reconstruct_visual_rows(
+        &reconstructed.elements,
+    ))
+    .into_iter()
+    .map(|row| row.text)
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
 fn worker_recognition(
     expected_request_id: RequestId,
     event: OcrWorkerEvent,
@@ -444,11 +464,7 @@ fn worker_recognition(
             processing_duration_ms,
             ..
         } => Ok(Recognition {
-            text: lines
-                .into_iter()
-                .map(|line| line.text)
-                .collect::<Vec<_>>()
-                .join("\n"),
+            text: application_text(&lines),
             elapsed_ms: processing_duration_ms as f64,
             working_set_bytes: None,
             peak_working_set_bytes: None,

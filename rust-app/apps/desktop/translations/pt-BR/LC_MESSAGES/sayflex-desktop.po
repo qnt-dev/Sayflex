@@ -519,11 +519,11 @@ msgstr "O protocolo do processo de entrada não corresponde. Reinstale o aplicat
 msgid "Insert latest dictation"
 msgstr "Inserir o último ditado"
 
-msgid "Inserted; the target read the text in {milliseconds} ms"
-msgstr "Inserido; o destino leu o texto em {milliseconds} ms"
+msgid "Inserted; the application received the text."
+msgstr "Inserido: o aplicativo recebeu o texto."
 
-msgid "Inserted through the target adapter in {milliseconds} ms"
-msgstr "Inserido pelo adaptador de destino em {milliseconds} ms"
+msgid "Inserted."
+msgstr "Inserido."
 
 msgid "Install"
 msgstr "Instalar"
@@ -802,8 +802,8 @@ msgstr "Visão geral"
 msgid "PALETTE"
 msgstr "PALETA"
 
-msgid "Paste requested; delivery not confirmed ({milliseconds} ms)"
-msgstr "Colagem solicitada; resultado não confirmado ({milliseconds} ms)"
+msgid "Paste sent; the application did not confirm it."
+msgstr "Colagem enviada; o aplicativo não a confirmou."
 
 msgid "Paste the key"
 msgstr "Cole a chave"
@@ -1263,8 +1263,8 @@ msgstr "A tradução está desativada em Ações."
 msgid "Translation is on, but no text route is ready yet."
 msgstr "A tradução está ativada, mas nenhuma rota de texto está pronta."
 
-msgid "Translation model ready in {milliseconds} ms."
-msgstr "Modelo de tradução pronto em {milliseconds} ms."
+msgid "Translation model ready."
+msgstr "Modelo de tradução pronto."
 
 msgid "Translation preview"
 msgstr "Pré-visualização da tradução"
@@ -1305,8 +1305,8 @@ msgstr "Use uma letra, número, tecla de função, espaço, tabulação, Enter o
 msgid "Value"
 msgstr "Valor"
 
-msgid "Inserted and verified in {milliseconds} ms"
-msgstr "Inserido e verificado em {milliseconds} ms"
+msgid "Inserted and verified."
+msgstr "Inserido e verificado."
 
 msgid "VERSION"
 msgstr "VERSÃO"
@@ -1846,3 +1846,9 @@ msgstr "Manter a janela no topo"
 
 msgid "Unpin window"
 msgstr "Desafixar a janela"
+
+msgid "The speech model loads when you start dictating."
+msgstr "O modelo de fala é carregado quando você começa a ditar."
+
+msgid "Details and cancel are in Models."
+msgstr "Detalhes e cancelamento ficam em Modelos."

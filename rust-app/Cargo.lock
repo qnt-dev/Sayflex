@@ -5828,6 +5828,7 @@ dependencies = [
  "image",
  "oar-ocr",
  "ort",
+ "rust-ocr-engine",
  "rust-protocol",
  "serde",
  "serde_json",

@@ -101,7 +101,10 @@ component TranslatedLabel inherits Rectangle {
         ? (touch.has-hover ? root.plate.mix(root.ink, 0.88) : root.plate)
         : (touch.has-hover ? root.ink.with-alpha(0.1) : transparent);
     clip: true;
-    opacity: root.dimmed ? 0.38 : 1;
+    // While one block is edited the others step back. Only their text fades:
+    // fading the whole block let the original glyphs under its plate show
+    // through the translation.
+    property <float> ink-opacity: root.dimmed ? 0.38 : 1;
     accessible-role: button;
     // Five blocks with one name were indistinguishable to a screen reader.
     accessible-label: root.translated-text != "" ? root.translated-text : @tr("Editable translated image text");
@@ -114,6 +117,7 @@ component TranslatedLabel inherits Rectangle {
         height: parent.height - 3px;
         text: translated-text-item.text;
         color: root.shadow;
+        opacity: root.ink-opacity;
         font-size: translated-text-item.font-size;
         font-weight: root.text-weight;
         wrap: word-wrap;
@@ -129,6 +133,7 @@ component TranslatedLabel inherits Rectangle {
             ? root.source-text + "\n" + root.translated-text
             : root.translated-text;
         color: root.ink;
+        opacity: root.ink-opacity;
         font-size: max(12px, root.text-size);
         font-weight: root.text-weight;
         wrap: word-wrap;

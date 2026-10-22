@@ -3144,7 +3144,10 @@ mod keep_warm_release_tests {
 
         state.engine_last_used = Some(long_ago);
         state.release_idle_contextual_engine(&writer, now).unwrap();
-        assert!(state.engine.is_none(), "an idle contextual model is released");
+        assert!(
+            state.engine.is_none(),
+            "an idle contextual model is released"
+        );
         assert!(received.try_iter().any(|event| matches!(
             event,
             TranslationWorkerEvent::LocalModelState { loaded: false, .. }
