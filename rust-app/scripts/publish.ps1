@@ -297,6 +297,42 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
         if (-not (Test-Path -LiteralPath (Join-Path $env:SAYFLEX_OCR_BUNDLE 'bundle.verified.json'))) {
             throw 'The OCR model bundle was not staged completely.'
         }
+        # Inno Setup keeps file times to two seconds. The receipt records exact
+        # times, so the installed bundle never matched it and SayFlex rewrote
+        # the receipt inside its own installation. Round the times down to two
+        # seconds now and verify again, so the receipt matches what is installed.
+        Get-ChildItem -LiteralPath $env:SAYFLEX_OCR_BUNDLE -File -Recurse |
+            Where-Object Name -ne 'bundle.verified.json' |
+            ForEach-Object {
+                $ticks = $_.LastWriteTimeUtc.Ticks
+                $_.LastWriteTimeUtc = [DateTime]::new($ticks - ($ticks % 20000000), [DateTimeKind]::Utc)
+            }
+        $ocrLog = [System.IO.Path]::GetTempFileName()
+        $ocrInstall = Start-Process -FilePath (Join-Path $output 'SayFlex.Ocr.exe') `
+            -ArgumentList '--install-models' -NoNewWindow -Wait -PassThru `
+            -RedirectStandardError $ocrLog
+        if ($ocrInstall.ExitCode -ne 0) {
+            throw "The OCR model bundle could not be verified again: $(Get-Content -LiteralPath $ocrLog -Tail 3)"
+        }
+        Remove-Item -LiteralPath $ocrLog -Force -ErrorAction SilentlyContinue
+
+        # Visual C++ runtime beside the executables (app-local deployment, as
+        # the Visual Studio redistribution terms allow). A clean Windows has no
+        # VCRUNTIME140.dll, and every SayFlex process imports it.
+        $crtRoot = Get-ChildItem -LiteralPath (Join-Path $visualStudioInstance 'VC\Redist\MSVC') -Directory |
+            Sort-Object { [version]($_.Name -replace '[^0-9.].*$', '') } -Descending |
+            ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'x64') -Directory -Filter 'Microsoft.VC14*.CRT' -ErrorAction SilentlyContinue } |
+            Select-Object -First 1
+        if (-not $crtRoot) {
+            throw 'The Visual C++ x64 redistributable files were not found.'
+        }
+        foreach ($dll in @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll')) {
+            $source = Join-Path $crtRoot.FullName $dll
+            if (-not (Test-Path -LiteralPath $source)) {
+                throw "The Visual C++ runtime is incomplete: $source is missing."
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $output $dll)
+        }
 
         # Silero VAD (MIT) keeps silence and noise from becoming text. It is
         # pinned by revision and SHA-256, cached outside the wiped targets,
@@ -325,14 +361,12 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
 
         Copy-Item -LiteralPath (Join-Path $rustRoot '..\LICENSE') `
             -Destination (Join-Path $output 'LICENSE.txt')
-        foreach ($document in @('THIRD_PARTY_NOTICES.md', 'SECURITY.md')) {
+        foreach ($document in @('THIRD_PARTY_NOTICES.md', 'SECURITY.md', 'PRIVACY.md')) {
             Copy-Item -LiteralPath (Join-Path $rustRoot $document) `
                 -Destination (Join-Path $output $document)
         }
-        if ($TestNvidia) {
-            & (Join-Path $PSScriptRoot 'generate-third-party-notices.ps1') `
-                -OutputPath (Join-Path $output 'THIRD_PARTY_NOTICES.md') -TestNvidia
-        }
+        & (Join-Path $PSScriptRoot 'generate-third-party-notices.ps1') `
+            -OutputPath (Join-Path $output 'THIRD_PARTY_NOTICES.md') -TestNvidia:$TestNvidia
 
         $env:CUDA_PATH = $cudaRoot
         $env:CMAKE_CUDA_ARCHITECTURES = $cudaArchitectures

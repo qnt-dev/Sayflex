@@ -1071,6 +1071,7 @@ fn unquoted_language_evidence(text: &str) -> Cow<'_, str> {
 }
 
 struct LlamaRuntime {
+    port: u16,
     child: Child,
     client: Client,
     async_client: reqwest::Client,
@@ -1249,6 +1250,7 @@ impl LlamaRuntime {
             .context("could not create the local translation async runtime")?;
         let endpoint = format!("http://127.0.0.1:{port}");
         let runtime = Self {
+            port,
             child,
             client,
             async_client,
@@ -1290,6 +1292,22 @@ impl LlamaRuntime {
         })?;
         match health {
             HealthPoll::Ready => {
+                // The port was drawn by binding and releasing a socket, so
+                // another local program could have taken it first. Text goes
+                // only to the server this process started.
+                match loopback_listener_owner(self.port) {
+                    Some(owner) if owner != self.child.id() => {
+                        bail!(
+                            "the local translation port {} belongs to another process (pid {owner})",
+                            self.port
+                        );
+                    }
+                    Some(_) => {}
+                    None => eprintln!(
+                        "local_llama_runtime state=ready owner_check=unavailable port={}",
+                        self.port
+                    ),
+                }
                 eprintln!(
                     "local_llama_runtime state=ready pid={} endpoint={}",
                     self.child.id(),
@@ -2868,6 +2886,70 @@ fn configure_hidden_process(command: &mut Command) {
 #[cfg(not(windows))]
 fn configure_hidden_process(_command: &mut Command) {}
 
+/// The process listening on 127.0.0.1 (or any address) at `port`, if Windows
+/// reports one.
+#[cfg(windows)]
+fn loopback_listener_owner(port: u16) -> Option<u32> {
+    use windows_sys::Win32::{
+        Foundation::NO_ERROR,
+        NetworkManagement::IpHelper::{
+            GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+            TCP_TABLE_OWNER_PID_LISTENER,
+        },
+        Networking::WinSock::AF_INET,
+    };
+    let mut size = 0_u32;
+    // SAFETY: a null buffer asks only for the required size.
+    unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            u32::from(AF_INET),
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
+    }
+    // u32 elements keep the table's alignment.
+    let mut buffer = vec![0_u32; (size as usize).div_ceil(4) + 1];
+    let mut size = (buffer.len() * 4) as u32;
+    // SAFETY: the buffer holds `size` writable bytes.
+    let status = unsafe {
+        GetExtendedTcpTable(
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            0,
+            u32::from(AF_INET),
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if status != NO_ERROR {
+        return None;
+    }
+    // SAFETY: on success the buffer starts with a MIB_TCPTABLE_OWNER_PID whose
+    // dwNumEntries rows follow it inside the buffer.
+    let rows = unsafe {
+        let table = &*buffer.as_ptr().cast::<MIB_TCPTABLE_OWNER_PID>();
+        std::slice::from_raw_parts::<MIB_TCPROW_OWNER_PID>(
+            table.table.as_ptr(),
+            table.dwNumEntries as usize,
+        )
+    };
+    let loopback = u32::from_ne_bytes([127, 0, 0, 1]);
+    rows.iter()
+        .find(|row| {
+            u16::from_be(row.dwLocalPort as u16) == port
+                && (row.dwLocalAddr == loopback || row.dwLocalAddr == 0)
+        })
+        .map(|row| row.dwOwningPid)
+}
+
+#[cfg(not(windows))]
+fn loopback_listener_owner(_port: u16) -> Option<u32> {
+    None
+}
+
 fn language_name(language: TranslationLanguage) -> &'static str {
     language.display_name()
 }
@@ -3233,6 +3315,19 @@ fn lexical_spans(text: &str) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn the_owner_of_a_loopback_port_is_this_process() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_eq!(
+            super::loopback_listener_owner(port),
+            Some(std::process::id())
+        );
+        drop(listener);
+        assert_eq!(super::loopback_listener_owner(port), None);
+    }
+
     #[test]
     fn masked_values_round_trip_through_a_reordered_translation() {
         let source =

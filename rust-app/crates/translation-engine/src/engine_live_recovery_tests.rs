@@ -239,6 +239,7 @@ impl CpuHarness {
             .spawn()
             .context("could not start isolated CPU server")?;
         let runtime = LlamaRuntime {
+            port,
             child,
             client,
             async_client,

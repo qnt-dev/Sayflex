@@ -410,7 +410,7 @@ fn verify_file(
 
 fn expand_zstd(source: &Path, destination: &Path) -> Result<(), ModelInstallError> {
     let source = File::open(source)?;
-    let mut decoder = ruzstd::StreamingDecoder::new(source).map_err(|error| {
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(source).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("zstd stream is invalid: {error}"),

@@ -112,6 +112,7 @@ export component DictationPage inherits HorizontalLayout {
     /// it, so on the CPU the control says why instead of pretending.
     in property <bool> release-mode-locked: false;
     in property <string> release-mode-note;
+    in property <string> insertion-mode-value: "clipboard";
     in property <bool> keeping-history: true;
     in property <string> hotkey;
 
@@ -123,6 +124,7 @@ export component DictationPage inherits HorizontalLayout {
     callback set-output-mode(string);
     callback set-dictation-language(string);
     callback set-release-mode(string);
+    callback set-insertion-mode(string);
     callback set-keeping-history(bool);
 
     spacing: 24px;
@@ -391,6 +393,28 @@ export component DictationPage inherits HorizontalLayout {
         }
         if root.release-mode-note != "" : SideNote {
             text: root.release-mode-note;
+        }
+
+        GroupLabel { text: @tr("INSERTION"); height: 30px; }
+        MenuButton {
+            text: root.insertion-mode-value == "typed"
+                ? @tr("Type the text")
+                : @tr("Paste through the clipboard");
+            value: root.insertion-mode-value;
+            current-index: root.insertion-mode-value == "typed" ? 1 : 0;
+            options: [
+                {
+                    value: "clipboard",
+                    label: @tr("Paste through the clipboard"),
+                    note: @tr("Fast. Clipboard tools and remote sessions can read the text for a moment"),
+                },
+                {
+                    value: "typed",
+                    label: @tr("Type the text"),
+                    note: @tr("No clipboard. Slower; editors with auto-completion may change the text"),
+                },
+            ];
+            chosen(value) => { root.set-insertion-mode(value); }
         }
 
         GroupLabel { text: @tr("HISTORY"); height: 30px; }

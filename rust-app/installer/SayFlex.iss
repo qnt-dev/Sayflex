@@ -103,6 +103,24 @@ russian.MaintenanceLanguage=Язык приложения после устан�
 russian.MaintenanceLanguageKept=Текущий язык приложения сохранится.
 russian.MaintenanceContinue=Нажмите «Далее», чтобы продолжить.
 russian.MaintenanceReadyPrompt=Нажмите «%1», чтобы продолжить, или «Назад», чтобы проверить параметры.
+UninstallDeleteModels=Also delete the downloaded speech and translation models and the optional runtimes?%n%nThey can take several gigabytes in %1. You can download them again later.
+russian.UninstallDeleteModels=Удалить также скачанные модели речи и перевода и дополнительные компоненты?%n%nОни могут занимать несколько гигабайт в %1. Позже их можно скачать снова.
+ukrainian.UninstallDeleteModels=Видалити також завантажені моделі мовлення й перекладу та додаткові компоненти?%n%nВони можуть займати кілька гігабайтів у %1. Пізніше їх можна завантажити знову.
+spanish.UninstallDeleteModels=¿Eliminar también los modelos de voz y traducción descargados y los componentes opcionales?%n%nPueden ocupar varios gigabytes en %1. Podrás descargarlos de nuevo más tarde.
+brazilianportuguese.UninstallDeleteModels=Excluir também os modelos de fala e tradução baixados e os componentes opcionais?%n%nEles podem ocupar vários gigabytes em %1. Você pode baixá-los novamente depois.
+german.UninstallDeleteModels=Auch die heruntergeladenen Sprach- und Übersetzungsmodelle und die optionalen Laufzeitkomponenten löschen?%n%nSie können in %1 mehrere Gigabyte belegen. Sie lassen sich später erneut herunterladen.
+french.UninstallDeleteModels=Supprimer aussi les modèles vocaux et de traduction téléchargés et les composants facultatifs ?%n%nIls peuvent occuper plusieurs gigaoctets dans %1. Vous pourrez les télécharger à nouveau.
+italian.UninstallDeleteModels=Eliminare anche i modelli vocali e di traduzione scaricati e i componenti facoltativi?%n%nPossono occupare diversi gigabyte in %1. Potrai scaricarli di nuovo in seguito.
+korean.UninstallDeleteModels=다운로드한 음성 및 번역 모델과 선택 구성 요소도 삭제할까요?%n%n%1에서 몇 기가바이트를 차지할 수 있습니다. 나중에 다시 다운로드할 수 있습니다.
+UninstallDeletePersonalData=Also delete your dictation and translation history, settings and saved service keys?%n%nEverything left in %1 will be removed. This cannot be undone.
+russian.UninstallDeletePersonalData=Удалить также историю диктовки и перевода, настройки и сохранённые ключи сервисов?%n%nВсё, что осталось в %1, будет удалено. Это нельзя отменить.
+ukrainian.UninstallDeletePersonalData=Видалити також історію диктування й перекладу, налаштування та збережені ключі сервісів?%n%nУсе, що залишилося в %1, буде видалено. Це не можна скасувати.
+spanish.UninstallDeletePersonalData=¿Eliminar también el historial de dictado y traducción, la configuración y las claves de servicio guardadas?%n%nSe eliminará todo lo que quede en %1. No se puede deshacer.
+brazilianportuguese.UninstallDeletePersonalData=Excluir também o histórico de ditado e tradução, as configurações e as chaves de serviço salvas?%n%nTudo o que restar em %1 será removido. Isso não pode ser desfeito.
+german.UninstallDeletePersonalData=Auch den Diktat- und Übersetzungsverlauf, die Einstellungen und gespeicherte Dienstschlüssel löschen?%n%nAlles, was in %1 verbleibt, wird entfernt. Das lässt sich nicht rückgängig machen.
+french.UninstallDeletePersonalData=Supprimer aussi l'historique de dictée et de traduction, les paramètres et les clés de service enregistrées ?%n%nTout ce qui reste dans %1 sera supprimé. Cette action est irréversible.
+italian.UninstallDeletePersonalData=Eliminare anche la cronologia di dettatura e traduzione, le impostazioni e le chiavi dei servizi salvate?%n%nTutto ciò che rimane in %1 verrà rimosso. L'operazione non può essere annullata.
+korean.UninstallDeletePersonalData=받아쓰기 및 번역 기록, 설정, 저장된 서비스 키도 삭제할까요?%n%n%1에 남아 있는 모든 항목이 제거됩니다. 이 작업은 되돌릴 수 없습니다.
 ProcessorTooOld=SayFlex needs a processor with SSE4.2 instructions (Intel or AMD, 2009 or newer). This processor does not have them, so setup will close.
 russian.ProcessorTooOld=SayFlex нужен процессор с инструкциями SSE4.2 (Intel или AMD, 2009 года и новее). У этого процессора их нет, поэтому установка будет закрыта.
 ukrainian.ProcessorTooOld=SayFlex потрібен процесор з інструкціями SSE4.2 (Intel або AMD, 2009 року й новіший). Цей процесор їх не має, тому встановлення буде закрито.
@@ -293,12 +311,14 @@ begin
 end;
 
 { The oldest worker is built for SSE4.2 (every x86-64 processor since 2009).
-  Refuse clearly instead of installing a program that cannot start. }
-function InitializeSetup: Boolean;
+  Refuse clearly, before any file is installed, instead of installing a
+  program that cannot start. Empty when the processor is supported. }
+function UnsupportedProcessorMessage: String;
 begin
-  Result := IsProcessorFeaturePresent(PF_SSE4_2_INSTRUCTIONS_AVAILABLE);
-  if not Result then
-    SuppressibleMsgBox(CustomMessage('ProcessorTooOld'), mbCriticalError, MB_OK, IDOK);
+  if IsProcessorFeaturePresent(PF_SSE4_2_INSTRUCTIONS_AVAILABLE) then
+    Result := ''
+  else
+    Result := CustomMessage('ProcessorTooOld');
 end;
 
 procedure InitializeWizard;
@@ -368,13 +388,20 @@ end;
 #ifdef TestNvidia
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  Result := '';
+  Result := UnsupportedProcessorMessage;
+  if Result <> '' then
+    Exit;
   { Also reject /DIR overrides: a marker must never enter the normal install. }
   if CompareText(CanonicalInstallPath(ExpandConstant('{app}')),
       CanonicalInstallPath(ExpandConstant('{localappdata}\Programs\SayFlex-Test-Nvidia'))) <> 0 then
     Result := 'SayFlex Test must be installed in its separate SayFlex-Test-Nvidia directory.';
 end;
 #else
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := UnsupportedProcessorMessage;
+end;
+
 procedure RemoveLegacyApplicationFiles;
 var
   LegacyDir: String;
@@ -432,6 +459,41 @@ begin
   if not SaveStringToFile(ExpandConstant('{app}\installer-language'),
       InstallerLanguageRequest(ActiveLanguage, NewInstallationId), False) then
     RaiseException('Could not save the selected application language.');
+end;
+
+function UserDataDirectory: String;
+begin
+#ifdef TestNvidia
+  Result := ExpandConstant('{localappdata}\SayFlex-Test-Nvidia');
+#else
+  Result := ExpandConstant('{localappdata}\SayFlex');
+#endif
+end;
+
+{ Uninstalling used to leave every downloaded model (up to ~12 GB), the
+  history in plain text and the saved keys behind without asking. Ask twice:
+  models are large and easy to download again; history and keys are personal.
+  A silent uninstall keeps everything, so an upgrade never loses data. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir: String;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  DataDir := UserDataDirectory;
+  if not DirExists(DataDir) then
+    Exit;
+  if SuppressibleMsgBox(FmtMessage(CustomMessage('UninstallDeleteModels'), [DataDir]),
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then begin
+    DelTree(DataDir + '\models', True, True, True);
+    DelTree(DataDir + '\translation-models', True, True, True);
+    DelTree(DataDir + '\ocr-models', True, True, True);
+    DelTree(DataDir + '\runtimes', True, True, True);
+    DelTree(DataDir + '\runtime-downloads', True, True, True);
+  end;
+  if SuppressibleMsgBox(FmtMessage(CustomMessage('UninstallDeletePersonalData'), [DataDir]),
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
+    DelTree(DataDir, True, True, True);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

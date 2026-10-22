@@ -253,6 +253,7 @@ pub(crate) struct SavedSettings {
     pub(crate) output_mode: SpeechOutputMode,
     pub(crate) dictation_language: DictationLanguage,
     pub(crate) fast_release_previews: bool,
+    pub(crate) avoid_clipboard_insertion: bool,
     pub(crate) visualizer_style: VisualizerStyle,
     pub(crate) circular_spectrum_palette: CircularSpectrumPalette,
     pub(crate) broadcast_mic_palette: BroadcastMicPalette,
@@ -292,6 +293,7 @@ impl Default for SavedSettings {
             output_mode: SpeechOutputMode::default(),
             dictation_language: DictationLanguage::default(),
             fast_release_previews: true,
+            avoid_clipboard_insertion: false,
             visualizer_style: VisualizerStyle::FlowSphere,
             circular_spectrum_palette: CircularSpectrumPalette::default(),
             broadcast_mic_palette: BroadcastMicPalette::default(),
@@ -369,6 +371,11 @@ impl<'de> Deserialize<'de> for SavedSettings {
             &document,
             "fast_release_previews",
             &mut settings.fast_release_previews,
+        );
+        read(
+            &document,
+            "avoid_clipboard_insertion",
+            &mut settings.avoid_clipboard_insertion,
         );
         read(
             &document,
@@ -499,6 +506,7 @@ impl SavedSettings {
             output_mode: state.output_mode,
             dictation_language: state.dictation_language,
             fast_release_previews: state.fast_release_previews,
+            avoid_clipboard_insertion: state.avoid_clipboard_insertion,
             visualizer_style: state.visualizer_style,
             circular_spectrum_palette: state.circular_spectrum_palette,
             broadcast_mic_palette: state.broadcast_mic_palette,

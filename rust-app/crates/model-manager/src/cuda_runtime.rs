@@ -337,11 +337,8 @@ fn extract_verified(
         cancelled(cancellation)?;
         let mut entry = zip.by_index(index).map_err(invalid_zip)?;
         validate_entry(&entry)?;
-        let Some(expected) = archive
-            .files
-            .iter()
-            .find(|file| file.archive_path == entry.name())
-        else {
+        let name = entry.name().map_err(invalid_zip)?.into_owned();
+        let Some(expected) = archive.files.iter().find(|file| file.archive_path == name) else {
             continue;
         };
         if !found.insert(expected.name.clone()) || entry.is_dir() || entry.size() != expected.bytes
@@ -461,7 +458,7 @@ fn pinned_manifest() -> RuntimeManifest {
 }
 
 fn validate_entry(entry: &zip::read::ZipFile<'_, File>) -> Result<(), ModelInstallError> {
-    let name = entry.name();
+    let name = entry.name().map_err(invalid_zip)?;
     let mode = entry.unix_mode().unwrap_or(0) & 0o170_000;
     if entry.enclosed_name().is_none()
         || name.contains(['\\', ':'])

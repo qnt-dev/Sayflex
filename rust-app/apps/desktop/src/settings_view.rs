@@ -457,6 +457,14 @@ pub(crate) fn sync_action_settings(
     let previews_possible =
         state.speech_backend_active != Some(crate::speech_backend::SpeechBackend::Cpu);
     let previews_on = state.fast_release_previews && previews_possible;
+    settings.set_insertion_mode(
+        if state.avoid_clipboard_insertion {
+            "typed"
+        } else {
+            "clipboard"
+        }
+        .into(),
+    );
     settings.set_release_mode(if previews_on { "fastest" } else { "efficient" }.into());
     settings.set_release_mode_label(
         text(
@@ -2741,6 +2749,20 @@ pub(crate) fn wire_settings(
                 .send(&SpeechWorkerCommand::SetOutputMode { output_mode });
             let _ = save_settings(&state.borrow());
             sync_output_mode(&settings_weak, &state);
+        });
+    }
+    {
+        let settings_weak = settings.as_weak();
+        let state = Rc::clone(state);
+        let workers = Rc::clone(workers);
+        settings.on_set_insertion_mode(move |value| {
+            let avoid_clipboard = value == "typed";
+            state.borrow_mut().avoid_clipboard_insertion = avoid_clipboard;
+            let _ = workers
+                .input
+                .send(&InputHostCommand::SetInsertionPolicy { avoid_clipboard });
+            let _ = save_settings(&state.borrow());
+            sync_action_settings(&settings_weak, &state);
         });
     }
     {

@@ -321,7 +321,8 @@ fn run_insertion_smoke() -> Result<(), Box<dyn std::error::Error>> {
         "clipboard_policy": match method {
             rust_protocol::InsertionMethod::ClipboardTransaction => "transaction_restored",
             rust_protocol::InsertionMethod::NativeEditMessage
-            | rust_protocol::InsertionMethod::WezTermCli => "untouched",
+            | rust_protocol::InsertionMethod::WezTermCli
+            | rust_protocol::InsertionMethod::UnicodeInput => "untouched",
         },
         "chars": text.chars().count(),
     });
@@ -467,6 +468,9 @@ fn read_commands(
             } => insertion.insert(transcript, target, add_trailing_space),
             InputHostCommand::CopyTranscript { transcript } => {
                 insertion.copy(transcript);
+            }
+            InputHostCommand::SetInsertionPolicy { avoid_clipboard } => {
+                insertion_adapter::set_avoid_clipboard(avoid_clipboard);
             }
             InputHostCommand::InsertIntoForeground { transcript } => {
                 match crate::target::capture_text_target() {

@@ -1,134 +1,103 @@
 # Architecture
 
+SayFlex is a Rust application for Windows (`rust-app/`). The interface uses
+Slint. Every job that can block, crash or hold a large model runs in its own
+worker process; the desktop process supervises them.
+
 ```text
-Keyboop.InputHost.exe
-  dedicated WH_KEYBOARD_LL thread
-    -> Ctrl+Win push-to-talk / repeat-last / pause hotkeys
-    -> optional experimental auto-correction pipeline
-    -> default mode passes ordinary typing through without text buffering
-          |
-          | authenticated current-user named pipe
-          v
-Keyboop.UI.exe (.NET 10 WPF)
-  tray / settings / selection hotkey / preview
-          |
-          | versioned named pipe
-          v
-Keyboop.SpeechWorker.exe
-  WASAPI / quality gate / Whisper CUDA
-          |
-          | accepted transcript + detected source language
-          v
-  optional local NMT translation backend
+SayFlex.exe  (desktop: Slint UI, tray, settings, overlays, supervisor)
+  |  JSON lines over stdin/stdout, protocol version checked at startup
+  |  (crates/protocol, PROTOCOL_VERSION)
+  +-- SayFlex.InputHost.exe       hotkeys (WH_KEYBOARD_LL), text insertion,
+  |                               selection capture, clipboard transactions
+  +-- SayFlex.Speech.{Cuda,Vulkan,Cpu,CpuCompat}.exe
+  |                               microphone (WASAPI via cpal), Silero VAD,
+  |                               whisper.cpp, history, online speech providers
+  +-- SayFlex.Translation.exe     compact packs (fxtranslate), llama.cpp server
+  |                               for contextual models, online providers
+  +-- SayFlex.Ocr.exe             PP-OCRv5 through ONNX Runtime (CPU)
+  +-- SayFlex.Companion.exe       optional desktop companion visualizer
 ```
 
-No per-keystroke IPC is permitted. The InputHost owns keyboard state and has enough
-local configuration to continue safely when every other process is unavailable.
+All workers run inside one Windows Job Object, so they end with the desktop.
+A worker that exits is restarted by the supervisor; a protocol mismatch stops
+the worker and is shown in Settings.
 
-## Manual selection transaction
+## Dictation
 
-1. Windows delivers `Ctrl+Alt+K` to the UI through `RegisterHotKey`.
-2. Capture the foreground target immediately, then wait until Ctrl, Alt, and K are
-   physically released so the copy chord cannot become `Ctrl+Alt+C`.
-3. Snapshot the clipboard sequence and data object.
-4. Send `Ctrl+C`, require an observed sequence change, and read Unicode text.
-5. Build deterministic RU/EN layout alternatives locally and show a topmost preview.
-6. Escape restores the clipboard and performs no target edit.
-7. An explicit candidate restores the original target, pastes the replacement, and
-   restores the old clipboard only if the operation still owns the sequence.
+1. InputHost sees the dictation chord and captures the target: the foreground
+   top-level window, its process and thread, the keyboard layout and the
+   pointer. Password fields are refused.
+2. The speech worker records while the key is held. During pauses it may
+   decode the stable part early (speculation) so the final pass is short.
+3. On release the final audio is resampled to 16 kHz. **Silero VAD** decides
+   whether it contains speech; without speech nothing is decoded and nothing is
+   inserted. Whisper decodes the rest. A segment with OpenAI's no-speech
+   signature (no-speech probability > 0.6 and average log-probability < -1) is
+   dropped. With *Auto*, the language is chosen among the user's Windows
+   languages (display languages and keyboard layouts).
+4. The desktop sends the transcript to InputHost. InputHost checks that the
+   same top-level window is in front (a short grace period covers a tooltip or
+   notification taking the foreground) and delivers the text by the first
+   route that applies:
+   - WezTerm: its CLI;
+   - standard Win32 Edit/RichEdit controls: `EM_REPLACESEL`;
+   - with *Insertion → Type the text*: Unicode keystrokes (`SendInput`);
+   - otherwise a clipboard transaction: the previous clipboard is saved, the
+     text is offered with delayed rendering and privacy formats, the paste
+     shortcut of that application is sent, and the previous clipboard is
+     restored after the target read it or after 2.5 s.
+5. As soon as the paste reaches the target, InputHost reports
+   `InsertionDispatched` and the visualizer disappears. A failed insertion
+   shows a notice with **Insert** (into the window now in front) and **Copy**.
 
-The transaction never monitors ordinary typing and never auto-applies a candidate.
+The text is never inserted into another window on SayFlex's own initiative.
 
-## Runtime choices
+## Translation
 
-- Core and InputHost: C#/.NET 10, with NativeAOT publish evaluated after compatibility
-  tests. The hook callback is allocation-free and queues compact value events.
-- UI: WPF on .NET 10.
-- Speech: Whisper.net over whisper.cpp. CUDA is preferred; CPU remains a fallback.
-- Audio: Windows Core Audio (WASAPI).
-- IPC: named pipes restricted to the current user, length-prefixed JSON during early
-  development; a source-generated serializer and strict message limits are required
-  before release.
-- Settings: versioned JSON under `%LOCALAPPDATA%`; secrets use DPAPI.
-- Voice history: opt-in atomic JSON store, capped at 200 successful entries.
+The text path translates selected text with the local engine or, when the user
+configured one, an online provider. The local engine checks that numbers,
+dates, times and URLs survived; if not, it translates again with each value
+replaced by a marker (`[1]`, `[2]`, …) and restores the values. What still
+differs is flagged in the result ("check the numbers").
 
-## Experimental automatic replacement transaction
+Compact packs (Firefox Translations models, MPL-2.0) run in-process through
+`fxtranslate`; its AVX2 kernel is used only on processors that have AVX2.
+Contextual models run in `llama-server` on the loopback interface with a random
+API key; the worker verifies that the listening port belongs to its own child
+process. An idle contextual model is released after ten minutes.
 
-1. Record the physical boundary event and snapshot target window/thread/layout.
-2. Decide synchronously from in-memory detector data.
-3. If correction is required, enter a short bounded transaction.
-4. Queue later physical events up to a hard event/deadline cap.
-5. Revalidate target identity, focus, layout, and supported-field policy.
-6. Submit deletion, Unicode replacement, and boundary in one `SendInput` array.
-7. Replay queued physical events in original order.
-8. On any failed precondition, replay the untouched original sequence.
+## Screen translation
 
-Transactions never wait on the UI, speech worker, disk, network, or database.
+The desktop captures the selected area, the OCR worker finds text lines and
+reads each with the language family that reads it best among the user's
+languages, fixes look-alike Latin/Cyrillic letters, and retries weak vertical
+lines upside down. The desktop rebuilds rows and paragraphs
+(`crates/ocr-engine/src/reconstruct.rs`), translates the blocks and draws them
+over a repaired copy of the image.
 
-## Speech strategy
+## Models and runtimes
 
-The target machine has an Intel Core i9-10850K, 64 GB RAM, and an NVIDIA RTX 3080 Ti
-with 12 GB VRAM. The primary profile therefore keeps `large-v3-turbo` resident on
-CUDA. Holding left Ctrl+left Windows starts WASAPI capture into a temporary local
-WAV file. Releasing either key closes the capture and runs final local recognition.
-The current release does not claim streaming partial transcription or Silero VAD.
+`crates/model-manager` downloads every artifact over HTTPS, resumes partial
+downloads, and verifies size and SHA-256 before a file is used. Data lives in
+`%LOCALAPPDATA%\SayFlex` (see `rust-app/PRIVACY.md`).
 
-The capture file is bounded to 20 minutes, with a warning at 19 minutes, and is
-deleted after conversion for recognition. Admission gates reject very short, quiet,
-or punctuation-only results. Final text is inserted through a guarded clipboard
-transaction: materialize the existing formats, paste into the still-focused target,
-and restore only while Keyboop still owns the clipboard sequence. Unicode
-`SendInput` is the fallback. WezTerm uses the previously verified direct Unicode
-path for ordinary live dictation.
+The installer contains no NVIDIA files. The CUDA worker links `cudart64_13.dll`
+dynamically; the NVIDIA runtime (cuBLAS and cudart from CUDA 13.3.1) is
+downloaded inside the app only after the user accepts the NVIDIA EULA
+(`crates/model-manager/src/cuda_runtime.rs`).
 
-When history is enabled, SpeechWorker atomically stores the successful transcript
-before returning it to InputHost, so target loss cannot destroy recognized text.
-The store is `%LOCALAPPDATA%\Keyboop\dictation-history.json`, capped at 200
-entries, and contains text plus language and timing metadata but no audio.
-`Shift+Alt+X` is held as a pending recovery chord until all three physical keys
-are released.
+## Processor support
 
-InputHost assigns an immutable `sessionId` when capture begins. The hook and the
-physical-key watchdog submit intents through the same synchronized session owner
-and single-reader action channel. `Begin`, idempotent `End`, the final transcript,
-history, insertion, and recovery all carry this ID. SpeechWorker retains one
-completion task per session; concurrent or repeated `End` requests share it, and a
-recovery request waits for that exact task even if it reaches the named-pipe server
-before `End`. In that case recovery may own the same idempotent finalization itself,
-so a delayed or lost standalone `End` cannot leave it waiting forever. Completion
-order therefore cannot redefine which text “last” means.
-The global last-transcript query remains only as a restart fallback when InputHost
-has no in-memory session identity.
+The speech, translation and Vulkan/CUDA workers are built for x86-64-v3 (AVX2,
+FMA, F16C, BMI2). `SayFlex.Speech.CpuCompat.exe` is built for SSE4.2; the
+desktop selects it, and only it, on processors without AVX2. Setup refuses a
+processor without SSE4.2.
 
-Recovery puts the resolved text in the clipboard without restoring the previous
-clipboard. The explicit second step is `Shift+Insert` in WezTerm or `Ctrl+V` in
-ordinary applications, avoiding focus races and application-specific paste
-shortcuts inside the global hook path.
+## Building and releasing
 
-NVIDIA Parakeet TDT 0.6B v3 is retained as an experimental backend candidate. It is
-not the initial production dependency because its Windows NeMo deployment surface is
-larger and less self-contained than whisper.cpp.
-
-## Dictate-and-translate direction
-
-Translation must run after ordinary recognition rather than enabling Whisper's
-translation task on the current `large-v3-turbo` model. Turbo is not trained for
-speech translation and can return the source language even when translation is
-requested.
-
-The planned pipeline is:
-
-1. Whisper Turbo recognizes speech and reports the detected source language.
-2. If the selected output is `original`, the transcript follows the existing
-   insertion path unchanged.
-3. If a target language is selected, a separate local NMT backend translates
-   the accepted transcript.
-4. The translated result becomes the last accepted transcript and follows the
-   same guarded insertion transaction.
-5. A missing model, unsupported pair, timeout, or low-confidence result fails
-   open by retaining the original transcript instead of losing the dictation.
-
-The first candidate pair is RU to EN with an attributed OPUS-MT model through a
-native CTranslate2 worker. The protocol and settings should store a target
-language code rather than a RU-to-EN boolean so additional downloadable language
-pairs can be added without changing the dictation contract.
+`rust-app/scripts/build-installer.ps1` builds every worker, stages the OCR and
+VAD models, the Visual C++ runtime and the notices, validates the payload
+(`validate-release.ps1`) and compiles the Inno Setup installer
+(`rust-app/installer/SayFlex.iss`). `.github/workflows/rust.yml` runs format,
+lint and tests on every push.

@@ -113,6 +113,66 @@ $lines.Add('')
 $lines.Add('- RapidOCR: <https://github.com/RapidAI/RapidOCR>')
 $lines.Add('- PaddleOCR: <https://github.com/PaddlePaddle/PaddleOCR>')
 $lines.Add('')
+$mitText = @'
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+'@
+
+function Add-LicenseText([string]$Title, [string]$Text) {
+    $lines.Add("### $Title")
+    $lines.Add('')
+    $lines.Add('```text')
+    foreach ($line in ($Text.TrimEnd() -split "`r?`n")) { $lines.Add($line) }
+    $lines.Add('```')
+    $lines.Add('')
+}
+
+function Find-PackageDirectory([string]$Name) {
+    $package = $metadata.packages | Where-Object name -eq $Name | Select-Object -First 1
+    if (-not $package) { throw "The package $Name is not in the locked graph." }
+    Split-Path -Parent $package.manifest_path
+}
+
+# Native code compiled into the executables, and files shipped beside them.
+# Rust packages are listed further below; these are the parts cargo cannot see.
+$lines.Add('## Native components')
+$lines.Add('')
+$lines.Add('- whisper.cpp and ggml (speech recognition, compiled into the speech workers): MIT.')
+$lines.Add('- Silero VAD v6.2.0 (`speech-vad/ggml-silero-v6.2.0.bin`, voice activity detection): MIT.')
+$lines.Add('- ONNX Runtime (screen-text recognition, compiled into `SayFlex.Ocr.exe`): MIT;')
+$lines.Add('  its own third-party notices: <https://github.com/microsoft/onnxruntime/blob/main/ThirdPartyNotices.txt>.')
+$lines.Add('- gemmology (int8 matrix kernel in the translation worker): MIT.')
+$lines.Add('- xsimd (SIMD wrappers used by gemmology): BSD-3-Clause.')
+$lines.Add('- Microsoft Visual C++ runtime (`vcruntime140*.dll`, `msvcp140*.dll`): redistributed')
+$lines.Add('  unmodified under the Microsoft Visual Studio redistribution terms, which allow')
+$lines.Add('  app-local deployment; it is not covered by the SayFlex MIT license.')
+$lines.Add('- llama.cpp (contextual translation, MIT) is downloaded from its GitHub release only')
+$lines.Add('  after the user chooses a contextual model; it is not in the installer.')
+$lines.Add('')
+Add-LicenseText 'whisper.cpp and ggml (MIT)' (
+    Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Find-PackageDirectory 'whisper-rs-sys') 'whisper.cpp\LICENSE'))
+Add-LicenseText 'Silero VAD (MIT)' ("MIT License`n`nCopyright (c) 2020-present Silero Team`n`n" + $mitText)
+Add-LicenseText 'ONNX Runtime (MIT)' ("MIT License`n`nCopyright (c) Microsoft Corporation`n`n" + $mitText)
+Add-LicenseText 'gemmology (MIT)' (
+    Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $rustRoot 'vendor\fxtranslate\vendor\gemmology\LICENSE'))
+Add-LicenseText 'xsimd (BSD-3-Clause)' (
+    Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $rustRoot 'vendor\fxtranslate\vendor\xsimd\LICENSE'))
+
 $lines.Add('## Locked Rust dependency inventory')
 $lines.Add('')
 $lines.Add('| Package | Version | Declared license | Source |')
@@ -125,6 +185,61 @@ foreach ($package in $dependencies) {
 }
 $lines.Add('')
 $lines.Add("Generated from Cargo.lock; $($dependencies.Count) registry or git package versions listed.")
+$lines.Add('')
+
+# The full texts, as each package publishes them. Packages that ship the same
+# text share one copy; a package without a license file is covered by the SPDX
+# license it declares above.
+$lines.Add('## License texts of the Rust dependencies')
+$lines.Add('')
+$texts = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+$withoutText = [System.Collections.Generic.List[string]]::new()
+foreach ($package in $dependencies) {
+    $directory = Split-Path -Parent $package.manifest_path
+    # Ordinal order: Sort-Object compares differently in Windows PowerShell
+    # and PowerShell 7, and the notices must be identical from either.
+    $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    foreach ($file in @(Get-ChildItem -LiteralPath $directory -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^(?i)(licen[cs]e|copying|notice)([-._].*)?$' })) {
+        $files.Add($file)
+    }
+    $files.Sort([System.Comparison[System.IO.FileInfo]] {
+        param($left, $right)
+        [string]::CompareOrdinal($left.Name, $right.Name)
+    })
+    if ($files.Count -eq 0) {
+        $withoutText.Add("$($package.name) $($package.version)")
+        continue
+    }
+    foreach ($file in $files) {
+        $text = (Get-Content -Raw -Encoding UTF8 -LiteralPath $file.FullName) -replace "`r`n", "`n"
+        $key = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new(
+            [System.Text.Encoding]::UTF8.GetBytes($text.Trim()))) -Algorithm SHA256).Hash
+        if (-not $texts.ContainsKey($key)) {
+            $texts[$key] = [pscustomobject]@{ Text = $text; Users = [System.Collections.Generic.List[string]]::new() }
+        }
+        $texts[$key].Users.Add("$($package.name) $($package.version) ($($file.Name))")
+    }
+}
+$index = 0
+foreach ($entry in $texts.Values) {
+    $index++
+    $lines.Add("### Text $index")
+    $lines.Add('')
+    $users = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($user in $entry.Users) { [void]$users.Add($user) }
+    $lines.Add('Used by: ' + (@($users) -join ', '))
+    $lines.Add('')
+    $lines.Add('```text')
+    foreach ($line in ($entry.Text.TrimEnd() -split "`n")) { $lines.Add($line) }
+    $lines.Add('```')
+    $lines.Add('')
+}
+if ($withoutText.Count -gt 0) {
+    $lines.Add('Packages without a license file in their published source (their declared')
+    $lines.Add('SPDX license in the inventory applies): ' + ($withoutText -join ', ') + '.')
+    $lines.Add('')
+}
 
 $parent = Split-Path -Parent $resolvedOutput
 if (-not (Test-Path -LiteralPath $parent)) {

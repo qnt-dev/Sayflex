@@ -63,7 +63,17 @@ impl HttpFetcher {
 
     /// `component` names the caller in the user agent, so a server log can tell
     /// a speech model download from a translation pack download.
+    ///
+    /// Every download requires HTTPS, for the first URL and each redirect. The
+    /// SHA-256 pins protect the bytes; HTTPS also keeps which model a user
+    /// fetches off the network path.
     pub fn new(component: &str) -> Result<Self, ModelInstallError> {
+        Self::build(component, true)
+    }
+
+    /// Plain HTTP, for a test server on the loopback interface only.
+    #[cfg(test)]
+    fn allowing_plain_http(component: &str) -> Result<Self, ModelInstallError> {
         Self::build(component, false)
     }
 
@@ -273,6 +283,21 @@ mod tests {
     }
 
     #[test]
+    fn every_fetcher_rejects_plain_http() {
+        let directory = tempdir().unwrap();
+        let fetcher = HttpFetcher::new("model-test").unwrap();
+        let result = fetcher.fetch(
+            "http://127.0.0.1:9/model.bin",
+            &directory.path().join("model.bin"),
+            8,
+            &mut |_| {},
+        );
+        assert!(
+            matches!(result, Err(ModelInstallError::Download(message)) if message.contains("HTTPS"))
+        );
+    }
+
+    #[test]
     fn cancellation_interrupts_a_stalled_response_body() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -289,7 +314,7 @@ mod tests {
             thread::sleep(Duration::from_secs(5));
         });
 
-        let fetcher = HttpFetcher::new("cancel-test").unwrap();
+        let fetcher = HttpFetcher::allowing_plain_http("cancel-test").unwrap();
         let cancellation = fetcher.cancellation();
         let directory = tempdir().unwrap();
         let destination = directory.path().join("partial.bin");

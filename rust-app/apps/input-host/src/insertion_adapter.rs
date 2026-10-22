@@ -31,6 +31,17 @@ pub struct DeliveryFailure {
 /// the insertion is given up. A notification, a tooltip or a menu of another
 /// program can take the foreground for a moment; the user has not left.
 const FOREGROUND_RETURN_GRACE: Duration = Duration::from_millis(450);
+
+/// The user chose to keep dictation off the clipboard (Settings > Dictation).
+static AVOID_CLIPBOARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_avoid_clipboard(avoid: bool) {
+    AVOID_CLIPBOARD.store(avoid, std::sync::atomic::Ordering::Release);
+}
+
+fn avoids_clipboard() -> bool {
+    AVOID_CLIPBOARD.load(std::sync::atomic::Ordering::Acquire)
+}
 const FOREGROUND_RETURN_POLL: Duration = Duration::from_millis(25);
 
 /// Routes one immutable payload by target capability. A route is attempted at
@@ -105,6 +116,25 @@ pub fn deliver(
             failure.stage = "native_edit";
             return Err(failure);
         }
+    }
+
+    if !force_clipboard_transaction && avoids_clipboard() {
+        // Typed key by key: slower, and an editor's auto-completion may act
+        // on it, but no other program can read it from the clipboard.
+        return inject::type_text(target_snapshot, payload)
+            .map(|()| {
+                on_dispatched();
+                DeliveryReceipt {
+                    method: InsertionMethod::UnicodeInput,
+                    delivery: InsertionDelivery::Dispatched,
+                    clipboard_receipt: None,
+                }
+            })
+            .map_err(|error| {
+                let mut failure = injection_failure(InsertionMethod::UnicodeInput, error);
+                failure.stage = "unicode_input";
+                failure
+            });
     }
 
     let shortcut = target::paste_shortcut(target_snapshot);

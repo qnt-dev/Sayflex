@@ -2,6 +2,10 @@ name: Rust quality
 
 on:
   push:
+    # Every branch, not only release tags: the audit of 2026-10-21 found an
+    # installed build that no CI run had checked.
+    branches:
+      - "**"
     tags:
       - "v*"
     paths:

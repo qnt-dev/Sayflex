@@ -1852,3 +1852,18 @@ msgstr "El modelo de voz se carga cuando empiezas a dictar."
 
 msgid "Details and cancel are in Models."
 msgstr "Los detalles y la cancelación están en Modelos."
+
+msgid "INSERTION"
+msgstr "INSERCIÓN"
+
+msgid "Paste through the clipboard"
+msgstr "Pegar mediante el portapapeles"
+
+msgid "Type the text"
+msgstr "Escribir el texto"
+
+msgid "Fast. Clipboard tools and remote sessions can read the text for a moment"
+msgstr "Rápido. Las herramientas del portapapeles y las sesiones remotas pueden leer el texto un instante"
+
+msgid "No clipboard. Slower; editors with auto-completion may change the text"
+msgstr "Sin portapapeles. Más lento; los editores con autocompletado pueden cambiar el texto"

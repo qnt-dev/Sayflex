@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 Describe 'Installer maintenance decisions and language requests' {
     It 'runs the compiled Pascal helpers without a wizard, installation, or profile access' {

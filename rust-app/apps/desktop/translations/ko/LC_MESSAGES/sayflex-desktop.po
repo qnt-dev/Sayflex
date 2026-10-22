@@ -1852,3 +1852,18 @@ msgstr "받아쓰기를 시작하면 음성 모델이 로드됩니다."
 
 msgid "Details and cancel are in Models."
 msgstr "세부 정보와 취소는 모델에 있습니다."
+
+msgid "INSERTION"
+msgstr "삽입"
+
+msgid "Paste through the clipboard"
+msgstr "클립보드로 붙여넣기"
+
+msgid "Type the text"
+msgstr "텍스트 입력"
+
+msgid "Fast. Clipboard tools and remote sessions can read the text for a moment"
+msgstr "빠름. 클립보드 도구와 원격 세션이 잠시 텍스트를 읽을 수 있음"
+
+msgid "No clipboard. Slower; editors with auto-completion may change the text"
+msgstr "클립보드 없음. 더 느리며 자동 완성 편집기가 텍스트를 바꿀 수 있음"

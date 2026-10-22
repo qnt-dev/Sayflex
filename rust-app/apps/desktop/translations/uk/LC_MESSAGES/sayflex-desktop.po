@@ -1852,3 +1852,18 @@ msgstr "Мовна модель завантажиться, коли ви поч
 
 msgid "Details and cancel are in Models."
 msgstr "Подробиці та скасування — у розділі «Моделі»."
+
+msgid "INSERTION"
+msgstr "ВСТАВЛЕННЯ"
+
+msgid "Paste through the clipboard"
+msgstr "Вставляти через буфер обміну"
+
+msgid "Type the text"
+msgstr "Друкувати текст"
+
+msgid "Fast. Clipboard tools and remote sessions can read the text for a moment"
+msgstr "Швидко. Програми буфера обміну й віддалені сеанси можуть на мить прочитати текст"
+
+msgid "No clipboard. Slower; editors with auto-completion may change the text"
+msgstr "Без буфера обміну. Повільніше; редактори з автодоповненням можуть змінити текст"

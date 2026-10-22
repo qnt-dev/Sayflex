@@ -41,7 +41,7 @@ Describe 'Local NVIDIA test payload boundary' {
         $app = Join-Path $TestDrive ([Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $app | Out-Null
         Set-Content -LiteralPath (Join-Path $app 'sayflex-test-channel') -Value 'test-nvidia'
-        Set-Content -LiteralPath (Join-Path $app 'SayFlex.Speech.Cuda.exe') -Value 'worker fixture'
+        Set-Content -LiteralPath (Join-Path $app 'SayFlex.Speech.Cuda.exe') -Value 'worker fixture importing cudart64_13.dll'
         $manifest = [pscustomobject]@{
             product = 'SayFlex'; channel = 'test-nvidia'; official_release = $false
             source_snapshot = [pscustomobject]@{ sha256 = ('a' * 64); files = @('fixture') }

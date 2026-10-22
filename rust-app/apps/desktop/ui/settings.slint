@@ -187,6 +187,7 @@ export component SettingsWindow inherits Window {
     in-out property <string> dictation-language: "auto";
     in-out property <string> dictation-language-label: @tr("Auto-detect");
     in-out property <string> release-mode: "fastest";
+    in-out property <string> insertion-mode: "clipboard";
     in-out property <string> release-mode-label: @tr("Fast response");
     in property <bool> release-mode-locked: false;
     in property <string> release-mode-note: "";
@@ -299,6 +300,7 @@ export component SettingsWindow inherits Window {
     callback set-output-mode(string);
     callback set-dictation-language(string);
     callback set-release-mode(string);
+    callback set-insertion-mode(string);
     callback select-speech-backend(int);
     callback download-cuda-runtime();
     callback cancel-cuda-runtime();
@@ -506,12 +508,14 @@ export component SettingsWindow inherits Window {
                     release-mode-value: root.release-mode;
                     release-mode-locked: root.release-mode-locked;
                     release-mode-note: root.release-mode-note;
+                    insertion-mode-value: root.insertion-mode;
                     keeping-history: root.history-enabled;
                     hotkey: root.dictate-hotkey;
                     select-backend(index) => { root.select-speech-backend(index); }
                     set-output-mode(value) => { root.set-output-mode(value); }
                     set-dictation-language(value) => { root.set-dictation-language(value); }
                     set-release-mode(value) => { root.set-release-mode(value); }
+                    set-insertion-mode(value) => { root.set-insertion-mode(value); }
                     set-keeping-history(next) => { root.set-history-enabled(next); }
                 }
 

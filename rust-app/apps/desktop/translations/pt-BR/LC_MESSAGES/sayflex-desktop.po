@@ -1852,3 +1852,18 @@ msgstr "O modelo de fala é carregado quando você começa a ditar."
 
 msgid "Details and cancel are in Models."
 msgstr "Detalhes e cancelamento ficam em Modelos."
+
+msgid "INSERTION"
+msgstr "INSERÇÃO"
+
+msgid "Paste through the clipboard"
+msgstr "Colar pela área de transferência"
+
+msgid "Type the text"
+msgstr "Digitar o texto"
+
+msgid "Fast. Clipboard tools and remote sessions can read the text for a moment"
+msgstr "Rápido. Ferramentas da área de transferência e sessões remotas podem ler o texto por um instante"
+
+msgid "No clipboard. Slower; editors with auto-completion may change the text"
+msgstr "Sem área de transferência. Mais lento; editores com preenchimento automático podem alterar o texto"

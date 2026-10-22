@@ -47,7 +47,11 @@ $required = @(
     'ocr-models\screen-ocr-ppocrv5-mobile-v3.9.2\bundle.verified.json',
     'build-manifest.json',
     'speech-backends.json',
-    'speech-vad\ggml-silero-v6.2.0.bin'
+    'speech-vad\ggml-silero-v6.2.0.bin',
+    'vcruntime140.dll',
+    'vcruntime140_1.dll',
+    'msvcp140.dll',
+    'msvcp140_1.dll'
 )
 if ($TestNvidia) {
     $required += @('sayflex-test-channel', 'TEST-BUILD-README.txt', 'THIRD_PARTY_NOTICES.md')
@@ -201,6 +205,13 @@ function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
 # one exact set of bytes. It is the authority used by every later comparison.
 $buildManifestPath = Join-Path $appRoot 'build-manifest.json'
 $buildManifest = Get-Content -LiteralPath $buildManifestPath -Raw | ConvertFrom-Json
+# The developer preview's Battle for Wesnoth screenshot is GPL and must never be
+# compiled into the program again.
+$desktopText = [System.Text.Encoding]::ASCII.GetString(
+    [System.IO.File]::ReadAllBytes((Join-Path $appRoot 'SayFlex.exe')))
+if ($desktopText.Contains('Wesnoth') -or $desktopText.Contains('battle-for-wesnoth')) {
+    $failures.Add('SayFlex.exe contains the GPL Battle for Wesnoth preview screenshot or its name')
+}
 Import-Module (Join-Path $PSScriptRoot 'test-nvidia-packaging.psm1') -Force
 try {
     Assert-NoBundledNvidiaRuntime -AppDirectory $appRoot

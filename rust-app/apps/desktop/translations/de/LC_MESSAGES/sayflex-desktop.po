@@ -1852,3 +1852,18 @@ msgstr "Das Sprachmodell wird geladen, sobald Sie zu diktieren beginnen."
 
 msgid "Details and cancel are in Models."
 msgstr "Details und Abbrechen finden Sie unter Modelle."
+
+msgid "INSERTION"
+msgstr "EINFÜGEN"
+
+msgid "Paste through the clipboard"
+msgstr "Über die Zwischenablage einfügen"
+
+msgid "Type the text"
+msgstr "Text eintippen"
+
+msgid "Fast. Clipboard tools and remote sessions can read the text for a moment"
+msgstr "Schnell. Zwischenablage-Tools und Remotesitzungen können den Text kurz lesen"
+
+msgid "No clipboard. Slower; editors with auto-completion may change the text"
+msgstr "Ohne Zwischenablage. Langsamer; Editoren mit Autovervollständigung können den Text ändern"

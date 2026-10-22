@@ -7,8 +7,8 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
-            KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput, VK_C, VK_CONTROL,
-            VK_INSERT, VK_LCONTROL, VK_LMENU, VK_SHIFT, VK_V,
+            KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput,
+            VK_C, VK_CONTROL, VK_INSERT, VK_LCONTROL, VK_LMENU, VK_RETURN, VK_SHIFT, VK_V,
         },
         WindowsAndMessaging::{
             ES_PASSWORD, GA_ROOT, GUITHREADINFO, GWL_STYLE, GetAncestor, GetClassNameW,
@@ -245,6 +245,76 @@ pub fn foreground_window_handle() -> u64 {
     let root = unsafe { GetAncestor(foreground, GA_ROOT) };
     let actual = if root.is_null() { foreground } else { root };
     actual as usize as u64
+}
+
+/// Characters typed per `SendInput` call. The target window is checked
+/// between batches, so a switch to another window stops the typing.
+const TYPED_BATCH: usize = 24;
+
+/// Types `text` as Unicode keystrokes, without the clipboard. A line break is
+/// typed as Enter. Returns `TargetChanged` if the target lost the foreground
+/// before anything was typed, and `Partial` if it lost it part way through.
+pub fn type_text(target: TargetSnapshot, text: &str) -> Result<(), InjectionError> {
+    ensure_injection_safe()?;
+    let units = text
+        .replace("\r\n", "\n")
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let mut typed = 0_u32;
+    for batch in units.chunks(TYPED_BATCH) {
+        if !is_foreground(target) {
+            return Err(if typed == 0 {
+                InjectionError::TargetChanged
+            } else {
+                InjectionError::Partial {
+                    sent: typed,
+                    expected: units.len() as u32,
+                    win32: 0,
+                }
+            });
+        }
+        let inputs = batch
+            .iter()
+            .flat_map(|unit| {
+                if *unit == u16::from(b'\n') {
+                    [
+                        scan_code_key(VK_RETURN, false),
+                        scan_code_key(VK_RETURN, true),
+                    ]
+                } else {
+                    [unicode_key(*unit, false), unicode_key(*unit, true)]
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = send(&inputs) {
+            return Err(if typed == 0 {
+                error
+            } else {
+                InjectionError::Partial {
+                    sent: typed,
+                    expected: units.len() as u32,
+                    win32: 0,
+                }
+            });
+        }
+        typed += batch.len() as u32;
+    }
+    Ok(())
+}
+
+fn unicode_key(unit: u16, key_up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: 0,
+                wScan: unit,
+                dwFlags: KEYEVENTF_UNICODE | if key_up { KEYEVENTF_KEYUP } else { 0 },
+                time: 0,
+                dwExtraInfo: SYNTHETIC_MARKER,
+            },
+        },
+    }
 }
 
 fn scan_code_key(virtual_key: u16, key_up: bool) -> INPUT {

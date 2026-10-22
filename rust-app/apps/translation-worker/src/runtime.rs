@@ -61,6 +61,8 @@ impl LlamaRuntimeManager {
         mut progress: impl FnMut(DownloadProgress),
     ) -> Result<PathBuf> {
         if self.is_installed() {
+            // Earlier versions kept the 33 MB archive beside its extracted copy.
+            let _ = fs::remove_file(self.root.join(RUNTIME_ARCHIVE));
             progress(DownloadProgress {
                 phase: InstallPhase::Ready,
                 bytes_received: RUNTIME_DOWNLOAD_BYTES,
@@ -104,6 +106,9 @@ impl LlamaRuntimeManager {
             total_bytes: RUNTIME_DOWNLOAD_BYTES,
         });
         self.extract_atomically(&archive)?;
+        // The extracted runtime is verified by its marker; the archive is
+        // not needed again and only doubled the disk use.
+        let _ = fs::remove_file(&archive);
         progress(DownloadProgress {
             phase: InstallPhase::Ready,
             bytes_received: RUNTIME_DOWNLOAD_BYTES,
@@ -163,6 +168,9 @@ impl LlamaRuntimeManager {
                 .enclosed_name()
                 .ok_or_else(|| anyhow::anyhow!("runtime archive contains an unsafe path"))?
                 .to_owned();
+            if !runtime_needs(&relative) {
+                continue;
+            }
             let destination = staging.join(relative);
             if entry.is_dir() {
                 fs::create_dir_all(&destination)?;
@@ -203,6 +211,24 @@ impl LlamaRuntimeManager {
         remove_directory_if_present(&previous)?;
         Ok(())
     }
+}
+
+/// SayFlex runs only `llama-server`. The release archive also carries the
+/// command-line tools, benchmarks and an RPC server, each with its own library;
+/// none of them is extracted.
+fn runtime_needs(relative: &Path) -> bool {
+    let name = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.ends_with(".exe") {
+        return name == "llama-server.exe";
+    }
+    if name.ends_with("-impl.dll") {
+        return name == "llama-server-impl.dll";
+    }
+    true
 }
 
 fn measure_runtime_path(path: &Path, metadata: &fs::Metadata) -> Result<RemovalReceipt> {
@@ -298,6 +324,29 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{LlamaRuntimeManager, REQUIRED_FILES, RUNTIME_SHA256};
+
+    #[test]
+    fn only_the_server_and_its_libraries_are_extracted() {
+        use std::path::Path;
+        for needed in [
+            "llama-server.exe",
+            "llama-server-impl.dll",
+            "llama.dll",
+            "ggml-vulkan.dll",
+            "ggml-cpu-haswell.dll",
+            "LICENSE-curl",
+        ] {
+            assert!(super::runtime_needs(Path::new(needed)), "{needed}");
+        }
+        for unneeded in [
+            "llama-cli.exe",
+            "llama-cli-impl.dll",
+            "ggml-rpc-server.exe",
+            "llama-bench.exe",
+        ] {
+            assert!(!super::runtime_needs(Path::new(unneeded)), "{unneeded}");
+        }
+    }
 
     #[test]
     fn incomplete_runtime_is_never_reported_as_installed() {

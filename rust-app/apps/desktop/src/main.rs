@@ -908,6 +908,8 @@ struct AppState {
     output_mode: SpeechOutputMode,
     dictation_language: DictationLanguage,
     fast_release_previews: bool,
+    /// Type dictation instead of pasting it through the clipboard.
+    avoid_clipboard_insertion: bool,
     visualizer_style: VisualizerStyle,
     circular_spectrum_palette: CircularSpectrumPalette,
     broadcast_mic_palette: BroadcastMicPalette,
@@ -1055,6 +1057,7 @@ impl AppState {
             output_mode,
             dictation_language: saved_settings.dictation_language,
             fast_release_previews: saved_settings.fast_release_previews,
+            avoid_clipboard_insertion: saved_settings.avoid_clipboard_insertion,
             visualizer_style: saved_settings.visualizer_style,
             circular_spectrum_palette: saved_settings.circular_spectrum_palette,
             broadcast_mic_palette: saved_settings.broadcast_mic_palette,
@@ -5212,6 +5215,10 @@ fn handle_input_event(event: InputHostEvent, runtime: &RuntimeUi) {
                     );
                     return;
                 }
+                let avoid_clipboard = state.borrow().avoid_clipboard_insertion;
+                let _ = workers
+                    .input
+                    .send(&InputHostCommand::SetInsertionPolicy { avoid_clipboard });
                 set_runtime_status(settings, state_text(state, UiText::InputReady));
             } else {
                 state.borrow_mut().input_ready = false;
@@ -5906,6 +5913,7 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 rust_protocol::InsertionMethod::NativeEditMessage => "native_edit_message",
                 rust_protocol::InsertionMethod::ClipboardTransaction => "clipboard_transaction",
                 rust_protocol::InsertionMethod::WezTermCli => "wezterm_cli",
+                rust_protocol::InsertionMethod::UnicodeInput => "unicode_input",
             };
             let delivery_name = match delivery {
                 rust_protocol::InsertionDelivery::Committed => "committed",

@@ -782,6 +782,8 @@ pub enum InsertionMethod {
     /// without a synchronous native adapter.
     ClipboardTransaction,
     WezTermCli,
+    /// The text typed as Unicode keystrokes; the clipboard is not used.
+    UnicodeInput,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -979,6 +981,12 @@ pub enum InputHostCommand {
     /// chose it, the same as with the insert-last shortcut.
     InsertIntoForeground {
         transcript: Transcript,
+    },
+    /// The user's choice of how dictation reaches other applications.
+    /// `avoid_clipboard` types the text instead of pasting it, so clipboard
+    /// monitors and remote-session synchronizers never receive it.
+    SetInsertionPolicy {
+        avoid_clipboard: bool,
     },
     CopyText {
         request_id: RequestId,
@@ -3411,6 +3419,9 @@ mod complete_wire_schema_tests {
             InputHostCommand::InsertIntoForeground {
                 transcript: transcript(),
             },
+            InputHostCommand::SetInsertionPolicy {
+                avoid_clipboard: true,
+            },
             InputHostCommand::CopyText {
                 request_id,
                 text: "text".to_owned(),
@@ -3880,7 +3891,8 @@ mod complete_wire_schema_tests {
         InputHostCommand::CopyTranscript { .. } => 2, InputHostCommand::CopyText { .. } => 3,
         InputHostCommand::ReplaceSelection { .. } => 4, InputHostCommand::CancelSelection { .. } => 5,
         InputHostCommand::SetScreenCaptureMode { .. } => 6, InputHostCommand::Shutdown => 7,
-        InputHostCommand::InsertIntoForeground { .. } => 8
+        InputHostCommand::InsertIntoForeground { .. } => 8,
+        InputHostCommand::SetInsertionPolicy { .. } => 9
     );
     index_fn!(ocr_command_index, OcrWorkerCommand,
         OcrWorkerCommand::Recognize { .. } => 0, OcrWorkerCommand::Cancel { .. } => 1,
@@ -4026,7 +4038,7 @@ mod complete_wire_schema_tests {
         let companion_events = companion_events();
 
         assert_complete(&input_events, input_event_index, 20);
-        assert_complete(&input_commands, input_command_index, 9);
+        assert_complete(&input_commands, input_command_index, 10);
         assert_complete(&ocr_commands, ocr_command_index, 3);
         assert_complete(&ocr_events, ocr_event_index, 4);
         assert_complete(&translation_commands, translation_command_index, 20);
@@ -4051,7 +4063,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x164e_1c04_fad9_e84a,
+            0x4199_3afd_4ec1_56df,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

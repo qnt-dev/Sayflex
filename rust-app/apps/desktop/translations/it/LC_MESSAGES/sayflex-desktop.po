@@ -1852,3 +1852,18 @@ msgstr "Il modello vocale si carica quando inizi a dettare."
 
 msgid "Details and cancel are in Models."
 msgstr "Dettagli e annullamento sono in Modelli."
+
+msgid "INSERTION"
+msgstr "INSERIMENTO"
+
+msgid "Paste through the clipboard"
+msgstr "Incolla tramite gli appunti"
+
+msgid "Type the text"
+msgstr "Digita il testo"
+
+msgid "Fast. Clipboard tools and remote sessions can read the text for a moment"
+msgstr "Veloce. Gli strumenti degli appunti e le sessioni remote possono leggere il testo per un attimo"
+
+msgid "No clipboard. Slower; editors with auto-completion may change the text"
+msgstr "Senza appunti. Più lento; gli editor con completamento automatico possono modificare il testo"

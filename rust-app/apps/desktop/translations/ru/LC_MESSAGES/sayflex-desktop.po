@@ -1852,3 +1852,18 @@ msgstr "Речевая модель загрузится, когда вы нач
 
 msgid "Details and cancel are in Models."
 msgstr "Подробности и отмена — в разделе «Модели»."
+
+msgid "INSERTION"
+msgstr "ВСТАВКА"
+
+msgid "Paste through the clipboard"
+msgstr "Вставлять через буфер обмена"
+
+msgid "Type the text"
+msgstr "Печатать текст"
+
+msgid "Fast. Clipboard tools and remote sessions can read the text for a moment"
+msgstr "Быстро. Программы буфера обмена и удалённые сеансы могут на миг прочитать текст"
+
+msgid "No clipboard. Slower; editors with auto-completion may change the text"
+msgstr "Без буфера обмена. Медленнее; редакторы с автодополнением могут изменить текст"

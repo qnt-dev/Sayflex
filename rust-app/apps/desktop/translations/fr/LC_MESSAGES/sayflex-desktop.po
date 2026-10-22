@@ -1852,3 +1852,18 @@ msgstr "Le modèle vocal se charge quand vous commencez à dicter."
 
 msgid "Details and cancel are in Models."
 msgstr "Les détails et l'annulation se trouvent dans Modèles."
+
+msgid "INSERTION"
+msgstr "SAISIE"
+
+msgid "Paste through the clipboard"
+msgstr "Coller via le presse-papiers"
+
+msgid "Type the text"
+msgstr "Taper le texte"
+
+msgid "Fast. Clipboard tools and remote sessions can read the text for a moment"
+msgstr "Rapide. Les outils du presse-papiers et les sessions distantes peuvent lire le texte un instant"
+
+msgid "No clipboard. Slower; editors with auto-completion may change the text"
+msgstr "Sans presse-papiers. Plus lent ; les éditeurs avec complétion automatique peuvent modifier le texte"

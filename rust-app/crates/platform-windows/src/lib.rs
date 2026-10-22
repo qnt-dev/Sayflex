@@ -869,18 +869,6 @@ fn primary_language_codes<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Strin
     codes
 }
 
-#[cfg(test)]
-mod language_code_tests {
-    #[test]
-    fn locale_names_become_unique_primary_codes_in_order() {
-        assert_eq!(
-            super::primary_language_codes(
-                ["ru-RU", "en-US", "ru-RU", "uk-UA", "EN-GB", "", "x"].into_iter()
-            ),
-            ["ru", "en", "uk"]
-        );
-    }
-}
 
 #[cfg(not(windows))]
 pub mod region_selection {
@@ -974,4 +962,17 @@ pub fn name_this_application_to_the_shell() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod language_code_tests {
+    #[test]
+    fn locale_names_become_unique_primary_codes_in_order() {
+        assert_eq!(
+            super::primary_language_codes(
+                ["ru-RU", "en-US", "ru-RU", "uk-UA", "EN-GB", "", "x"].into_iter()
+            ),
+            ["ru", "en", "uk"]
+        );
+    }
 }
