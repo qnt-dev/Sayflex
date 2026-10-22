@@ -869,7 +869,6 @@ fn primary_language_codes<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Strin
     codes
 }
 
-
 #[cfg(not(windows))]
 pub mod region_selection {
     use rust_protocol::PhysicalRect;

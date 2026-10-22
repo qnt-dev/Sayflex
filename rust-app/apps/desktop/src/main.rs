@@ -1399,6 +1399,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut run_session =
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
+    settings_view::release_native_window_on_close(&settings);
     if rust_app_core::product::is_test_build() {
         settings.set_window_title("SayFlex Test".into());
     }
@@ -1535,6 +1536,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "screen-translation")]
     let screen_result_windows = Rc::new(RefCell::new(ScreenResultWindowRegistry::default()));
     let translator = TranslatorWindow::new()?;
+    settings_view::release_native_window_on_close(&translator);
     let tray = AppTray::new()?;
     precreate_indicator(
         &recording_overlays.panel.indicator,
@@ -1889,9 +1891,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     if !env::args().any(|argument| argument == "--background") {
-        settings.show()?;
-        configure_standard_app_window(&settings, "Settings");
-        visualizer::wake_animation();
+        settings_view::present_settings_window(&settings)?;
     }
     settings.on_animation_wanted(visualizer::wake_animation);
     // A second launch (the shortcut, the Start menu) shows these settings.
@@ -1906,9 +1906,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 rust_app_core::diagnostics::log_line(
                     "desktop lifecycle=activated_by_second_launch",
                 );
-                let _ = settings.show();
-                configure_standard_app_window(&settings, "Settings");
-                visualizer::wake_animation();
+                let _ = settings_view::present_settings_window(&settings);
                 if let Some(handle) = slint_window_handle(settings.window()) {
                     rust_platform_windows::activate_window(handle);
                 }

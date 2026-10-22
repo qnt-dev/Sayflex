@@ -3011,6 +3011,79 @@ pub(crate) fn wire_settings(
     }
 }
 
+/// Shows the settings window as a standard application window.
+///
+/// Slint gives a window its preferred size only when it is first shown before
+/// the event loop runs. After a `--background` start (autostart) the window is
+/// first shown from the tray or by a second launch, and it opened at its
+/// minimum size, 520 × 300, with the page cut off. Its first showing gets the
+/// preferred size of settings.slint; later ones keep what the user chose.
+pub(crate) fn present_settings_window(
+    settings: &SettingsWindow,
+) -> Result<(), slint::PlatformError> {
+    thread_local! {
+        static SHOWN_BEFORE: Cell<bool> = const { Cell::new(false) };
+    }
+    if !SHOWN_BEFORE.replace(true) {
+        settings
+            .window()
+            .set_size(slint::LogicalSize::new(1000.0, 720.0));
+    }
+    settings.show()?;
+    configure_standard_app_window(settings, "Settings");
+    settings.window().request_redraw();
+    crate::visualizer::wake_animation();
+    Ok(())
+}
+
+/// Hides a standard window and destroys its native window.
+///
+/// Slint 1.17 throttles redraws with a timer at the monitor's refresh rate
+/// that runs until the window has drawn. A hidden window never draws, so once
+/// a hidden window had something to redraw, that timer ran for good: after a
+/// dictation updated the closed settings window (history, status), the
+/// interface thread woke 200–270 times a second (every 5 ms on a 170 Hz
+/// monitor). A destroyed window has nothing to redraw, and showing it again
+/// creates it with the same size and position.
+pub(crate) fn hide_releasing_native_window<T: ComponentHandle>(component: &T) {
+    const DESTROY_ON_HIDE: &str = "SLINT_DESTROY_WINDOW_ON_HIDE";
+    let previous = std::env::var_os(DESTROY_ON_HIDE);
+    // SAFETY: the environment of a Windows process is synchronized by the
+    // system, and Slint reads this variable only inside `hide()`, on this
+    // thread.
+    unsafe { std::env::set_var(DESTROY_ON_HIDE, "1") };
+    let _ = component.hide();
+    match previous {
+        // SAFETY: as above.
+        Some(value) => unsafe { std::env::set_var(DESTROY_ON_HIDE, value) },
+        // SAFETY: as above.
+        None => unsafe { std::env::remove_var(DESTROY_ON_HIDE) },
+    }
+}
+
+/// Hides through [`hide_releasing_native_window`], after the event that asked
+/// for it has been handled: the native window must not be destroyed while it
+/// is still dispatching that event.
+pub(crate) fn hide_releasing_native_window_later<T: ComponentHandle + 'static>(component: &T) {
+    let weak = component.as_weak();
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        if let Some(component) = weak.upgrade() {
+            hide_releasing_native_window(&component);
+        }
+    });
+}
+
+/// The window's own close button hides it the same way.
+pub(crate) fn release_native_window_on_close<T: ComponentHandle + 'static>(component: &T) {
+    let weak = component.as_weak();
+    component.window().on_close_requested(move || {
+        if let Some(component) = weak.upgrade() {
+            hide_releasing_native_window_later(&component);
+        }
+        slint::CloseRequestResponse::KeepWindowShown
+    });
+}
+
 pub(crate) fn wire_tray(
     tray: &AppTray,
     settings: &SettingsWindow,
@@ -3022,10 +3095,7 @@ pub(crate) fn wire_tray(
         let settings = settings.as_weak();
         tray.on_open_settings(move || {
             if let Some(settings) = settings.upgrade() {
-                let _ = settings.show();
-                configure_standard_app_window(&settings, "Settings");
-                settings.window().request_redraw();
-                crate::visualizer::wake_animation();
+                let _ = present_settings_window(&settings);
             }
         });
     }
@@ -3234,7 +3304,7 @@ pub(crate) fn wire_translator(
             if let Some(translator) = translator_weak.upgrade() {
                 translator.set_model_offer_visible(false);
                 translator.set_model_offer_action("".into());
-                let _ = translator.hide();
+                hide_releasing_native_window_later(&translator);
             }
         });
     }
