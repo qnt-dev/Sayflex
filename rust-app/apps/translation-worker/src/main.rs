@@ -303,22 +303,49 @@ impl WorkerState {
 }
 
 /// Checks twice a minute whether a contextual model has gone unused.
-fn start_idle_release(state: Arc<Mutex<WorkerState>>, writer: EventWriter) -> Result<()> {
-    std::thread::Builder::new()
-        .name("translation-idle-release".into())
-        .spawn(move || {
-            loop {
-                std::thread::sleep(IDLE_RELEASE_CHECK);
-                if recover_lock(&state)
-                    .release_idle_contextual_engine(&writer, Instant::now())
-                    .is_err()
-                {
-                    // The desktop closed our output; the worker is ending.
-                    return;
+fn start_idle_release(state: Arc<Mutex<WorkerState>>, writer: EventWriter) -> Result<Periodic> {
+    Periodic::start("translation-idle-release", IDLE_RELEASE_CHECK, move || {
+        // An error means the desktop closed our output; the worker is ending.
+        recover_lock(&state)
+            .release_idle_contextual_engine(&writer, Instant::now())
+            .is_ok()
+    })
+}
+
+/// A thread that runs `tick` every `period` until `tick` returns false or the
+/// handle is stopped.
+///
+/// The idle release holds an `EventWriter`, and the output thread ends only
+/// when every writer is gone: a thread that could not be stopped kept the
+/// worker alive after `Shutdown` and after its input closed.
+struct Periodic {
+    stop: Sender<()>,
+    thread: JoinHandle<()>,
+}
+
+impl Periodic {
+    fn start(
+        name: &str,
+        period: Duration,
+        mut tick: impl FnMut() -> bool + Send + 'static,
+    ) -> Result<Self> {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(period) {
+                    if !tick() {
+                        return;
+                    }
                 }
-            }
-        })?;
-    Ok(())
+            })?;
+        Ok(Self { stop, thread })
+    }
+
+    fn stop(self) {
+        drop(self.stop);
+        let _ = self.thread.join();
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -676,7 +703,7 @@ fn main() -> Result<()> {
     let (writer, output_thread) = EventWriter::start()?;
     let (installs, install_thread) =
         InstallActor::start(Arc::clone(&state), writer.clone(), cancellation)?;
-    start_idle_release(Arc::clone(&state), writer.clone())?;
+    let idle_release = start_idle_release(Arc::clone(&state), writer.clone())?;
     let coordinator = ProviderActorHandle::start(Providers::new(
         data_root().join("translation-credentials.dat"),
     ))?;
@@ -723,6 +750,7 @@ fn main() -> Result<()> {
         }
     }
     let provider_stopped = coordinator.shutdown();
+    idle_release.stop();
     installs.cancel();
     installs.send(InstallCommand::Shutdown);
     drop(installs);
@@ -3086,7 +3114,7 @@ mod local_model_policy_tests {
 
 #[cfg(test)]
 mod keep_warm_release_tests {
-    use std::sync::mpsc;
+    use std::{sync::mpsc, time::Duration};
 
     use rust_protocol::TranslationWorkerEvent;
     use rust_translation_engine::{TranslationCatalog, TranslationEngine};
@@ -3154,6 +3182,46 @@ mod keep_warm_release_tests {
         )));
         history.shutdown();
         history_thread.join().unwrap();
+    }
+
+    #[test]
+    fn the_idle_release_thread_lets_go_of_its_writer_when_stopped() {
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let ticking = writer.clone();
+        let periodic =
+            super::Periodic::start("test-periodic", Duration::from_secs(3600), move || {
+                let _ = &ticking;
+                true
+            })
+            .unwrap();
+        drop(writer);
+
+        let started = std::time::Instant::now();
+        periodic.stop();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "stopping waits for no period"
+        );
+        // Every writer is gone, so the output side sees the end, as the
+        // worker's output thread must at shutdown.
+        assert!(matches!(
+            received.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn the_idle_release_thread_ends_when_its_check_fails() {
+        let (done, finished) = mpsc::channel();
+        let periodic =
+            super::Periodic::start("test-periodic", Duration::from_millis(5), move || {
+                let _ = done.send(());
+                false
+            })
+            .unwrap();
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        periodic.thread.join().unwrap();
     }
 
     #[test]
