@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.8.11"
+  #define AppVersion "0.8.12"
 #endif
 
 #ifdef TestNvidia
