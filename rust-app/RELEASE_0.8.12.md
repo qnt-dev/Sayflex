@@ -49,7 +49,10 @@ audit finding it closes.
 
 ## Interface and resources
 
-- Starting SayFlex again shows the running instance's settings (UI-01).
+- Starting SayFlex again shows the running instance's settings (UI-01). After
+  an autostart, settings open at full size instead of 520 × 300.
+- A closed settings or translator window no longer keeps the interface thread
+  awake: after a dictation it woke about 250 times a second (PERF-01).
 - Missing translations, screen-reader names and number agreement fixed (UI-02);
   clearer Overview states and statuses without raw milliseconds (UI-03).
 - The 60 Hz animation timer and the global mouse hook run only while something
