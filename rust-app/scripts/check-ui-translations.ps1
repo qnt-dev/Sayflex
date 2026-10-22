@@ -56,7 +56,7 @@ $messages | ForEach-Object { [void]$messageSet.Add($_) }
 $locales = @('ru', 'uk', 'es', 'pt-BR', 'de', 'fr', 'it', 'ko')
 $literalAllowlist = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 @(
-    'AUTO', 'CPU', 'CUDA', 'Vulkan', 'NVIDIA', 'PIN', 'ORIG', 'DUAL',
+    'AUTO', 'CPU', 'CUDA', 'Vulkan', 'NVIDIA', 'PIN', 'ORIG', 'DUAL', 'ON IMAGE', 'DEL',
     'SayFlex', 'SayFlex {}', 'Say', 'Flex', 'Ctrl + Alt + F', 'CTRL + ALT + F',
     'Deutsch', 'Español', 'Français', 'Italiano', 'Português (Brasil)', 'Hindi',
     'local', 'Monochrome', 'Region', 'Engine', 'Account', 'PALETTE', 'STYLE',

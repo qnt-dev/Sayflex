@@ -20,7 +20,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 35;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -500,6 +500,11 @@ pub struct TranslationResult {
     pub tokenize_duration_ms: u64,
     #[serde(default)]
     pub chunk_count: u32,
+    /// Numbers, times, dates or links in the translation could not be matched
+    /// to the source, even after a guarded retry. The text is still shown, but
+    /// the reader is told to check those values.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub protected_values_changed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -725,6 +730,13 @@ pub enum InputHostEvent {
         method: InsertionMethod,
         delivery: InsertionDelivery,
         dispatch_duration_ms: u64,
+    },
+    /// The paste command reached the target. Delivery is not yet known; the
+    /// clipboard transaction may still wait for a read acknowledgement and
+    /// then restore the previous clipboard. `InsertionCompleted` or `Failed`
+    /// follows for the same session.
+    InsertionDispatched {
+        session_id: SessionId,
     },
     Recovered {
         session_id: SessionId,
@@ -960,6 +972,12 @@ pub enum InputHostCommand {
         add_trailing_space: bool,
     },
     CopyTranscript {
+        transcript: Transcript,
+    },
+    /// The user pressed "Insert" on the failed-insertion notice. The input
+    /// host captures the window that is in front at that moment: the user
+    /// chose it, the same as with the insert-last shortcut.
+    InsertIntoForeground {
         transcript: Transcript,
     },
     CopyText {
@@ -2202,6 +2220,7 @@ mod tests {
                 backend_request_count: 1,
                 tokenize_duration_ms: 0,
                 chunk_count: 1,
+                protected_values_changed: false,
             },
             created_unix_ms: 123,
         };
@@ -2276,6 +2295,7 @@ mod tests {
                 backend_request_count: 1,
                 tokenize_duration_ms: 0,
                 chunk_count: 1,
+                protected_values_changed: false,
             },
             created_unix_ms: 123,
         };
@@ -2720,6 +2740,7 @@ mod wire_schema_tests {
             backend_request_count: 0,
             tokenize_duration_ms: 0,
             chunk_count: 0,
+            protected_values_changed: false,
         }
     }
 
@@ -2754,8 +2775,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 34,
-            "every fingerprint below was written for protocol 34: if a shape \
+            PROTOCOL_VERSION, 35,
+            "every fingerprint below was written for protocol 35: if a shape \
              changes, this number changes with it"
         );
     }
@@ -3212,6 +3233,7 @@ mod complete_wire_schema_tests {
             backend_request_count: 3,
             tokenize_duration_ms: 4,
             chunk_count: 5,
+            protected_values_changed: true,
         }
     }
 
@@ -3343,6 +3365,7 @@ mod complete_wire_schema_tests {
                 delivery: InsertionDelivery::PayloadRead,
                 dispatch_duration_ms: 1,
             },
+            InputHostEvent::InsertionDispatched { session_id },
             InputHostEvent::Recovered { session_id },
             InputHostEvent::SelectionReplaced { request_id },
             InputHostEvent::TextCopied { request_id },
@@ -3383,6 +3406,9 @@ mod complete_wire_schema_tests {
                 add_trailing_space: true,
             },
             InputHostCommand::CopyTranscript {
+                transcript: transcript(),
+            },
+            InputHostCommand::InsertIntoForeground {
                 transcript: transcript(),
             },
             InputHostCommand::CopyText {
@@ -3847,13 +3873,14 @@ mod complete_wire_schema_tests {
         InputHostEvent::Recovered { .. } => 12, InputHostEvent::SelectionReplaced { .. } => 13,
         InputHostEvent::TextCopied { .. } => 14, InputHostEvent::HotkeysApplied { .. } => 15,
         InputHostEvent::HotkeysRejected { .. } => 16, InputHostEvent::PauseChanged { .. } => 17,
-        InputHostEvent::Failed { .. } => 18
+        InputHostEvent::Failed { .. } => 18, InputHostEvent::InsertionDispatched { .. } => 19
     );
     index_fn!(input_command_index, InputHostCommand,
         InputHostCommand::SetHotkeys { .. } => 0, InputHostCommand::InsertTranscript { .. } => 1,
         InputHostCommand::CopyTranscript { .. } => 2, InputHostCommand::CopyText { .. } => 3,
         InputHostCommand::ReplaceSelection { .. } => 4, InputHostCommand::CancelSelection { .. } => 5,
-        InputHostCommand::SetScreenCaptureMode { .. } => 6, InputHostCommand::Shutdown => 7
+        InputHostCommand::SetScreenCaptureMode { .. } => 6, InputHostCommand::Shutdown => 7,
+        InputHostCommand::InsertIntoForeground { .. } => 8
     );
     index_fn!(ocr_command_index, OcrWorkerCommand,
         OcrWorkerCommand::Recognize { .. } => 0, OcrWorkerCommand::Cancel { .. } => 1,
@@ -3998,8 +4025,8 @@ mod complete_wire_schema_tests {
         let companion_commands = companion_commands();
         let companion_events = companion_events();
 
-        assert_complete(&input_events, input_event_index, 19);
-        assert_complete(&input_commands, input_command_index, 8);
+        assert_complete(&input_events, input_event_index, 20);
+        assert_complete(&input_commands, input_command_index, 9);
         assert_complete(&ocr_commands, ocr_command_index, 3);
         assert_complete(&ocr_events, ocr_event_index, 4);
         assert_complete(&translation_commands, translation_command_index, 20);
@@ -4024,7 +4051,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x32d9_4633_7b1d_7510,
+            0x164e_1c04_fad9_e84a,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

@@ -45,8 +45,9 @@ struct RenderRequest {
     opacity: f32,
 }
 
+/// The finished buffer moves to the interface thread without a copy.
 struct RenderedFrame {
-    pixels: Vec<u8>,
+    pixels: SharedPixelBuffer<Rgba8Pixel>,
 }
 
 pub(crate) struct PulseMatrixRenderer {
@@ -70,7 +71,7 @@ impl PulseMatrixRenderer {
                         request.opacity,
                     );
                     let rendered = RenderedFrame {
-                        pixels: frame.as_bytes().to_vec(),
+                        pixels: frame,
                     };
                     match frame_tx.try_send(rendered) {
                         Ok(()) => {}
@@ -112,14 +113,7 @@ impl PulseMatrixRenderer {
         while let Ok(frame) = self.frames.try_recv() {
             latest = Some(frame);
         }
-        latest.map(|frame| {
-            let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(
-                PULSE_MATRIX_IMAGE_SIZE,
-                PULSE_MATRIX_IMAGE_SIZE,
-            );
-            buffer.make_mut_bytes().copy_from_slice(&frame.pixels);
-            Image::from_rgba8_premultiplied(buffer)
-        })
+        latest.map(|frame| Image::from_rgba8_premultiplied(frame.pixels))
     }
 }
 

@@ -7,21 +7,27 @@ pub struct SpeechWorkerWindowsMetadata {
 pub fn windows_metadata(
     cuda_enabled: bool,
     vulkan_enabled: bool,
+    cpu_compat: bool,
 ) -> Result<SpeechWorkerWindowsMetadata, &'static str> {
-    match (cuda_enabled, vulkan_enabled) {
-        (false, false) => Ok(SpeechWorkerWindowsMetadata {
+    match (cuda_enabled, vulkan_enabled, cpu_compat) {
+        (false, false, false) => Ok(SpeechWorkerWindowsMetadata {
             description: "SayFlex CPU speech recognition worker",
             original_filename: "SayFlex.Speech.Cpu.exe",
         }),
-        (true, false) => Ok(SpeechWorkerWindowsMetadata {
+        (false, false, true) => Ok(SpeechWorkerWindowsMetadata {
+            description: "SayFlex CPU speech recognition worker for processors without AVX2",
+            original_filename: "SayFlex.Speech.CpuCompat.exe",
+        }),
+        (true, false, false) => Ok(SpeechWorkerWindowsMetadata {
             description: "SayFlex CUDA speech recognition worker",
             original_filename: "SayFlex.Speech.Cuda.exe",
         }),
-        (false, true) => Ok(SpeechWorkerWindowsMetadata {
+        (false, true, false) => Ok(SpeechWorkerWindowsMetadata {
             description: "SayFlex Vulkan speech recognition worker",
             original_filename: "SayFlex.Speech.Vulkan.exe",
         }),
-        (true, true) => Err("CUDA and Vulkan speech-worker features are mutually exclusive"),
+        (true, true, _) => Err("CUDA and Vulkan speech-worker features are mutually exclusive"),
+        (_, _, true) => Err("the compatibility build is a CPU-only speech worker"),
     }
 }
 
@@ -32,21 +38,25 @@ mod tests {
     #[test]
     fn each_published_backend_owns_its_installed_windows_filename() {
         assert_eq!(
-            windows_metadata(false, false),
+            windows_metadata(false, false, false),
             Ok(SpeechWorkerWindowsMetadata {
                 description: "SayFlex CPU speech recognition worker",
                 original_filename: "SayFlex.Speech.Cpu.exe",
             })
         );
         assert_eq!(
-            windows_metadata(true, false),
+            windows_metadata(false, false, true).map(|metadata| metadata.original_filename),
+            Ok("SayFlex.Speech.CpuCompat.exe")
+        );
+        assert_eq!(
+            windows_metadata(true, false, false),
             Ok(SpeechWorkerWindowsMetadata {
                 description: "SayFlex CUDA speech recognition worker",
                 original_filename: "SayFlex.Speech.Cuda.exe",
             })
         );
         assert_eq!(
-            windows_metadata(false, true),
+            windows_metadata(false, true, false),
             Ok(SpeechWorkerWindowsMetadata {
                 description: "SayFlex Vulkan speech recognition worker",
                 original_filename: "SayFlex.Speech.Vulkan.exe",
@@ -56,6 +66,8 @@ mod tests {
 
     #[test]
     fn mutually_exclusive_gpu_backends_cannot_claim_one_file() {
-        assert!(windows_metadata(true, true).is_err());
+        assert!(windows_metadata(true, true, false).is_err());
+        assert!(windows_metadata(true, false, true).is_err());
+        assert!(windows_metadata(false, true, true).is_err());
     }
 }

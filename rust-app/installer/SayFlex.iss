@@ -103,6 +103,15 @@ russian.MaintenanceLanguage=Язык приложения после устан�
 russian.MaintenanceLanguageKept=Текущий язык приложения сохранится.
 russian.MaintenanceContinue=Нажмите «Далее», чтобы продолжить.
 russian.MaintenanceReadyPrompt=Нажмите «%1», чтобы продолжить, или «Назад», чтобы проверить параметры.
+ProcessorTooOld=SayFlex needs a processor with SSE4.2 instructions (Intel or AMD, 2009 or newer). This processor does not have them, so setup will close.
+russian.ProcessorTooOld=SayFlex нужен процессор с инструкциями SSE4.2 (Intel или AMD, 2009 года и новее). У этого процессора их нет, поэтому установка будет закрыта.
+ukrainian.ProcessorTooOld=SayFlex потрібен процесор з інструкціями SSE4.2 (Intel або AMD, 2009 року й новіший). Цей процесор їх не має, тому встановлення буде закрито.
+spanish.ProcessorTooOld=SayFlex necesita un procesador con instrucciones SSE4.2 (Intel o AMD, de 2009 o posterior). Este procesador no las tiene, así que la instalación se cerrará.
+brazilianportuguese.ProcessorTooOld=O SayFlex precisa de um processador com instruções SSE4.2 (Intel ou AMD, de 2009 ou mais recente). Este processador não as tem, então a instalação será fechada.
+german.ProcessorTooOld=SayFlex benötigt einen Prozessor mit SSE4.2-Befehlen (Intel oder AMD, ab 2009). Dieser Prozessor hat sie nicht, daher wird die Installation beendet.
+french.ProcessorTooOld=SayFlex nécessite un processeur avec les instructions SSE4.2 (Intel ou AMD, 2009 ou plus récent). Ce processeur ne les a pas : l'installation va se fermer.
+italian.ProcessorTooOld=SayFlex richiede un processore con istruzioni SSE4.2 (Intel o AMD, dal 2009 in poi). Questo processore non le ha, quindi l'installazione verrà chiusa.
+korean.ProcessorTooOld=SayFlex에는 SSE4.2 명령을 지원하는 프로세서(2009년 이후 Intel 또는 AMD)가 필요합니다. 이 프로세서는 지원하지 않으므로 설치를 종료합니다.
 english.AutostartTask=Start SayFlex with Windows
 russian.AutostartTask=Запускать SayFlex вместе с Windows
 ukrainian.AutostartTask=Запускати SayFlex разом із Windows
@@ -149,6 +158,9 @@ Type: files; Name: "{group}\StyleFlex.lnk"
 ; bundled an unrelated experimental product into SayFlex.
 Type: files; Name: "{app}\SayFlex.Pet.exe"
 Type: filesandordirs; Name: "{app}\pet-assets"
+; Earlier universal installers bundled NVIDIA cuBLAS here. No installer ships
+; NVIDIA files any more; the app downloads them on the user's request.
+Type: filesandordirs; Name: "{app}\runtimes\cuda"
 #endif
 
 [Files]
@@ -188,6 +200,12 @@ function CoCreateGuid(var Guid: TInstallationGuid): Integer;
   external 'CoCreateGuid@{sys}\ole32.dll stdcall';
 function StringFromGUID2(var Guid: TInstallationGuid; Buffer: String; MaxLength: Integer): Integer;
   external 'StringFromGUID2@{sys}\ole32.dll stdcall';
+
+function IsProcessorFeaturePresent(Feature: LongWord): LongBool;
+  external 'IsProcessorFeaturePresent@kernel32.dll stdcall';
+
+const
+  PF_SSE4_2_INSTRUCTIONS_AVAILABLE = 38;
 
 var
   ExistingInstallation: Boolean;
@@ -272,6 +290,15 @@ begin
     Result := Result + FmtMessage(CustomMessage('MaintenanceLanguage'), [InstallerLanguageDisplayName])
   else
     Result := Result + CustomMessage('MaintenanceLanguageKept');
+end;
+
+{ The oldest worker is built for SSE4.2 (every x86-64 processor since 2009).
+  Refuse clearly instead of installing a program that cannot start. }
+function InitializeSetup: Boolean;
+begin
+  Result := IsProcessorFeaturePresent(PF_SSE4_2_INSTRUCTIONS_AVAILABLE);
+  if not Result then
+    SuppressibleMsgBox(CustomMessage('ProcessorTooOld'), mbCriticalError, MB_OK, IDOK);
 end;
 
 procedure InitializeWizard;

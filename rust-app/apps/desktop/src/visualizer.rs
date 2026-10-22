@@ -27,6 +27,25 @@ use crate::{
 
 pub(crate) const INDICATOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
+thread_local! {
+    static ANIMATION_WAKER: RefCell<Option<Rc<dyn Fn()>>> = RefCell::new(None);
+}
+
+/// Registers how to restart the frame timer once it has gone to sleep.
+pub(crate) fn set_animation_waker(waker: Rc<dyn Fn()>) {
+    ANIMATION_WAKER.with(|slot| *slot.borrow_mut() = Some(waker));
+}
+
+/// Restarts the frame timer if nothing was animating. The timer stops itself
+/// when no visualizer and no settings preview is on screen: a 60 Hz timer that
+/// never stopped woke the interface thread with nothing to draw.
+pub(crate) fn wake_animation() {
+    let waker = ANIMATION_WAKER.with(|slot| slot.borrow().clone());
+    if let Some(waker) = waker {
+        waker();
+    }
+}
+
 pub(crate) const INDICATOR_BAR_PROFILE: [f32; 10] =
     [0.25, 0.4, 0.62, 0.82, 1.0, 1.0, 0.82, 0.62, 0.4, 0.25];
 
@@ -588,6 +607,11 @@ impl IndicatorAnimation {
             self.slate_lines.set_vec(Vec::new());
         }
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
+        wake_animation();
+    }
+
+    pub(crate) fn is_hidden(&self) -> bool {
+        self.mode == IndicatorMode::Hidden
     }
 
     pub(crate) fn set_microphone_signal(&mut self, microphone_level: f32, spectrum: &[f32]) {
@@ -615,6 +639,7 @@ impl IndicatorAnimation {
             self.writing_slate.stop_input();
         }
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
+        wake_animation();
     }
 
     pub(crate) fn begin_success(&mut self) {
@@ -624,6 +649,7 @@ impl IndicatorAnimation {
         self.mode_progress = 0.0;
         self.flow_voice_impulse = 0.0;
         self.last_frame = Instant::now() - INDICATOR_FRAME_INTERVAL;
+        wake_animation();
     }
 
     pub(crate) fn stop(&mut self) {

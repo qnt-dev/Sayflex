@@ -9,6 +9,9 @@ license.workspace = true
 default = []
 cuda = ["whisper-rs/cuda"]
 vulkan = ["whisper-rs/vulkan"]
+# Names the build for processors without AVX2. The instruction set itself is
+# chosen by the GGML_* variables of the build (scripts/publish.ps1).
+cpu-compat = []
 
 [dependencies]
 anyhow = "1.0.100"
@@ -22,6 +25,7 @@ rust-model-manager = { version = "0.8.0", path = "../../crates/model-manager" }
 rust-platform-windows = { version = "0.8.0", path = "../../crates/platform-windows" }
 rust-protocol = { version = "0.8.0", path = "../../crates/protocol" }
 serde.workspace = true
+sha2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 whisper-rs = { version = "0.16.0" }

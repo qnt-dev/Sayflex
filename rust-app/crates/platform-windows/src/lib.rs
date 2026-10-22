@@ -14,7 +14,7 @@ pub mod credentials;
 mod file_dialog;
 mod gpu_adapters;
 mod job;
-pub use gpu_adapters::nvidia_adapter_name;
+pub use gpu_adapters::{has_dedicated_gpu, nvidia_adapter_name};
 #[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
@@ -41,11 +41,11 @@ pub use file_dialog::choose_png_save_path;
 pub use job::WorkerJob;
 #[cfg(windows)]
 pub use overlay::{
-    begin_borderless_window_drag, capture_blurred_cloaked_overlay_backdrop,
+    activate_window, begin_borderless_window_drag, capture_blurred_cloaked_overlay_backdrop,
     capture_blurred_overlay_backdrop, clear_screen_result_window_mode, cloak_overlay_window,
     conceal_overlay_window, configure_action_window, configure_action_window_for_target,
-    configure_blue_glass_overlay_window, configure_overlay_window, configure_screen_result_window,
-    configure_standard_window, configure_translation_window,
+    configure_blue_glass_overlay_window, configure_notice_window, configure_overlay_window,
+    configure_screen_result_window, configure_standard_window, configure_translation_window,
     configure_translation_window_for_region, configure_translation_window_for_target,
     configure_transparent_overlay_window, disable_translation_live_backdrop,
     enable_translation_live_backdrop, overlay_window_is_cloaked,
@@ -74,7 +74,7 @@ pub use process_resources::{
 #[cfg(windows)]
 pub use session_end::{SessionEndEvent, SessionEndMonitor, session_is_ending};
 #[cfg(windows)]
-pub use single_instance::SingleInstanceGuard;
+pub use single_instance::{ActivationListener, SingleInstanceGuard, listen_for_activation};
 #[cfg(windows)]
 pub use window_snapshot::{WindowIdentity, WindowInventory, WindowSnapshot, WindowSnapshotError};
 
@@ -326,6 +326,11 @@ pub fn configure_action_window_for_target(
 }
 
 #[cfg(not(windows))]
+pub fn configure_notice_window(_window_handle: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn prepare_action_window(_window_handle: u64) -> Result<(), String> {
     Ok(())
 }
@@ -393,6 +398,20 @@ pub fn restore_target_if_our_action_window_activated(
 ) -> Result<(), String> {
     Ok(())
 }
+
+#[cfg(not(windows))]
+pub struct ActivationListener;
+
+#[cfg(not(windows))]
+pub fn listen_for_activation(
+    _instance_name: &str,
+    _on_activate: impl Fn() + Send + 'static,
+) -> Result<ActivationListener, String> {
+    Ok(ActivationListener)
+}
+
+#[cfg(not(windows))]
+pub fn activate_window(_window_handle: u64) {}
 
 #[cfg(not(windows))]
 pub struct SingleInstanceGuard;
@@ -745,6 +764,122 @@ pub fn user_locale_name() -> String {
         return "en".to_owned();
     }
     String::from_utf16_lossy(&buffer[..length as usize - 1])
+}
+
+/// Whether this processor runs code built for the x86-64-v3 level (AVX2, FMA,
+/// F16C, BMI2): Intel since 2013, AMD since 2015. The speech workers other than
+/// the compatibility build need it; older processors would stop them with an
+/// illegal-instruction error.
+#[must_use]
+pub fn cpu_supports_avx2_level() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("fma")
+            && std::is_x86_feature_detected!("f16c")
+            && std::is_x86_feature_detected!("bmi2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        true
+    }
+}
+
+/// Languages this Windows user reads or types: the preferred display languages
+/// and the language of every installed keyboard layout, as lowercase ISO 639-1
+/// codes ("ru", "en"), most preferred first, without duplicates.
+///
+/// Speech recognition uses this list for "Auto": a recording is far more
+/// likely to be in a language the user has set up than in any of the 99 that
+/// Whisper knows.
+#[cfg(windows)]
+#[must_use]
+pub fn user_language_codes() -> Vec<String> {
+    use windows_sys::Win32::{
+        Globalization::{GetUserPreferredUILanguages, LCIDToLocaleName, MUI_LANGUAGE_NAME},
+        UI::Input::KeyboardAndMouse::GetKeyboardLayoutList,
+    };
+    const LOCALE_NAME_MAX_LENGTH: usize = 85;
+
+    let mut names = Vec::new();
+    let mut count = 0_u32;
+    let mut length = 0_u32;
+    unsafe {
+        if GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut count,
+            std::ptr::null_mut(),
+            &mut length,
+        ) != 0
+            && length > 0
+        {
+            let mut buffer = vec![0_u16; length as usize];
+            if GetUserPreferredUILanguages(
+                MUI_LANGUAGE_NAME,
+                &mut count,
+                buffer.as_mut_ptr(),
+                &mut length,
+            ) != 0
+            {
+                names.extend(
+                    buffer
+                        .split(|unit| *unit == 0)
+                        .filter(|name| !name.is_empty())
+                        .map(String::from_utf16_lossy),
+                );
+            }
+        }
+        let layouts = GetKeyboardLayoutList(0, std::ptr::null_mut());
+        if layouts > 0 {
+            let mut handles = vec![std::ptr::null_mut(); layouts as usize];
+            let filled = GetKeyboardLayoutList(layouts, handles.as_mut_ptr());
+            for handle in handles.into_iter().take(filled.max(0) as usize) {
+                // The low word of a layout handle is its input language.
+                let language_id = (handle as usize & 0xFFFF) as u32;
+                let mut buffer = [0_u16; LOCALE_NAME_MAX_LENGTH];
+                let written =
+                    LCIDToLocaleName(language_id, buffer.as_mut_ptr(), buffer.len() as i32, 0);
+                if written > 1 {
+                    names.push(String::from_utf16_lossy(&buffer[..written as usize - 1]));
+                }
+            }
+        }
+    }
+    primary_language_codes(names.iter().map(String::as_str))
+}
+
+#[cfg(not(windows))]
+#[must_use]
+pub fn user_language_codes() -> Vec<String> {
+    Vec::new()
+}
+
+fn primary_language_codes<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut codes: Vec<String> = Vec::new();
+    for name in names {
+        let code = name
+            .split(['-', '_'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if (2..=3).contains(&code.len()) && !codes.contains(&code) {
+            codes.push(code);
+        }
+    }
+    codes
+}
+
+#[cfg(test)]
+mod language_code_tests {
+    #[test]
+    fn locale_names_become_unique_primary_codes_in_order() {
+        assert_eq!(
+            super::primary_language_codes(
+                ["ru-RU", "en-US", "ru-RU", "uk-UA", "EN-GB", "", "x"].into_iter()
+            ),
+            ["ru", "en", "uk"]
+        );
+    }
 }
 
 #[cfg(not(windows))]

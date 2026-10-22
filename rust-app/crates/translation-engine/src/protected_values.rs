@@ -115,6 +115,35 @@ fn is_complete_seconds_suffix(suffix: &str) -> bool {
 }
 
 pub(crate) fn protected_values(text: &str) -> Vec<ProtectedValue> {
+    let mut values = scan(text)
+        .into_iter()
+        .map(|(_, _, value)| value)
+        .collect::<Vec<_>>();
+    values.sort();
+    values
+}
+
+/// Byte ranges a translation must copy unchanged: numbers, dates, times, URLs
+/// and `{placeholders}`. Overlapping ranges merge, so a number inside a URL is
+/// part of that URL. Trademark signs stay in the text: they need no mask.
+pub(crate) fn protected_value_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = scan(text)
+        .into_iter()
+        .filter(|(start, end, _)| !matches!(&text[*start..*end], "™" | "©" | "®"))
+        .map(|(start, end, _)| (start, end))
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some(last) if start < last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+fn scan(text: &str) -> Vec<(usize, usize, ProtectedValue)> {
     let mut values = Vec::new();
     let characters = text.char_indices().collect::<Vec<_>>();
     let mut index = 0;
@@ -147,21 +176,25 @@ pub(crate) fn protected_values(text: &str) -> Vec<ProtectedValue> {
                     break;
                 }
             }
-            values.push(protected_number(text, byte, end));
+            values.push((byte, end, protected_number(text, byte, end)));
             continue;
         }
         if character == '{'
             && let Some(relative_end) = text[byte..].find('}')
         {
             let end = byte + relative_end + 1;
-            values.push(ProtectedValue::Exact(text[byte..end].to_owned()));
+            values.push((byte, end, ProtectedValue::Exact(text[byte..end].to_owned())));
             while index < characters.len() && characters[index].0 < end {
                 index += 1;
             }
             continue;
         }
         if matches!(character, '™' | '©' | '®') {
-            values.push(ProtectedValue::Exact(character.to_string()));
+            values.push((
+                byte,
+                byte + character.len_utf8(),
+                ProtectedValue::Exact(character.to_string()),
+            ));
         }
         index += 1;
     }
@@ -173,16 +206,38 @@ pub(crate) fn protected_values(text: &str) -> Vec<ProtectedValue> {
             )
         });
         if token.starts_with("https://") || token.starts_with("http://") {
-            values.push(ProtectedValue::Exact(token.to_owned()));
+            let start = token.as_ptr() as usize - text.as_ptr() as usize;
+            values.push((
+                start,
+                start + token.len(),
+                ProtectedValue::Exact(token.to_owned()),
+            ));
         }
     }
-    values.sort();
     values
 }
 
 #[cfg(test)]
 mod tests {
-    use super::protected_values_match;
+    use super::{protected_value_spans, protected_values_match};
+
+    #[test]
+    fn spans_cover_times_dates_urls_and_placeholders_once() {
+        let text = "At 18:30 on 21.09.2026 open https://example.test/a?id=42 {name} ©";
+        let spans = protected_value_spans(text)
+            .into_iter()
+            .map(|(start, end)| &text[start..end])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spans,
+            [
+                "18:30",
+                "21.09.2026",
+                "https://example.test/a?id=42",
+                "{name}"
+            ]
+        );
+    }
 
     #[test]
     fn named_month_date_keeps_day_and_year_when_ocr_omits_comma_space() {

@@ -124,6 +124,7 @@ mod first_run;
 mod flow_sphere;
 #[cfg(feature = "screen-translation")]
 mod glossary_view;
+mod insertion_notice;
 mod installer_locale;
 mod localization;
 mod overlay_presenter;
@@ -488,6 +489,7 @@ struct RuntimeUi {
     state: Rc<RefCell<AppState>>,
     workers: Rc<Workers>,
     indicator_animation: Rc<RefCell<IndicatorAnimation>>,
+    insertion_notice: Rc<insertion_notice::InsertionNoticeController>,
     screen_selection: Rc<RefCell<DesktopScreenSelectionCoordinator>>,
     screen_translation: Rc<RefCell<ScreenTranslationCoordinator>>,
     #[cfg(feature = "screen-translation")]
@@ -1389,10 +1391,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let _ = rust_app_core::diagnostics::initialize(&data_root().join("logs"), "desktop");
     rust_app_core::lifecycle::install_panic_hook();
-    let _single_instance = rust_platform_windows::SingleInstanceGuard::acquire(&format!(
-        "Local\\{}",
-        rust_app_core::product::desktop_app_id()
-    ))?;
+    let instance_name = format!("Local\\{}", rust_app_core::product::desktop_app_id());
+    let _single_instance = rust_platform_windows::SingleInstanceGuard::acquire(&instance_name)?;
     let mut run_session =
         rust_app_core::lifecycle::RunSession::begin(&data_root(), env!("CARGO_PKG_VERSION"))?;
     let settings = SettingsWindow::new()?;
@@ -1787,6 +1787,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "screen-translation")]
     let screen_capture_backend =
         Arc::new(rust_platform_windows::screen_capture::WindowsDesktopCaptureBackend::default());
+    let insertion_notice = insertion_notice::InsertionNoticeController::new(&workers)?;
     install_runtime_handler(RuntimeUi {
         settings: settings.as_weak(),
         recording_overlays: recording_overlays.clone(),
@@ -1801,6 +1802,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         state: Rc::clone(&state),
         workers: Rc::clone(&workers),
         indicator_animation: Rc::clone(&indicator_animation),
+        insertion_notice,
         screen_selection,
         screen_translation,
         #[cfg(feature = "screen-translation")]
@@ -1886,7 +1888,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !env::args().any(|argument| argument == "--background") {
         settings.show()?;
         configure_standard_app_window(&settings, "Settings");
+        visualizer::wake_animation();
     }
+    settings.on_animation_wanted(visualizer::wake_animation);
+    // A second launch (the shortcut, the Start menu) shows these settings.
+    let _activation = {
+        let settings = settings.as_weak();
+        rust_platform_windows::listen_for_activation(&instance_name, move || {
+            let settings = settings.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(settings) = settings.upgrade() else {
+                    return;
+                };
+                rust_app_core::diagnostics::log_line(
+                    "desktop lifecycle=activated_by_second_launch",
+                );
+                let _ = settings.show();
+                configure_standard_app_window(&settings, "Settings");
+                visualizer::wake_animation();
+                if let Some(handle) = slint_window_handle(settings.window()) {
+                    rust_platform_windows::activate_window(handle);
+                }
+            });
+        })
+        .map_err(|error| {
+            rust_app_core::diagnostics::log_line(&format!(
+                "desktop lifecycle=activation_listener_failed error={error}"
+            ));
+        })
+        .ok()
+    };
     tray.show()?;
     slint::run_event_loop()?;
     #[cfg(feature = "screen-translation")]
@@ -2451,7 +2482,7 @@ fn finish_delete_stored_screenshots(result: Result<usize, String>, runtime: &Run
 fn start_indicator_animation(
     indicators: Vec<slint::Weak<RecordingIndicator>>,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
-) -> Timer {
+) -> Rc<Timer> {
     start_indicator_animation_with_optional_settings_preview(indicators, indicator_animation, None)
 }
 
@@ -2460,7 +2491,7 @@ fn start_indicator_animation_with_settings_preview(
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
     settings: slint::Weak<SettingsWindow>,
     settings_preview_animation: &Rc<RefCell<IndicatorAnimation>>,
-) -> Timer {
+) -> Rc<Timer> {
     start_indicator_animation_with_optional_settings_preview(
         indicators,
         indicator_animation,
@@ -2472,27 +2503,45 @@ fn start_indicator_animation_with_optional_settings_preview(
     indicators: Vec<slint::Weak<RecordingIndicator>>,
     indicator_animation: &Rc<RefCell<IndicatorAnimation>>,
     settings_preview: Option<(slint::Weak<SettingsWindow>, Rc<RefCell<IndicatorAnimation>>)>,
-) -> Timer {
-    let timer = Timer::default();
+) -> Rc<Timer> {
+    let timer = Rc::new(Timer::default());
     let indicator_animation = Rc::clone(indicator_animation);
     // One buffer, refilled. This ran sixty times a second on the same thread
     // that draws the interface and handles its events, and allocated two
     // vectors every time round: one for the upgraded handles and one holding
     // references into the first.
     let live = RefCell::new(Vec::with_capacity(indicators.len()));
+    let sleeping_timer = Rc::downgrade(&timer);
     timer.start(TimerMode::Repeated, INDICATOR_FRAME_INTERVAL, move || {
         let mut live = live.borrow_mut();
         live.clear();
         live.extend(indicators.iter().filter_map(slint::Weak::upgrade));
         indicator_animation.borrow_mut().tick(&live);
+        let mut preview_hidden = true;
         if let Some((settings, settings_preview_animation)) = &settings_preview
             && let Some(settings) = settings.upgrade()
         {
-            settings_preview_animation
-                .borrow_mut()
-                .tick_settings_preview(&settings);
+            let mut preview = settings_preview_animation.borrow_mut();
+            preview.tick_settings_preview(&settings);
+            preview_hidden = preview.is_hidden();
+        }
+        // Nothing on screen moves: sleep until a recording starts or the
+        // visualizer page is shown (`visualizer::wake_animation`).
+        if preview_hidden
+            && indicator_animation.borrow().is_hidden()
+            && let Some(timer) = sleeping_timer.upgrade()
+        {
+            timer.stop();
         }
     });
+    let waking_timer = Rc::downgrade(&timer);
+    visualizer::set_animation_waker(Rc::new(move || {
+        if let Some(timer) = waking_timer.upgrade()
+            && !timer.running()
+        {
+            timer.restart();
+        }
+    }));
     timer
 }
 
@@ -5803,12 +5852,32 @@ uia_ms={:?} clipboard_ms={:?} total_ms={}",
                 &state_message(state, UiText::SelectionIssue, &[("message", &message)]),
             );
         }
+        InputHostEvent::InsertionDispatched { session_id } => {
+            // The paste command reached the target. Waiting for the clipboard
+            // transaction to settle (up to 2.5 s) kept the visualizer on the
+            // screen after the text had already appeared.
+            let owns_indicator = {
+                let mut state = state.borrow_mut();
+                if state.indicator_session == Some(session_id) {
+                    state.indicator_session = None;
+                    state.active_visualizer_style = None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if owns_indicator {
+                indicator_animation.borrow_mut().stop();
+                recording_overlays.retire_all("insertion_dispatched");
+            }
+        }
         InputHostEvent::InsertionCompleted {
             session_id,
             method,
             delivery,
             dispatch_duration_ms,
         } => {
+            runtime.insertion_notice.resolve(session_id);
             let (owns_indicator, total_after_release_ms, transcript_latency) = {
                 let mut state = state.borrow_mut();
                 state.targets.remove(&session_id);
@@ -5942,6 +6011,18 @@ speculative_reuse={} method={} delivery={}",
             if owns_indicator {
                 indicator_animation.borrow_mut().stop();
                 recording_overlays.retire_all("insertion_failed");
+            }
+            // A dictation that could not be inserted is shown to the user with
+            // a way to insert or copy it. The status line alone was invisible.
+            let notice = insertion_notice::failure_reason(&code).and_then(|reason| {
+                let state = state.borrow();
+                let transcript = session_id.and_then(|id| state.transcripts.get(&id).cloned())?;
+                Some((transcript, reason, active_locale(state.ui_locale)))
+            });
+            if let Some((transcript, reason, locale)) = notice {
+                set_indicator_status(settings, text(locale, reason));
+                runtime.insertion_notice.show(transcript, reason, locale);
+                return;
             }
             set_indicator_status(
                 settings,
@@ -6671,6 +6752,7 @@ fn show_translation_preview_at(
     }
     preview.set_model_offer_visible(false);
     preview.set_model_offer_action("".into());
+    preview.set_notice("".into());
     preview.set_pin_enabled(final_update);
     preview.set_processing(!final_update);
     if first_show {
@@ -8871,6 +8953,21 @@ fn route_translation_result(
     // here by a sentence that said "locally" whatever had happened.
     let locale = active_locale(state.borrow().ui_locale);
     let fallback_notice = translator_status::completion_notice(locale, &result);
+    let values_notice = translator_status::protected_values_notice(locale, &result);
+    if result.protected_values_changed {
+        rust_app_core::diagnostics::log_line(&format!(
+            "translation_pipeline request={} stage=completed protected_values_changed=true",
+            result.request_id
+        ));
+    }
+    let show_values_notice = |request_id: RequestId| {
+        if values_notice.is_empty() {
+            return;
+        }
+        if let Some(slot) = translation_previews.borrow().slot_for_request(request_id) {
+            slot.preview.set_notice(values_notice.as_str().into());
+        }
+    };
     let origin =
         settings_projection::translation_origin_localized(result.provider.as_deref(), locale);
     let completed = settings_projection::translation_completed_sentence_localized(
@@ -8928,6 +9025,7 @@ fn route_translation_result(
                     translation_previews,
                     true,
                 );
+                show_values_notice(result.request_id);
                 completed
             }
             TranslationDelivery::Replace => {
@@ -8969,9 +9067,18 @@ fn route_translation_result(
                 translation_previews,
                 true,
             );
+            show_values_notice(result.request_id);
             completed
         }
     };
+    // Replace and Copy deliver the text without a card; the status line is
+    // the only place left to warn.
+    let completion_status =
+        if values_notice.is_empty() || completion_status.contains(&values_notice) {
+            completion_status
+        } else {
+            format!("{completion_status} {values_notice}")
+        };
     set_indicator_status(settings, &completion_status);
 }
 
@@ -10837,6 +10944,7 @@ mod screen_translation_privacy_tests {
             backend_request_count: 1,
             tokenize_duration_ms: 0,
             chunk_count: 1,
+            protected_values_changed: false,
         }
     }
 

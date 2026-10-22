@@ -10,6 +10,7 @@ mod model_actor;
 mod speculation;
 mod transcription;
 mod transcription_mailbox;
+mod vad;
 
 use std::{
     env, fs,

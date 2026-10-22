@@ -36,7 +36,7 @@ use rust_protocol::{
 };
 use rust_translation_engine::{
     TRANSLATION_OPERATION_TIMEOUT, TranslationCancelled, TranslationCatalog, TranslationEngine,
-    TranslationPackDescriptor, detect_language_with_policy,
+    TranslationPackDescriptor, detect_language_with_policy, same_script,
 };
 
 use crate::providers::{Providers, Routed};
@@ -271,8 +271,54 @@ struct WorkerState {
     keep_warm: bool,
     local_model_enabled: bool,
     engine: Option<TranslationEngine>,
+    /// When the resident engine last finished a request.
+    engine_last_used: Option<Instant>,
     locale: String,
     history: TranslationHistoryActor,
+}
+
+/// Keep-warm keeps the compact model (tens of MB in RAM) loaded for good. A
+/// contextual model holds gigabytes of RAM or VRAM (5.7 GB measured for 9B),
+/// so it is released after this long without a request.
+const CONTEXTUAL_MODEL_IDLE_RELEASE: Duration = Duration::from_secs(10 * 60);
+const IDLE_RELEASE_CHECK: Duration = Duration::from_secs(30);
+
+impl WorkerState {
+    /// Releases an idle contextual (llama.cpp) engine. The compact engine stays.
+    fn release_idle_contextual_engine(&mut self, writer: &EventWriter, now: Instant) -> Result<()> {
+        let idle = self.engine_last_used.is_some_and(|used| {
+            now.saturating_duration_since(used) >= CONTEXTUAL_MODEL_IDLE_RELEASE
+        });
+        let contextual = self.engine.as_ref().is_some_and(|engine| {
+            self.catalog
+                .by_id(engine.catalog_id())
+                .is_some_and(|pack| pack.backend.requires_llama_runtime())
+        });
+        if idle && contextual {
+            self.engine_last_used = None;
+            release_engine_unless_warm(false, &mut self.engine, writer)?;
+        }
+        Ok(())
+    }
+}
+
+/// Checks twice a minute whether a contextual model has gone unused.
+fn start_idle_release(state: Arc<Mutex<WorkerState>>, writer: EventWriter) -> Result<()> {
+    std::thread::Builder::new()
+        .name("translation-idle-release".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(IDLE_RELEASE_CHECK);
+                if recover_lock(&state)
+                    .release_idle_contextual_engine(&writer, Instant::now())
+                    .is_err()
+                {
+                    // The desktop closed our output; the worker is ending.
+                    return;
+                }
+            }
+        })?;
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -335,6 +381,51 @@ fn select_local_catalog_id(
     Ok(pack.id.clone())
 }
 
+fn local_direction_fallback(
+    catalog: &TranslationCatalog,
+    selected_tier: Option<TranslationTier>,
+    selected_catalog_id: Option<&str>,
+    detected: (TranslationLanguage, TranslationLanguage),
+    target_named: Option<TranslationLanguage>,
+    policy: TranslationLanguagePolicy,
+    is_installed: impl Fn(&str) -> bool,
+) -> (TranslationLanguage, TranslationLanguage) {
+    let selectable = |source: TranslationLanguage, target: TranslationLanguage| {
+        source != target
+            && select_local_catalog_id(
+                catalog,
+                selected_tier,
+                selected_catalog_id,
+                source,
+                target,
+                &is_installed,
+            )
+            .is_ok()
+    };
+    let (source, target) = detected;
+    if selectable(source, target) {
+        return detected;
+    }
+    let installed = catalog
+        .packs
+        .iter()
+        .filter(|pack| is_installed(&pack.id))
+        .flat_map(|pack| pack.languages.iter().copied())
+        .collect::<Vec<_>>();
+    [policy.primary, policy.secondary]
+        .into_iter()
+        .chain(installed)
+        .filter(|candidate| *candidate != source && same_script(*candidate, source))
+        .map(|candidate| {
+            (
+                candidate,
+                target_named.unwrap_or_else(|| policy.target_for(candidate)),
+            )
+        })
+        .find(|(candidate, target)| selectable(*candidate, *target))
+        .unwrap_or(detected)
+}
+
 fn replace_resident_resource<T, E>(
     slot: &mut Option<T>,
     announce_release: impl FnOnce() -> Result<(), E>,
@@ -367,6 +458,7 @@ impl WorkerState {
             keep_warm: true,
             local_model_enabled: true,
             engine: None,
+            engine_last_used: None,
             locale: system_language(),
             history,
         })
@@ -479,6 +571,31 @@ impl WorkerState {
         ))
     }
 
+    /// A short phrase can be read as a language no local pack speaks: an
+    /// English phrase detected as German. When the request named no source
+    /// language, use a language of an installed pack written in the same
+    /// script instead of failing with "model missing".
+    fn local_direction(
+        &self,
+        detected: (TranslationLanguage, TranslationLanguage),
+        source_named: bool,
+        target_named: Option<TranslationLanguage>,
+        policy: TranslationLanguagePolicy,
+    ) -> (TranslationLanguage, TranslationLanguage) {
+        if source_named {
+            return detected;
+        }
+        local_direction_fallback(
+            &self.catalog,
+            self.selected_tier,
+            self.selected_catalog_id.as_deref(),
+            detected,
+            target_named,
+            policy,
+            |candidate| self.model_installed(candidate),
+        )
+    }
+
     fn ensure_engine(
         &mut self,
         writer: &EventWriter,
@@ -559,6 +676,7 @@ fn main() -> Result<()> {
     let (writer, output_thread) = EventWriter::start()?;
     let (installs, install_thread) =
         InstallActor::start(Arc::clone(&state), writer.clone(), cancellation)?;
+    start_idle_release(Arc::clone(&state), writer.clone())?;
     let coordinator = ProviderActorHandle::start(Providers::new(
         data_root().join("translation-credentials.dat"),
     ))?;
@@ -1352,6 +1470,7 @@ fn translate_text_request(
                         backend_request_count,
                         tokenize_duration_ms: 0,
                         chunk_count: 1,
+                        protected_values_changed: false,
                     },
                 );
             }
@@ -1374,6 +1493,12 @@ fn translate_text_request(
         } else {
             TranslationFailureKind::LocalModelMissing
         };
+        let (source, target) = state.local_direction(
+            (source, target),
+            source_language.is_some(),
+            target_language,
+            language_policy,
+        );
         let tier = state
             .ensure_engine(
                 writer,
@@ -1461,6 +1586,7 @@ fn translate_text_request(
             backend_request_count: output.backend_request_count,
             tokenize_duration_ms: output.tokenize_duration_ms,
             chunk_count: output.chunk_count,
+            protected_values_changed: output.protected_values_changed,
         };
         finish(state, writer, result)
     })
@@ -1605,6 +1731,12 @@ fn translate_blocks_request(
         } else {
             TranslationFailureKind::LocalModelMissing
         };
+        let (source, target) = state.local_direction(
+            (source, target),
+            source_language.is_some(),
+            target_language,
+            language_policy,
+        );
         let _tier = state
             .ensure_engine(
                 writer,
@@ -1784,6 +1916,7 @@ fn with_request_engine<T>(
 ) -> Result<T> {
     let mut state = recover_lock(state);
     let result = operation(&mut state);
+    state.engine_last_used = Some(Instant::now());
     let keep_warm = state.keep_warm;
     // Keep ownership until the request's resident allocation has been released.
     // An installer or a subsequent request must not replace it between the
@@ -2614,6 +2747,54 @@ mod direction_tests {
     }
 
     #[test]
+    fn a_detected_language_without_a_pack_falls_back_to_an_installed_one_of_the_same_script() {
+        let catalog = TranslationCatalog::load().unwrap();
+        let policy = TranslationLanguagePolicy {
+            primary: TranslationLanguage::Russian,
+            secondary: TranslationLanguage::English,
+        };
+        let only_ru_en = |id: &str| id == "firefox-ru-en-v3.1";
+        assert_eq!(
+            super::local_direction_fallback(
+                &catalog,
+                Some(rust_protocol::TranslationTier::Compact),
+                Some("firefox-ru-en-v3.1"),
+                (TranslationLanguage::German, TranslationLanguage::Russian),
+                None,
+                policy,
+                only_ru_en,
+            ),
+            (TranslationLanguage::English, TranslationLanguage::Russian)
+        );
+        // An installed German pack keeps the detected German.
+        assert_eq!(
+            super::local_direction_fallback(
+                &catalog,
+                Some(rust_protocol::TranslationTier::Compact),
+                Some("firefox-ru-en-v3.1"),
+                (TranslationLanguage::German, TranslationLanguage::English),
+                None,
+                policy,
+                |id| id == "firefox-ru-en-v3.1" || id == "firefox-de-en-v3",
+            ),
+            (TranslationLanguage::German, TranslationLanguage::English)
+        );
+        // No script match: the detected direction stays and fails as before.
+        assert_eq!(
+            super::local_direction_fallback(
+                &catalog,
+                Some(rust_protocol::TranslationTier::Compact),
+                Some("firefox-ru-en-v3.1"),
+                (TranslationLanguage::Japanese, TranslationLanguage::Russian),
+                None,
+                policy,
+                only_ru_en,
+            ),
+            (TranslationLanguage::Japanese, TranslationLanguage::Russian)
+        );
+    }
+
+    #[test]
     fn noisy_english_screen_text_uses_the_installed_english_russian_package() {
         let catalog = TranslationCatalog::load().unwrap();
         for text in [
@@ -2923,6 +3104,55 @@ mod keep_warm_release_tests {
         )
     }
 
+    fn engine_for(requires_llama: bool) -> TranslationEngine {
+        let catalog = TranslationCatalog::load().unwrap();
+        let pack = catalog
+            .packs
+            .iter()
+            .find(|pack| pack.backend.requires_llama_runtime() == requires_llama)
+            .unwrap()
+            .clone();
+        let root = tempfile::tempdir().unwrap();
+        TranslationEngine::new(
+            pack,
+            root.path().join("models"),
+            root.path().join("runtimes"),
+        )
+    }
+
+    #[test]
+    fn only_an_idle_contextual_model_is_released_while_warm() {
+        let root = tempfile::tempdir().unwrap();
+        let (history, history_thread) =
+            super::TranslationHistoryActor::start(root.path().join("history.json")).unwrap();
+        let mut state = super::WorkerState::new(history.clone()).unwrap();
+        state.keep_warm = true;
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let now = std::time::Instant::now();
+        let long_ago = now - super::CONTEXTUAL_MODEL_IDLE_RELEASE;
+
+        state.engine = Some(engine_for(false));
+        state.engine_last_used = Some(long_ago);
+        state.release_idle_contextual_engine(&writer, now).unwrap();
+        assert!(state.engine.is_some(), "the compact model stays warm");
+
+        state.engine = Some(engine_for(true));
+        state.engine_last_used = Some(now);
+        state.release_idle_contextual_engine(&writer, now).unwrap();
+        assert!(state.engine.is_some(), "a recently used model stays");
+
+        state.engine_last_used = Some(long_ago);
+        state.release_idle_contextual_engine(&writer, now).unwrap();
+        assert!(state.engine.is_none(), "an idle contextual model is released");
+        assert!(received.try_iter().any(|event| matches!(
+            event,
+            TranslationWorkerEvent::LocalModelState { loaded: false, .. }
+        )));
+        history.shutdown();
+        history_thread.join().unwrap();
+    }
+
     #[test]
     fn a_cold_engine_is_released_after_the_request_and_the_desktop_is_told() {
         let (events, received) = mpsc::channel();
@@ -3103,6 +3333,7 @@ mod keep_warm_release_tests {
                 backend_request_count: 1,
                 tokenize_duration_ms: 0,
                 chunk_count: 1,
+                protected_values_changed: false,
             },
         );
         history.shutdown();

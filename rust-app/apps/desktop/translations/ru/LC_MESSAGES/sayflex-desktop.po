@@ -16,19 +16,19 @@ msgstr "Ошибка {code} в выбранном движке; автомати
 msgid "{code}: {message}"
 msgstr "{code}: {message}"
 
-msgid "{count} installed"
-msgstr "{count} установлен"
+msgid "Installed: {count}"
+msgstr "Установлено: {count}"
 
-msgid "{count} kept · {remote} went to a service"
-msgstr "{count} сохранено · {remote} отправлено в сервис"
+msgid "Kept: {count} · sent to a service: {remote}"
+msgstr "Сохранено: {count} · отправлено в сервис: {remote}"
 
-msgid "{count} kept · all on this device"
-msgstr "{count} сохранено · всё на этом устройстве"
+msgid "Kept: {count} · all on this device"
+msgstr "Сохранено: {count} · всё на этом устройстве"
 
-msgid "{count} kept on this device"
-msgstr "{count} сохранено на этом устройстве"
+msgid "Kept on this device: {count}"
+msgstr "Сохранено на этом устройстве: {count}"
 
-msgid "{count} of {total} shortcuts active"
+msgid "Shortcuts active: {count} of {total}"
 msgstr "Активно сочетаний: {count} из {total}"
 
 msgid "{field} is needed as well as the key."
@@ -52,8 +52,8 @@ msgstr "{provider} не подтвердил сохранение ключа."
 msgid "{visual} · shown while recording"
 msgstr "{visual} · отображается во время записи"
 
-msgid "1 installed"
-msgstr "1 установлено"
+msgid "Installed: 1"
+msgstr "Установлено: 1"
 
 msgid "A key is needed. To remove the one already stored, use Remove key."
 msgstr "Требуется ключ. Чтобы удалить уже сохранённый, нажмите «Удалить ключ»."
@@ -811,8 +811,8 @@ msgstr "Вставить ключ"
 msgid "Pause / resume"
 msgstr "Пауза/возобновление"
 
-msgid "Paused · {count} shortcuts configured"
-msgstr "Приостановлено · {count} настроены сочетания клавиш"
+msgid "Paused · shortcuts configured: {count}"
+msgstr "Приостановлено · настроено сочетаний: {count}"
 
 msgid "PIN"
 msgstr "PIN"
@@ -1003,11 +1003,11 @@ msgstr "Показать оригинал и перевод построчно"
 msgid "Show original text"
 msgstr "Показать исходный текст"
 
-msgid "Showing {count} · {remote} of them went to a service"
-msgstr "Показано {count} · в сервис отправлено: {remote}"
+msgid "Shown: {count} · sent to a service: {remote}"
+msgstr "Показано: {count} · отправлено в сервис: {remote}"
 
-msgid "Showing {count} · all on this device"
-msgstr "Отображается {count} · все на этом устройстве"
+msgid "Shown: {count} · all on this device"
+msgstr "Показано: {count} · всё на этом устройстве"
 
 msgid "Shows the palette every time"
 msgstr "Отображает палитру каждый раз"
@@ -1792,3 +1792,57 @@ msgstr "Открыть загрузку"
 
 msgid "{model}: translation package not installed. Open Models to install it."
 msgstr "{model}: пакет перевода не установлен. Установите его в разделе «Модели»."
+
+msgid "Text was not inserted"
+msgstr "Текст не вставлен"
+
+msgid "Click the field you want, then press Insert. The text is also in History."
+msgstr "Щёлкните нужное поле и нажмите «Вставить». Текст также сохранён в истории."
+
+msgid "INSERT"
+msgstr "ВСТАВИТЬ"
+
+msgid "COPY"
+msgstr "КОПИРОВАТЬ"
+
+msgid "The window changed before the text was pasted, so SayFlex did not paste it into another place."
+msgstr "Окно сменилось до вставки, поэтому SayFlex не стал вставлять текст в другое место."
+
+msgid "The application did not confirm the paste. Check whether the text appeared before you insert it again."
+msgstr "Приложение не подтвердило вставку. Проверьте, появился ли текст, прежде чем вставлять снова."
+
+msgid "The application did not accept the text."
+msgstr "Приложение не приняло текст."
+
+msgid "A key was still held down, so the text was not pasted."
+msgstr "Клавиша была ещё зажата, поэтому текст не вставлен."
+
+msgid "This is a password field or a window without a text field. SayFlex does not paste dictation there."
+msgstr "Это поле пароля или окно без текстового поля. SayFlex не вставляет туда диктовку."
+
+msgid "Check the numbers, dates and links: the translation may differ from the original."
+msgstr "Проверьте числа, даты и ссылки: в переводе они могут отличаться от оригинала."
+
+msgid "Translating"
+msgstr "Переводим"
+
+msgid "ON IMAGE"
+msgstr "ON IMAGE"
+
+msgid "DEL"
+msgstr "DEL"
+
+msgid "Original text"
+msgstr "Исходный текст"
+
+msgid "Original and translation"
+msgstr "Оригинал и перевод"
+
+msgid "Translation on the image"
+msgstr "Перевод на изображении"
+
+msgid "Keep window on top"
+msgstr "Закрепить окно поверх других"
+
+msgid "Unpin window"
+msgstr "Открепить окно"

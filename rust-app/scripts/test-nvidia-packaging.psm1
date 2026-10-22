@@ -74,12 +74,29 @@ function Assert-TestNvidiaPayload {
         @($Manifest.source_snapshot.files).Count -eq 0) {
         throw 'The test manifest must include its exact source snapshot.'
     }
+    Assert-NoBundledNvidiaRuntime -AppDirectory $AppDirectory
+}
+
+function Assert-NoBundledNvidiaRuntime {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$AppDirectory)
+    # SignPath Foundation signs only OSI-licensed payloads: no installer may
+    # carry NVIDIA runtime files, nor link the static CUDA runtime into the
+    # CUDA worker. The user downloads both from NVIDIA inside the app.
     $bundledNvidia = @(Get-ChildItem -LiteralPath $AppDirectory -File -Recurse | Where-Object {
         $_.Name -match '(?i)^(cublas|cudart|cufft|curand|cusolver|cusparse|nvrtc|nvjitlink|nvfatbin|nvcuda|nvcudart).*\.dll$'
     })
     if ($bundledNvidia.Count -gt 0) {
-        throw "The test payload must not bundle NVIDIA runtime DLLs: $($bundledNvidia.Name -join ', ')"
+        throw "The payload must not bundle NVIDIA runtime DLLs: $($bundledNvidia.Name -join ', ')"
+    }
+    $cudaWorker = Join-Path $AppDirectory 'SayFlex.Speech.Cuda.exe'
+    if (Test-Path -LiteralPath $cudaWorker -PathType Leaf) {
+        $bytes = [System.IO.File]::ReadAllBytes($cudaWorker)
+        $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+        if ($text -notmatch '(?i)cudart64_\d+\.dll') {
+            throw 'SayFlex.Speech.Cuda.exe must import cudart64_*.dll; the static CUDA runtime must not be linked.'
+        }
     }
 }
 
-Export-ModuleMember -Function Get-TestNvidiaSourceSnapshot, Assert-TestNvidiaSourceUnchanged, Assert-TestNvidiaPayload
+Export-ModuleMember -Function Get-TestNvidiaSourceSnapshot, Assert-TestNvidiaSourceUnchanged, Assert-TestNvidiaPayload, Assert-NoBundledNvidiaRuntime

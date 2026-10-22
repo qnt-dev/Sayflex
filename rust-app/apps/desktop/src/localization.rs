@@ -774,7 +774,7 @@ mod tests {
 
         for (language, source) in catalogs {
             let entries = catalog(source);
-            for label in ["CPU", "CUDA", "Vulkan", "PIN", "ORIG", "DUAL"] {
+            for label in ["CPU", "CUDA", "Vulkan", "PIN", "ORIG", "DUAL", "ON IMAGE", "DEL"] {
                 assert_eq!(
                     entries.get(label).map(String::as_str),
                     Some(label),

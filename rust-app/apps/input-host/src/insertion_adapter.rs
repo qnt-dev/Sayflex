@@ -21,28 +21,48 @@ pub enum DeliveryFailureState {
 #[derive(Debug)]
 pub struct DeliveryFailure {
     pub method: InsertionMethod,
+    /// Where it stopped: `precheck` (before any route was tried) or the route.
+    pub stage: &'static str,
     pub state: DeliveryFailureState,
     pub message: String,
 }
 
+/// How long a target that lost the foreground may take to get it back before
+/// the insertion is given up. A notification, a tooltip or a menu of another
+/// program can take the foreground for a moment; the user has not left.
+const FOREGROUND_RETURN_GRACE: Duration = Duration::from_millis(450);
+const FOREGROUND_RETURN_POLL: Duration = Duration::from_millis(25);
+
 /// Routes one immutable payload by target capability. A route is attempted at
 /// most once. In particular, an ambiguous specialized-adapter result is never
 /// followed by a second transport, because doing so can duplicate text.
+///
+/// `on_dispatched` runs once the paste command has reached the target and
+/// before the clipboard transaction waits for its acknowledgement.
 pub fn deliver(
     clipboard_host: &mut clipboard::ClipboardPasteHost,
     target_snapshot: TargetSnapshot,
     payload: &str,
+    on_dispatched: &mut dyn FnMut(),
 ) -> Result<DeliveryReceipt, DeliveryFailure> {
     let _transaction =
         clipboard::begin_clipboard_transaction().map_err(|error| DeliveryFailure {
             method: InsertionMethod::ClipboardTransaction,
+            stage: "precheck",
             state: DeliveryFailureState::NotDelivered,
             message: error.to_string(),
         })?;
     // Protection checks are mandatory for every route, including test routes
     // that disable UIA acknowledgement. Unknown UIA remains compatible.
-    let baseline = ensure_insertion_allowed(target_snapshot)
-        .map_err(|error| injection_failure(InsertionMethod::NativeEditMessage, error))?;
+    //
+    // Only the same top-level window counts as the target coming back. A
+    // different window of the same program may be a different conversation,
+    // so it is never accepted here.
+    let baseline = ensure_insertion_allowed_with_grace(target_snapshot).map_err(|error| {
+        let mut failure = injection_failure(InsertionMethod::NativeEditMessage, error);
+        failure.stage = "precheck";
+        failure
+    })?;
     let force_clipboard_transaction =
         std::env::var("SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION").as_deref() == Ok("1");
 
@@ -55,6 +75,7 @@ pub fn deliver(
             })
             .map_err(|error| DeliveryFailure {
                 method: InsertionMethod::WezTermCli,
+                stage: "wezterm",
                 state: if error.delivery_is_ambiguous() {
                     DeliveryFailureState::Ambiguous
                 } else if error.target_was_superseded() {
@@ -80,7 +101,9 @@ pub fn deliver(
         }
         Ok(false) => {}
         Err(error) => {
-            return Err(injection_failure(InsertionMethod::NativeEditMessage, error));
+            let mut failure = injection_failure(InsertionMethod::NativeEditMessage, error);
+            failure.stage = "native_edit";
+            return Err(failure);
         }
     }
 
@@ -134,6 +157,7 @@ pub fn deliver(
                 _ => clipboard::ClipboardError::Paste,
             })
         },
+        on_dispatched,
         target_snapshot.process_id,
         payload,
     )
@@ -161,6 +185,7 @@ pub fn deliver(
     })
     .map_err(|error| DeliveryFailure {
         method: InsertionMethod::ClipboardTransaction,
+        stage: "clipboard",
         state: match error {
             clipboard::ClipboardError::DeliveryUnconfirmed => DeliveryFailureState::Ambiguous,
             clipboard::ClipboardError::TargetChanged | clipboard::ClipboardError::Superseded => {
@@ -197,6 +222,40 @@ fn observed_focused_text_result(
     }
 }
 
+/// Like [`ensure_insertion_allowed`], but lets the same top-level window
+/// take the foreground back within a short grace period. Another window,
+/// even of the same program, never qualifies.
+fn ensure_insertion_allowed_with_grace(
+    target: TargetSnapshot,
+) -> Result<Option<String>, inject::InjectionError> {
+    ensure_with_grace(
+        || ensure_insertion_allowed(target),
+        || inject::is_foreground(target),
+        FOREGROUND_RETURN_GRACE,
+        FOREGROUND_RETURN_POLL,
+    )
+}
+
+fn ensure_with_grace<T>(
+    mut check: impl FnMut() -> Result<T, inject::InjectionError>,
+    mut target_is_foreground: impl FnMut() -> bool,
+    grace: Duration,
+    poll: Duration,
+) -> Result<T, inject::InjectionError> {
+    match check() {
+        Err(inject::InjectionError::TargetChanged) => {}
+        other => return other,
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        std::thread::sleep(poll);
+        if target_is_foreground() {
+            return check();
+        }
+    }
+    Err(inject::InjectionError::TargetChanged)
+}
+
 pub(crate) fn ensure_insertion_allowed(
     target: TargetSnapshot,
 ) -> Result<Option<String>, inject::InjectionError> {
@@ -222,6 +281,7 @@ fn ensure_insertion_allowed_using(
 fn injection_failure(method: InsertionMethod, error: inject::InjectionError) -> DeliveryFailure {
     DeliveryFailure {
         method,
+        stage: "route",
         state: match error {
             inject::InjectionError::Protected | inject::InjectionError::PhysicalModifiersHeld => {
                 DeliveryFailureState::NotDelivered
@@ -251,10 +311,12 @@ fn payload_was_inserted(baseline: &str, current: &str, payload: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_insertion_allowed_using, observed_focused_text_result, payload_was_inserted,
+        ensure_insertion_allowed_using, ensure_with_grace, observed_focused_text_result,
+        payload_was_inserted,
     };
     use crate::inject::InjectionError;
     use crate::uia_selection::{FocusedTextOutcome, SelectionError};
+    use std::{cell::Cell, time::Duration};
 
     #[test]
     fn protected_uia_cannot_become_an_unverified_paste() {
@@ -355,5 +417,55 @@ mod tests {
             "prefix dictated text",
             "dictated text "
         ));
+    }
+    #[test]
+    fn the_same_window_coming_back_within_the_grace_period_is_accepted() {
+        let checks = Cell::new(0);
+        let polls = Cell::new(0);
+        let result = ensure_with_grace(
+            || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 1 {
+                    Err(InjectionError::TargetChanged)
+                } else {
+                    Ok("baseline")
+                }
+            },
+            || {
+                polls.set(polls.get() + 1);
+                polls.get() >= 2
+            },
+            Duration::from_millis(200),
+            Duration::from_millis(1),
+        );
+        assert!(matches!(result, Ok("baseline")));
+        assert_eq!(checks.get(), 2, "the full check runs again before delivery");
+    }
+
+    #[test]
+    fn a_window_that_does_not_come_back_still_cancels_the_insertion() {
+        let result: Result<(), InjectionError> = ensure_with_grace(
+            || Err(InjectionError::TargetChanged),
+            || false,
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+        );
+        assert!(matches!(result, Err(InjectionError::TargetChanged)));
+    }
+
+    #[test]
+    fn a_protected_field_is_never_retried() {
+        let checks = Cell::new(0);
+        let result: Result<(), InjectionError> = ensure_with_grace(
+            || {
+                checks.set(checks.get() + 1);
+                Err(InjectionError::Protected)
+            },
+            || true,
+            Duration::from_millis(50),
+            Duration::from_millis(1),
+        );
+        assert!(matches!(result, Err(InjectionError::Protected)));
+        assert_eq!(checks.get(), 1);
     }
 }

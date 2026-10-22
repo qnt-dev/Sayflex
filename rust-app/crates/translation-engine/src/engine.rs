@@ -78,6 +78,9 @@ pub struct TranslationOutput {
     pub backend_request_count: u32,
     pub tokenize_duration_ms: u64,
     pub chunk_count: u32,
+    /// The translation still changes a number, date, time or URL of the
+    /// source after a masked retry. The caller must ask the user to check it.
+    pub protected_values_changed: bool,
 }
 
 /// One canonical screen-document translation.  Block identity is never
@@ -237,6 +240,20 @@ impl TranslationEngine {
         if !self.pack.supports(source, target) {
             bail!("installed pack does not support this translation direction");
         }
+        if is_untranslatable_acronym(text) {
+            // "OK" became "ООК": a model has nothing to translate in a lone
+            // acronym or code, and every language reads it unchanged.
+            return Ok(TranslationOutput {
+                text: text.trim().to_owned(),
+                source_language: source,
+                target_language: target,
+                first_token_duration_ms: 0,
+                backend_request_count: 0,
+                tokenize_duration_ms: 0,
+                chunk_count: 0,
+                protected_values_changed: false,
+            });
+        }
         // UI Automation providers commonly expose Windows paragraph breaks as
         // bare CR characters. Normalize the model input so the line-preserving
         // instruction operates on one unambiguous representation.
@@ -244,37 +261,74 @@ impl TranslationEngine {
 
         check_operation(deadline, &should_continue)?;
         let operation_active = || should_continue() && Instant::now() < deadline;
-        let translated = if self.pack.backend.requires_llama_runtime() {
-            self.translate_llama(
-                &model_input,
-                source,
-                target,
-                deadline,
-                &operation_active,
-                &mut on_partial,
-            )
-        } else {
-            self.translate_firefox(
-                &model_input,
-                source,
-                target,
-                deadline,
-                &operation_active,
-                &mut on_partial,
-            )
-        };
+        let translated = self.translate_planned_text(
+            &model_input,
+            source,
+            target,
+            deadline,
+            &operation_active,
+            &mut on_partial,
+        );
         check_operation(deadline, &should_continue)?;
         let translated = translated?;
-        let normalized = normalize_single_word_repetition(text, &translated.text);
+        let mut normalized = normalize_single_word_repetition(text, &translated.text);
+        let mut backend_request_count = translated.backend_request_count;
+        let mut protected_values_changed = false;
+        if !protected_values_match(&model_input, &normalized) {
+            // A model may rewrite "18:30" as "6:30 p.m." or drop a digit.
+            // Translate again with each value replaced by a marker the model
+            // copies verbatim, then put the original values back.
+            let retried = match mask_protected_values(&model_input) {
+                Some(masked) => {
+                    let retry = self.translate_planned_text(
+                        &masked.text,
+                        source,
+                        target,
+                        deadline,
+                        &operation_active,
+                        &mut |_, _| operation_active(),
+                    );
+                    check_operation(deadline, &should_continue)?;
+                    let retry = retry?;
+                    backend_request_count =
+                        backend_request_count.saturating_add(retry.backend_request_count);
+                    masked
+                        .restore(&retry.text)
+                        .filter(|restored| protected_values_match(&model_input, restored))
+                }
+                None => None,
+            };
+            match retried {
+                Some(restored) => normalized = restored,
+                None => protected_values_changed = true,
+            }
+        }
         Ok(TranslationOutput {
             text: normalized,
             source_language: source,
             target_language: target,
             first_token_duration_ms: translated.first_token_duration_ms,
-            backend_request_count: translated.backend_request_count,
+            backend_request_count,
             tokenize_duration_ms: translated.tokenize_duration_ms,
             chunk_count: translated.chunk_count,
+            protected_values_changed,
         })
+    }
+
+    fn translate_planned_text(
+        &mut self,
+        text: &str,
+        source: TranslationLanguage,
+        target: TranslationLanguage,
+        deadline: Instant,
+        should_continue: &impl Fn() -> bool,
+        on_partial: &mut impl FnMut(&str, TranslationProgress) -> bool,
+    ) -> Result<PlannedTranslation> {
+        if self.pack.backend.requires_llama_runtime() {
+            self.translate_llama(text, source, target, deadline, should_continue, on_partial)
+        } else {
+            self.translate_firefox(text, source, target, deadline, should_continue, on_partial)
+        }
     }
 
     pub fn translate_blocks(
@@ -877,6 +931,12 @@ pub fn detect_language_with_policy(
         Some(Lang::Ara) => TranslationLanguage::Arabic,
         _ => TranslationLanguage::English,
     }
+}
+
+/// Both languages are written in the same script (Latin, Cyrillic, ...).
+#[must_use]
+pub fn same_script(left: TranslationLanguage, right: TranslationLanguage) -> bool {
+    language_script(left) == language_script(right)
 }
 
 fn language_script(language: TranslationLanguage) -> whatlang::Script {
@@ -2553,6 +2613,69 @@ fn restore_source_word_spellings(
     Some(result)
 }
 
+/// Marker families the compact models copy unchanged. Measured on the ru-en
+/// pack: each kept every marker in 24 of 24 sentences, in both directions. The
+/// first family that does not already occur in the text is used.
+const PROTECTED_VALUE_MARKERS: [(&str, &str); 3] = [("[", "]"), ("ZZ", ""), ("<", ">")];
+
+struct MaskedText {
+    text: String,
+    /// Marker and the original value it stands for, in source order.
+    values: Vec<(String, String)>,
+}
+
+impl MaskedText {
+    /// Puts every original value back. Each marker must occur exactly once;
+    /// a lost or duplicated marker means the retry cannot be trusted.
+    fn restore(&self, translated: &str) -> Option<String> {
+        let mut restored = translated.to_owned();
+        // Replace "[12]" before "[1]" so that "ZZ1" never matches inside "ZZ12".
+        for (marker, original) in self.values.iter().rev() {
+            if restored.matches(marker.as_str()).count() != 1 {
+                return None;
+            }
+            restored = restored.replacen(marker.as_str(), original, 1);
+        }
+        Some(restored)
+    }
+}
+
+fn mask_protected_values(text: &str) -> Option<MaskedText> {
+    let spans = crate::protected_values::protected_value_spans(text);
+    if spans.is_empty() {
+        return None;
+    }
+    let marker = |(open, close): (&str, &str), index: usize| format!("{open}{index}{close}");
+    let family = PROTECTED_VALUE_MARKERS
+        .into_iter()
+        .find(|family| (1..=spans.len()).all(|index| !text.contains(&marker(*family, index))))?;
+    let mut masked = String::with_capacity(text.len());
+    let mut values = Vec::with_capacity(spans.len());
+    let mut cursor = 0;
+    for (index, (start, end)) in spans.into_iter().enumerate() {
+        let token = marker(family, index + 1);
+        masked.push_str(&text[cursor..start]);
+        masked.push_str(&token);
+        values.push((token, text[start..end].to_owned()));
+        cursor = end;
+    }
+    masked.push_str(&text[cursor..]);
+    Some(MaskedText {
+        text: masked,
+        values,
+    })
+}
+
+/// A lone acronym or code such as "OK", "ID" or "USB3": nothing to translate.
+fn is_untranslatable_acronym(text: &str) -> bool {
+    let token = text.trim();
+    (1..=5).contains(&token.chars().count())
+        && token
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && token.chars().any(|c| c.is_ascii_uppercase())
+}
+
 fn validate_protected_values(
     source: &str,
     translated: &str,
@@ -3110,6 +3233,55 @@ fn lexical_spans(text: &str) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn masked_values_round_trip_through_a_reordered_translation() {
+        let source =
+            "Алексей отправил 24 файла на https://example.com/docs в 18:30 21 сентября 2026 года.";
+        let masked = super::mask_protected_values(source).unwrap();
+        assert_eq!(
+            masked.text,
+            "Алексей отправил [1] файла на [2] в [3] [4] сентября [5] года."
+        );
+        let restored = masked
+            .restore("Alexey sent [1] files to [2] at [3] on September [4], [5].")
+            .unwrap();
+        assert_eq!(
+            restored,
+            "Alexey sent 24 files to https://example.com/docs at 18:30 on September 21, 2026."
+        );
+        assert!(crate::protected_values_match(source, &restored));
+    }
+
+    #[test]
+    fn a_lost_or_duplicated_marker_rejects_the_retry() {
+        let masked = super::mask_protected_values("Call at 18:30 or 19:00.").unwrap();
+        assert!(masked.restore("Звоните в [1].").is_none());
+        assert!(masked.restore("Звоните в [1] или [1] [2].").is_none());
+    }
+
+    #[test]
+    fn marker_family_avoids_markers_already_in_the_text() {
+        let masked = super::mask_protected_values("See note [1] at 18:30.").unwrap();
+        assert_eq!(masked.text, "See note [ZZ1] at ZZ2.");
+        let many = (1..=12)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let masked = super::mask_protected_values(&format!("Items ZZ1 {many}")).unwrap();
+        let restored = masked.restore(&masked.text).unwrap();
+        assert_eq!(restored, format!("Items ZZ1 {many}"));
+    }
+
+    #[test]
+    fn lone_acronyms_are_not_sent_to_the_model() {
+        for text in ["OK", " ID ", "USB3", "API"] {
+            assert!(super::is_untranslatable_acronym(text), "{text}");
+        }
+        for text in ["Ok", "OKAY!", "Hello", "123", "Не OK", "TOOLONG"] {
+            assert!(!super::is_untranslatable_acronym(text), "{text}");
+        }
+    }
+
     #[test]
     fn expired_operation_deadline_prevents_initial_runtime_model_access() {
         let catalog = crate::TranslationCatalog::load().unwrap();

@@ -128,18 +128,18 @@ Describe 'SayFlex public repository presentation' {
         $content | Should Not Match ([regex]::Escape($mojibakeNotice))
     }
 
-    It 'discloses the proprietary NVIDIA runtime bundled by the universal installer' {
+    It 'ships no NVIDIA runtime and discloses the in-app NVIDIA download' {
         $publish = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\publish.ps1') -Raw
         $generator = Get-Content -LiteralPath (
             Join-Path $PSScriptRoot '..\generate-third-party-notices.ps1'
         ) -Raw
-        $notice = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\THIRD_PARTY_NOTICES.md') -Raw
+        $validator = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\validate-release.ps1') -Raw
 
-        $publish | Should Match 'cublas64_13\.dll'
-        $publish | Should Match 'cublasLt64_13\.dll'
-        $generator | Should Match 'cublas64_13\.dll'
-        $generator | Should Match 'cublasLt64_13\.dll'
-        $notice | Should Match '(?s)## NVIDIA CUDA runtime.*proprietary NVIDIA software.*NVIDIA CUDA.*Toolkit EULA'
+        $publish | Should Not Match 'Copy-Item[^\r\n]*cublas'
+        $publish | Should Match "runtime_bundled = \`$false"
+        $generator | Should Match 'cudart64_13\.dll'
+        $generator | Should Match 'contains no NVIDIA files'
+        $validator | Should Match 'Assert-NoBundledNvidiaRuntime'
     }
 
     It 'ships and validates the OCR worker in the ordinary release payload' {

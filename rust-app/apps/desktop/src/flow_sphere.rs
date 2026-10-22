@@ -44,8 +44,11 @@ struct RenderRequest {
     opacity: f32,
 }
 
+/// A finished frame. The pixel buffer moves to the interface thread as it is:
+/// it used to be copied into a Vec and back into a new buffer, 53 KB twice per
+/// frame at sixty frames a second.
 struct RenderedFrame {
-    pixels: Vec<u8>,
+    pixels: SharedPixelBuffer<Rgba8Pixel>,
 }
 
 pub struct FlowSphereRenderer {
@@ -70,9 +73,7 @@ impl FlowSphereRenderer {
                         &request.spectrum,
                         request.opacity,
                     );
-                    let rendered = RenderedFrame {
-                        pixels: frame.as_bytes().to_vec(),
-                    };
+                    let rendered = RenderedFrame { pixels: frame };
                     match frame_tx.try_send(rendered) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
@@ -121,14 +122,7 @@ impl FlowSphereRenderer {
         while let Ok(frame) = self.frames.try_recv() {
             latest = Some(frame);
         }
-        latest.map(|frame| {
-            let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(
-                FLOW_SPHERE_IMAGE_SIZE,
-                FLOW_SPHERE_IMAGE_SIZE,
-            );
-            buffer.make_mut_bytes().copy_from_slice(&frame.pixels);
-            Image::from_rgba8_premultiplied(buffer)
-        })
+        latest.map(|frame| Image::from_rgba8_premultiplied(frame.pixels))
     }
 }
 
@@ -188,6 +182,77 @@ impl AudioShape {
     }
 }
 
+const LATITUDES: usize = 35;
+const LONGITUDES: usize = 72;
+
+/// sin and cos of one angle.
+#[derive(Clone, Copy, Default)]
+struct Turn {
+    sin: f32,
+    cos: f32,
+}
+
+impl Turn {
+    fn of(angle: f32) -> Self {
+        let (sin, cos) = angle.sin_cos();
+        Self { sin, cos }
+    }
+
+    /// sin(a + b) from the parts, so a term of a longitude, a latitude and
+    /// time needs no transcendental call per point.
+    fn sin_plus(self, other: Self) -> f32 {
+        self.sin * other.cos + self.cos * other.sin
+    }
+
+    /// cos(a + b) from the parts.
+    fn cos_plus(self, other: Self) -> f32 {
+        self.cos * other.cos - self.sin * other.sin
+    }
+}
+
+/// Everything that depends on one row (latitude) and time.
+#[derive(Clone, Copy, Default)]
+struct RowTerms {
+    latitude: f32,
+    latitude_sin: f32,
+    longitude_warp: f32,
+    longitude_warp_voice: f32,
+    x_shift: f32,
+    onset: Turn,
+    fold: Turn,
+    ripple: Turn,
+    mid_fold: Turn,
+    high_ripple: Turn,
+    flow_a: Turn,
+    flow_b: Turn,
+}
+
+/// Everything that depends on one column (longitude) and time.
+#[derive(Clone, Copy, Default)]
+struct ColumnTerms {
+    longitude: f32,
+    latitude_warp: f32,
+    latitude_warp_voice: f32,
+    latitude_warp_broad: f32,
+    low_breath: f32,
+    y_shift: f32,
+    onset: Turn,
+    fold: Turn,
+    ripple: Turn,
+    mid_fold: Turn,
+    high_ripple: Turn,
+    flow_a: Turn,
+    flow_b: Turn,
+}
+
+/// The sphere's rotation for one frame.
+#[derive(Clone, Copy)]
+struct Rotation {
+    y: Turn,
+    x: Turn,
+    z: Turn,
+}
+
 fn render_flow_sphere_buffer(
     phase: f32,
     energy: f32,
@@ -208,6 +273,47 @@ fn render_flow_sphere_buffer(
     let width = buffer.width();
     let height = buffer.height();
 
+    let rows: [RowTerms; LATITUDES] = std::array::from_fn(|index| {
+        let latitude = -1.48 + index as f32 / 34.0 * 2.96;
+        RowTerms {
+            latitude,
+            latitude_sin: latitude.sin(),
+            longitude_warp: (latitude * 2.08 + time * 0.73).sin(),
+            longitude_warp_voice: (latitude * 4.2 - time * 1.08).cos(),
+            x_shift: (latitude * 2.4 - time * 1.2).cos(),
+            onset: Turn::of(latitude * 2.16 - time * 1.8),
+            fold: Turn::of(latitude * 2.07 + time * 1.31),
+            ripple: Turn::of(-latitude * 3.34 - time * 0.92),
+            mid_fold: Turn::of(latitude * 1.47 + time * 0.82),
+            high_ripple: Turn::of(-latitude * 4.8 - time * 1.26),
+            flow_a: Turn::of(latitude * 1.86 + time * 1.17),
+            flow_b: Turn::of(-latitude * 0.73 - time * 0.66),
+        }
+    });
+    let columns: [ColumnTerms; LONGITUDES] = std::array::from_fn(|index| {
+        let longitude = -std::f32::consts::PI + index as f32 / 72.0 * std::f32::consts::TAU;
+        ColumnTerms {
+            longitude,
+            latitude_warp: (longitude * 1.52 - time * 0.91).sin(),
+            latitude_warp_voice: (longitude * 3.1 + time * 0.47).cos(),
+            latitude_warp_broad: (longitude * 0.83 - time * 0.36).sin(),
+            low_breath: (longitude * 0.84 - time * 0.58).sin(),
+            y_shift: (longitude * 1.7 + time * 1.8).sin(),
+            onset: Turn::of(longitude * 1.37),
+            fold: Turn::of(longitude * 2.34),
+            ripple: Turn::of(longitude * 5.7),
+            mid_fold: Turn::of(longitude * 2.61),
+            high_ripple: Turn::of(longitude * 7.1),
+            flow_a: Turn::of(longitude * 1.13),
+            flow_b: Turn::of(longitude * 2.41),
+        }
+    });
+    let rotation = Rotation {
+        y: Turn::of(time * 0.94 + 0.30),
+        x: Turn::of(0.40 + (time * 0.52).sin() * 0.46),
+        z: Turn::of((time * 0.39).sin() * 0.96),
+    };
+
     // One closed point-cloud surface produces both the interior and the rim.
     // Near the camera tangent, points from the front and back accumulate into
     // a thick silhouette; as the sphere turns, those same points move inward.
@@ -216,12 +322,9 @@ fn render_flow_sphere_buffer(
         width,
         height,
     };
-    for latitude_index in 0..35 {
-        let latitude = -1.48 + latitude_index as f32 / 34.0 * 2.96;
-        for longitude_index in 0..72 {
-            let longitude =
-                -std::f32::consts::PI + longitude_index as f32 / 72.0 * std::f32::consts::TAU;
-            let deformed = deform_sphere(latitude, longitude, time, audio, spectrum);
+    for row in &rows {
+        for column in &columns {
+            let deformed = deform_sphere(row, column, time, audio, spectrum, rotation);
             let point = deformed.position;
             let (x, y) = project(point, center, radius);
             let distance = ((x - center).powi(2) + (y - center).powi(2)).sqrt();
@@ -232,8 +335,8 @@ fn render_flow_sphere_buffer(
             let vertical_mix = ((center - y) / (radius * 2.0) + 0.5).clamp(0.0, 1.0);
             let depth = ((point.z + 1.0) * 0.5).clamp(0.0, 1.0);
             let silhouette = (-point.z.abs() * 8.4).exp();
-            let flow = (((longitude * 1.13 + latitude * 1.86 + time * 1.17).sin()
-                + (longitude * 2.41 - latitude * 0.73 - time * 0.66).cos() * 0.42)
+            let flow = ((column.flow_a.sin_plus(row.flow_a)
+                + column.flow_b.cos_plus(row.flow_b) * 0.42)
                 * 0.5
                 + 0.5)
                 .clamp(0.0, 1.0);
@@ -319,14 +422,17 @@ fn mix_rgb(left: (u8, u8, u8), right: (u8, u8, u8), amount: f32) -> (u8, u8, u8)
 }
 
 fn deform_sphere(
-    latitude: f32,
-    longitude: f32,
+    row: &RowTerms,
+    column: &ColumnTerms,
     time: f32,
     audio: AudioShape,
     spectrum: &[f32],
+    rotation: Rotation,
 ) -> DeformedPoint {
+    let latitude = row.latitude;
+    let longitude = column.longitude;
     let spectrum_position =
-        (longitude / std::f32::consts::TAU + 0.5 + latitude.sin() * 0.075 + time * 0.018)
+        (longitude / std::f32::consts::TAU + 0.5 + row.latitude_sin * 0.075 + time * 0.018)
             .rem_euclid(1.0);
     let band = smoothed_spectrum_band(spectrum, spectrum_position);
     let band_shape = (band / audio.envelope.max(0.12)).clamp(0.0, 1.0);
@@ -335,32 +441,32 @@ fn deform_sphere(
         .clamp(0.0, 1.0);
     let broad_voice =
         audio.envelope * (audio.low * 0.27 + audio.mid * 0.48 + audio.high * 0.25).clamp(0.0, 1.0);
-    let onset_lobe = ((((longitude * 1.37 + latitude * 2.16 - time * 1.8).sin() + 1.0) * 0.5)
-        .powi(4)
+    let onset_lobe = (((column.onset.sin_plus(row.onset) + 1.0) * 0.5).powi(4)
         * audio.impulse
         * (0.45 + band_shape * 0.55))
         .clamp(0.0, 1.0);
 
     let warped_latitude = (latitude
-        + (longitude * 1.52 - time * 0.91).sin() * (0.08 + voice_response * 0.14)
-        + (longitude * 3.1 + time * 0.47).cos() * voice_response * 0.052
-        + (longitude * 0.83 - time * 0.36).sin() * broad_voice * 0.045)
+        + column.latitude_warp * (0.08 + voice_response * 0.14)
+        + column.latitude_warp_voice * voice_response * 0.052
+        + column.latitude_warp_broad * broad_voice * 0.045)
         .clamp(-1.54, 1.54);
     let warped_longitude = longitude
-        + (latitude * 2.08 + time * 0.73).sin() * (0.22 + voice_response * 0.24)
-        + (latitude * 4.2 - time * 1.08).cos() * voice_response * 0.075;
-    let latitude_cos = warped_latitude.cos();
+        + row.longitude_warp * (0.22 + voice_response * 0.24)
+        + row.longitude_warp_voice * voice_response * 0.075;
+    let (latitude_sin, latitude_cos) = warped_latitude.sin_cos();
+    let (longitude_sin, longitude_cos) = warped_longitude.sin_cos();
     let mut point = SurfacePoint {
-        x: latitude_cos * warped_longitude.cos(),
-        y: warped_latitude.sin(),
-        z: latitude_cos * warped_longitude.sin(),
+        x: latitude_cos * longitude_cos,
+        y: latitude_sin,
+        z: latitude_cos * longitude_sin,
     };
 
-    let fold = (longitude * 2.34 + latitude * 2.07 + time * 1.31).sin();
-    let ripple = (longitude * 5.7 - latitude * 3.34 - time * 0.92).sin();
-    let low_breath = (longitude * 0.84 - time * 0.58).sin() * audio.low;
-    let mid_fold = (longitude * 2.61 + latitude * 1.47 + time * 0.82).sin() * audio.mid;
-    let high_ripple = (longitude * 7.1 - latitude * 4.8 - time * 1.26).sin() * audio.high;
+    let fold = column.fold.sin_plus(row.fold);
+    let ripple = column.ripple.sin_plus(row.ripple);
+    let low_breath = column.low_breath * audio.low;
+    let mid_fold = column.mid_fold.sin_plus(row.mid_fold) * audio.mid;
+    let high_ripple = column.high_ripple.sin_plus(row.high_ripple) * audio.high;
     let radial = 0.94
         + audio.envelope * 0.018
         + onset_lobe * 0.085
@@ -371,16 +477,13 @@ fn deform_sphere(
     point.y *= radial;
     point.z *= radial;
     point.z += fold * (0.07 + voice_response * 0.15) + onset_lobe * 0.055;
-    point.x += (latitude * 2.4 - time * 1.2).cos() * voice_response * 0.072;
-    point.y += (longitude * 1.7 + time * 1.8).sin() * voice_response * 0.096;
+    point.x += row.x_shift * voice_response * 0.072;
+    point.y += column.y_shift * voice_response * 0.096;
 
     DeformedPoint {
         position: rotate_z(
-            rotate_x(
-                rotate_y(point, time * 0.94 + 0.30),
-                0.40 + (time * 0.52).sin() * 0.46,
-            ),
-            (time * 0.39).sin() * 0.96,
+            rotate_x(rotate_y(point, rotation.y), rotation.x),
+            rotation.z,
         ),
         voice_response,
     }
@@ -436,10 +539,10 @@ impl RasterSurface<'_> {
                 }
                 let dx = pixel_x as f32 + 0.5 - x;
                 let dy = pixel_y as f32 + 0.5 - y;
-                let coverage = (-((dx * dx + dy * dy) / (2.0 * sigma * sigma))).exp();
-                if coverage < 0.035 {
+                let Some(coverage) = gaussian_coverage((dx * dx + dy * dy) / (2.0 * sigma * sigma))
+                else {
                     continue;
-                }
+                };
                 blend_premultiplied(
                     self.pixels,
                     (pixel_y as u32 * self.width + pixel_x as u32) as usize * 4,
@@ -449,6 +552,25 @@ impl RasterSurface<'_> {
             }
         }
     }
+}
+
+/// exp(-x) for the glow of one point, from a table: nine exponentials per
+/// point were most of a frame. Coverage below 0.035 (x above ln(1/0.035)) is
+/// not drawn, exactly as before.
+fn gaussian_coverage(x: f32) -> Option<f32> {
+    const CUTOFF: f32 = 3.352_407;
+    const STEPS_PER_UNIT: f32 = 256.0;
+    const ENTRIES: usize = (CUTOFF * STEPS_PER_UNIT) as usize + 2;
+    static TABLE: std::sync::OnceLock<[f32; ENTRIES]> = std::sync::OnceLock::new();
+    if !(0.0..CUTOFF).contains(&x) {
+        return None;
+    }
+    let table =
+        TABLE.get_or_init(|| std::array::from_fn(|index| (-(index as f32) / STEPS_PER_UNIT).exp()));
+    let position = x * STEPS_PER_UNIT;
+    let index = position as usize;
+    let fraction = position - index as f32;
+    Some(table[index] + (table[index + 1] - table[index]) * fraction)
 }
 
 fn blend_premultiplied(pixels: &mut [u8], offset: usize, color: (u8, u8, u8), source_alpha: f32) {
@@ -470,8 +592,8 @@ fn project(point: SurfacePoint, center: f32, radius: f32) -> (f32, f32) {
     )
 }
 
-fn rotate_x(point: SurfacePoint, angle: f32) -> SurfacePoint {
-    let (sin, cos) = angle.sin_cos();
+fn rotate_x(point: SurfacePoint, turn: Turn) -> SurfacePoint {
+    let Turn { sin, cos } = turn;
     SurfacePoint {
         x: point.x,
         y: point.y * cos - point.z * sin,
@@ -479,8 +601,8 @@ fn rotate_x(point: SurfacePoint, angle: f32) -> SurfacePoint {
     }
 }
 
-fn rotate_y(point: SurfacePoint, angle: f32) -> SurfacePoint {
-    let (sin, cos) = angle.sin_cos();
+fn rotate_y(point: SurfacePoint, turn: Turn) -> SurfacePoint {
+    let Turn { sin, cos } = turn;
     SurfacePoint {
         x: point.x * cos + point.z * sin,
         y: point.y,
@@ -488,8 +610,8 @@ fn rotate_y(point: SurfacePoint, angle: f32) -> SurfacePoint {
     }
 }
 
-fn rotate_z(point: SurfacePoint, angle: f32) -> SurfacePoint {
-    let (sin, cos) = angle.sin_cos();
+fn rotate_z(point: SurfacePoint, turn: Turn) -> SurfacePoint {
+    let Turn { sin, cos } = turn;
     SurfacePoint {
         x: point.x * cos - point.y * sin,
         y: point.x * sin + point.y * cos,
@@ -500,9 +622,219 @@ fn rotate_z(point: SurfacePoint, angle: f32) -> SurfacePoint {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioShape, FLOW_SPHERE_IMAGE_SIZE, FlowSpherePalette, flow_sphere_color,
-        render_flow_sphere_buffer,
+        AudioShape, DeformedPoint, FLOW_SPHERE_IMAGE_SIZE, FlowSpherePalette, RasterSurface,
+        SurfacePoint, Turn, flow_sphere_color, project, render_flow_sphere_buffer, rotate_x,
+        rotate_y, rotate_z, smoothed_spectrum_band,
     };
+    use slint::{Rgba8Pixel, SharedPixelBuffer};
+
+    // The implementation before the per-frame tables, kept to prove that the
+    // faster one draws the same picture.
+    fn reference_render(
+        phase: f32,
+        energy: f32,
+        impulse: f32,
+        palette: FlowSpherePalette,
+        spectrum: &[f32],
+        opacity: f32,
+    ) -> SharedPixelBuffer<Rgba8Pixel> {
+        let mut buffer =
+            SharedPixelBuffer::<Rgba8Pixel>::new(FLOW_SPHERE_IMAGE_SIZE, FLOW_SPHERE_IMAGE_SIZE);
+        buffer.make_mut_bytes().fill(0);
+
+        let fade = opacity.clamp(0.0, 1.0);
+        let center = FLOW_SPHERE_IMAGE_SIZE as f32 / 2.0;
+        let radius = 46.0;
+        let time = phase * 0.055;
+        let audio = AudioShape::from_signal(energy, impulse, spectrum);
+        let width = buffer.width();
+        let height = buffer.height();
+
+        // One closed point-cloud surface produces both the interior and the rim.
+        // Near the camera tangent, points from the front and back accumulate into
+        // a thick silhouette; as the sphere turns, those same points move inward.
+        let mut surface = RasterSurface {
+            pixels: buffer.make_mut_bytes(),
+            width,
+            height,
+        };
+        for latitude_index in 0..35 {
+            let latitude = -1.48 + latitude_index as f32 / 34.0 * 2.96;
+            for longitude_index in 0..72 {
+                let longitude =
+                    -std::f32::consts::PI + longitude_index as f32 / 72.0 * std::f32::consts::TAU;
+                let deformed = reference_deform(latitude, longitude, time, audio, spectrum);
+                let point = deformed.position;
+                let (x, y) = project(point, center, radius);
+                let distance = ((x - center).powi(2) + (y - center).powi(2)).sqrt();
+                if distance > radius * 1.055 {
+                    continue;
+                }
+
+                let vertical_mix = ((center - y) / (radius * 2.0) + 0.5).clamp(0.0, 1.0);
+                let depth = ((point.z + 1.0) * 0.5).clamp(0.0, 1.0);
+                let silhouette = (-point.z.abs() * 8.4).exp();
+                let flow = (((longitude * 1.13 + latitude * 1.86 + time * 1.17).sin()
+                    + (longitude * 2.41 - latitude * 0.73 - time * 0.66).cos() * 0.42)
+                    * 0.5
+                    + 0.5)
+                    .clamp(0.0, 1.0);
+                let surface_alpha = (0.11 + depth * 0.46) * (0.34 + flow * 0.66);
+                let voice_presence = deformed.voice_response.clamp(0.0, 1.0).powf(0.68);
+                let alpha = fade
+                    * (surface_alpha + voice_presence * 0.105)
+                        .max(silhouette * (0.62 + flow * 0.32 + voice_presence * 0.22));
+                let color = flow_sphere_color(
+                    palette,
+                    vertical_mix,
+                    depth,
+                    silhouette,
+                    flow,
+                    voice_presence,
+                );
+                surface.draw_glowing_point(
+                    x,
+                    y,
+                    0.27 + depth * 0.09
+                        + silhouette * (0.08 + voice_presence * 0.065)
+                        + voice_presence * 0.04,
+                    color,
+                    alpha,
+                );
+            }
+        }
+        buffer
+    }
+
+    fn reference_deform(
+        latitude: f32,
+        longitude: f32,
+        time: f32,
+        audio: AudioShape,
+        spectrum: &[f32],
+    ) -> DeformedPoint {
+        let spectrum_position =
+            (longitude / std::f32::consts::TAU + 0.5 + latitude.sin() * 0.075 + time * 0.018)
+                .rem_euclid(1.0);
+        let band = smoothed_spectrum_band(spectrum, spectrum_position);
+        let band_shape = (band / audio.envelope.max(0.12)).clamp(0.0, 1.0);
+        let voice_response = (audio.envelope * (0.38 + band_shape * 0.62)
+            + audio.impulse * (0.24 + band_shape * 0.76))
+            .clamp(0.0, 1.0);
+        let broad_voice = audio.envelope
+            * (audio.low * 0.27 + audio.mid * 0.48 + audio.high * 0.25).clamp(0.0, 1.0);
+        let onset_lobe = ((((longitude * 1.37 + latitude * 2.16 - time * 1.8).sin() + 1.0) * 0.5)
+            .powi(4)
+            * audio.impulse
+            * (0.45 + band_shape * 0.55))
+            .clamp(0.0, 1.0);
+
+        let warped_latitude = (latitude
+            + (longitude * 1.52 - time * 0.91).sin() * (0.08 + voice_response * 0.14)
+            + (longitude * 3.1 + time * 0.47).cos() * voice_response * 0.052
+            + (longitude * 0.83 - time * 0.36).sin() * broad_voice * 0.045)
+            .clamp(-1.54, 1.54);
+        let warped_longitude = longitude
+            + (latitude * 2.08 + time * 0.73).sin() * (0.22 + voice_response * 0.24)
+            + (latitude * 4.2 - time * 1.08).cos() * voice_response * 0.075;
+        let latitude_cos = warped_latitude.cos();
+        let mut point = SurfacePoint {
+            x: latitude_cos * warped_longitude.cos(),
+            y: warped_latitude.sin(),
+            z: latitude_cos * warped_longitude.sin(),
+        };
+
+        let fold = (longitude * 2.34 + latitude * 2.07 + time * 1.31).sin();
+        let ripple = (longitude * 5.7 - latitude * 3.34 - time * 0.92).sin();
+        let low_breath = (longitude * 0.84 - time * 0.58).sin() * audio.low;
+        let mid_fold = (longitude * 2.61 + latitude * 1.47 + time * 0.82).sin() * audio.mid;
+        let high_ripple = (longitude * 7.1 - latitude * 4.8 - time * 1.26).sin() * audio.high;
+        let radial = 0.94
+            + audio.envelope * 0.018
+            + onset_lobe * 0.085
+            + fold * (0.036 + voice_response * 0.105)
+            + ripple * (0.012 + voice_response * 0.036)
+            + audio.envelope * (low_breath * 0.036 + mid_fold * 0.048 + high_ripple * 0.019);
+        point.x *= radial;
+        point.y *= radial;
+        point.z *= radial;
+        point.z += fold * (0.07 + voice_response * 0.15) + onset_lobe * 0.055;
+        point.x += (latitude * 2.4 - time * 1.2).cos() * voice_response * 0.072;
+        point.y += (longitude * 1.7 + time * 1.8).sin() * voice_response * 0.096;
+
+        DeformedPoint {
+            position: rotate_z(
+                rotate_x(
+                    rotate_y(point, Turn::of(time * 0.94 + 0.30)),
+                    Turn::of(0.40 + (time * 0.52).sin() * 0.46),
+                ),
+                Turn::of((time * 0.39).sin() * 0.96),
+            ),
+            voice_response,
+        }
+    }
+
+    #[test]
+    fn the_table_driven_sphere_draws_the_same_picture() {
+        let spectrum = std::array::from_fn::<_, 32, _>(|index| {
+            ((index as f32 * 0.37).sin().abs() * 0.8).clamp(0.0, 1.0)
+        });
+        for (phase, energy, impulse, palette) in [
+            (0.0, 0.08, 0.0, FlowSpherePalette::Reference),
+            (1.4, 0.72, 0.4, FlowSpherePalette::BlackYellow),
+            (37.5, 0.55, 0.9, FlowSpherePalette::BlackYellow),
+        ] {
+            let fast = render_flow_sphere_buffer(phase, energy, impulse, palette, &spectrum, 1.0);
+            let reference = reference_render(phase, energy, impulse, palette, &spectrum, 1.0);
+            let mut largest = 0;
+            let mut differing = 0;
+            for (left, right) in fast.as_bytes().iter().zip(reference.as_bytes()) {
+                let difference = left.abs_diff(*right);
+                largest = largest.max(difference);
+                differing += usize::from(difference > 0);
+            }
+            assert!(
+                largest <= 3,
+                "phase {phase}: a channel differs by {largest}"
+            );
+            assert!(
+                differing < fast.as_bytes().len() / 100,
+                "phase {phase}: {differing} channels differ"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "timing on the build machine; run with --release -- --ignored"]
+    fn sphere_frame_cost() {
+        let spectrum = [0.4_f32; 32];
+        let frames = 600;
+        let started = std::time::Instant::now();
+        for frame in 0..frames {
+            std::hint::black_box(reference_render(
+                frame as f32,
+                0.6,
+                0.3,
+                FlowSpherePalette::BlackYellow,
+                &spectrum,
+                1.0,
+            ));
+        }
+        let before = started.elapsed() / frames;
+        let started = std::time::Instant::now();
+        for frame in 0..frames {
+            std::hint::black_box(render_flow_sphere_buffer(
+                frame as f32,
+                0.6,
+                0.3,
+                FlowSpherePalette::BlackYellow,
+                &spectrum,
+                1.0,
+            ));
+        }
+        let after = started.elapsed() / frames;
+        println!("sphere frame: before {before:?}, after {after:?}");
+    }
 
     #[test]
     fn sphere_frame_keeps_corners_transparent_and_draws_one_point_cloud() {

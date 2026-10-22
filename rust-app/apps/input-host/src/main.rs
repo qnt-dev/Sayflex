@@ -468,6 +468,18 @@ fn read_commands(
             InputHostCommand::CopyTranscript { transcript } => {
                 insertion.copy(transcript);
             }
+            InputHostCommand::InsertIntoForeground { transcript } => {
+                match crate::target::capture_text_target() {
+                    Some(target) => insertion.insert(transcript, target, false),
+                    None => {
+                        let _ = events.send(InputHostEvent::Failed {
+                            session_id: Some(transcript.session_id),
+                            code: "insert_protected_field".to_owned(),
+                            message: "the active field does not accept dictated text".to_owned(),
+                        });
+                    }
+                }
+            }
             InputHostCommand::CopyText { request_id, text } => {
                 insertion.copy_text(request_id, text);
             }

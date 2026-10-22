@@ -52,11 +52,32 @@ mod imp {
         unsafe { gemmology_prepared_bytes() }
     }
 
+    /// Whether this processor can run the compiled kernel. The x86_64 shim is
+    /// built with /arch:AVX2 (which also emits FMA); on an older processor it
+    /// would stop with an illegal instruction, so there every weight stays
+    /// unprepared and callers take the scalar kernel. [SayFlex patch]
+    pub fn simd_supported() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *SUPPORTED.get_or_init(|| {
+                std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+            })
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            true
+        }
+    }
+
     /// The xsimd arch the SIMD kernel was compiled for ("i8mm+neon64", "avx2", …),
     /// read from the compiled shim itself. Lets callers and CI prove which kernel
     /// is live rather than trusting it didn't silently fall back to scalar — the
     /// scalar stub below reports "scalar" instead.
     pub fn backend() -> &'static str {
+        if !simd_supported() {
+            return "scalar";
+        }
         // SAFETY: the shim returns a pointer to a static, NUL-terminated string
         // (xsimd's `Arch::name()`), valid for the whole program.
         let name = unsafe { std::ffi::CStr::from_ptr(gemmology_backend_name()) };
@@ -85,6 +106,9 @@ mod imp {
         /// If `b_transposed.len() != n * k`.
         pub fn new(b_transposed: &[i8], n: usize, k: usize) -> Option<PreparedB> {
             assert_eq!(b_transposed.len(), n * k, "B length must be n * k");
+            if !simd_supported() {
+                return None;
+            }
             // SAFETY: pointer/len are consistent with (n, k); the shim only reads
             // n*k bytes and copies them into its own buffer.
             let handle = unsafe { gemmology_prepare_b(b_transposed.as_ptr(), n, k) };

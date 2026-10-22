@@ -34,7 +34,13 @@ use crate::{
 #[cfg(feature = "screen-translation")]
 use rust_platform_windows::{WindowInventory, screen_capture::RgbaFrame};
 
-const SELECTION_WATCHDOG_SECONDS: u64 = 15;
+/// A selection ends after this long without any pointer activity...
+const SELECTION_IDLE_SECONDS: u64 = 15;
+/// ...and after this long in total. The fixed 15 s limit cut off people who
+/// stopped to read before dragging (7 of 44 real requests).
+const SELECTION_MAX_SECONDS: u64 = 120;
+/// Pointer activity re-arms the idle limit at most this often.
+const SELECTION_REARM_INTERVAL: Duration = Duration::from_secs(1);
 const SURFACE_READY_DEADLINE: Duration = Duration::from_millis(2_500);
 const SURFACE_READY_RETRY: Duration = Duration::from_millis(16);
 
@@ -675,7 +681,7 @@ pub(crate) trait SelectionEnvironment {
     fn schedule_surface_retry(&mut self, request_id: RequestId);
     fn update_selection(&mut self, selection: Option<PhysicalRect>);
     fn teardown_surfaces(&mut self);
-    fn arm_watchdog(&mut self, request_id: RequestId);
+    fn arm_watchdog(&mut self, request_id: RequestId, after: Duration);
     fn disarm_watchdog(&mut self);
     fn desktop_layout_current(&self) -> bool;
 }
@@ -691,6 +697,18 @@ struct ActiveSelection {
     capture: DesktopCapture,
     drag_origin: Option<(i32, i32)>,
     capture_mode_active: bool,
+    started: Instant,
+    watchdog_armed: Instant,
+}
+
+impl ActiveSelection {
+    /// Time left before the selection ends: the idle limit, but never past
+    /// the overall limit.
+    fn watchdog_delay(&self, now: Instant) -> Duration {
+        let total_left = Duration::from_secs(SELECTION_MAX_SECONDS)
+            .saturating_sub(now.saturating_duration_since(self.started));
+        Duration::from_secs(SELECTION_IDLE_SECONDS).min(total_left)
+    }
 }
 
 pub(crate) struct ScreenSelectionCoordinator<E: SelectionEnvironment> {
@@ -746,6 +764,8 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
             capture,
             drag_origin: None,
             capture_mode_active: false,
+            started: Instant::now(),
+            watchdog_armed: Instant::now(),
         });
         self.present_active_surfaces()
     }
@@ -780,11 +800,12 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
         if let Err(error) = self.environment.set_capture_mode(request_id, true) {
             return self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(error)));
         }
-        self.active
-            .as_mut()
-            .expect("selection was just installed")
-            .capture_mode_active = true;
-        self.environment.arm_watchdog(request_id);
+        let active = self.active.as_mut().expect("selection was just installed");
+        active.capture_mode_active = true;
+        let now = Instant::now();
+        active.watchdog_armed = now;
+        let delay = active.watchdog_delay(now);
+        self.environment.arm_watchdog(request_id, delay);
         None
     }
 
@@ -792,6 +813,15 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
         if !matches!(event, PointerEvent::Move { .. }) && !self.environment.desktop_layout_current()
         {
             return self.desktop_disconnected();
+        }
+        let active = self.active.as_mut()?;
+        // Any pointer activity means the user is still choosing.
+        let now = Instant::now();
+        if now.saturating_duration_since(active.watchdog_armed) >= SELECTION_REARM_INTERVAL {
+            active.watchdog_armed = now;
+            let delay = active.watchdog_delay(now);
+            let request_id = active.request_id;
+            self.environment.arm_watchdog(request_id, delay);
         }
         let active = self.active.as_mut()?;
         match event {
@@ -833,13 +863,16 @@ impl<E: SelectionEnvironment> ScreenSelectionCoordinator<E> {
     }
 
     pub(crate) fn watchdog_expired(&mut self, request_id: RequestId) -> Option<SelectionTerminal> {
-        (self.active.as_ref()?.request_id == request_id).then(|| {
-            self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(
-                format!(
-                    "screen selection exceeded the {SELECTION_WATCHDOG_SECONDS}-second safety limit"
-                ),
-            )))
-        })?
+        let active = self.active.as_ref()?;
+        if active.request_id != request_id {
+            return None;
+        }
+        let message = if active.started.elapsed() >= Duration::from_secs(SELECTION_MAX_SECONDS) {
+            format!("screen selection exceeded the {SELECTION_MAX_SECONDS}-second limit")
+        } else {
+            format!("screen selection had no pointer activity for {SELECTION_IDLE_SECONDS} seconds")
+        };
+        self.terminate(SelectionOutcome::Failed(SelectionFailure::Runtime(message)))
     }
 
     fn terminate(&mut self, outcome: SelectionOutcome) -> Option<SelectionTerminal> {
@@ -1018,14 +1051,10 @@ impl SelectionEnvironment for DesktopSelectionEnvironment {
         }
     }
 
-    fn arm_watchdog(&mut self, request_id: RequestId) {
-        self.watchdog.start(
-            TimerMode::SingleShot,
-            Duration::from_secs(SELECTION_WATCHDOG_SECONDS),
-            move || {
-                dispatch_runtime_event(RuntimeEvent::ScreenSelectionWatchdog { request_id });
-            },
-        );
+    fn arm_watchdog(&mut self, request_id: RequestId, after: Duration) {
+        self.watchdog.start(TimerMode::SingleShot, after, move || {
+            dispatch_runtime_event(RuntimeEvent::ScreenSelectionWatchdog { request_id });
+        });
     }
 
     fn disarm_watchdog(&mut self) {
@@ -1272,6 +1301,8 @@ fn intersect(first: PhysicalRect, second: PhysicalRect) -> Option<PhysicalRect> 
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use rust_platform_windows::region_selection::{MonitorRegion, PointerEvent};
     #[cfg(feature = "screen-translation")]
     use rust_platform_windows::screen_capture::RgbaFrame;
@@ -1472,7 +1503,7 @@ mod tests {
             self.visible_surfaces = 0;
         }
 
-        fn arm_watchdog(&mut self, _request_id: RequestId) {}
+        fn arm_watchdog(&mut self, _request_id: RequestId, _after: Duration) {}
 
         fn disarm_watchdog(&mut self) {}
 
@@ -1644,6 +1675,27 @@ mod tests {
             assert_eq!(coordinator.environment().visible_surfaces, 0, "{case}");
             assert!(!coordinator.is_active(), "{case}");
         }
+    }
+
+    #[test]
+    fn the_idle_limit_never_runs_past_the_overall_limit() {
+        let now = Instant::now();
+        let selection = |started: Instant| super::ActiveSelection {
+            request_id: RequestId::new(),
+            capture: capture(),
+            drag_origin: None,
+            capture_mode_active: true,
+            started,
+            watchdog_armed: started,
+        };
+        assert_eq!(
+            selection(now).watchdog_delay(now),
+            Duration::from_secs(super::SELECTION_IDLE_SECONDS)
+        );
+        let late = now - Duration::from_secs(super::SELECTION_MAX_SECONDS - 5);
+        assert_eq!(selection(late).watchdog_delay(now), Duration::from_secs(5));
+        let over = now - Duration::from_secs(super::SELECTION_MAX_SECONDS + 5);
+        assert_eq!(selection(over).watchdog_delay(now), Duration::ZERO);
     }
 
     #[test]

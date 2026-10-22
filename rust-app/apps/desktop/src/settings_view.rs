@@ -2993,6 +2993,7 @@ pub(crate) fn wire_tray(
                 let _ = settings.show();
                 configure_standard_app_window(&settings, "Settings");
                 settings.window().request_redraw();
+                crate::visualizer::wake_animation();
             }
         });
     }
@@ -3636,7 +3637,7 @@ mod hotkey_capture_tests {
         assert!(row.locked_reason.is_empty());
         assert_eq!(
             hotkeys_summary(&state),
-            format!("4 of {} shortcuts active", visible_hotkey_actions().len())
+            format!("Shortcuts active: 4 of {}", visible_hotkey_actions().len())
         );
     }
 
@@ -3664,7 +3665,7 @@ mod hotkey_capture_tests {
         assert!(row.enabled);
         assert_eq!(
             hotkeys_summary(&state),
-            format!("5 of {} shortcuts active", visible_hotkey_actions().len())
+            format!("Shortcuts active: 5 of {}", visible_hotkey_actions().len())
         );
     }
 

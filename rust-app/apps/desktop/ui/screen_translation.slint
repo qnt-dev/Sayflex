@@ -64,7 +64,7 @@ component OverlayButton inherits Rectangle {
         text: root.label;
         color: root.active ? #0b0e13 : #dedad3;
         opacity: root.active ? 1 : (touch.has-hover ? 0.92 : 0.62);
-        font-size: root.label == "ON IMAGE" ? 9px : 10px;
+        font-size: root.label.character-count > 6 ? 9px : 10px;
         font-weight: 680;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -103,7 +103,8 @@ component TranslatedLabel inherits Rectangle {
     clip: true;
     opacity: root.dimmed ? 0.38 : 1;
     accessible-role: button;
-    accessible-label: @tr("Editable translated image text");
+    // Five blocks with one name were indistinguishable to a screen reader.
+    accessible-label: root.translated-text != "" ? root.translated-text : @tr("Editable translated image text");
     accessible-action-default => { root.edit-requested(); }
 
     if root.shadow.alpha > 0: Text {
@@ -164,7 +165,7 @@ export component TranslationCorrectionPanel inherits Rectangle {
     in-out property <string> original-text: "End Turn";
     in property <string> block-source: "End Turn";
     property <bool> term-mode: root.original-text != root.block-source;
-    in property <string> context-text: "Battle for Wesnoth · game interface";
+    in property <string> context-text: "Game interface";
     in property <string> baseline-translation: "Завершить ход";
     in property <bool> save-error: false;
     in property <bool> editor-focusable: true;
@@ -330,7 +331,7 @@ export component ScreenImageResult inherits Rectangle {
     in property <string> end-turn-translation: "Завершить ход";
     in-out property <string> editor-original: "End Turn";
     in property <string> editor-block-source: "End Turn";
-    in property <string> editor-context: "Battle for Wesnoth · game interface";
+    in property <string> editor-context: "Game interface";
     in property <string> editor-direction: "EN → RU";
     in property <string> editor-baseline: "Завершить ход";
     in-out property <string> editor-translation: "Завершить ход";
@@ -383,12 +384,12 @@ export component ScreenImageResult inherits Rectangle {
             }
         }
     }
-    OverlayButton { x: 14px; y: 7px; width: 44px; label: "ORIG"; active: root.view-mode == 1; clicked => { root.view-requested(1); } }
-    OverlayButton { x: 64px; y: 7px; width: 44px; label: "DUAL"; active: root.view-mode == 2; clicked => { root.view-requested(2); } }
-    OverlayButton { x: 114px; y: 7px; width: 78px; label: "ON IMAGE"; active: root.view-mode == 3; clicked => { root.view-requested(3); } }
+    OverlayButton { x: 14px; y: 7px; width: 44px; label: @tr("ORIG"); accessible-name: @tr("Original text"); active: root.view-mode == 1; clicked => { root.view-requested(1); } }
+    OverlayButton { x: 64px; y: 7px; width: 44px; label: @tr("DUAL"); accessible-name: @tr("Original and translation"); active: root.view-mode == 2; clicked => { root.view-requested(2); } }
+    OverlayButton { x: 114px; y: 7px; width: 78px; label: @tr("ON IMAGE"); accessible-name: @tr("Translation on the image"); active: root.view-mode == 3; clicked => { root.view-requested(3); } }
     OverlayButton { x: 198px; y: 7px; width: 32px; label: "↓"; accessible-name: @tr("Save file"); enabled: !root.image-expired && !root.translating; clicked => { root.save-file-requested(); } }
-    OverlayButton { x: 236px; y: 7px; width: 38px; label: "DEL"; accessible-name: @tr("Delete image"); enabled: !root.image-expired && !root.translating; clicked => { root.delete-image-requested(); } }
-    OverlayButton { x: parent.width - 96px; y: 7px; width: 44px; label: "PIN"; active: root.pinned; clicked => { root.pin-requested(); } }
+    OverlayButton { x: 236px; y: 7px; width: 38px; label: @tr("DEL"); accessible-name: @tr("Delete image"); enabled: !root.image-expired && !root.translating; clicked => { root.delete-image-requested(); } }
+    OverlayButton { x: parent.width - 96px; y: 7px; width: 44px; label: @tr("PIN"); accessible-name: root.pinned ? @tr("Unpin window") : @tr("Keep window on top"); active: root.pinned; clicked => { root.pin-requested(); } }
     OverlayButton { x: parent.width - 46px; y: 7px; width: 38px; label: "×"; accessible-name: @tr("Close"); clicked => { root.close-requested(); } }
     if root.notice-height > 0px: Rectangle {
         x: 0px; y: 38px; width: parent.width; height: root.notice-height;
@@ -884,7 +885,9 @@ export component ScreenTranslationPreviewWindow inherits Window {
     forward-focus: keyboard;
 
     in-out property <int> preview-state: 0;
-    in property <image> fixture-image: @image-url("../assets/battle-for-wesnoth-1.12-screen-translation-preview.jpg");
+    // Set by the developer preview from a file in the source tree. The GPL
+    // screenshot must not be compiled into the program.
+    in property <image> fixture-image;
     in-out property <int> view-mode: 3;
     in-out property <bool> pinned: false;
     in-out property <bool> editor-visible: false;

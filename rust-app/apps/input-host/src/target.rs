@@ -185,6 +185,36 @@ pub fn process_path(process_id: u32) -> Option<std::path::PathBuf> {
     Some(Path::new(&full_path).to_path_buf())
 }
 
+/// Names the window that is in front right now, for a diagnostic line: its
+/// process, executable and window class. Never the title, which can carry a
+/// document name, a chat partner or a page the user is reading.
+pub fn describe_foreground() -> String {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return "foreground_pid=0 foreground_exe=none foreground_class=none".to_owned();
+    }
+    let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+    let top_level = if root.is_null() { foreground } else { root };
+    let mut process_id = 0_u32;
+    unsafe {
+        GetWindowThreadProcessId(top_level, &mut process_id);
+    }
+    let mut class_name = [0_u16; 128];
+    let copied =
+        unsafe { GetClassNameW(top_level, class_name.as_mut_ptr(), class_name.len() as i32) };
+    let class_name = if copied > 0 {
+        String::from_utf16_lossy(&class_name[..copied as usize])
+    } else {
+        "unknown".to_owned()
+    };
+    format!(
+        "foreground_pid={process_id} foreground_hwnd={} foreground_exe={} foreground_class={}",
+        top_level as usize as u64,
+        process_name(process_id).unwrap_or_else(|| "unknown".to_owned()),
+        class_name.replace(' ', "_"),
+    )
+}
+
 #[allow(dead_code)]
 pub fn capture_focused_target() -> TargetSnapshot {
     let foreground = unsafe { GetForegroundWindow() };

@@ -13,9 +13,12 @@ use zip::ZipArchive;
 
 use crate::{ArtifactFetcher, CancelToken, DownloadProgress, InstallPhase, ModelInstallError};
 
-pub const CUDA_DOWNLOAD_BYTES: u64 = 393_706_755;
+pub const CUDA_DOWNLOAD_BYTES: u64 = 393_706_755 + 2_589_792;
 pub const CUDA_LICENSE_URL: &str = "https://docs.nvidia.com/cuda/eula/index.html";
 const RECEIPT: &str = ".sayflex-cuda-runtime.json";
+/// Earlier component versions. Their verified DLLs are reused instead of being
+/// downloaded again, and their directories are removed once the new one is live.
+const SUPERSEDED: &[&str] = &["cuda-cublas-13.6.0.2"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct RuntimeFile {
@@ -26,12 +29,29 @@ struct RuntimeFile {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct RuntimeArchive {
+    url: String,
+    bytes: u64,
+    sha256: String,
+    files: Vec<RuntimeFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct RuntimeManifest {
     id: String,
-    url: String,
-    archive_bytes: u64,
-    archive_sha256: String,
-    files: Vec<RuntimeFile>,
+    archives: Vec<RuntimeArchive>,
+}
+
+impl RuntimeManifest {
+    fn files(&self) -> impl Iterator<Item = &RuntimeFile> {
+        self.archives
+            .iter()
+            .flat_map(|archive| archive.files.iter())
+    }
+
+    fn download_bytes(&self) -> u64 {
+        self.archives.iter().map(|archive| archive.bytes).sum()
+    }
 }
 
 /// A pinned, application-owned CUDA component. This installs no driver or Toolkit.
@@ -89,59 +109,6 @@ impl CudaRuntimeManager {
             progress(self.progress(InstallPhase::Ready));
             return Ok(self.runtime_path());
         }
-        let archive = self.root.join(format!("{}.zip.download", self.manifest.id));
-        reject_link_if_present(&archive)?;
-        if archive
-            .metadata()
-            .is_ok_and(|m| m.len() > self.manifest.archive_bytes)
-        {
-            fs::remove_file(&archive)?;
-        }
-        let mut archive_verified = false;
-        if archive
-            .metadata()
-            .is_ok_and(|m| m.len() == self.manifest.archive_bytes)
-        {
-            progress(self.progress(InstallPhase::Verifying));
-            match verify_file(
-                &archive,
-                self.manifest.archive_bytes,
-                &self.manifest.archive_sha256,
-                cancellation,
-            ) {
-                Ok(()) => archive_verified = true,
-                Err(ModelInstallError::Cancelled) => return Err(ModelInstallError::Cancelled),
-                Err(_) => {
-                    fs::remove_file(&archive)?;
-                }
-            }
-        }
-        if !archive_verified {
-            // HttpFetcher resumes this file; it must share `cancellation` with
-            // its caller to interrupt a stalled response as well as local work.
-            fetcher.fetch(
-                &self.manifest.url,
-                &archive,
-                self.manifest.archive_bytes,
-                &mut progress,
-            )?;
-            progress(self.progress(InstallPhase::Verifying));
-            let verified = verify_file(
-                &archive,
-                self.manifest.archive_bytes,
-                &self.manifest.archive_sha256,
-                cancellation,
-            );
-            if let Err(error) = verified {
-                if !matches!(error, ModelInstallError::Cancelled) {
-                    let _ = fs::remove_file(&archive);
-                }
-                return Err(error);
-            }
-        }
-        cancelled(cancellation)?;
-        progress(self.progress(InstallPhase::Installing));
-        cancelled(cancellation)?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| ModelInstallError::VerificationTime(e.to_string()))?
@@ -153,7 +120,29 @@ impl CudaRuntimeManager {
         ));
         fs::create_dir(&stage)?;
         let staged = StagedDirectory(stage);
-        self.extract_verified(&archive, &staged.0, cancellation)?;
+        let total = self.manifest.download_bytes();
+        let mut offset = 0;
+        let mut downloaded = Vec::new();
+        for (index, archive) in self.manifest.archives.iter().enumerate() {
+            if !self.reuse_superseded(archive, &staged.0, cancellation)? {
+                let path = self.archive_path(index);
+                // Report one continuous download across all archives.
+                download_verified(fetcher, archive, &path, cancellation, &mut |step| {
+                    progress(DownloadProgress {
+                        phase: step.phase,
+                        bytes_received: offset + step.bytes_received.min(archive.bytes),
+                        total_bytes: total,
+                    })
+                })?;
+                downloaded.push((archive, path));
+            }
+            offset += archive.bytes;
+        }
+        cancelled(cancellation)?;
+        progress(self.progress(InstallPhase::Installing));
+        for (archive, path) in &downloaded {
+            extract_verified(archive, path, &staged.0, cancellation)?;
+        }
         fs::write(staged.0.join(RECEIPT), serde_json::to_vec(&self.manifest)?)?;
         cancelled(cancellation)?;
         let destination = self.runtime_path();
@@ -181,16 +170,77 @@ impl CudaRuntimeManager {
         remember_verified(&destination, &self.manifest)?;
         // Keep partial/verified archives on failure or cancellation for retry,
         // but do not permanently duplicate the component's compressed payload.
-        let _ = fs::remove_file(&archive);
+        for (_, path) in &downloaded {
+            let _ = fs::remove_file(path);
+        }
+        // A DLL still loaded by a running worker cannot be deleted; that
+        // leftover is harmless because nothing searches the old directory.
+        for id in SUPERSEDED {
+            let directory = self.root.join(id);
+            if reject_link_if_present(&directory).is_ok() {
+                let _ = fs::remove_dir_all(directory);
+            }
+        }
         progress(self.progress(InstallPhase::Ready));
         Ok(destination)
     }
 
+    fn archive_path(&self, index: usize) -> PathBuf {
+        self.root
+            .join(format!("{}.{index}.zip.download", self.manifest.id))
+    }
+
+    /// Links (or copies) byte-identical files of an earlier component version
+    /// into the stage. Every staged file is hashed again before it counts.
+    fn reuse_superseded(
+        &self,
+        archive: &RuntimeArchive,
+        stage: &Path,
+        cancellation: &CancelToken,
+    ) -> Result<bool, ModelInstallError> {
+        for id in SUPERSEDED {
+            let directory = self.root.join(id);
+            if regular_directory(&directory).is_err() {
+                continue;
+            }
+            let mut staged = Vec::new();
+            let mut complete = true;
+            for file in &archive.files {
+                let source = directory.join(&file.name);
+                let target = stage.join(&file.name);
+                if regular_file(&source).is_err()
+                    || (fs::hard_link(&source, &target).is_err()
+                        && fs::copy(&source, &target).is_err())
+                {
+                    complete = false;
+                    break;
+                }
+                staged.push(target.clone());
+                match verify_file(&target, file.bytes, &file.sha256, cancellation) {
+                    Ok(()) => {}
+                    Err(ModelInstallError::Cancelled) => return Err(ModelInstallError::Cancelled),
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                return Ok(true);
+            }
+            for target in staged {
+                let _ = fs::remove_file(target);
+            }
+        }
+        Ok(false)
+    }
+
     fn progress(&self, phase: InstallPhase) -> DownloadProgress {
+        let total = self.manifest.download_bytes();
         DownloadProgress {
             phase,
-            bytes_received: self.manifest.archive_bytes,
-            total_bytes: self.manifest.archive_bytes,
+            bytes_received: total,
+            total_bytes: total,
         }
     }
 
@@ -213,7 +263,7 @@ impl CudaRuntimeManager {
         {
             return Ok(true);
         }
-        for file in &self.manifest.files {
+        for file in self.manifest.files() {
             match verify_file(
                 &path.join(&file.name),
                 file.bytes,
@@ -235,114 +285,178 @@ impl CudaRuntimeManager {
         cache.push(identity);
         Ok(true)
     }
+}
 
-    fn extract_verified(
-        &self,
-        archive: &Path,
-        stage: &Path,
-        cancellation: &CancelToken,
-    ) -> Result<(), ModelInstallError> {
-        let mut zip = ZipArchive::new(File::open(archive)?).map_err(invalid_zip)?;
-        let mut found = HashSet::new();
-        for index in 0..zip.len() {
-            cancelled(cancellation)?;
-            let mut entry = zip.by_index(index).map_err(invalid_zip)?;
-            validate_entry(&entry)?;
-            let Some(expected) = self
-                .manifest
-                .files
-                .iter()
-                .find(|file| file.archive_path == entry.name())
-            else {
-                continue;
-            };
-            if !found.insert(expected.name.clone())
-                || entry.is_dir()
-                || entry.size() != expected.bytes
-            {
-                return Err(ModelInstallError::InvalidBundle(
-                    "duplicate or invalid CUDA archive file".into(),
-                ));
-            }
-            let mut output = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(stage.join(&expected.name))?;
-            let mut hasher = Sha256::new();
-            let mut copied = 0_u64;
-            let mut buffer = vec![0_u8; 1024 * 1024];
-            loop {
-                cancelled(cancellation)?;
-                let count = entry.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                copied += count as u64;
-                if copied > expected.bytes {
-                    return Err(ModelInstallError::SizeMismatch {
-                        expected: expected.bytes,
-                        actual: copied,
-                    });
-                }
-                hasher.update(&buffer[..count]);
-                output.write_all(&buffer[..count])?;
-            }
-            output.sync_all()?;
-            check_digest(
-                copied,
-                format!("{:x}", hasher.finalize()),
-                expected.bytes,
-                &expected.sha256,
-            )?;
+fn download_verified(
+    fetcher: &dyn ArtifactFetcher,
+    archive: &RuntimeArchive,
+    path: &Path,
+    cancellation: &CancelToken,
+    progress: &mut dyn FnMut(DownloadProgress),
+) -> Result<(), ModelInstallError> {
+    let verifying = DownloadProgress {
+        phase: InstallPhase::Verifying,
+        bytes_received: archive.bytes,
+        total_bytes: archive.bytes,
+    };
+    reject_link_if_present(path)?;
+    if path.metadata().is_ok_and(|m| m.len() > archive.bytes) {
+        fs::remove_file(path)?;
+    }
+    if path.metadata().is_ok_and(|m| m.len() == archive.bytes) {
+        progress(verifying);
+        match verify_file(path, archive.bytes, &archive.sha256, cancellation) {
+            Ok(()) => return Ok(()),
+            Err(ModelInstallError::Cancelled) => return Err(ModelInstallError::Cancelled),
+            Err(_) => fs::remove_file(path)?,
         }
-        if found.len() != self.manifest.files.len() {
+    }
+    // HttpFetcher resumes this file; it must share `cancellation` with its
+    // caller to interrupt a stalled response as well as local work.
+    fetcher.fetch(&archive.url, path, archive.bytes, progress)?;
+    progress(verifying);
+    let verified = verify_file(path, archive.bytes, &archive.sha256, cancellation);
+    if let Err(error) = verified {
+        if !matches!(error, ModelInstallError::Cancelled) {
+            let _ = fs::remove_file(path);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn extract_verified(
+    archive: &RuntimeArchive,
+    path: &Path,
+    stage: &Path,
+    cancellation: &CancelToken,
+) -> Result<(), ModelInstallError> {
+    let mut zip = ZipArchive::new(File::open(path)?).map_err(invalid_zip)?;
+    let mut found = HashSet::new();
+    for index in 0..zip.len() {
+        cancelled(cancellation)?;
+        let mut entry = zip.by_index(index).map_err(invalid_zip)?;
+        validate_entry(&entry)?;
+        let Some(expected) = archive
+            .files
+            .iter()
+            .find(|file| file.archive_path == entry.name())
+        else {
+            continue;
+        };
+        if !found.insert(expected.name.clone()) || entry.is_dir() || entry.size() != expected.bytes
+        {
             return Err(ModelInstallError::InvalidBundle(
-                "CUDA archive is missing required runtime or license files".into(),
+                "duplicate or invalid CUDA archive file".into(),
             ));
         }
-        Ok(())
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(stage.join(&expected.name))?;
+        let mut hasher = Sha256::new();
+        let mut copied = 0_u64;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            cancelled(cancellation)?;
+            let count = entry.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            copied += count as u64;
+            if copied > expected.bytes {
+                return Err(ModelInstallError::SizeMismatch {
+                    expected: expected.bytes,
+                    actual: copied,
+                });
+            }
+            hasher.update(&buffer[..count]);
+            output.write_all(&buffer[..count])?;
+        }
+        output.sync_all()?;
+        check_digest(
+            copied,
+            format!("{:x}", hasher.finalize()),
+            expected.bytes,
+            &expected.sha256,
+        )?;
     }
+    if found.len() != archive.files.len() {
+        return Err(ModelInstallError::InvalidBundle(
+            "CUDA archive is missing required runtime or license files".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn pinned_manifest() -> RuntimeManifest {
-    // NVIDIA CUDA 13.3.1 redistrib manifest; both DLL hashes also match the
-    // previously bundled Toolkit build, preserving the execution binaries.
-    let package = "libcublas-windows-x86_64-13.6.0.2-archive";
+    // NVIDIA CUDA 13.3.1 redistrib manifest. The DLL hashes match the CUDA
+    // 13.3 Toolkit the worker is built with; the worker links cudart
+    // dynamically so that no NVIDIA runtime code ships in the installer.
+    // Both archives carry the same LICENSE, which is published once.
+    let redist = "https://developer.download.nvidia.com/compute/cuda/redist";
+    let archive = |url: String,
+                   bytes: u64,
+                   sha256: &str,
+                   package: &str,
+                   files: &[(&str, &str, u64, &str)]| RuntimeArchive {
+        url,
+        bytes,
+        sha256: sha256.into(),
+        files: files
+            .iter()
+            .map(|(path, name, bytes, sha256)| RuntimeFile {
+                archive_path: format!("{package}/{path}"),
+                name: (*name).into(),
+                bytes: *bytes,
+                sha256: (*sha256).into(),
+            })
+            .collect(),
+    };
+    let cublas = "libcublas-windows-x86_64-13.6.0.2-archive";
+    let cudart = "cuda_cudart-windows-x86_64-13.3.29-archive";
     RuntimeManifest {
-        id: "cuda-cublas-13.6.0.2".into(),
-        url: format!(
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/{package}.zip"
-        ),
-        archive_bytes: CUDA_DOWNLOAD_BYTES,
-        archive_sha256: "62e9fa30560c8f0a28e0cdcf9d6fc1fed347bcfab8847239b9ae1fdc1d86408a".into(),
-        files: [
-            (
-                "bin/x64/cublas64_13.dll",
-                "cublas64_13.dll",
-                52_697_712,
-                "8c6bac24474af29627ec96500025a5d410a1b7e8ffa00e1fe13b1781fc6b3ddc",
+        id: "cuda-runtime-13.3.1".into(),
+        archives: vec![
+            archive(
+                format!("{redist}/libcublas/windows-x86_64/{cublas}.zip"),
+                393_706_755,
+                "62e9fa30560c8f0a28e0cdcf9d6fc1fed347bcfab8847239b9ae1fdc1d86408a",
+                cublas,
+                &[
+                    (
+                        "bin/x64/cublas64_13.dll",
+                        "cublas64_13.dll",
+                        52_697_712,
+                        "8c6bac24474af29627ec96500025a5d410a1b7e8ffa00e1fe13b1781fc6b3ddc",
+                    ),
+                    (
+                        "bin/x64/cublasLt64_13.dll",
+                        "cublasLt64_13.dll",
+                        463_655_536,
+                        "e323abd89e0f03c1db91a09d7aeb1928de08e1f86192cc713b335fefe3e368a9",
+                    ),
+                    (
+                        "LICENSE",
+                        "LICENSE",
+                        68_070,
+                        "088381bc2d891e719a2a9398645b00bb45f3b24231473a8283ac7e3e66b8a028",
+                    ),
+                ],
             ),
-            (
-                "bin/x64/cublasLt64_13.dll",
-                "cublasLt64_13.dll",
-                463_655_536,
-                "e323abd89e0f03c1db91a09d7aeb1928de08e1f86192cc713b335fefe3e368a9",
+            archive(
+                format!("{redist}/cuda_cudart/windows-x86_64/{cudart}.zip"),
+                2_589_792,
+                "1feb7dd266813ffe8dbc24e115183a5ac35a4795c8d34aca0df85ab616b64d9c",
+                cudart,
+                &[(
+                    "bin/x64/cudart64_13.dll",
+                    "cudart64_13.dll",
+                    551_024,
+                    "b00ca6f53699120da815bf3e06e2e4285fae2f201235b883dcbb50eec51e2a2a",
+                )],
             ),
-            (
-                "LICENSE",
-                "LICENSE",
-                68_070,
-                "088381bc2d891e719a2a9398645b00bb45f3b24231473a8283ac7e3e66b8a028",
-            ),
-        ]
-        .into_iter()
-        .map(|(path, name, bytes, sha256)| RuntimeFile {
-            archive_path: format!("{package}/{path}"),
-            name: name.into(),
-            bytes,
-            sha256: sha256.into(),
-        })
-        .collect(),
+        ],
     }
 }
 
@@ -500,17 +614,16 @@ fn installation_identity(path: &Path, manifest: &RuntimeManifest) -> Option<Inst
         .ok()?
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-    if entries.len() != manifest.files.len() + 1
+    if entries.len() != manifest.files().count() + 1
         || entries.iter().any(|entry| {
             let name = entry.file_name();
-            name != RECEIPT && !manifest.files.iter().any(|file| name == file.name.as_str())
+            name != RECEIPT && !manifest.files().any(|file| name == file.name.as_str())
         })
     {
         return None;
     }
     let files = manifest
-        .files
-        .iter()
+        .files()
         .map(|file| file.name.as_str())
         .chain(std::iter::once(RECEIPT))
         .map(|name| {
@@ -557,39 +670,36 @@ mod tests {
     use zip::{ZipWriter, write::SimpleFileOptions};
 
     #[test]
-    #[ignore = "requires an explicitly supplied NVIDIA archive; writes only to a temporary directory"]
-    fn installs_the_official_pinned_archive_without_loading_cuda() {
-        struct LocalArchive(PathBuf);
-        impl ArtifactFetcher for LocalArchive {
+    #[ignore = "requires explicitly supplied NVIDIA archives; writes only to a temporary directory"]
+    fn installs_the_official_pinned_archives_without_loading_cuda() {
+        struct LocalArchives(PathBuf);
+        impl ArtifactFetcher for LocalArchives {
             fn fetch(
                 &self,
-                _: &str,
+                url: &str,
                 destination: &Path,
                 _: u64,
                 _: &mut dyn FnMut(DownloadProgress),
             ) -> Result<(), ModelInstallError> {
-                fs::copy(&self.0, destination)?;
+                let name = url.rsplit('/').next().unwrap();
+                fs::copy(self.0.join(name), destination)?;
                 Ok(())
             }
         }
-        let archive = std::env::var_os("SAYFLEX_CUDA_RUNTIME_ARCHIVE")
-            .expect("set the local NVIDIA archive path");
+        let archives = std::env::var_os("SAYFLEX_CUDA_RUNTIME_ARCHIVE_DIR")
+            .expect("set the directory that holds both NVIDIA archives");
         let root = tempdir().unwrap();
         let manager = CudaRuntimeManager::new(root.path().to_owned());
         let path = manager
             .ensure_installed(
-                &LocalArchive(archive.into()),
+                &LocalArchives(archives.into()),
                 &CancelToken::default(),
                 |_| {},
             )
             .unwrap();
         assert!(manager.is_installed());
-        assert!(
-            !manager
-                .root
-                .join(format!("{}.zip.download", manager.manifest.id))
-                .exists()
-        );
+        assert!(!manager.archive_path(0).exists());
+        assert!(!manager.archive_path(1).exists());
         // Force a cold integrity probe; an on-disk receipt alone cannot replace
         // checking the real published DLL contents.
         verified_cache()
@@ -597,7 +707,7 @@ mod tests {
             .unwrap()
             .retain(|entry| entry.path != path);
         assert!(manager.is_installed());
-        assert_eq!(fs::read_dir(path).unwrap().count(), 4);
+        assert_eq!(fs::read_dir(path).unwrap().count(), 5);
     }
 
     struct BytesFetcher(Vec<u8>);
@@ -619,25 +729,55 @@ mod tests {
         }
     }
 
-    fn digest(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
+    /// Serves each archive by URL and records which URLs were requested.
+    struct UrlFetcher {
+        archives: Vec<(String, Vec<u8>)>,
+        requested: Mutex<Vec<String>>,
+    }
+    impl ArtifactFetcher for UrlFetcher {
+        fn fetch(
+            &self,
+            url: &str,
+            destination: &Path,
+            total: u64,
+            progress: &mut dyn FnMut(DownloadProgress),
+        ) -> Result<(), ModelInstallError> {
+            self.requested.lock().unwrap().push(url.to_owned());
+            let (_, bytes) = self
+                .archives
+                .iter()
+                .find(|(candidate, _)| candidate == url)
+                .ok_or_else(|| ModelInstallError::Download("unknown URL".into()))?;
+            fs::write(destination, bytes)?;
+            progress(DownloadProgress {
+                phase: InstallPhase::Downloading,
+                bytes_received: bytes.len() as u64 / 2,
+                total_bytes: total,
+            });
+            progress(DownloadProgress {
+                phase: InstallPhase::Downloading,
+                bytes_received: bytes.len() as u64,
+                total_bytes: total,
+            });
+            Ok(())
+        }
     }
 
-    fn fixture(root: &Path, extra: Option<&str>) -> (CudaRuntimeManager, Vec<u8>) {
+    fn archive_fixture(
+        url: &str,
+        entries: &[(&str, &[u8])],
+        extra: Option<&str>,
+    ) -> (RuntimeArchive, Vec<u8>) {
         let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
         let mut files = Vec::new();
-        for (name, bytes) in [
-            ("cublas64_13.dll", b"test cublas".as_slice()),
-            ("cublasLt64_13.dll", b"test cublasLt".as_slice()),
-            ("LICENSE", b"test NVIDIA license".as_slice()),
-        ] {
+        for (name, bytes) in entries {
             let archive_path = format!("package/{name}");
             zip.start_file(&archive_path, SimpleFileOptions::default())
                 .unwrap();
             zip.write_all(bytes).unwrap();
             files.push(RuntimeFile {
                 archive_path,
-                name: name.into(),
+                name: (*name).into(),
                 bytes: bytes.len() as u64,
                 sha256: digest(bytes),
             });
@@ -647,14 +787,57 @@ mod tests {
             zip.write_all(b"untrusted").unwrap();
         }
         let bytes = zip.finish().unwrap().into_inner();
+        (
+            RuntimeArchive {
+                url: url.into(),
+                bytes: bytes.len() as u64,
+                sha256: digest(&bytes),
+                files,
+            },
+            bytes,
+        )
+    }
+
+    const CUBLAS: &[(&str, &[u8])] = &[
+        ("cublas64_13.dll", b"test cublas"),
+        ("cublasLt64_13.dll", b"test cublasLt"),
+        ("LICENSE", b"test NVIDIA license"),
+    ];
+    const CUDART: &[(&str, &[u8])] = &[("cudart64_13.dll", b"test cudart")];
+
+    fn two_archive_fixture(root: &Path) -> (CudaRuntimeManager, UrlFetcher) {
+        let (cublas, cublas_bytes) =
+            archive_fixture("https://example.invalid/cublas.zip", CUBLAS, None);
+        let (cudart, cudart_bytes) =
+            archive_fixture("https://example.invalid/cudart.zip", CUDART, None);
+        let fetcher = UrlFetcher {
+            archives: vec![
+                (cublas.url.clone(), cublas_bytes),
+                (cudart.url.clone(), cudart_bytes),
+            ],
+            requested: Mutex::new(Vec::new()),
+        };
         let manager = CudaRuntimeManager {
             root: root.to_owned(),
             manifest: RuntimeManifest {
                 id: "cuda-test-version".into(),
-                url: "https://example.invalid/pinned.zip".into(),
-                archive_bytes: bytes.len() as u64,
-                archive_sha256: digest(&bytes),
-                files,
+                archives: vec![cublas, cudart],
+            },
+        };
+        (manager, fetcher)
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn fixture(root: &Path, extra: Option<&str>) -> (CudaRuntimeManager, Vec<u8>) {
+        let (archive, bytes) = archive_fixture("https://example.invalid/pinned.zip", CUBLAS, extra);
+        let manager = CudaRuntimeManager {
+            root: root.to_owned(),
+            manifest: RuntimeManifest {
+                id: "cuda-test-version".into(),
+                archives: vec![archive],
             },
         };
         (manager, bytes)
@@ -679,12 +862,7 @@ mod tests {
             })
             .unwrap();
         assert!(ready);
-        assert!(
-            !manager
-                .root
-                .join(format!("{}.zip.download", manager.manifest.id))
-                .exists()
-        );
+        assert!(!manager.archive_path(0).exists());
         assert_eq!(
             fs::read(manager.runtime_path().join("LICENSE")).unwrap(),
             b"test NVIDIA license"
@@ -746,12 +924,7 @@ mod tests {
         });
         assert!(matches!(result, Err(ModelInstallError::Cancelled)));
         assert!(!manager.runtime_path().exists());
-        assert!(
-            manager
-                .root
-                .join(format!("{}.zip.download", manager.manifest.id))
-                .is_file()
-        );
+        assert!(manager.archive_path(0).is_file());
         cancellation.reset();
         struct Offline;
         impl ArtifactFetcher for Offline {
@@ -783,8 +956,8 @@ mod tests {
         )
         .unwrap();
         let bytes = zip.finish().unwrap().into_inner();
-        manager.manifest.archive_bytes = bytes.len() as u64;
-        manager.manifest.archive_sha256 = digest(&bytes);
+        manager.manifest.archives[0].bytes = bytes.len() as u64;
+        manager.manifest.archives[0].sha256 = digest(&bytes);
         assert!(
             manager
                 .ensure_installed(&BytesFetcher(bytes), &CancelToken::default(), |_| {})
@@ -797,7 +970,7 @@ mod tests {
     fn rejects_wrong_inner_dll_hash_and_never_emits_ready() {
         let root = tempdir().unwrap();
         let (mut manager, bytes) = fixture(root.path(), None);
-        manager.manifest.files[0].sha256 = "00".repeat(32);
+        manager.manifest.archives[0].files[0].sha256 = "00".repeat(32);
         let mut ready = false;
         let result = manager.ensure_installed(&BytesFetcher(bytes), &CancelToken::default(), |p| {
             ready |= p.phase == InstallPhase::Ready;
@@ -847,5 +1020,98 @@ mod tests {
             .unwrap();
         fs::write(manager.runtime_path().join("nvcuda.dll"), b"not verified").unwrap();
         assert!(!manager.is_installed());
+    }
+    #[test]
+    fn two_archives_report_one_continuous_download_and_publish_every_file() {
+        let root = tempdir().unwrap();
+        let (manager, fetcher) = two_archive_fixture(root.path());
+        let total = manager.manifest.download_bytes();
+        let mut received = Vec::new();
+        manager
+            .ensure_installed(&fetcher, &CancelToken::default(), |p| {
+                assert_eq!(p.total_bytes, total);
+                if p.phase == InstallPhase::Downloading {
+                    received.push(p.bytes_received);
+                }
+            })
+            .unwrap();
+        assert!(received.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(received.last(), Some(&total));
+        assert!(manager.is_installed());
+        for name in [
+            "cublas64_13.dll",
+            "cublasLt64_13.dll",
+            "LICENSE",
+            "cudart64_13.dll",
+        ] {
+            assert!(manager.runtime_path().join(name).is_file(), "{name}");
+        }
+        assert!(!manager.archive_path(0).exists());
+        assert!(!manager.archive_path(1).exists());
+    }
+
+    #[test]
+    fn reuses_verified_files_of_a_superseded_version_and_removes_it() {
+        let root = tempdir().unwrap();
+        let (manager, fetcher) = two_archive_fixture(root.path());
+        let legacy = root.path().join(SUPERSEDED[0]);
+        fs::create_dir(&legacy).unwrap();
+        for (name, bytes) in CUBLAS {
+            fs::write(legacy.join(name), bytes).unwrap();
+        }
+        manager
+            .ensure_installed(&fetcher, &CancelToken::default(), |_| {})
+            .unwrap();
+        assert_eq!(
+            *fetcher.requested.lock().unwrap(),
+            vec!["https://example.invalid/cudart.zip".to_owned()]
+        );
+        assert!(manager.is_installed());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn a_corrupt_superseded_file_is_downloaded_again() {
+        let root = tempdir().unwrap();
+        let (manager, fetcher) = two_archive_fixture(root.path());
+        let legacy = root.path().join(SUPERSEDED[0]);
+        fs::create_dir(&legacy).unwrap();
+        for (name, bytes) in CUBLAS {
+            fs::write(legacy.join(name), bytes).unwrap();
+        }
+        fs::write(legacy.join("cublas64_13.dll"), b"bad! cublas").unwrap();
+        manager
+            .ensure_installed(&fetcher, &CancelToken::default(), |_| {})
+            .unwrap();
+        assert_eq!(fetcher.requested.lock().unwrap().len(), 2);
+        assert_eq!(
+            fs::read(manager.runtime_path().join("cublas64_13.dll")).unwrap(),
+            b"test cublas"
+        );
+        assert!(manager.is_installed());
+    }
+
+    #[test]
+    fn the_pinned_manifest_ships_cudart_beside_cublas() {
+        let manifest = pinned_manifest();
+        let names = manifest
+            .files()
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "cublas64_13.dll",
+                "cublasLt64_13.dll",
+                "LICENSE",
+                "cudart64_13.dll"
+            ]
+        );
+        assert_eq!(manifest.download_bytes(), CUDA_DOWNLOAD_BYTES);
+        assert!(manifest.archives.iter().all(|archive| {
+            archive
+                .url
+                .starts_with("https://developer.download.nvidia.com/compute/cuda/redist/")
+        }));
     }
 }

@@ -3,7 +3,7 @@ use std::{
     ptr,
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -18,13 +18,17 @@ use windows_sys::Win32::{
             CallNextHookEx, DispatchMessageW, GA_ROOT, GetAncestor, GetMessageW, GetWindowRect,
             HHOOK, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW,
             PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-            WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEWHEEL, WM_QUIT,
-            WM_RBUTTONDOWN, WindowFromPoint,
+            WH_MOUSE_LL, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEWHEEL,
+            WM_QUIT, WM_RBUTTONDOWN, WindowFromPoint,
         },
     },
 };
 
 static ACTIVE_POPUPS: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
+/// The hook thread, told to install or remove the hook as popups come and go.
+static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+/// Sent to the hook thread after the set of popups changed.
+const WM_SYNC_HOOK: u32 = WM_APP + 0x51;
 static PIN_CLICK_CAPTURED: AtomicUsize = AtomicUsize::new(0);
 static DISMISS_SENDER: OnceLock<mpsc::Sender<DismissSignal>> = OnceLock::new();
 
@@ -130,6 +134,20 @@ pub fn activate_popup_dismiss(window_handle: u64) {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .entry(window_handle)
         .or_insert(false);
+    request_hook_sync();
+}
+
+/// The global mouse hook exists only while a translation popup is open. It
+/// used to stay installed for the whole session, so every mouse event in
+/// Windows passed through SayFlex even with nothing to dismiss.
+fn request_hook_sync() {
+    let thread_id = HOOK_THREAD_ID.load(Ordering::Acquire);
+    if thread_id != 0 {
+        // SAFETY: posting a value-only message to the hook thread's queue.
+        unsafe {
+            let _ = PostThreadMessageW(thread_id, WM_SYNC_HOOK, 0, 0);
+        }
+    }
 }
 
 pub fn set_popup_pinned(window_handle: u64, pinned: bool) {
@@ -147,6 +165,7 @@ pub fn deactivate_popup_dismiss(window_handle: u64) {
         .remove(&window_handle);
     let _ =
         PIN_CLICK_CAPTURED.compare_exchange(window_handle, 0, Ordering::AcqRel, Ordering::Acquire);
+    request_hook_sync();
 }
 
 pub fn deactivate_all_popup_dismiss() {
@@ -155,6 +174,7 @@ pub fn deactivate_all_popup_dismiss() {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();
     PIN_CLICK_CAPTURED.store(0, Ordering::Release);
+    request_hook_sync();
 }
 
 fn popup_registry() -> &'static Mutex<HashMap<usize, bool>> {
@@ -168,21 +188,17 @@ fn run_mouse_hook(ready: mpsc::SyncSender<Result<u32, String>>) {
     unsafe {
         let _ = PeekMessageW(&mut queue_probe, ptr::null_mut(), 0, 0, PM_NOREMOVE);
     }
-    // SAFETY: null asks Windows for the current executable module.
-    let module = unsafe { GetModuleHandleW(ptr::null()) };
-    // SAFETY: mouse_hook has the required ABI and remains valid for the process.
-    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0) };
-    if hook.is_null() {
-        let _ = ready.send(Err(std::io::Error::last_os_error().to_string()));
-        return;
-    }
-    let _guard = MouseHookGuard(hook);
     // SAFETY: this is the identifier of the current hook thread.
     let thread_id = unsafe { GetCurrentThreadId() };
+    HOOK_THREAD_ID.store(thread_id, Ordering::Release);
     if ready.send(Ok(thread_id)).is_err() {
+        HOOK_THREAD_ID.store(0, Ordering::Release);
         return;
     }
 
+    let mut hook: Option<MouseHookGuard> = None;
+    // A popup may have opened before this thread published its identifier.
+    sync_hook(&mut hook);
     let mut message = MSG::default();
     loop {
         // SAFETY: message points to valid storage for the duration of the call.
@@ -190,11 +206,44 @@ fn run_mouse_hook(ready: mpsc::SyncSender<Result<u32, String>>) {
         if result <= 0 {
             break;
         }
+        if message.hwnd.is_null() && message.message == WM_SYNC_HOOK {
+            sync_hook(&mut hook);
+            continue;
+        }
         // SAFETY: message was produced by GetMessageW.
         unsafe {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+    }
+    HOOK_THREAD_ID.store(0, Ordering::Release);
+}
+
+/// Installs the hook while any popup is registered and removes it otherwise.
+/// Runs on the hook thread, which owns the hook and its message loop.
+fn sync_hook(hook: &mut Option<MouseHookGuard>) {
+    let wanted = !popup_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_empty();
+    match (wanted, hook.is_some()) {
+        (true, false) => {
+            // SAFETY: null asks Windows for the current executable module.
+            let module = unsafe { GetModuleHandleW(ptr::null()) };
+            // SAFETY: mouse_hook has the required ABI and remains valid for
+            // the process.
+            let handle = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0) };
+            if handle.is_null() {
+                eprintln!(
+                    "translation popup mouse hook could not be installed: {}",
+                    std::io::Error::last_os_error()
+                );
+            } else {
+                *hook = Some(MouseHookGuard(handle));
+            }
+        }
+        (false, true) => *hook = None,
+        _ => {}
     }
 }
 
@@ -328,8 +377,27 @@ mod tests {
         activate_popup_dismiss, deactivate_all_popup_dismiss, popup_snapshot, set_popup_pinned,
     };
 
+    /// Both tests use the process-wide popup registry.
+    static REGISTRY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_hook_follows_the_popups() {
+        let _registry = REGISTRY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut hook = None;
+        deactivate_all_popup_dismiss();
+        super::sync_hook(&mut hook);
+        assert!(hook.is_none(), "no popup, no hook");
+        activate_popup_dismiss(91);
+        super::sync_hook(&mut hook);
+        assert!(hook.is_some(), "an open popup installs the hook");
+        super::deactivate_popup_dismiss(91);
+        super::sync_hook(&mut hook);
+        assert!(hook.is_none(), "the last popup removes it");
+    }
+
     #[test]
     fn rendered_refresh_preserves_pin_and_other_popups() {
+        let _registry = REGISTRY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         deactivate_all_popup_dismiss();
         activate_popup_dismiss(42);
         set_popup_pinned(42, true);

@@ -29,18 +29,19 @@ use windows_sys::Win32::{
         Threading::GetCurrentProcessId,
     },
     UI::{
-        HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+        HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
         WindowsAndMessaging::{
             GCLP_HICON, GCLP_HICONSM, GUITHREADINFO, GWL_EXSTYLE, GWL_STYLE, GetCursorPos,
             GetForegroundWindow, GetGUIThreadInfo, GetSystemMetrics, GetWindowLongPtrW,
             GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG,
-            ICON_SMALL, IMAGE_ICON, IsWindowVisible, LR_DEFAULTCOLOR, LoadImageW, SM_CXICON,
-            SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetClassLongPtrW,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_SETICON,
-            WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+            ICON_SMALL, IMAGE_ICON, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR, LoadImageW,
+            SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
+            SetClassLongPtrW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+            WM_SETICON, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+            WS_THICKFRAME,
         },
     },
 };
@@ -1029,6 +1030,50 @@ pub fn configure_action_window_for_target(
     position_action_window(window_handle, target_window_handle)
 }
 
+/// Places a notice in the lower-right corner of the work area of the monitor
+/// with the pointer, where Windows shows its own notifications. It does not
+/// cover the text the user is working on and never takes the keyboard focus.
+pub fn configure_notice_window(window_handle: u64) -> Result<(), String> {
+    configure_action_window(window_handle)?;
+    let hwnd = window_handle as usize as HWND;
+    let anchor = cursor_anchor().unwrap_or_default();
+    unsafe {
+        let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+        let mut monitor_info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        let mut window_rect = RECT::default();
+        if monitor.is_null()
+            || GetMonitorInfoW(monitor, &mut monitor_info) == 0
+            || GetWindowRect(hwnd, &mut window_rect) == 0
+        {
+            return Err("Windows could not measure the notice window".to_owned());
+        }
+        let width = window_rect.right - window_rect.left;
+        let height = window_rect.bottom - window_rect.top;
+        let work = monitor_info.rcWork;
+        let margin = 16 * GetDpiForWindow(hwnd).max(96) as i32 / 96;
+        let x = (work.right - width - margin).max(work.left);
+        let y = (work.bottom - height - margin).max(work.top);
+        if SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            return Err("SetWindowPos failed for notice window placement".to_owned());
+        }
+    }
+    Ok(())
+}
+
 pub fn prepare_action_window(window_handle: u64) -> Result<(), String> {
     configure_action_window(window_handle)?;
     prepare_interactive_window(window_handle)
@@ -1682,6 +1727,22 @@ fn flush_composition(operation: &str) -> Result<(), String> {
         Err(format!("DwmFlush failed while {operation}: 0x{result:08X}"))
     } else {
         Ok(())
+    }
+}
+
+/// Restores and brings a window of this process to the front. Windows allows
+/// it when the user's last input went to this process, or when the process
+/// that received it passed the right on (`AllowSetForegroundWindow`).
+pub fn activate_window(window_handle: u64) {
+    let hwnd = window_handle as usize as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
     }
 }
 

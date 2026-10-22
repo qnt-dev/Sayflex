@@ -21,6 +21,7 @@ const AUDIO_RING_SECONDS: usize = 8;
 const CAPTURE_RESERVE_SECONDS: usize = 15;
 const MAX_CAPTURE_SECONDS: usize = 5 * 60;
 const LEVEL_INTERVAL: Duration = Duration::from_millis(32);
+const CAPTURE_DRAIN_INTERVAL: Duration = Duration::from_millis(10);
 const SPECTRUM_WINDOW_SAMPLES: usize = 1_024;
 const SPECTRUM_MIN_FREQUENCY_HZ: f32 = 80.0;
 const SPECTRUM_MAX_FREQUENCY_HZ: f32 = 8_000.0;
@@ -627,8 +628,11 @@ fn capture_loop(
             &stream,
             &recording_limit_events,
         );
+        // Windows delivers microphone audio in 10 ms periods and the ring holds
+        // 8 s, so draining once per period loses nothing. Polling every 2 ms
+        // woke this thread 500 times a second during every recording.
         let command = if active.is_some() {
-            commands.recv_timeout(Duration::from_millis(2))
+            commands.recv_timeout(CAPTURE_DRAIN_INTERVAL)
         } else {
             commands
                 .recv()

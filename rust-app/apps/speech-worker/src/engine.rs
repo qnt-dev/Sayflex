@@ -12,10 +12,13 @@ use anyhow::{Context, Result, bail};
 use rust_protocol::SpeechOutputMode;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
-    get_lang_str,
+    get_lang_id, get_lang_str,
 };
 
-use crate::audio::{RecordedAudio, resample_bandlimited};
+use crate::{
+    audio::{RecordedAudio, resample_bandlimited},
+    vad::{self, NoSpeech, SpeechGate},
+};
 
 #[cfg(all(feature = "cuda", feature = "vulkan"))]
 compile_error!("the speech worker must be built for exactly one GPU backend");
@@ -98,6 +101,11 @@ pub struct WhisperEngine {
     state: Option<WhisperState>,
     direct_translation_supported: bool,
     language: Option<String>,
+    /// Languages of this Windows user, most preferred first. "Auto" chooses
+    /// among these instead of all 99 Whisper languages.
+    user_languages: Vec<String>,
+    speech_gate: Option<SpeechGate>,
+    speech_gate_attempted: bool,
 }
 
 impl WhisperEngine {
@@ -108,6 +116,26 @@ impl WhisperEngine {
             state: None,
             language: None,
             direct_translation_supported: false,
+            user_languages: rust_platform_windows::user_language_codes(),
+            speech_gate: None,
+            speech_gate_attempted: false,
+        }
+    }
+
+    /// Loads the voice activity model once. Without it, the no-speech rule
+    /// after decoding still applies.
+    fn ensure_speech_gate(&mut self) {
+        if self.speech_gate_attempted {
+            return;
+        }
+        self.speech_gate_attempted = true;
+        match SpeechGate::bundled_model_path().map(|path| SpeechGate::load(&path)) {
+            Some(Ok(gate)) => self.speech_gate = Some(gate),
+            Some(Err(error)) => eprintln!("voice activity detection is off: {error:#}"),
+            None => eprintln!(
+                "voice activity detection is off: {} is not installed",
+                vad::VAD_MODEL_FILE
+            ),
         }
     }
 
@@ -177,7 +205,17 @@ impl WhisperEngine {
         self.state = Some(state);
         self.loaded_path = Some(model_path.to_owned());
         self.direct_translation_supported = direct_translation_supported;
+        self.ensure_speech_gate();
 
+        // The silent pass proves that a GPU has compatible kernels. A CPU has
+        // nothing to prove, and the pass cost seconds at every start there.
+        if backend_name() == "cpu" {
+            return Ok(PreparedModel {
+                load_duration_ms,
+                warmup_duration_ms: 0,
+                backend: backend_name(),
+            });
+        }
         let warmup_started = Instant::now();
         let silence = vec![0.0_f32; WARMUP_SAMPLES];
         // Model loading alone does not prove that the selected GPU contains
@@ -246,6 +284,14 @@ impl WhisperEngine {
         );
         let preprocessing_ms = elapsed_ms(preprocessing_started);
         let inference_started = Instant::now();
+        if let Some(gate) = self.speech_gate.as_mut() {
+            match gate.speech_ms(&audio) {
+                Ok(speech_ms) if speech_ms < vad::MIN_SPEECH_MS => return Err(NoSpeech.into()),
+                Ok(_) => {}
+                // A detector failure must not lose a dictation: decode anyway.
+                Err(error) => eprintln!("voice activity detection failed: {error:#}"),
+            }
+        }
         let decoded =
             self.run_whisper(&audio, output_mode, false, initial_prompt, abort_generation)?;
         let segments = decoded
@@ -280,6 +326,16 @@ impl WhisperEngine {
         initial_prompt: Option<&str>,
         abort_generation: Option<AbortGeneration>,
     ) -> Result<DecodedTranscript> {
+        let language = match self.language.clone() {
+            Some(language) => Some(language),
+            None if single_segment => None,
+            None => self.likely_user_language(audio)?,
+        };
+        let end_of_text = self
+            .context
+            .as_ref()
+            .context("Whisper model is not prepared")?
+            .token_eot();
         let state = self
             .state
             .as_mut()
@@ -287,7 +343,7 @@ impl WhisperEngine {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         let decode_policy = whisper_decode_policy(single_segment);
         params.set_n_threads(inference_threads());
-        params.set_language(self.language.as_deref());
+        params.set_language(language.as_deref());
         params.set_translate(output_mode == SpeechOutputMode::TranslateToEnglish);
         params.set_no_context(true);
         if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.is_empty()) {
@@ -320,6 +376,23 @@ impl WhisperEngine {
         let mut raw_text = String::new();
         let mut segments = Vec::new();
         for segment in state.as_iter() {
+            if !single_segment {
+                let text_tokens = (0..segment.n_tokens())
+                    .filter_map(|index| segment.get_token(index))
+                    .map(|token| token.token_data())
+                    .filter(|data| data.id < end_of_text)
+                    .map(|data| data.plog)
+                    .collect::<Vec<_>>();
+                let average_log_probability = if text_tokens.is_empty() {
+                    f32::NEG_INFINITY
+                } else {
+                    text_tokens.iter().sum::<f32>() / text_tokens.len() as f32
+                };
+                if vad::is_silence_segment(segment.no_speech_probability(), average_log_probability)
+                {
+                    continue;
+                }
+            }
             let raw_segment = segment
                 .to_str()
                 .context("Whisper returned invalid transcript text")?;
@@ -335,7 +408,7 @@ impl WhisperEngine {
         }
         let text = normalize_transcript(&raw_text);
         if text.is_empty() {
-            bail!("no speech was recognized");
+            return Err(NoSpeech.into());
         }
         let language = if output_mode == SpeechOutputMode::TranslateToEnglish {
             "en".to_owned()
@@ -350,6 +423,53 @@ impl WhisperEngine {
             segments,
         })
     }
+}
+
+impl WhisperEngine {
+    /// With "Auto", the most likely of the user's own languages. One language
+    /// needs no detection; several are compared with Whisper's language
+    /// probabilities. Whisper's own auto mode spends the same encoder pass on
+    /// detection, so this costs nothing extra.
+    fn likely_user_language(&mut self, audio: &[f32]) -> Result<Option<String>> {
+        let candidates = self
+            .user_languages
+            .iter()
+            .filter_map(|code| get_lang_id(code).map(|id| (code.clone(), id)))
+            .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [(only, _)] => Ok(Some(only.clone())),
+            _ => {
+                let state = self
+                    .state
+                    .as_mut()
+                    .context("Whisper inference state is not prepared")?;
+                let threads = inference_threads() as usize;
+                state
+                    .pcm_to_mel(audio, threads)
+                    .context("could not prepare audio for language detection")?;
+                let (_, probabilities) = state
+                    .lang_detect(0, threads)
+                    .context("Whisper language detection failed")?;
+                Ok(choose_user_language(&candidates, &probabilities))
+            }
+        }
+    }
+}
+
+fn choose_user_language(candidates: &[(String, i32)], probabilities: &[f32]) -> Option<String> {
+    candidates
+        .iter()
+        .filter_map(|(code, id)| {
+            let probability = *probabilities.get(usize::try_from(*id).ok()?)?;
+            Some((code, probability))
+        })
+        // On a tie, the earlier (more preferred) language wins.
+        .fold(None::<(&String, f32)>, |best, candidate| match best {
+            Some(best) if best.1 >= candidate.1 => Some(best),
+            _ => Some(candidate),
+        })
+        .map(|(code, _)| code.clone())
 }
 
 fn source_sample_at_timestamp(recording: &RecordedAudio, timestamp_cs: i64) -> usize {
@@ -411,9 +531,28 @@ mod tests {
     use rust_protocol::SessionId;
 
     use super::{
-        WhisperEngine, inference_threads, normalize_transcript, source_sample_at_timestamp,
-        supports_direct_translation, whisper_decode_policy,
+        WhisperEngine, choose_user_language, inference_threads, normalize_transcript,
+        source_sample_at_timestamp, supports_direct_translation, whisper_decode_policy,
     };
+
+    #[test]
+    fn auto_language_picks_the_most_likely_of_the_users_languages() {
+        let candidates = [("ru".to_owned(), 2), ("en".to_owned(), 0)];
+        let mut probabilities = vec![0.0_f32; 100];
+        probabilities[0] = 0.30; // en
+        probabilities[2] = 0.55; // ru
+        probabilities[4] = 0.90; // fr: not one of the user's languages
+        assert_eq!(
+            choose_user_language(&candidates, &probabilities).as_deref(),
+            Some("ru")
+        );
+        probabilities[0] = 0.55;
+        assert_eq!(
+            choose_user_language(&candidates, &probabilities).as_deref(),
+            Some("ru"),
+            "a tie keeps the more preferred language"
+        );
+    }
     use crate::audio::RecordedAudio;
 
     #[test]

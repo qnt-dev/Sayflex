@@ -7,8 +7,8 @@ OverviewSpeechInstallDetail|{model} · Download complete. Checking and installin
 OverviewSpeechPreparing|{model} · Preparing the installed speech model.
 OverviewSelectedSpeechMissing|The selected speech model is not installed.
 OverviewViewDownload|View download
-OneInstalled|1 installed
-ManyInstalled|{count} installed
+OneInstalled|Installed: 1
+ManyInstalled|Installed: {count}
 NoCompatibleSpeechBackend|No compatible speech backend is active
 LocalSpeechReady|Local speech · ready
 LocalSpeechStarting|Local speech · starting
@@ -18,9 +18,9 @@ Applying|Applying
 WaitingForWindows|Waiting for Windows
 DecideFromText|Decide from the text
 AlwaysAsk|Always ask
-PausedShortcuts|Paused · {count} shortcuts configured
+PausedShortcuts|Paused · shortcuts configured: {count}
 ApplyingShortcuts|Waiting for Windows to accept the new shortcuts
-ActiveShortcuts|{count} of {total} shortcuts active
+ActiveShortcuts|Shortcuts active: {count} of {total}
 NoSpeechModel|No speech model is installed, so nothing can be dictated yet.
 SpeechEngine|SPEECH ENGINE
 SpeechModel|SPEECH MODEL
@@ -44,13 +44,13 @@ Preference|preference: {value}
 Off|off
 Ready|ready
 Cold|cold
-KeptOnDevice|{count} kept on this device
+KeptOnDevice|Kept on this device: {count}
 NotKept|not kept
 NothingKeptYet|Nothing kept yet
-AllKeptOnDevice|{count} kept · all on this device
-ShowingAllOnDevice|Showing {count} · all on this device
-SomeSentToService|{count} kept · {remote} went to a service
-ShowingSomeSent|Showing {count} · {remote} of them went to a service
+AllKeptOnDevice|Kept: {count} · all on this device
+ShowingAllOnDevice|Shown: {count} · all on this device
+SomeSentToService|Kept: {count} · sent to a service: {remote}
+ShowingSomeSent|Shown: {count} · sent to a service: {remote}
 EnglishToCyrillic|English keys → Cyrillic layout
 CyrillicToLatin|Cyrillic keys → Latin layout
 SpeechSection|Speech
@@ -368,3 +368,9 @@ CudaRetryDownload|Retry download
 CudaGpuDetected|Detected GPU: {gpu}. Compatibility is checked when you activate.
 CudaNoGpuDetected|No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation.
 CudaGpuUnknown|GPU detection was unavailable. Activation checks NVIDIA compatibility.
+InsertFailedTargetChanged|The window changed before the text was pasted, so SayFlex did not paste it into another place.
+InsertFailedUnconfirmed|The application did not confirm the paste. Check whether the text appeared before you insert it again.
+InsertFailedNotDelivered|The application did not accept the text.
+InsertFailedModifiersBusy|A key was still held down, so the text was not pasted.
+InsertFailedProtectedField|This is a password field or a window without a text field. SayFlex does not paste dictation there.
+TranslationCheckNumbers|Check the numbers, dates and links: the translation may differ from the original.

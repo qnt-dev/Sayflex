@@ -77,10 +77,28 @@ pub(crate) fn run_preview() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The Battle for Wesnoth screenshot (GPL, attributed in
+/// docs/evidence/screen-translation-preview) from the source tree. Only the
+/// developer preview reads it, at run time; a shipped build shows the preview
+/// without it, so no GPL image is compiled into SayFlex.
+fn fixture_image() -> slint::Image {
+    #[cfg(any(test, debug_assertions, feature = "inspect"))]
+    {
+        let asset = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/battle-for-wesnoth-1.12-screen-translation-preview.jpg");
+        slint::Image::load_from_path(&asset).unwrap_or_default()
+    }
+    #[cfg(not(any(test, debug_assertions, feature = "inspect")))]
+    {
+        slint::Image::default()
+    }
+}
+
 fn configured_window(
     state: ScreenTranslationPreviewState,
 ) -> Result<ScreenTranslationPreviewWindow, slint::PlatformError> {
     let window = ScreenTranslationPreviewWindow::new()?;
+    window.set_fixture_image(fixture_image());
     window.set_preview_state(state.slint_value());
     window.set_editor_visible(matches!(
         state,
@@ -273,6 +291,18 @@ mod tests {
         assert_eq!(window.get_drag_request_count(), 1);
         assert_eq!(window.get_close_request_count(), 1);
         assert_eq!(window.get_delete_request_count(), 1);
+    }
+
+    #[test]
+    fn the_gpl_screenshot_is_loaded_at_run_time_not_compiled_in() {
+        assert!(!SOURCE.contains("@image-url(\"../assets/battle-for-wesnoth"));
+        assert!(!SOURCE.contains("Wesnoth"));
+        assert!(!APP_SOURCE.contains("Wesnoth"));
+        let image = super::fixture_image();
+        assert!(
+            image.size().width > 0,
+            "the developer preview still shows it"
+        );
     }
 
     #[test]

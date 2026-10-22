@@ -38,6 +38,7 @@ $required = @(
     'SayFlex.exe',
     'SayFlex.InputHost.exe',
     'SayFlex.Speech.Cpu.exe',
+    'SayFlex.Speech.CpuCompat.exe',
     'SayFlex.Speech.Cuda.exe',
     'SayFlex.Speech.Vulkan.exe',
     'SayFlex.Translation.exe',
@@ -45,12 +46,11 @@ $required = @(
     'SayFlex.Companion.exe',
     'ocr-models\screen-ocr-ppocrv5-mobile-v3.9.2\bundle.verified.json',
     'build-manifest.json',
-    'speech-backends.json'
+    'speech-backends.json',
+    'speech-vad\ggml-silero-v6.2.0.bin'
 )
 if ($TestNvidia) {
     $required += @('sayflex-test-channel', 'TEST-BUILD-README.txt', 'THIRD_PARTY_NOTICES.md')
-} else {
-    $required += @('runtimes\cuda\cublas64_13.dll', 'runtimes\cuda\cublasLt64_13.dll')
 }
 
 $missing = $required | Where-Object {
@@ -160,9 +160,9 @@ function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
     $out = [System.IO.Path]::GetTempFileName()
     $previousPath = $env:PATH
     try {
-        if ($TestNvidia -and [IO.Path]::GetFileName($Path) -eq 'SayFlex.Speech.Cuda.exe') {
-            # Protocol/build-ID probes need the CUDA import resolved even
-            # though this package deliberately contains no NVIDIA DLLs. Use
+        if ([IO.Path]::GetFileName($Path) -eq 'SayFlex.Speech.Cuda.exe') {
+            # Protocol/build-ID probes need the CUDA imports resolved even
+            # though no package contains NVIDIA DLLs. Use
             # only the developer's trusted Toolkit, never a user data cache.
             # This checks build identity, not managed-runtime installation.
             $toolkits = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA'
@@ -171,10 +171,11 @@ function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
                 ForEach-Object { Join-Path $_.FullName 'bin\x64' } |
                 Where-Object {
                     (Test-Path -LiteralPath (Join-Path $_ 'cublas64_13.dll')) -and
-                    (Test-Path -LiteralPath (Join-Path $_ 'cublasLt64_13.dll'))
+                    (Test-Path -LiteralPath (Join-Path $_ 'cublasLt64_13.dll')) -and
+                    (Test-Path -LiteralPath (Join-Path $_ 'cudart64_13.dll'))
                 } | Select-Object -First 1
             if (-not $probeRuntime) {
-                throw 'The local test CUDA identity probe requires the trusted build-machine CUDA 13 Toolkit.'
+                throw 'The CUDA identity probe requires the trusted build-machine CUDA 13 Toolkit.'
             }
             $env:PATH = "$probeRuntime;$previousPath"
         }
@@ -200,8 +201,13 @@ function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
 # one exact set of bytes. It is the authority used by every later comparison.
 $buildManifestPath = Join-Path $appRoot 'build-manifest.json'
 $buildManifest = Get-Content -LiteralPath $buildManifestPath -Raw | ConvertFrom-Json
+Import-Module (Join-Path $PSScriptRoot 'test-nvidia-packaging.psm1') -Force
+try {
+    Assert-NoBundledNvidiaRuntime -AppDirectory $appRoot
+} catch {
+    $failures.Add($_.Exception.Message)
+}
 if ($TestNvidia) {
-    Import-Module (Join-Path $PSScriptRoot 'test-nvidia-packaging.psm1') -Force
     Assert-TestNvidiaPayload -AppDirectory $appRoot -Manifest $buildManifest
     Assert-TestNvidiaSourceUnchanged -RepositoryPath $rustRoot -Snapshot $buildManifest.source_snapshot
 } elseif ($buildManifest.PSObject.Properties.Name -contains 'official_release' -and
@@ -358,6 +364,7 @@ if ($protocol -ne "$($buildManifest.protocol_version)") {
 # disagrees is exactly as broken as a CPU one, and it is the one that runs.
 foreach ($worker in @(
     'SayFlex.Speech.Cpu.exe',
+    'SayFlex.Speech.CpuCompat.exe',
     'SayFlex.Speech.Cuda.exe',
     'SayFlex.Speech.Vulkan.exe',
     'SayFlex.Translation.exe',

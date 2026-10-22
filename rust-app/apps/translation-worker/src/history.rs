@@ -235,6 +235,7 @@ mod tests {
                 backend_request_count: 1,
                 tokenize_duration_ms: 0,
                 chunk_count: 1,
+                protected_values_changed: false,
             },
             created_unix_ms: 2,
         });
@@ -278,6 +279,7 @@ mod tests {
                 backend_request_count: 1,
                 tokenize_duration_ms: 0,
                 chunk_count: 1,
+                protected_values_changed: false,
             },
             created_unix_ms: 2,
         });
@@ -316,6 +318,7 @@ mod tests {
                 backend_request_count: 1,
                 tokenize_duration_ms: 0,
                 chunk_count: 1,
+                protected_values_changed: false,
             },
             created_unix_ms: 2,
         });

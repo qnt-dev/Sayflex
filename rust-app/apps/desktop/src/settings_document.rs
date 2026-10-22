@@ -48,6 +48,8 @@ pub(crate) struct LoadedSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FirstRunChoice {
     pub(crate) download_recommended_speech_model: bool,
+    /// The catalog model recommended for this computer's hardware.
+    pub(crate) speech_model_id: &'static str,
 }
 
 impl SettingsStorage {
@@ -542,11 +544,7 @@ impl SavedSettings {
             .filter(|identifier| !identifier.trim().is_empty());
         if self.translation_primary_language == self.translation_secondary_language {
             self.translation_secondary_language =
-                if self.translation_primary_language == TranslationLanguage::Russian {
-                    TranslationLanguage::English
-                } else {
-                    TranslationLanguage::Russian
-                };
+                partner_language(self.translation_primary_language);
         }
         // Repair only what the validator rejects. Builds up to 0.8.9 saved the
         // set Windows accepted, so a refused Ctrl+Alt+P was stored as a
@@ -586,11 +584,53 @@ pub(crate) fn load_settings() -> LoadedSettings {
 const TRANSCRIPTION_PROVIDER_IDS: [&str; 6] =
     ["local", "groq", "cloudflare", "azure", "deepgram", "custom"];
 
+/// The translation pair for a new installation, from the languages this
+/// Windows user has set up (display languages, then keyboard layouts). Foreign
+/// text is translated into the first; text in the first goes to the second.
+/// Nothing assumes Russian or English: the user changes either in Settings.
+pub(crate) fn system_translation_pair(
+    codes: &[String],
+) -> (TranslationLanguage, TranslationLanguage) {
+    let mut languages = Vec::new();
+    for language in codes
+        .iter()
+        .filter_map(|code| TranslationLanguage::from_code(code))
+    {
+        if !languages.contains(&language) {
+            languages.push(language);
+        }
+    }
+    let primary = languages
+        .first()
+        .copied()
+        .unwrap_or(TranslationLanguage::English);
+    let secondary = languages
+        .iter()
+        .copied()
+        .find(|language| *language != primary)
+        .unwrap_or_else(|| partner_language(primary));
+    (primary, secondary)
+}
+
+/// A second language when the user has set up only one: English, or for an
+/// English-only user the most widely learned other language.
+fn partner_language(language: TranslationLanguage) -> TranslationLanguage {
+    if language == TranslationLanguage::English {
+        TranslationLanguage::Spanish
+    } else {
+        TranslationLanguage::English
+    }
+}
+
 pub(crate) fn apply_first_run_choice(
     mut settings: SavedSettings,
     choice: FirstRunChoice,
 ) -> SavedSettings {
-    settings.selected_model_id = Some("whisper-large-v3-turbo".to_owned());
+    let (primary, secondary) =
+        system_translation_pair(&rust_platform_windows::user_language_codes());
+    settings.translation_primary_language = primary;
+    settings.translation_secondary_language = secondary;
+    settings.selected_model_id = Some(choice.speech_model_id.to_owned());
     settings.transcription_providers = TRANSCRIPTION_PROVIDER_IDS
         .into_iter()
         .map(|id| TranscriptionProviderEntry {
@@ -850,7 +890,7 @@ mod settings_document_tests {
         );
         assert_eq!(
             settings.translation_secondary_language,
-            TranslationLanguage::Russian
+            TranslationLanguage::English
         );
         assert!(!settings.history_enabled);
     }
@@ -1190,6 +1230,7 @@ mod settings_document_tests {
             loaded.settings,
             FirstRunChoice {
                 download_recommended_speech_model: false,
+                speech_model_id: "whisper-large-v3-turbo",
             },
         );
         storage.replace_atomically(&accepted).unwrap();
@@ -1387,11 +1428,45 @@ mod settings_document_tests {
     }
 
     #[test]
+    fn a_new_installation_translates_into_the_windows_language() {
+        let codes = |list: &[&str]| {
+            list.iter()
+                .map(|code| (*code).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            super::system_translation_pair(&codes(&["ru", "en"])),
+            (TranslationLanguage::Russian, TranslationLanguage::English)
+        );
+        assert_eq!(
+            super::system_translation_pair(&codes(&["de"])),
+            (TranslationLanguage::German, TranslationLanguage::English)
+        );
+        assert_eq!(
+            super::system_translation_pair(&codes(&["en"])),
+            (TranslationLanguage::English, TranslationLanguage::Spanish)
+        );
+        assert_eq!(
+            super::system_translation_pair(&codes(&["sv", "pt", "en"])),
+            (
+                TranslationLanguage::PortugueseBrazil,
+                TranslationLanguage::English
+            ),
+            "a language without translation support is skipped"
+        );
+        assert_eq!(
+            super::system_translation_pair(&[]),
+            (TranslationLanguage::English, TranslationLanguage::Spanish)
+        );
+    }
+
+    #[test]
     fn declining_the_recommended_download_persists_cloud_ready_defaults() {
         let settings = apply_first_run_choice(
             SavedSettings::default(),
             FirstRunChoice {
                 download_recommended_speech_model: false,
+                speech_model_id: "whisper-large-v3-turbo",
             },
         );
         let state = AppState::new(
@@ -1417,6 +1492,7 @@ mod settings_document_tests {
             SavedSettings::default(),
             FirstRunChoice {
                 download_recommended_speech_model: true,
+                speech_model_id: "whisper-large-v3-turbo",
             },
         );
         let enabled = settings

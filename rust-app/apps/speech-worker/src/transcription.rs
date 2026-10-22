@@ -155,7 +155,7 @@ pub fn start(
                     retryable: false,
                 });
             }
-            while let Some(item) = requests.recv_next(Duration::from_millis(25)) {
+            while let Some(item) = requests.recv_next() {
                 let command = match item {
                     MailboxItem::Control(command) | MailboxItem::Work(command) => command,
                 };
@@ -258,7 +258,7 @@ fn join_with_deadline(
 }
 
 fn network_loop(receiver: TranscriptionMailboxReceiver<NetworkControl, NetworkJob>) {
-    while let Some(item) = receiver.recv_next(Duration::from_millis(25)) {
+    while let Some(item) = receiver.recv_next() {
         match item {
             MailboxItem::Control(NetworkControl::Shutdown) => return,
             MailboxItem::Work(job) => job.run(),

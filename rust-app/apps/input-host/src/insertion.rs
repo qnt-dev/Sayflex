@@ -107,15 +107,15 @@ impl InsertionService {
                                 add_trailing_space,
                             ) {
                                 Ok(()) => {}
-                                Err(error) => {
+                                Err(InsertFailure { code, message }) => {
                                     crate::diagnostic_line(&format!(
-                                        "insertion action=insert result=failed session={} target_pid={} error={error}",
+                                        "insertion action=insert result=failed session={} target_pid={} code={code} error={message}",
                                         transcript.session_id, target.process_id
                                     ));
                                     let _ = events.send(InputHostEvent::Failed {
                                         session_id: Some(transcript.session_id),
-                                        code: "insert_transcript".to_owned(),
-                                        message: error,
+                                        code: code.to_owned(),
+                                        message,
                                     });
                                 }
                             }
@@ -289,6 +289,13 @@ impl InsertionSession {
     }
 }
 
+/// Why a dictation was not inserted. The code tells the desktop which
+/// explanation to show; the message stays in the diagnostic log.
+struct InsertFailure {
+    code: &'static str,
+    message: String,
+}
+
 fn insert_transcript(
     clipboard_host: &mut clipboard::ClipboardPasteHost,
     events: &Sender<InputHostEvent>,
@@ -296,7 +303,7 @@ fn insert_transcript(
     target_snapshot: TargetSnapshot,
     text: &str,
     add_trailing_space: bool,
-) -> Result<(), String> {
+) -> Result<(), InsertFailure> {
     let started = Instant::now();
     let session = InsertionSession::new(session_id, target_snapshot, text, add_trailing_space);
     crate::diagnostic_line(&format!(
@@ -307,40 +314,68 @@ fn insert_transcript(
         payload_fingerprint(&session.payload),
     ));
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
-        return Err(
-            "physical modifier keys did not become idle; transcript remains in history".to_owned(),
-        );
+        return Err(InsertFailure {
+            code: "insert_modifiers_busy",
+            message: "physical modifier keys did not become idle; transcript remains in history"
+                .to_owned(),
+        });
     }
     let timing = InsertionTiming {
         started,
         method_started: Instant::now(),
         release_wait_ms: elapsed_ms(started),
     };
-    let receipt = match insertion_adapter::deliver(clipboard_host, session.target, &session.payload)
-    {
+    let mut announce_dispatch = || {
+        let _ = events.send(InputHostEvent::InsertionDispatched {
+            session_id: session.session_id,
+        });
+    };
+    let receipt = match insertion_adapter::deliver(
+        clipboard_host,
+        session.target,
+        &session.payload,
+        &mut announce_dispatch,
+    ) {
         Ok(receipt) => receipt,
         Err(failure) => {
+            let foreground = if failure.state == insertion_adapter::DeliveryFailureState::Superseded
+            {
+                format!(" {}", crate::target::describe_foreground())
+            } else {
+                String::new()
+            };
             crate::diagnostic_line(&format!(
-                "insertion action=insert state={:?} session={} method={:?} target_pid={} chars={} payload_sha256={} error={}",
+                "insertion action=insert state={:?} session={} stage={} method={:?} target_pid={} target_hwnd={} chars={} payload_sha256={} error={}{foreground}",
                 failure.state,
                 session.session_id,
+                failure.stage,
                 failure.method,
                 session.target.process_id,
+                session.target.window_handle,
                 session.chars,
                 payload_fingerprint(&session.payload),
                 failure.message,
             ));
-            return Err(format!("{:?}: {}", failure.state, failure.message));
+            return Err(InsertFailure {
+                code: match failure.state {
+                    insertion_adapter::DeliveryFailureState::Superseded => "insert_target_changed",
+                    insertion_adapter::DeliveryFailureState::Ambiguous => "insert_unconfirmed",
+                    insertion_adapter::DeliveryFailureState::NotDelivered => "insert_not_delivered",
+                },
+                message: format!("{:?}: {}", failure.state, failure.message),
+            });
         }
     };
     if let Some(clipboard_receipt) = receipt.clipboard_receipt {
         crate::diagnostic_line(&format!(
-            "clipboard_transaction action=settle session={} result={:?} original_sequence={} replacement_sequence={} settled_sequence={}",
+            "clipboard_transaction action=settle session={} result={:?} original_sequence={} replacement_sequence={} settled_sequence={} ansi_renders={} settled_owner_pid={}",
             session.session_id,
             clipboard_receipt.disposition,
             clipboard_receipt.original_sequence,
             clipboard_receipt.replacement_sequence,
             clipboard_receipt.settled_sequence,
+            clipboard_receipt.ansi_renders,
+            clipboard_receipt.settled_owner_process_id,
         ));
     }
     send_completed(
@@ -365,7 +400,8 @@ fn replace_selection(
     if !hotkeys::wait_until_injection_safe(INJECTION_IDLE_TIMEOUT) {
         return Err("physical modifier keys did not become idle".to_owned());
     }
-    let receipt = insertion_adapter::deliver(clipboard_host, target_snapshot, text).map_err(
+    let receipt = insertion_adapter::deliver(clipboard_host, target_snapshot, text, &mut || {})
+        .map_err(
         |failure| {
             crate::diagnostic_line(&format!(
                 "insertion action=replace_selection state={:?} request={request_id} target_pid={} method={:?} error={}",

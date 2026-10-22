@@ -305,6 +305,8 @@ export component SettingsWindow inherits Window {
     callback activate-cuda-runtime();
     callback open-cuda-license();
     callback select-visualizer(int);
+    /// The visualizer page needs the sleeping frame timer.
+    callback animation-wanted();
     callback select-circular-palette(int);
     callback select-broadcast-mic-palette(int);
     callback select-flow-sphere-palette(int);
@@ -583,6 +585,9 @@ export component SettingsWindow inherits Window {
                 }
 
                 if root.active-page == 5 : VisualsPage {
+                    // The live preview needs the frame timer, which sleeps
+                    // while nothing moves.
+                    init => { root.animation-wanted(); }
                     selected: root.selected-visualizer;
                     subtitle: root.visuals-subtitle;
                     caption: root.visuals-caption;
@@ -612,7 +617,10 @@ export component SettingsWindow inherits Window {
                     preview-mic-middle-height: root.visual-preview-mic-middle-height;
                     preview-mic-inner-height: root.visual-preview-mic-inner-height;
                     preview-mic-near-height: root.visual-preview-mic-near-height;
-                    select-visualizer(index) => { root.select-visualizer(index); }
+                    select-visualizer(index) => {
+                        root.select-visualizer(index);
+                        root.animation-wanted();
+                    }
                     select-circular-palette(index) => { root.select-circular-palette(index); }
                     select-broadcast-mic-palette(index) => { root.select-broadcast-mic-palette(index); }
                     select-sphere-palette(index) => { root.select-flow-sphere-palette(index); }

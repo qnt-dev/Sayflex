@@ -667,7 +667,7 @@ fn fill_overview(settings: &SettingsWindow) {
         },
         Fact {
             label: "HISTORY".into(),
-            value: "12 kept on this device".into(),
+            value: "Kept on this device: 12".into(),
             detail: "".into(),
             signal: false,
         },
@@ -706,7 +706,7 @@ fn fill_translation(settings: &SettingsWindow) {
 /// One of each thing a model row can be doing, including the two that only
 /// appear while something is running.
 fn fill_models(settings: &SettingsWindow) {
-    settings.set_models_summary("2 installed".into());
+    settings.set_models_summary("Installed: 2".into());
     settings.set_model_rows(ModelRc::new(VecModel::from(vec![
         ModelRow {
             catalog_id: "whisper-large-v3-turbo".into(),
@@ -1004,7 +1004,7 @@ fn fill_history(settings: &SettingsWindow) {
         settings.set_history_rows(ModelRc::new(VecModel::from(Vec::new())));
         return;
     }
-    settings.set_history_scope("12 kept \u{b7} 3 went to a service".into());
+    settings.set_history_scope("Kept: 12 \u{b7} sent to a service: 3".into());
     let mut rows = vec![
         HistoryRow {
             text: "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{43a}\u{430} \u{441}\u{432}\u{44f}\u{437}\u{438}, \u{44d}\u{442}\u{43e} \u{442}\u{435}\u{441}\u{442}\u{43e}\u{432}\u{430}\u{44f} \u{434}\u{438}\u{43a}\u{442}\u{43e}\u{432}\u{43a}\u{430}".into(),
@@ -1043,7 +1043,7 @@ fn fill_history(settings: &SettingsWindow) {
 }
 
 fn fill_hotkeys(settings: &SettingsWindow) {
-    settings.set_hotkeys_summary("Five of five shortcuts active".into());
+    settings.set_hotkeys_summary("Shortcuts active: 5 of 5".into());
     settings.set_hotkey_rows(ModelRc::new(VecModel::from(vec![
         HotkeyRow {
             action: "dictate".into(),

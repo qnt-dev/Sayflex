@@ -10,6 +10,7 @@ use rust_protocol::TargetSnapshot;
 use thiserror::Error;
 use windows_sys::Win32::{
     Foundation::{GlobalFree, HANDLE, HWND, LPARAM, LRESULT, WPARAM},
+    Globalization::{CP_ACP, GetACP, WideCharToMultiByte},
     System::{
         Com::{STGMEDIUM, STGMEDIUM_0, TYMED_ENHMF, TYMED_GDI, TYMED_HGLOBAL, TYMED_MFPICT},
         DataExchange::{
@@ -20,7 +21,7 @@ use windows_sys::Win32::{
         LibraryLoader::GetModuleHandleW,
         Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         Ole::{
-            CF_BITMAP, CF_ENHMETAFILE, CF_METAFILEPICT, CF_PALETTE, CF_UNICODETEXT,
+            CF_BITMAP, CF_ENHMETAFILE, CF_METAFILEPICT, CF_PALETTE, CF_TEXT, CF_UNICODETEXT,
             OleDuplicateData, OleInitialize, OleUninitialize, ReleaseStgMedium,
         },
     },
@@ -187,6 +188,17 @@ struct ClipboardRenderState {
     rendered: bool,
     target_requested: bool,
     render_failed: bool,
+    /// ANSI text renders requested by consumers. Windows would otherwise
+    /// synthesize CF_TEXT silently; offering it ourselves makes every such
+    /// request visible in the diagnostic log.
+    ansi_renders: u32,
+}
+
+impl ClipboardRenderState {
+    /// Some consumer has materialized the payload, as Unicode or as ANSI text.
+    fn any_rendered(&self) -> bool {
+        self.rendered || self.ansi_renders > 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,6 +278,7 @@ impl ClipboardPasteHost {
                 self.state.rendered = false;
                 self.state.target_requested = false;
                 self.state.render_failed = false;
+                self.state.ansi_renders = 0;
 
                 if unsafe { EmptyClipboard() } == 0 {
                     return Err(ClipboardError::Busy);
@@ -274,6 +287,7 @@ impl ClipboardPasteHost {
                 // WM_RENDERFORMAT only when a consumer actually requests text.
                 unsafe {
                     let _ = SetClipboardData(u32::from(CF_UNICODETEXT), ptr::null_mut());
+                    let _ = SetClipboardData(u32::from(CF_TEXT), ptr::null_mut());
                 }
                 for (format, payload) in &mut private_payloads {
                     let accepted = unsafe { SetClipboardData(*format, payload.handle) };
@@ -320,27 +334,27 @@ impl ClipboardPasteHost {
                 return Ok(outcome);
             }
             if !self.owns_clipboard() {
-                return Ok(if self.state.rendered {
+                return Ok(if self.state.any_rendered() {
                     ClipboardReadOutcome::DispatchedUnverified
                 } else {
                     ClipboardReadOutcome::Superseded
                 });
             }
             if !target_still_focused() {
-                return Ok(if self.state.rendered {
+                return Ok(if self.state.any_rendered() {
                     ClipboardReadOutcome::DispatchedUnverified
                 } else {
                     ClipboardReadOutcome::TargetChanged
                 });
             }
-            if self.state.rendered
+            if self.state.any_rendered()
                 && !verification_available
                 && started.elapsed() >= PASTE_READ_ACK_TIMEOUT
             {
                 return Ok(ClipboardReadOutcome::DispatchedUnverified);
             }
             if Instant::now() >= deadline {
-                return Ok(if self.state.rendered {
+                return Ok(if self.state.any_rendered() {
                     ClipboardReadOutcome::DispatchedUnverified
                 } else {
                     ClipboardReadOutcome::TimedOut
@@ -453,7 +467,7 @@ fn acknowledged_read_outcome(
     state: &ClipboardRenderState,
     mut target_contains_payload: impl FnMut() -> bool,
 ) -> Option<ClipboardReadOutcome> {
-    if state.rendered && state.target_requested {
+    if state.any_rendered() && state.target_requested {
         // The identified target already requested this exact payload. An
         // optional UIA provider must not delay that independent proof.
         Some(ClipboardReadOutcome::TargetRead)
@@ -480,6 +494,46 @@ unsafe extern "system" fn clipboard_render_window_proc(
         }
     }
     let state = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ClipboardRenderState;
+    if message == WM_RENDERFORMAT && wparam as u32 == u32::from(CF_TEXT) && !state.is_null() {
+        let requester = unsafe { GetOpenClipboardWindow() };
+        let mut requester_process_id = 0;
+        if !requester.is_null() {
+            unsafe {
+                GetWindowThreadProcessId(requester, &mut requester_process_id);
+            }
+        }
+        let state = unsafe { &mut *state };
+        state.ansi_renders = state.ansi_renders.saturating_add(1);
+        // Windows used to synthesize this format from CF_UNICODETEXT, which
+        // counted as the target reading the payload. Keep that meaning.
+        let requester_root = if requester.is_null() {
+            requester
+        } else {
+            let root = unsafe { GetAncestor(requester, GA_ROOT) };
+            if root.is_null() { requester } else { root }
+        };
+        if request_is_from_target(
+            requester_process_id,
+            state.target_process_id,
+            requester_root as usize as u64,
+            state.target_window_handle,
+        ) {
+            state.target_requested = true;
+        }
+        // The same conversion Windows would have synthesized: the system
+        // ANSI code page. A character outside it becomes '?', which is the
+        // reason this request is worth recording.
+        let lossy = !fits_ansi_code_page(&state.payload);
+        crate::diagnostic_line(&format!(
+            "clipboard_transaction action=render format=CF_TEXT requester_pid={requester_process_id} target_pid={} ansi_code_page={} lossy={lossy}",
+            state.target_process_id,
+            unsafe { GetACP() },
+        ));
+        if render_ansi_payload(state).is_err() {
+            state.render_failed = true;
+        }
+        return 0;
+    }
     if message == WM_RENDERFORMAT && wparam as u32 == u32::from(CF_UNICODETEXT) && !state.is_null()
     {
         let requester = unsafe { GetOpenClipboardWindow() };
@@ -544,6 +598,38 @@ fn render_payload(state: &mut ClipboardRenderState) -> Result<(), ClipboardError
     payload.release_to_clipboard();
     state.rendered = true;
     Ok(())
+}
+
+fn render_ansi_payload(state: &mut ClipboardRenderState) -> Result<(), ClipboardError> {
+    let mut payload = GlobalAllocation::from_ansi(&state.payload)?;
+    let accepted = unsafe { SetClipboardData(u32::from(CF_TEXT), payload.handle) };
+    if accepted.is_null() {
+        return Err(ClipboardError::Allocation);
+    }
+    payload.release_to_clipboard();
+    Ok(())
+}
+
+/// Whether every character survives the system ANSI code page unchanged.
+fn fits_ansi_code_page(text: &str) -> bool {
+    let wide = text.encode_utf16().collect::<Vec<_>>();
+    if wide.is_empty() {
+        return true;
+    }
+    let mut used_default = 0_i32;
+    let written = unsafe {
+        WideCharToMultiByte(
+            CP_ACP,
+            0,
+            wide.as_ptr(),
+            wide.len() as i32,
+            ptr::null_mut(),
+            0,
+            ptr::null(),
+            &mut used_default,
+        )
+    };
+    written > 0 && used_default == 0
 }
 
 fn request_is_from_target(
@@ -698,6 +784,46 @@ impl GlobalAllocation {
             utf16.as_ptr().cast::<u8>(),
             utf16.len() * mem::size_of::<u16>(),
         )
+    }
+
+    fn from_ansi(text: &str) -> Result<Self, ClipboardError> {
+        let wide = text.encode_utf16().collect::<Vec<_>>();
+        if wide.is_empty() {
+            return Self::from_bytes([0_u8].as_ptr(), 1);
+        }
+        let needed = unsafe {
+            WideCharToMultiByte(
+                CP_ACP,
+                0,
+                wide.as_ptr(),
+                wide.len() as i32,
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        if needed <= 0 {
+            return Err(ClipboardError::InvalidData);
+        }
+        let mut bytes = vec![0_u8; needed as usize + 1];
+        let written = unsafe {
+            WideCharToMultiByte(
+                CP_ACP,
+                0,
+                wide.as_ptr(),
+                wide.len() as i32,
+                bytes.as_mut_ptr(),
+                needed,
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        if written <= 0 {
+            return Err(ClipboardError::InvalidData);
+        }
+        bytes.truncate(written as usize + 1);
+        Self::from_bytes(bytes.as_ptr(), bytes.len())
     }
 
     fn from_u32(value: u32) -> Result<Self, ClipboardError> {
@@ -1115,6 +1241,10 @@ pub struct ClipboardPasteReceipt {
     pub replacement_sequence: u32,
     pub settled_sequence: u32,
     pub disposition: ClipboardPasteDisposition,
+    /// How many times a consumer asked for the payload as ANSI text.
+    pub ansi_renders: u32,
+    /// The process that owns the clipboard once the transaction settled.
+    pub settled_owner_process_id: u32,
 }
 
 /// Executes one serialized compatibility transaction for targets that expose
@@ -1130,6 +1260,7 @@ pub fn dispatch_paste(
     target_contains_payload: impl FnMut() -> bool,
     validate_before_dispatch: impl FnOnce() -> Result<(), ClipboardError>,
     send_paste: impl FnOnce() -> Result<(), ClipboardError>,
+    on_dispatched: &mut dyn FnMut(),
     target_process_id: u32,
     payload: &str,
 ) -> Result<ClipboardPasteReceipt, ClipboardError> {
@@ -1181,6 +1312,7 @@ pub fn dispatch_paste(
         }
         return Err(error);
     }
+    on_dispatched();
 
     let outcome = match host.await_target_read(
         target_still_focused,
@@ -1201,11 +1333,23 @@ pub fn dispatch_paste(
         )?,
     };
 
+    let settled_owner_process_id = {
+        let owner = unsafe { GetClipboardOwner() };
+        let mut process_id = 0;
+        if !owner.is_null() {
+            unsafe {
+                GetWindowThreadProcessId(owner, &mut process_id);
+            }
+        }
+        process_id
+    };
     Ok(ClipboardPasteReceipt {
         original_sequence,
         replacement_sequence,
         settled_sequence: unsafe { GetClipboardSequenceNumber() },
         disposition,
+        ansi_renders: host.state.ansi_renders,
+        settled_owner_process_id,
     })
 }
 

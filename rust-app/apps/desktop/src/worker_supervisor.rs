@@ -52,6 +52,9 @@ pub(crate) const COMPANION_RENDERER_EXE: &str = "SayFlex.Companion.exe";
 
 pub(crate) const SPEECH_CPU_EXE: &str = "SayFlex.Speech.Cpu.exe";
 
+/// The CPU speech worker built for processors without AVX2 (SSE4.2 level).
+pub(crate) const SPEECH_CPU_COMPAT_EXE: &str = "SayFlex.Speech.CpuCompat.exe";
+
 pub(crate) const SPEECH_CUDA_EXE: &str = "SayFlex.Speech.Cuda.exe";
 
 pub(crate) const SPEECH_VULKAN_EXE: &str = "SayFlex.Speech.Vulkan.exe";
@@ -1404,7 +1407,8 @@ pub(crate) fn speech_worker_path(backend: SpeechBackend) -> Result<PathBuf, Box<
     let installed = parent.join(match backend {
         SpeechBackend::Cuda => SPEECH_CUDA_EXE,
         SpeechBackend::Vulkan => SPEECH_VULKAN_EXE,
-        SpeechBackend::Cpu => SPEECH_CPU_EXE,
+        SpeechBackend::Cpu if rust_platform_windows::cpu_supports_avx2_level() => SPEECH_CPU_EXE,
+        SpeechBackend::Cpu => SPEECH_CPU_COMPAT_EXE,
     });
     if installed.is_file() {
         return Ok(installed);
@@ -1431,7 +1435,10 @@ pub(crate) fn available_speech_backends() -> Vec<SpeechBackend> {
     ]
     .into_iter()
     .filter(|backend| {
-        speech_worker_path(*backend).is_ok()
+        // The GPU workers also run ggml's AVX2 CPU code; an older processor
+        // uses only the compatibility CPU worker.
+        (*backend == SpeechBackend::Cpu || rust_platform_windows::cpu_supports_avx2_level())
+            && speech_worker_path(*backend).is_ok()
             && (*backend != SpeechBackend::Cuda || trusted_cuda_runtime_directory().is_some())
     })
     .collect()
@@ -1451,22 +1458,11 @@ pub(crate) fn trusted_cuda_runtime_directory() -> Option<PathBuf> {
         return managed.runtime_path().canonicalize().ok();
     }
     // A fresh trial must exercise the opt-in download even on a developer's
-    // machine with an existing Toolkit. The production install keeps its
-    // bundled/system compatibility paths below.
+    // machine with an existing Toolkit. No installer ships NVIDIA files, so
+    // the only other source is a CUDA Toolkit the user installed themselves.
     if rust_app_core::product::is_test_build() {
         return None;
     }
-    let application_runtime = env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(PathBuf::from))
-        .map(|path| path.join("runtimes").join("cuda"));
-    if let Some(directory) = application_runtime
-        .filter(|directory| cuda_runtime_is_complete(directory))
-        .and_then(|directory| directory.canonicalize().ok())
-    {
-        return Some(directory);
-    }
-
     let program_files = env::var_os("ProgramFiles")
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok())?;
@@ -1505,7 +1501,9 @@ pub(crate) fn trusted_cuda_runtime_directory() -> Option<PathBuf> {
 }
 
 pub(crate) fn cuda_runtime_is_complete(directory: &std::path::Path) -> bool {
-    directory.join("cublas64_13.dll").is_file() && directory.join("cublasLt64_13.dll").is_file()
+    ["cublas64_13.dll", "cublasLt64_13.dll", "cudart64_13.dll"]
+        .iter()
+        .all(|name| directory.join(name).is_file())
 }
 
 #[cfg(test)]

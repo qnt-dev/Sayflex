@@ -1,10 +1,6 @@
 use std::{
-    collections::HashSet,
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
-    },
-    time::Duration,
+    collections::{HashSet, VecDeque},
+    sync::{Arc, Condvar, Mutex, MutexGuard, mpsc::TrySendError},
 };
 
 use rust_cloud_speech::router::CancelSignal;
@@ -17,83 +13,128 @@ pub(crate) enum MailboxItem<C, W> {
 
 /// A bounded control lane plus one replaceable work slot. Control can never sit
 /// behind a recording, and overload cannot grow memory without bound.
+///
+/// The receiver sleeps on a condition variable until something arrives. It
+/// used to poll every 25 ms, about 35 wake-ups a second per thread while idle.
 pub(crate) struct TranscriptionMailbox<C, W> {
-    control: SyncSender<C>,
-    latest_work: Arc<Mutex<Option<W>>>,
+    shared: Arc<Shared<C, W>>,
 }
 
 pub(crate) struct TranscriptionMailboxReceiver<C, W> {
-    control: Receiver<C>,
-    latest_work: Arc<Mutex<Option<W>>>,
+    shared: Arc<Shared<C, W>>,
+}
+
+struct Shared<C, W> {
+    state: Mutex<State<C, W>>,
+    ready: Condvar,
+}
+
+struct State<C, W> {
+    control: VecDeque<C>,
+    control_capacity: usize,
+    latest_work: Option<W>,
+    senders: usize,
+    receiver_alive: bool,
+}
+
+impl<C, W> Shared<C, W> {
+    fn lock(&self) -> MutexGuard<'_, State<C, W>> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl<C, W> Clone for TranscriptionMailbox<C, W> {
     fn clone(&self) -> Self {
+        self.shared.lock().senders += 1;
         Self {
-            control: self.control.clone(),
-            latest_work: Arc::clone(&self.latest_work),
+            shared: Arc::clone(&self.shared),
         }
+    }
+}
+
+impl<C, W> Drop for TranscriptionMailbox<C, W> {
+    fn drop(&mut self) {
+        let mut state = self.shared.lock();
+        state.senders -= 1;
+        if state.senders == 0 {
+            drop(state);
+            self.shared.ready.notify_all();
+        }
+    }
+}
+
+impl<C, W> Drop for TranscriptionMailboxReceiver<C, W> {
+    fn drop(&mut self) {
+        self.shared.lock().receiver_alive = false;
     }
 }
 
 impl<C, W> TranscriptionMailbox<C, W> {
     pub(crate) fn bounded(control_capacity: usize) -> (Self, TranscriptionMailboxReceiver<C, W>) {
-        let (control, receiver) = mpsc::sync_channel(control_capacity);
-        let latest_work = Arc::new(Mutex::new(None));
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State {
+                control: VecDeque::with_capacity(control_capacity),
+                control_capacity,
+                latest_work: None,
+                senders: 1,
+                receiver_alive: true,
+            }),
+            ready: Condvar::new(),
+        });
         (
             Self {
-                control,
-                latest_work: Arc::clone(&latest_work),
+                shared: Arc::clone(&shared),
             },
-            TranscriptionMailboxReceiver {
-                control: receiver,
-                latest_work,
-            },
+            TranscriptionMailboxReceiver { shared },
         )
     }
 
     pub(crate) fn send_control(&self, command: C) -> Result<(), TrySendError<C>> {
-        self.control.try_send(command)
+        let mut state = self.shared.lock();
+        if !state.receiver_alive {
+            return Err(TrySendError::Disconnected(command));
+        }
+        if state.control.len() >= state.control_capacity {
+            return Err(TrySendError::Full(command));
+        }
+        state.control.push_back(command);
+        drop(state);
+        self.shared.ready.notify_one();
+        Ok(())
     }
 
     /// Replaces and returns work that had not started. The caller can publish a
     /// typed cancellation for that superseded session immediately.
     pub(crate) fn send_latest(&self, work: W) -> Option<W> {
-        self.latest_work
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace(work)
+        let replaced = self.shared.lock().latest_work.replace(work);
+        self.shared.ready.notify_one();
+        replaced
     }
 }
 
 impl<C, W> TranscriptionMailboxReceiver<C, W> {
-    pub(crate) fn recv_next(&self, timeout: Duration) -> Option<MailboxItem<C, W>> {
+    /// Waits for the next item; control first. Returns `None` once every
+    /// sender is gone and nothing is left.
+    pub(crate) fn recv_next(&self) -> Option<MailboxItem<C, W>> {
+        let mut state = self.shared.lock();
         loop {
-            match self.control.try_recv() {
-                Ok(command) => return Some(MailboxItem::Control(command)),
-                Err(TryRecvError::Disconnected) => {
-                    return self.take_work().map(MailboxItem::Work);
-                }
-                Err(TryRecvError::Empty) => {}
+            if let Some(command) = state.control.pop_front() {
+                return Some(MailboxItem::Control(command));
             }
-            if let Some(work) = self.take_work() {
+            if let Some(work) = state.latest_work.take() {
                 return Some(MailboxItem::Work(work));
             }
-            match self.control.recv_timeout(timeout) {
-                Ok(command) => return Some(MailboxItem::Control(command)),
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => {
-                    return self.take_work().map(MailboxItem::Work);
-                }
+            if state.senders == 0 {
+                return None;
             }
+            state = self
+                .shared
+                .ready
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
-    }
-
-    fn take_work(&self) -> Option<W> {
-        self.latest_work
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
     }
 }
 
@@ -174,7 +215,7 @@ impl CancelSignal for SessionPublicationGuard {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc::TrySendError, time::Duration};
+    use std::sync::mpsc::TrySendError;
 
     use rust_protocol::SessionId;
 
@@ -221,10 +262,25 @@ mod tests {
         let (mailbox, receiver) = TranscriptionMailbox::<&str, u32>::bounded(2);
         assert_eq!(mailbox.send_latest(1), None);
         assert_eq!(mailbox.send_latest(2), Some(1));
-        assert!(matches!(
-            receiver.recv_next(Duration::ZERO),
-            Some(MailboxItem::Work(2))
-        ));
+        assert!(matches!(receiver.recv_next(), Some(MailboxItem::Work(2))));
+    }
+
+    #[test]
+    fn a_waiting_receiver_wakes_for_work_and_ends_when_senders_leave() {
+        let (mailbox, receiver) = TranscriptionMailbox::<u32, u32>::bounded(1);
+        let waiter = std::thread::spawn(move || {
+            let first = receiver.recv_next();
+            let second = receiver.recv_next();
+            (
+                matches!(first, Some(MailboxItem::Work(5))),
+                second.is_none(),
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        mailbox.send_latest(5);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        drop(mailbox);
+        assert_eq!(waiter.join().unwrap(), (true, true));
     }
 
     #[test]
@@ -237,12 +293,9 @@ mod tests {
             Err(TrySendError::Full(2))
         ));
         assert!(matches!(
-            receiver.recv_next(Duration::ZERO),
+            receiver.recv_next(),
             Some(MailboxItem::Control(1))
         ));
-        assert!(matches!(
-            receiver.recv_next(Duration::ZERO),
-            Some(MailboxItem::Work(7))
-        ));
+        assert!(matches!(receiver.recv_next(), Some(MailboxItem::Work(7))));
     }
 }

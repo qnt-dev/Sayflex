@@ -60,7 +60,8 @@ $vulkanTarget = [System.IO.Path]::GetFullPath(
         if ($TestNvidia) { 'C:\sf-build\nt' } else { 'C:\sf-build\v' }
     } else { $VulkanTarget })
 )
-$temporaryTargets = @($cpuTarget, $cudaTarget, $vulkanTarget)
+$compatTarget = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'target\publish-cpu-compat'))
+$temporaryTargets = @($cpuTarget, $cudaTarget, $vulkanTarget, $compatTarget)
 $cudaArchitectures = '75-virtual;80-virtual;86-real;89-real;120a-real;121a-real'
 
 function Assert-WorkspaceChild([string]$Path) {
@@ -171,6 +172,8 @@ $previousOcrBundle = $env:SAYFLEX_OCR_BUNDLE
 $previousRequireSimd = $env:FXTRANSLATE_REQUIRE_SIMD
 $previousNativeCReleaseFlags = $env:CMAKE_C_FLAGS_RELEASE
 $previousNativeCxxReleaseFlags = $env:CMAKE_CXX_FLAGS_RELEASE
+$previousGgml = @{}
+$previousCudaRuntimeLibrary = $env:CMAKE_CUDA_RUNTIME_LIBRARY
 $publishSucceeded = $false
 
 try {
@@ -189,6 +192,18 @@ try {
     # Cargo's --release optimizes Rust but cannot repair these CMake flags.
     $env:CMAKE_C_FLAGS_RELEASE = '/MD /O2 /Ob2 /DNDEBUG'
     $env:CMAKE_CXX_FLAGS_RELEASE = '/MD /O2 /Ob2 /DNDEBUG'
+    # whisper-rs-sys passes GGML_* variables to CMake. GGML_NATIVE detected the
+    # build machine's instructions, so a build host with AVX-512 shipped
+    # AVX-512. Pin the x86-64-v3 level (AVX2, FMA, F16C, BMI2) instead; the
+    # compatibility CPU worker below covers older processors.
+    $ggmlLevel = [ordered]@{
+        GGML_NATIVE = 'OFF'; GGML_AVX512 = 'OFF'; GGML_AVX2 = 'ON'; GGML_AVX = 'ON'
+        GGML_FMA = 'ON'; GGML_F16C = 'ON'; GGML_BMI2 = 'ON'; GGML_SSE42 = 'ON'
+    }
+    foreach ($name in $ggmlLevel.Keys) {
+        $previousGgml[$name] = [Environment]::GetEnvironmentVariable($name)
+        [Environment]::SetEnvironmentVariable($name, $ggmlLevel[$name])
+    }
     New-Item -ItemType Directory -Force -Path $output | Out-Null
     Get-ChildItem -LiteralPath $output -Force -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force
@@ -212,12 +227,11 @@ Separate settings, history, models and runtimes: %LOCALAPPDATA%\SayFlex-Test-Nvi
 The normal SayFlex installation and data are not imported or modified.
 Windows autostart is disabled for this build. Launch it from SayFlex Test.
 
-The included CUDA speech worker contains statically linked NVIDIA runtime-loader code.
-NVIDIA cuBLAS DLLs are not bundled; their separate download requires your
+The CUDA speech worker links the NVIDIA CUDA runtime dynamically. No NVIDIA
+file is bundled: cudart and cuBLAS are downloaded from NVIDIA only after your
 explicit action in the test app.
 CPU/Vulkan speech and translation remain available without that download.
 This build is for local functional testing and is not approved by SignPath Foundation.
-Separating the DLL download does not remove the NVIDIA code embedded in the worker.
 
 Uninstall only "SayFlex Test" in Windows Settings > Apps. Its private data
 is retained. To remove it as well, close SayFlex Test and manually delete
@@ -284,6 +298,31 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
             throw 'The OCR model bundle was not staged completely.'
         }
 
+        # Silero VAD (MIT) keeps silence and noise from becoming text. It is
+        # pinned by revision and SHA-256, cached outside the wiped targets,
+        # and verified again by the speech workers before they load it.
+        $vadFile = 'ggml-silero-v6.2.0.bin'
+        $vadSha256 = '2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987'
+        $vadUrl = 'https://huggingface.co/ggml-org/whisper-vad/resolve/' +
+            "9ffd54a1e1ee413ddf265af9913beaf518d1639b/$vadFile"
+        $vadCache = Join-Path $rustRoot "target\speech-vad\$vadFile"
+        $vadCached = (Test-Path -LiteralPath $vadCache) -and
+            (Get-FileHash -LiteralPath $vadCache -Algorithm SHA256).Hash.ToLowerInvariant() -eq $vadSha256
+        if (-not $vadCached) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $vadCache) | Out-Null
+            $vadDownload = "$vadCache.download"
+            Invoke-WebRequest -Uri $vadUrl -OutFile $vadDownload -UseBasicParsing
+            $vadActual = (Get-FileHash -LiteralPath $vadDownload -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($vadActual -ne $vadSha256) {
+                Remove-Item -LiteralPath $vadDownload -Force
+                throw "The Silero VAD model does not match its pinned SHA-256 ($vadActual)."
+            }
+            Move-Item -LiteralPath $vadDownload -Destination $vadCache -Force
+        }
+        $vadOutput = Join-Path $output 'speech-vad'
+        New-Item -ItemType Directory -Force -Path $vadOutput | Out-Null
+        Copy-Item -LiteralPath $vadCache -Destination (Join-Path $vadOutput $vadFile)
+
         Copy-Item -LiteralPath (Join-Path $rustRoot '..\LICENSE') `
             -Destination (Join-Path $output 'LICENSE.txt')
         foreach ($document in @('THIRD_PARTY_NOTICES.md', 'SECURITY.md')) {
@@ -303,9 +342,13 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
         # exited 1 without a diagnostic. Eight is enough to keep the GPU build
         # short without that pressure.
         $cudaJobs = [Math]::Max(1, [Math]::Min(8, [Environment]::ProcessorCount))
+        # Link the CUDA runtime dynamically: the installer then carries no
+        # NVIDIA code, and cudart64_13.dll comes with the opt-in download.
+        $env:CMAKE_CUDA_RUNTIME_LIBRARY = 'Shared'
         & $cargoPath build --locked --target-dir $cudaTarget --profile $profile `
             --jobs $cudaJobs -p sayflex-speech-worker --features cuda
         if ($LASTEXITCODE -ne 0) { throw 'The CUDA speech worker build failed.' }
+        $env:CMAKE_CUDA_RUNTIME_LIBRARY = $previousCudaRuntimeLibrary
         Copy-Item -LiteralPath (Join-Path $cudaTarget "$profile\sayflex-speech-worker.exe") `
             -Destination (Join-Path $output 'SayFlex.Speech.Cuda.exe')
 
@@ -326,17 +369,24 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
         Copy-Item -LiteralPath (Join-Path $vulkanTarget "$profile\sayflex-speech-worker.exe") `
             -Destination (Join-Path $output 'SayFlex.Speech.Vulkan.exe')
 
-        if (-not $TestNvidia) {
-            $cudaRuntimeOutput = Join-Path $output 'runtimes\cuda'
-            New-Item -ItemType Directory -Force -Path $cudaRuntimeOutput | Out-Null
-            foreach ($dll in @('cublas64_13.dll', 'cublasLt64_13.dll')) {
-                $source = Join-Path $cudaRoot "bin\x64\$dll"
-                if (-not (Test-Path -LiteralPath $source)) {
-                    throw "The CUDA runtime is incomplete: $source is missing."
-                }
-                Copy-Item -LiteralPath $source -Destination (Join-Path $cudaRuntimeOutput $dll)
-            }
+        # Processors without AVX2 (before 2013, and many later Pentium, Celeron
+        # and Atom models) get a CPU worker built for SSE4.2. The desktop picks
+        # it by CPUID. Its own target directory keeps the AVX2 build cached.
+        foreach ($name in @('GGML_AVX2', 'GGML_AVX', 'GGML_FMA', 'GGML_F16C', 'GGML_BMI2')) {
+            [Environment]::SetEnvironmentVariable($name, 'OFF')
         }
+        & $cargoPath build --locked --target-dir $compatTarget --profile $profile `
+            -p sayflex-speech-worker --features cpu-compat
+        if ($LASTEXITCODE -ne 0) { throw 'The compatibility CPU speech worker build failed.' }
+        foreach ($name in $ggmlLevel.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $ggmlLevel[$name])
+        }
+        Copy-Item -LiteralPath (Join-Path $compatTarget "$profile\sayflex-speech-worker.exe") `
+            -Destination (Join-Path $output 'SayFlex.Speech.CpuCompat.exe')
+
+        # No NVIDIA file ships in any installer. The CUDA worker links the CUDA
+        # runtime dynamically; cudart64_13.dll and cuBLAS are downloaded from
+        # NVIDIA inside the app, only after the user accepts the NVIDIA EULA.
 
         if (-not [string]::IsNullOrWhiteSpace($SigningThumbprint)) {
             $executables = Get-ChildItem -LiteralPath $output -Filter '*.exe' -File |
@@ -356,7 +406,8 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
                     executable = 'SayFlex.Speech.Cuda.exe'
                     probe = 'whisper_model_warmup'
                     cuda_architectures = $cudaArchitectures.Split(';')
-                    runtime_directory = 'runtimes/cuda'
+                    runtime_directory = 'external-managed-runtime'
+                    runtime_bundled = $false
                 },
                 [ordered]@{
                     id = 'vulkan'
@@ -369,10 +420,6 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
                     probe = 'whisper_model_warmup'
                 }
             )
-        }
-        if ($TestNvidia) {
-            $manifest.backends[0].runtime_directory = 'external-managed-runtime'
-            $manifest.backends[0].runtime_bundled = $false
         }
         $manifest | ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $output 'speech-backends.json') -Encoding utf8
@@ -456,6 +503,10 @@ finally {
     $env:FXTRANSLATE_REQUIRE_SIMD = $previousRequireSimd
     $env:CMAKE_C_FLAGS_RELEASE = $previousNativeCReleaseFlags
     $env:CMAKE_CXX_FLAGS_RELEASE = $previousNativeCxxReleaseFlags
+    $env:CMAKE_CUDA_RUNTIME_LIBRARY = $previousCudaRuntimeLibrary
+    foreach ($name in $previousGgml.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $previousGgml[$name])
+    }
     $env:SAYFLEX_OCR_BUNDLE = $previousOcrBundle
     if (-not $KeepBuildArtifacts -and -not $TestNvidia) {
         foreach ($target in $temporaryTargets) {

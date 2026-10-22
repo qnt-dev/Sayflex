@@ -33,3 +33,35 @@ pub fn nvidia_adapter_name() -> Result<Option<String>, String> {
 pub fn nvidia_adapter_name() -> Result<Option<String>, String> {
     Ok(None)
 }
+
+/// Whether a graphics adapter can run the large speech model at interactive
+/// speed through Vulkan or CUDA: real hardware with at least 2 GiB of its own
+/// memory. Integrated graphics share system memory and report far less, and
+/// the speech model then runs on the processor.
+#[cfg(windows)]
+#[must_use]
+pub fn has_dedicated_gpu() -> bool {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1,
+    };
+    const MIN_DEDICATED_MEMORY: usize = 2 << 30;
+    // SAFETY: DXGI interfaces are owned by their reference-counted Rust wrappers.
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+        return false;
+    };
+    (0..)
+        // SAFETY: the factory remains alive and the index is a value.
+        .map_while(|index| unsafe { factory.EnumAdapters1(index) }.ok())
+        // SAFETY: the live adapter owns the description returned by value.
+        .filter_map(|adapter| unsafe { adapter.GetDesc1() }.ok())
+        .any(|description| {
+            description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0
+                && description.DedicatedVideoMemory >= MIN_DEDICATED_MEMORY
+        })
+}
+
+#[cfg(not(windows))]
+#[must_use]
+pub fn has_dedicated_gpu() -> bool {
+    false
+}

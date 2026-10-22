@@ -29,11 +29,27 @@ impl TranslatorNotice {
     }
 }
 
+/// The warning shown under a translation whose numbers, dates or links still
+/// differ from the original after the masked retry.
+pub(crate) fn protected_values_notice(locale: UiLocale, result: &TranslationResult) -> String {
+    if result.protected_values_changed {
+        text(locale, UiText::TranslationCheckNumbers).to_owned()
+    } else {
+        String::new()
+    }
+}
+
 pub(crate) fn completion_notice(
     locale: UiLocale,
     result: &TranslationResult,
 ) -> Option<TranslatorNotice> {
-    let attempt = result.attempts.last()?;
+    let Some(attempt) = result.attempts.last() else {
+        return result.protected_values_changed.then(|| TranslatorNotice {
+            severity: TranslatorSeverity::Warning,
+            headline: protected_values_notice(locale, result),
+            detail: String::new(),
+        });
+    };
     let final_route = result.provider.as_deref().map_or_else(
         || text(locale, UiText::TranslationFallbackLocal).to_owned(),
         |provider| {
@@ -165,6 +181,7 @@ mod tests {
             backend_request_count: 1,
             tokenize_duration_ms: 1,
             chunk_count: 1,
+            protected_values_changed: false,
         }
     }
 

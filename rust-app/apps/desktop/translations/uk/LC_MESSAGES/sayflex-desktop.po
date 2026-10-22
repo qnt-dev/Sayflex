@@ -16,20 +16,20 @@ msgstr "Помилка {code} у вибраному рушії; автомати
 msgid "{code}: {message}"
 msgstr "{code}: {message}"
 
-msgid "{count} installed"
-msgstr "{count} встановлено"
+msgid "Installed: {count}"
+msgstr "Встановлено: {count}"
 
-msgid "{count} kept · {remote} went to a service"
-msgstr "{count} збережено · {remote} передано до служби"
+msgid "Kept: {count} · sent to a service: {remote}"
+msgstr "Збережено: {count} · надіслано в сервіс: {remote}"
 
-msgid "{count} kept · all on this device"
-msgstr "{count} збережено · усе на цьому пристрої"
+msgid "Kept: {count} · all on this device"
+msgstr "Збережено: {count} · усе на цьому пристрої"
 
-msgid "{count} kept on this device"
-msgstr "{count} збережено на цьому пристрої"
+msgid "Kept on this device: {count}"
+msgstr "Збережено на цьому пристрої: {count}"
 
-msgid "{count} of {total} shortcuts active"
-msgstr "Активних сполучень: {count} із {total}"
+msgid "Shortcuts active: {count} of {total}"
+msgstr "Активних сполучень: {count} з {total}"
 
 msgid "{field} is needed as well as the key."
 msgstr "Потрібен {field}, а також ключ."
@@ -52,8 +52,8 @@ msgstr "{provider} не підтвердив збереження ключа."
 msgid "{visual} · shown while recording"
 msgstr "{visual} · відображається під час запису"
 
-msgid "1 installed"
-msgstr "1 встановлено"
+msgid "Installed: 1"
+msgstr "Встановлено: 1"
 
 msgid "A key is needed. To remove the one already stored, use Remove key."
 msgstr "Потрібен ключ. Щоб видалити вже збережений, натисніть «Видалити ключ»."
@@ -811,8 +811,8 @@ msgstr "Вставити ключ"
 msgid "Pause / resume"
 msgstr "Пауза / відновлення"
 
-msgid "Paused · {count} shortcuts configured"
-msgstr "Призупинено · {count} налаштовані комбінації клавіш"
+msgid "Paused · shortcuts configured: {count}"
+msgstr "Призупинено · налаштовано сполучень: {count}"
 
 msgid "PIN"
 msgstr "PIN"
@@ -1003,11 +1003,11 @@ msgstr "Показати оригінал і переклад почергово
 msgid "Show original text"
 msgstr "Показати вихідний текст"
 
-msgid "Showing {count} · {remote} of them went to a service"
-msgstr "Показано {count} · до служби надіслано: {remote}"
+msgid "Shown: {count} · sent to a service: {remote}"
+msgstr "Показано: {count} · надіслано в сервіс: {remote}"
 
-msgid "Showing {count} · all on this device"
-msgstr "Показано {count} · усі на цьому пристрої"
+msgid "Shown: {count} · all on this device"
+msgstr "Показано: {count} · усе на цьому пристрої"
 
 msgid "Shows the palette every time"
 msgstr "Показує палітру щоразу"
@@ -1698,73 +1698,73 @@ msgid "Another screen translation is running. Wait for it to finish."
 msgstr "Дочекайтеся завершення іншого перекладу з екрана."
 
 msgid "Checking NVIDIA components…"
-msgstr "Checking NVIDIA components…"
+msgstr "Перевіряємо компоненти NVIDIA…"
 
 msgid "NVIDIA components are not installed."
-msgstr "NVIDIA components are not installed."
+msgstr "Компоненти NVIDIA не встановлено."
 
 msgid "Downloading from NVIDIA: {received} / {total} MB"
-msgstr "Downloading from NVIDIA: {received} / {total} MB"
+msgstr "Завантаження з сайту NVIDIA: {received} / {total} МБ"
 
 msgid "Verifying the NVIDIA download…"
-msgstr "Verifying the NVIDIA download…"
+msgstr "Перевіряємо завантажені компоненти NVIDIA…"
 
 msgid "Installing NVIDIA components…"
-msgstr "Installing NVIDIA components…"
+msgstr "Встановлюємо компоненти NVIDIA…"
 
 msgid "Cancelling the NVIDIA download…"
-msgstr "Cancelling the NVIDIA download…"
+msgstr "Скасовуємо завантаження NVIDIA…"
 
 msgid "Installed. CUDA is not active with a ready speech model."
-msgstr "Installed. CUDA is not active with a ready speech model."
+msgstr "Компоненти встановлено. CUDA з готовою мовною моделлю ще не активна."
 
 msgid "CUDA is active and the speech model is ready."
-msgstr "CUDA is active and the speech model is ready."
+msgstr "CUDA активна, мовна модель готова."
 
 msgid "Download cancelled. You can try again."
-msgstr "Download cancelled. You can try again."
+msgstr "Завантаження скасовано. Можна спробувати ще раз."
 
 msgid "NVIDIA components could not be installed. You can retry."
-msgstr "NVIDIA components could not be installed. You can retry."
+msgstr "Не вдалося встановити компоненти NVIDIA. Можна спробувати ще раз."
 
 msgid "Optional download: {size} MB from NVIDIA."
-msgstr "Optional download: {size} MB from NVIDIA."
+msgstr "Додаткове завантаження: {size} МБ із сайту NVIDIA."
 
 msgid "Could not complete this action: {error}"
-msgstr "Could not complete this action: {error}"
+msgstr "Не вдалося виконати дію: {error}"
 
 msgid "Accept and download"
-msgstr "Accept and download"
+msgstr "Прийняти й завантажити"
 
 msgid "Retry download"
-msgstr "Retry download"
+msgstr "Повторити завантаження"
 
 msgid "Detected GPU: {gpu}. Compatibility is checked when you activate."
-msgstr "Detected GPU: {gpu}. Compatibility is checked when you activate."
+msgstr "Виявлено відеокарту: {gpu}. Сумісність перевіряється під час активації."
 
 msgid "No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation."
-msgstr "No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation."
+msgstr "Відеокарту NVIDIA не виявлено. Для активації потрібна сумісна відеокарта NVIDIA."
 
 msgid "GPU detection was unavailable. Activation checks NVIDIA compatibility."
-msgstr "GPU detection was unavailable. Activation checks NVIDIA compatibility."
+msgstr "Не вдалося визначити відеокарту. Сумісність NVIDIA перевіряється під час активації."
 
 msgid "NVIDIA acceleration"
-msgstr "NVIDIA acceleration"
+msgstr "Прискорення NVIDIA"
 
 msgid "Optional NVIDIA components require a compatible NVIDIA GPU and driver. Downloading means you accept the NVIDIA license."
-msgstr "Optional NVIDIA components require a compatible NVIDIA GPU and driver. Downloading means you accept the NVIDIA license."
+msgstr "Для додаткових компонентів NVIDIA потрібні сумісна відеокарта NVIDIA і драйвер. Завантажуючи їх, ви приймаєте ліцензію NVIDIA."
 
 msgid "NVIDIA license"
-msgstr "NVIDIA license"
+msgstr "Ліцензія NVIDIA"
 
 msgid "Activate NVIDIA"
-msgstr "Activate NVIDIA"
+msgstr "Активувати NVIDIA"
 
 msgid "Have an NVIDIA GPU? After setup, open Settings → Dictation to download optional NVIDIA acceleration separately."
-msgstr "Have an NVIDIA GPU? After setup, open Settings → Dictation to download optional NVIDIA acceleration separately."
+msgstr "Маєте відеокарту NVIDIA? Після налаштування відкрийте «Налаштування → Диктування», щоб окремо завантажити прискорення NVIDIA."
 
 msgid "NVIDIA is selected. A ready local speech model is required for CUDA dictation."
-msgstr "NVIDIA is selected. A ready local speech model is required for CUDA dictation."
+msgstr "NVIDIA вибрано. Для диктування через CUDA потрібна готова локальна мовна модель."
 
 msgid "Downloading speech model"
 msgstr "Завантажуємо мовленнєву модель"
@@ -1792,3 +1792,57 @@ msgstr "Переглянути завантаження"
 
 msgid "{model}: translation package not installed. Open Models to install it."
 msgstr "{model}: пакет перекладу не встановлено. Установіть його в розділі «Моделі»."
+
+msgid "Text was not inserted"
+msgstr "Текст не вставлено"
+
+msgid "Click the field you want, then press Insert. The text is also in History."
+msgstr "Клацніть потрібне поле й натисніть «Вставити». Текст також збережено в історії."
+
+msgid "INSERT"
+msgstr "ВСТАВИТИ"
+
+msgid "COPY"
+msgstr "КОПІЮВАТИ"
+
+msgid "The window changed before the text was pasted, so SayFlex did not paste it into another place."
+msgstr "Вікно змінилося до вставлення, тому SayFlex не вставив текст в інше місце."
+
+msgid "The application did not confirm the paste. Check whether the text appeared before you insert it again."
+msgstr "Програма не підтвердила вставлення. Перевірте, чи з'явився текст, перш ніж вставляти знову."
+
+msgid "The application did not accept the text."
+msgstr "Програма не прийняла текст."
+
+msgid "A key was still held down, so the text was not pasted."
+msgstr "Клавіша ще була затиснута, тому текст не вставлено."
+
+msgid "This is a password field or a window without a text field. SayFlex does not paste dictation there."
+msgstr "Це поле пароля або вікно без текстового поля. SayFlex не вставляє туди диктування."
+
+msgid "Check the numbers, dates and links: the translation may differ from the original."
+msgstr "Перевірте числа, дати й посилання: у перекладі вони можуть відрізнятися від оригіналу."
+
+msgid "Translating"
+msgstr "Перекладаємо"
+
+msgid "ON IMAGE"
+msgstr "ON IMAGE"
+
+msgid "DEL"
+msgstr "DEL"
+
+msgid "Original text"
+msgstr "Вихідний текст"
+
+msgid "Original and translation"
+msgstr "Оригінал і переклад"
+
+msgid "Translation on the image"
+msgstr "Переклад на зображенні"
+
+msgid "Keep window on top"
+msgstr "Закріпити вікно поверх інших"
+
+msgid "Unpin window"
+msgstr "Відкріпити вікно"

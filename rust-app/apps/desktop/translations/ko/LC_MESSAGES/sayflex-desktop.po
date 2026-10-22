@@ -16,20 +16,20 @@ msgstr "선택한 백엔드에서 {code} 오류가 발생했습니다. {backend}
 msgid "{code}: {message}"
 msgstr "{code}: {message}"
 
-msgid "{count} installed"
-msgstr "{count} 개 설치됨"
+msgid "Installed: {count}"
+msgstr "설치됨: {count}"
 
-msgid "{count} kept · {remote} went to a service"
-msgstr "{count} 개 유지 · {remote} 개는 서비스로 이동"
+msgid "Kept: {count} · sent to a service: {remote}"
+msgstr "보관됨: {count} · 서비스로 전송됨: {remote}"
 
-msgid "{count} kept · all on this device"
-msgstr "{count} 개 유지 · 모두 이 장치에 있음"
+msgid "Kept: {count} · all on this device"
+msgstr "보관됨: {count} · 모두 이 기기에 있음"
 
-msgid "{count} kept on this device"
-msgstr "{count} 개가 이 장치에 유지됨"
+msgid "Kept on this device: {count}"
+msgstr "이 기기에 보관됨: {count}"
 
-msgid "{count} of {total} shortcuts active"
-msgstr "바로가기 {total}개 중 {count}개 활성"
+msgid "Shortcuts active: {count} of {total}"
+msgstr "활성 단축키: {total}개 중 {count}개"
 
 msgid "{field} is needed as well as the key."
 msgstr "{field}과 키가 필요합니다."
@@ -52,8 +52,8 @@ msgstr "{provider}에서 키를 확인하지 않았습니다."
 msgid "{visual} · shown while recording"
 msgstr "{visual} · 녹음하는 동안 표시됨"
 
-msgid "1 installed"
-msgstr "1개 설치됨"
+msgid "Installed: 1"
+msgstr "설치됨: 1"
 
 msgid "A key is needed. To remove the one already stored, use Remove key."
 msgstr "키가 필요합니다. 저장된 키를 제거하려면 키 제거를 사용하세요."
@@ -811,8 +811,8 @@ msgstr "키 붙여넣기"
 msgid "Pause / resume"
 msgstr "일시중지/재개"
 
-msgid "Paused · {count} shortcuts configured"
-msgstr "일시 중지 · {count}개의 단축키 설정됨"
+msgid "Paused · shortcuts configured: {count}"
+msgstr "일시 중지됨 · 구성된 단축키: {count}"
 
 msgid "PIN"
 msgstr "PIN"
@@ -1003,11 +1003,11 @@ msgstr "원문과 번역을 교대로 표시"
 msgid "Show original text"
 msgstr "원문 표시"
 
-msgid "Showing {count} · {remote} of them went to a service"
-msgstr "{count}개 표시 중 · 그중 {remote}개가 서비스로 전송됨"
+msgid "Shown: {count} · sent to a service: {remote}"
+msgstr "표시됨: {count} · 서비스로 전송됨: {remote}"
 
-msgid "Showing {count} · all on this device"
-msgstr "{count}개 표시 · 이 기기에 모두 있음"
+msgid "Shown: {count} · all on this device"
+msgstr "표시됨: {count} · 모두 이 기기에 있음"
 
 msgid "Shows the palette every time"
 msgstr "매번 팔레트 표시"
@@ -1698,73 +1698,73 @@ msgid "Another screen translation is running. Wait for it to finish."
 msgstr "다른 화면 번역이 끝날 때까지 기다려 주세요."
 
 msgid "Checking NVIDIA components…"
-msgstr "Checking NVIDIA components…"
+msgstr "NVIDIA 구성 요소를 확인하는 중…"
 
 msgid "NVIDIA components are not installed."
-msgstr "NVIDIA components are not installed."
+msgstr "NVIDIA 구성 요소가 설치되지 않았습니다."
 
 msgid "Downloading from NVIDIA: {received} / {total} MB"
-msgstr "Downloading from NVIDIA: {received} / {total} MB"
+msgstr "NVIDIA에서 다운로드 중: {received} / {total} MB"
 
 msgid "Verifying the NVIDIA download…"
-msgstr "Verifying the NVIDIA download…"
+msgstr "NVIDIA 다운로드를 확인하는 중…"
 
 msgid "Installing NVIDIA components…"
-msgstr "Installing NVIDIA components…"
+msgstr "NVIDIA 구성 요소를 설치하는 중…"
 
 msgid "Cancelling the NVIDIA download…"
-msgstr "Cancelling the NVIDIA download…"
+msgstr "NVIDIA 다운로드를 취소하는 중…"
 
 msgid "Installed. CUDA is not active with a ready speech model."
-msgstr "Installed. CUDA is not active with a ready speech model."
+msgstr "설치되었습니다. 준비된 음성 모델로 CUDA가 아직 활성화되지 않았습니다."
 
 msgid "CUDA is active and the speech model is ready."
-msgstr "CUDA is active and the speech model is ready."
+msgstr "CUDA가 활성화되었고 음성 모델이 준비되었습니다."
 
 msgid "Download cancelled. You can try again."
-msgstr "Download cancelled. You can try again."
+msgstr "다운로드가 취소되었습니다. 다시 시도할 수 있습니다."
 
 msgid "NVIDIA components could not be installed. You can retry."
-msgstr "NVIDIA components could not be installed. You can retry."
+msgstr "NVIDIA 구성 요소를 설치할 수 없습니다. 다시 시도할 수 있습니다."
 
 msgid "Optional download: {size} MB from NVIDIA."
-msgstr "Optional download: {size} MB from NVIDIA."
+msgstr "선택 다운로드: NVIDIA에서 {size}MB"
 
 msgid "Could not complete this action: {error}"
-msgstr "Could not complete this action: {error}"
+msgstr "이 작업을 완료할 수 없습니다: {error}"
 
 msgid "Accept and download"
-msgstr "Accept and download"
+msgstr "동의하고 다운로드"
 
 msgid "Retry download"
-msgstr "Retry download"
+msgstr "다운로드 다시 시도"
 
 msgid "Detected GPU: {gpu}. Compatibility is checked when you activate."
-msgstr "Detected GPU: {gpu}. Compatibility is checked when you activate."
+msgstr "감지된 GPU: {gpu}. 활성화할 때 호환성을 확인합니다."
 
 msgid "No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation."
-msgstr "No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation."
+msgstr "NVIDIA GPU가 감지되지 않았습니다. 활성화하려면 호환되는 NVIDIA GPU가 필요합니다."
 
 msgid "GPU detection was unavailable. Activation checks NVIDIA compatibility."
-msgstr "GPU detection was unavailable. Activation checks NVIDIA compatibility."
+msgstr "GPU를 감지할 수 없습니다. 활성화할 때 NVIDIA 호환성을 확인합니다."
 
 msgid "NVIDIA acceleration"
-msgstr "NVIDIA acceleration"
+msgstr "NVIDIA 가속"
 
 msgid "Optional NVIDIA components require a compatible NVIDIA GPU and driver. Downloading means you accept the NVIDIA license."
-msgstr "Optional NVIDIA components require a compatible NVIDIA GPU and driver. Downloading means you accept the NVIDIA license."
+msgstr "선택 사항인 NVIDIA 구성 요소에는 호환되는 NVIDIA GPU와 드라이버가 필요합니다. 다운로드하면 NVIDIA 라이선스에 동의하는 것입니다."
 
 msgid "NVIDIA license"
-msgstr "NVIDIA license"
+msgstr "NVIDIA 라이선스"
 
 msgid "Activate NVIDIA"
-msgstr "Activate NVIDIA"
+msgstr "NVIDIA 활성화"
 
 msgid "Have an NVIDIA GPU? After setup, open Settings → Dictation to download optional NVIDIA acceleration separately."
-msgstr "Have an NVIDIA GPU? After setup, open Settings → Dictation to download optional NVIDIA acceleration separately."
+msgstr "NVIDIA GPU가 있나요? 설정 후 설정 → 받아쓰기에서 선택 사항인 NVIDIA 가속을 별도로 다운로드하세요."
 
 msgid "NVIDIA is selected. A ready local speech model is required for CUDA dictation."
-msgstr "NVIDIA is selected. A ready local speech model is required for CUDA dictation."
+msgstr "NVIDIA가 선택되었습니다. CUDA 받아쓰기에는 준비된 로컬 음성 모델이 필요합니다."
 
 msgid "Downloading speech model"
 msgstr "음성 모델 다운로드 중"
@@ -1792,3 +1792,57 @@ msgstr "다운로드 보기"
 
 msgid "{model}: translation package not installed. Open Models to install it."
 msgstr "{model}: 번역 패키지가 설치되어 있지 않습니다. 모델에서 설치하세요."
+
+msgid "Text was not inserted"
+msgstr "텍스트가 삽입되지 않았습니다"
+
+msgid "Click the field you want, then press Insert. The text is also in History."
+msgstr "원하는 입력란을 클릭한 다음 삽입을 누르세요. 텍스트는 기록에도 있습니다."
+
+msgid "INSERT"
+msgstr "삽입"
+
+msgid "COPY"
+msgstr "복사"
+
+msgid "The window changed before the text was pasted, so SayFlex did not paste it into another place."
+msgstr "붙여넣기 전에 창이 바뀌어 SayFlex가 다른 곳에 텍스트를 붙여넣지 않았습니다."
+
+msgid "The application did not confirm the paste. Check whether the text appeared before you insert it again."
+msgstr "애플리케이션이 붙여넣기를 확인하지 않았습니다. 다시 삽입하기 전에 텍스트가 나타났는지 확인하세요."
+
+msgid "The application did not accept the text."
+msgstr "애플리케이션이 텍스트를 받지 않았습니다."
+
+msgid "A key was still held down, so the text was not pasted."
+msgstr "키가 아직 눌려 있어 텍스트를 붙여넣지 않았습니다."
+
+msgid "This is a password field or a window without a text field. SayFlex does not paste dictation there."
+msgstr "비밀번호 입력란이거나 텍스트 입력란이 없는 창입니다. SayFlex는 그곳에 받아쓰기를 붙여넣지 않습니다."
+
+msgid "Check the numbers, dates and links: the translation may differ from the original."
+msgstr "숫자, 날짜, 링크를 확인하세요. 번역이 원문과 다를 수 있습니다."
+
+msgid "Translating"
+msgstr "번역 중"
+
+msgid "ON IMAGE"
+msgstr "ON IMAGE"
+
+msgid "DEL"
+msgstr "DEL"
+
+msgid "Original text"
+msgstr "원문"
+
+msgid "Original and translation"
+msgstr "원문과 번역"
+
+msgid "Translation on the image"
+msgstr "이미지 위 번역"
+
+msgid "Keep window on top"
+msgstr "창을 항상 위에 표시"
+
+msgid "Unpin window"
+msgstr "창 고정 해제"

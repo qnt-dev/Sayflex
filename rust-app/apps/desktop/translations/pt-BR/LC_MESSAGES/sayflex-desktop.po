@@ -16,20 +16,20 @@ msgstr "Erro {code} no mecanismo selecionado; verificando {backend} automaticame
 msgid "{code}: {message}"
 msgstr "{code}: {message}"
 
-msgid "{count} installed"
-msgstr "{count} instalado"
+msgid "Installed: {count}"
+msgstr "Instalados: {count}"
 
-msgid "{count} kept · {remote} went to a service"
-msgstr "{count} mantidos · {remote} enviados a um serviço"
+msgid "Kept: {count} · sent to a service: {remote}"
+msgstr "Salvos: {count} · enviados a um serviço: {remote}"
 
-msgid "{count} kept · all on this device"
-msgstr "{count} mantido · tudo neste dispositivo"
+msgid "Kept: {count} · all on this device"
+msgstr "Salvos: {count} · tudo neste dispositivo"
 
-msgid "{count} kept on this device"
-msgstr "{count} mantido neste dispositivo"
+msgid "Kept on this device: {count}"
+msgstr "Salvos neste dispositivo: {count}"
 
-msgid "{count} of {total} shortcuts active"
-msgstr "{count} de {total} atalhos ativos"
+msgid "Shortcuts active: {count} of {total}"
+msgstr "Atalhos ativos: {count} de {total}"
 
 msgid "{field} is needed as well as the key."
 msgstr "{field} é necessário, assim como a chave."
@@ -52,8 +52,8 @@ msgstr "{provider} não confirmou a chave."
 msgid "{visual} · shown while recording"
 msgstr "{visual} · mostrado durante a gravação"
 
-msgid "1 installed"
-msgstr "1 instalado"
+msgid "Installed: 1"
+msgstr "Instalados: 1"
 
 msgid "A key is needed. To remove the one already stored, use Remove key."
 msgstr "É necessária uma chave. Para remover a já salva, use Remover chave."
@@ -811,8 +811,8 @@ msgstr "Cole a chave"
 msgid "Pause / resume"
 msgstr "Pausar / retomar"
 
-msgid "Paused · {count} shortcuts configured"
-msgstr "Em pausa · {count} atalhos configurados"
+msgid "Paused · shortcuts configured: {count}"
+msgstr "Pausado · atalhos configurados: {count}"
 
 msgid "PIN"
 msgstr "PIN"
@@ -1003,11 +1003,11 @@ msgstr "Mostrar original e tradução intercalados"
 msgid "Show original text"
 msgstr "Mostrar texto original"
 
-msgid "Showing {count} · {remote} of them went to a service"
-msgstr "Exibindo {count} · {remote} foram enviados a um serviço"
+msgid "Shown: {count} · sent to a service: {remote}"
+msgstr "Exibidos: {count} · enviados a um serviço: {remote}"
 
-msgid "Showing {count} · all on this device"
-msgstr "Exibindo {count} · todos neste dispositivo"
+msgid "Shown: {count} · all on this device"
+msgstr "Exibidos: {count} · tudo neste dispositivo"
 
 msgid "Shows the palette every time"
 msgstr "Exibe a paleta sempre"
@@ -1698,73 +1698,73 @@ msgid "Another screen translation is running. Wait for it to finish."
 msgstr "Aguarde a conclusão da outra tradução de tela."
 
 msgid "Checking NVIDIA components…"
-msgstr "Checking NVIDIA components…"
+msgstr "Verificando os componentes da NVIDIA…"
 
 msgid "NVIDIA components are not installed."
-msgstr "NVIDIA components are not installed."
+msgstr "Os componentes da NVIDIA não estão instalados."
 
 msgid "Downloading from NVIDIA: {received} / {total} MB"
-msgstr "Downloading from NVIDIA: {received} / {total} MB"
+msgstr "Baixando da NVIDIA: {received} / {total} MB"
 
 msgid "Verifying the NVIDIA download…"
-msgstr "Verifying the NVIDIA download…"
+msgstr "Verificando o download da NVIDIA…"
 
 msgid "Installing NVIDIA components…"
-msgstr "Installing NVIDIA components…"
+msgstr "Instalando os componentes da NVIDIA…"
 
 msgid "Cancelling the NVIDIA download…"
-msgstr "Cancelling the NVIDIA download…"
+msgstr "Cancelando o download da NVIDIA…"
 
 msgid "Installed. CUDA is not active with a ready speech model."
-msgstr "Installed. CUDA is not active with a ready speech model."
+msgstr "Instalado. O CUDA ainda não está ativo com um modelo de fala pronto."
 
 msgid "CUDA is active and the speech model is ready."
-msgstr "CUDA is active and the speech model is ready."
+msgstr "O CUDA está ativo e o modelo de fala está pronto."
 
 msgid "Download cancelled. You can try again."
-msgstr "Download cancelled. You can try again."
+msgstr "Download cancelado. Você pode tentar novamente."
 
 msgid "NVIDIA components could not be installed. You can retry."
-msgstr "NVIDIA components could not be installed. You can retry."
+msgstr "Não foi possível instalar os componentes da NVIDIA. Você pode tentar novamente."
 
 msgid "Optional download: {size} MB from NVIDIA."
-msgstr "Optional download: {size} MB from NVIDIA."
+msgstr "Download opcional: {size} MB da NVIDIA."
 
 msgid "Could not complete this action: {error}"
-msgstr "Could not complete this action: {error}"
+msgstr "Não foi possível concluir esta ação: {error}"
 
 msgid "Accept and download"
-msgstr "Accept and download"
+msgstr "Aceitar e baixar"
 
 msgid "Retry download"
-msgstr "Retry download"
+msgstr "Tentar baixar novamente"
 
 msgid "Detected GPU: {gpu}. Compatibility is checked when you activate."
-msgstr "Detected GPU: {gpu}. Compatibility is checked when you activate."
+msgstr "GPU detectada: {gpu}. A compatibilidade é verificada na ativação."
 
 msgid "No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation."
-msgstr "No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation."
+msgstr "Nenhuma GPU NVIDIA foi detectada. A ativação requer uma GPU NVIDIA compatível."
 
 msgid "GPU detection was unavailable. Activation checks NVIDIA compatibility."
-msgstr "GPU detection was unavailable. Activation checks NVIDIA compatibility."
+msgstr "Não foi possível detectar a GPU. A ativação verifica a compatibilidade com a NVIDIA."
 
 msgid "NVIDIA acceleration"
-msgstr "NVIDIA acceleration"
+msgstr "Aceleração NVIDIA"
 
 msgid "Optional NVIDIA components require a compatible NVIDIA GPU and driver. Downloading means you accept the NVIDIA license."
-msgstr "Optional NVIDIA components require a compatible NVIDIA GPU and driver. Downloading means you accept the NVIDIA license."
+msgstr "Os componentes opcionais da NVIDIA exigem GPU e driver NVIDIA compatíveis. Ao baixá-los, você aceita a licença da NVIDIA."
 
 msgid "NVIDIA license"
-msgstr "NVIDIA license"
+msgstr "Licença da NVIDIA"
 
 msgid "Activate NVIDIA"
-msgstr "Activate NVIDIA"
+msgstr "Ativar NVIDIA"
 
 msgid "Have an NVIDIA GPU? After setup, open Settings → Dictation to download optional NVIDIA acceleration separately."
-msgstr "Have an NVIDIA GPU? After setup, open Settings → Dictation to download optional NVIDIA acceleration separately."
+msgstr "Tem uma GPU NVIDIA? Após a configuração, abra Configurações → Ditado para baixar separadamente a aceleração NVIDIA opcional."
 
 msgid "NVIDIA is selected. A ready local speech model is required for CUDA dictation."
-msgstr "NVIDIA is selected. A ready local speech model is required for CUDA dictation."
+msgstr "A NVIDIA está selecionada. O ditado com CUDA precisa de um modelo de fala local pronto."
 
 msgid "Downloading speech model"
 msgstr "Baixando o modelo de voz"
@@ -1792,3 +1792,57 @@ msgstr "Ver download"
 
 msgid "{model}: translation package not installed. Open Models to install it."
 msgstr "{model}: o pacote de tradução não está instalado. Abra Modelos para instalá-lo."
+
+msgid "Text was not inserted"
+msgstr "O texto não foi inserido"
+
+msgid "Click the field you want, then press Insert. The text is also in History."
+msgstr "Clique no campo desejado e pressione Inserir. O texto também está no histórico."
+
+msgid "INSERT"
+msgstr "INSERIR"
+
+msgid "COPY"
+msgstr "COPIAR"
+
+msgid "The window changed before the text was pasted, so SayFlex did not paste it into another place."
+msgstr "A janela mudou antes de colar o texto, então o SayFlex não o colou em outro lugar."
+
+msgid "The application did not confirm the paste. Check whether the text appeared before you insert it again."
+msgstr "O aplicativo não confirmou a colagem. Verifique se o texto apareceu antes de inseri-lo novamente."
+
+msgid "The application did not accept the text."
+msgstr "O aplicativo não aceitou o texto."
+
+msgid "A key was still held down, so the text was not pasted."
+msgstr "Uma tecla ainda estava pressionada, então o texto não foi colado."
+
+msgid "This is a password field or a window without a text field. SayFlex does not paste dictation there."
+msgstr "É um campo de senha ou uma janela sem campo de texto. O SayFlex não cola ditados ali."
+
+msgid "Check the numbers, dates and links: the translation may differ from the original."
+msgstr "Confira números, datas e links: a tradução pode diferir do original."
+
+msgid "Translating"
+msgstr "Traduzindo"
+
+msgid "ON IMAGE"
+msgstr "ON IMAGE"
+
+msgid "DEL"
+msgstr "DEL"
+
+msgid "Original text"
+msgstr "Texto original"
+
+msgid "Original and translation"
+msgstr "Original e tradução"
+
+msgid "Translation on the image"
+msgstr "Tradução sobre a imagem"
+
+msgid "Keep window on top"
+msgstr "Manter a janela no topo"
+
+msgid "Unpin window"
+msgstr "Desafixar a janela"

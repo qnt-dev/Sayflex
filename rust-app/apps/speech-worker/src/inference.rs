@@ -698,6 +698,11 @@ fn finalize_from_stable_prefix(
     let prompt = context_prompt(&prefix.text);
     match engine.transcribe_with_prompt(&tail, output_mode, Some(&prompt), Some(abort.clone())) {
         Ok(segment) => Ok(merge_engine_transcripts(prefix, segment)),
+        Err(error) if error.is::<crate::vad::NoSpeech>() => Ok(EngineTranscript {
+            audio_duration_ms: recording.duration_ms,
+            source_sample_count: recording.source_total_samples,
+            ..prefix.clone()
+        }),
         Err(error) => {
             eprintln!(
                 "segmented final tail was not usable; falling back to authoritative pass: {error:#}"
