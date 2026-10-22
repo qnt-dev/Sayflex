@@ -191,6 +191,24 @@ madd(xsimd::batch<int8_t, Arch> x, xsimd::batch<int8_t, Arch> y,
   return _mm256_maddubs_epi16(xsimd::abs(x), _mm256_sign_epi8(y, x));
 }
 
+// SayFlex: the shifted uint8 activation spans the full byte range. A direct
+// maddubs may saturate its adjacent-product int16 sum before widening. Split
+// each activation into low seven bits and its high bit: each half's pair sum
+// fits [-32768, 32512] for all signed int8 weights. Widen separately, then add
+// in int32 so the dot product is identical to the scalar/ARM accumulation.
+template <class Arch>
+inline xsimd::batch<int32_t, Arch>
+maddw(xsimd::batch<uint8_t, Arch> x, xsimd::batch<int8_t, Arch> y,
+      xsimd::batch<int32_t, Arch> z,
+      xsimd::kernel::requires_arch<xsimd::avx2>) {
+  const __m256i low = _mm256_and_si256(x, _mm256_set1_epi8(0x7f));
+  const __m256i high = _mm256_xor_si256(x, low);
+  const __m256i ones = _mm256_set1_epi16(1);
+  const __m256i low_sum = _mm256_madd_epi16(_mm256_maddubs_epi16(low, y), ones);
+  const __m256i high_sum = _mm256_madd_epi16(_mm256_maddubs_epi16(high, y), ones);
+  return _mm256_add_epi32(z, _mm256_add_epi32(low_sum, high_sum));
+}
+
 template <class Arch>
 inline xsimd::batch<int32_t, Arch>
 PermuteSummer(xsimd::batch<int32_t, Arch> pack0123,

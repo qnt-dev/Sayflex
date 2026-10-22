@@ -1,5 +1,6 @@
 use rust_protocol::{
-    TranslationAttemptReport, TranslationFailureKind, TranslationFailureReport, TranslationResult,
+    TranslationAttemptReport, TranslationFailureKind, TranslationFailureReport,
+    TranslationModelSummary, TranslationResult,
 };
 
 use crate::localization::{UiLocale, UiText, render, text};
@@ -53,7 +54,27 @@ pub(crate) fn completion_notice(
 pub(crate) fn failure_notice(
     locale: UiLocale,
     failure: &TranslationFailureReport,
+    models: &[TranslationModelSummary],
 ) -> TranslatorNotice {
+    if failure.kind == TranslationFailureKind::LocalModelMissing
+        && let Some(model) = failure
+            .required_catalog_id
+            .as_deref()
+            .and_then(|required| models.iter().find(|model| model.catalog_id == required))
+    {
+        let name = crate::settings_projection::translation_model_title_localized(model, locale);
+        return TranslatorNotice {
+            severity: TranslatorSeverity::Error,
+            headline: render(
+                locale,
+                UiText::TranslationPackageMissing,
+                &[("model", &name)],
+            ),
+            // The catalog gives a localized, actionable name. Technical worker
+            // details remain in diagnostics rather than the translation card.
+            detail: String::new(),
+        };
+    }
     let headline = match failure.kind {
         TranslationFailureKind::NoText => text(locale, UiText::EnterTextToTranslate).to_owned(),
         TranslationFailureKind::NoProviderAvailable => {
@@ -123,7 +144,7 @@ fn provider_name(provider_id: &str) -> &str {
 mod tests {
     use rust_protocol::{
         RequestId, TranslationAttemptReport, TranslationFailureKind, TranslationFailureReport,
-        TranslationLanguage, TranslationResult, TranslationTier,
+        TranslationLanguage, TranslationModelSummary, TranslationResult, TranslationTier,
     };
 
     use super::{TranslatorSeverity, completion_notice, failure_notice};
@@ -177,6 +198,7 @@ mod tests {
                 detail: "raw provider response".to_owned(),
                 attempts: Vec::new(),
             },
+            &[],
         );
 
         assert_eq!(notice.severity, TranslatorSeverity::Error);
@@ -240,6 +262,7 @@ mod tests {
                     detail: "technical detail".to_owned(),
                     attempts: Vec::new(),
                 },
+                &[],
             );
             assert_eq!(notice.headline, expected);
             assert_eq!(notice.message(), expected);
@@ -275,9 +298,47 @@ mod tests {
                     detail: String::new(),
                     attempts: Vec::new(),
                 },
+                &[],
             );
             assert_eq!(notice.headline, expected);
         }
+    }
+
+    #[test]
+    fn missing_language_package_names_the_required_package_in_russian() {
+        let models = [TranslationModelSummary {
+            catalog_id: "firefox-fr-en-v3".to_owned(),
+            display_name: "French language pack".to_owned(),
+            description: String::new(),
+            tier: TranslationTier::Compact,
+            languages: vec![TranslationLanguage::French, TranslationLanguage::English],
+            size_bytes: 0,
+            installed: false,
+            selected: false,
+            recommended: false,
+            license: "MPL-2.0".to_owned(),
+        }];
+        let notice = failure_notice(
+            UiLocale::Russian,
+            &TranslationFailureReport {
+                kind: TranslationFailureKind::LocalModelMissing,
+                provider_id: None,
+                retry_after_ms: None,
+                required_catalog_id: Some("firefox-fr-en-v3".to_owned()),
+                detail: "translation package firefox-fr-en-v3 is not installed".to_owned(),
+                attempts: Vec::new(),
+            },
+            &models,
+        );
+
+        assert!(notice.message().contains("Французский ↔ Английский"));
+        assert!(!notice.message().contains("firefox-fr-en-v3"));
+        assert!(notice.detail.is_empty());
+        assert!(
+            !notice
+                .message()
+                .contains("Локальная модель перевода не установлена")
+        );
     }
 
     #[test]
@@ -292,6 +353,7 @@ mod tests {
                 detail: String::new(),
                 attempts: Vec::new(),
             },
+            &[],
         );
 
         assert_eq!(

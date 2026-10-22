@@ -2561,6 +2561,7 @@ dependencies = [
  "cfg_aliases",
  "i-slint-common",
  "i-slint-core",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "vtable",
 ]
@@ -5489,6 +5490,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "zip",
 ]
 
 [[package]]
@@ -5500,6 +5502,7 @@ dependencies = [
  "oar-ocr",
  "oar-ocr-core",
  "rust-protocol",
+ "serde_json",
  "thiserror 2.0.19",
  "unicode-bidi",
 ]
@@ -5541,6 +5544,7 @@ dependencies = [
  "anyhow",
  "fxtranslate",
  "reqwest",
+ "rust-app-core",
  "rust-model-manager",
  "rust-protocol",
  "serde",
@@ -5548,6 +5552,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "unicode-segmentation",
  "uuid",
  "whatlang",
 ]
@@ -5774,6 +5779,8 @@ version = "0.8.11"
 dependencies = [
  "base64 0.22.1",
  "i-slint-backend-testing",
+ "i-slint-core",
+ "i-slint-renderer-skia",
  "pet_orb",
  "pet_particles",
  "pet_render",

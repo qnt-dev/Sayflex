@@ -17,7 +17,7 @@ use rust_protocol::{
 use crate::{
     audio::RecordedAudio,
     engine::{AbortGeneration, EngineTranscript, WhisperEngine},
-    history_actor::HistoryCommand,
+    history_actor::{HistoryCommand, queue_completion},
     transcription_mailbox::{SessionCancellationSet, SessionPublicationGuard},
 };
 
@@ -199,11 +199,20 @@ impl InferenceHandle {
         *recover_lock(&self.active_session) = Some(session_id);
     }
 
+    /// Releases only this capture's ownership. A cloud request can finish after
+    /// the user has already started another dictation.
+    pub(crate) fn finish_session(&self, session_id: SessionId) {
+        let mut active = recover_lock(&self.active_session);
+        if *active == Some(session_id) {
+            *active = None;
+        }
+    }
+
     pub fn cancel_session(&self, session_id: SessionId) {
         self.cancellations.cancel(session_id);
         let mut active = recover_lock(&self.active_session);
         let finalizing = *recover_lock(&self.finalizing_session) == Some(session_id);
-        if *active == Some(session_id) || finalizing {
+        if *active == Some(session_id) || (active.is_none() && finalizing) {
             *active = None;
             drop(active);
             self.reset_segmented_session();
@@ -277,7 +286,7 @@ impl InferenceHandle {
         audio_finalize_ms: u64,
         release_started: Instant,
     ) {
-        *recover_lock(&self.active_session) = None;
+        self.finish_session(recording.session_id);
         let candidate = *recover_lock(&self.candidate);
         let allow_preview_completion = candidate.is_some_and(|candidate| {
             candidate.session_id == recording.session_id
@@ -521,6 +530,7 @@ fn inference_loop(
                     ),
                 };
                 stable_source_sample_count.store(0, Ordering::Release);
+                let mut terminal_transferred = false;
                 match engine_result {
                     Ok(result) => {
                         let created_unix_ms = crate::unix_ms();
@@ -540,19 +550,13 @@ fn inference_loop(
                                 speculative_reuse,
                             },
                         };
-                        if !publish_terminal_if_current(&publication, || {
-                            // User-visible completion is deliberately ahead of durable history I/O.
-                            let _ = events.send(SpeechWorkerEvent::Completed {
-                                transcript: transcript.clone(),
-                                created_unix_ms,
-                            });
-                            let _ = history.send(HistoryCommand::Append {
-                                transcript,
-                                created_unix_ms,
-                            });
-                        }) {
-                            let _ = events.send(SpeechWorkerEvent::Cancelled { session_id });
-                        }
+                        terminal_transferred = queue_completion(
+                            transcript,
+                            created_unix_ms,
+                            &history,
+                            &publication,
+                            &events,
+                        );
                     }
                     Err(error) => {
                         if !publish_terminal_if_current(&publication, || {
@@ -567,7 +571,9 @@ fn inference_loop(
                         }
                     }
                 }
-                publication.complete();
+                if !terminal_transferred {
+                    publication.complete();
+                }
                 clear_finalizing_session(&finalizing_session, session_id);
             }
             InferenceCommand::Unload {
@@ -874,6 +880,56 @@ mod tests {
             }
         );
         inference.shutdown();
+    }
+
+    #[test]
+    fn cancelling_older_local_finalization_preserves_newer_capture() {
+        let (events, received_events) = mpsc::channel();
+        let (history, _received_history) = mpsc::channel();
+        let inference = InferenceHandle::start(events, history).unwrap();
+        // Hold the real inference owner at its unload acknowledgement until
+        // both captures overlap, without loading a model or recording audio.
+        let (acknowledged, release) = mpsc::sync_channel(0);
+        inference
+            .commands
+            .send(super::InferenceCommand::Unload {
+                only_catalog_id: None,
+                acknowledged: Some(acknowledged),
+                retain_reload_target: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            received_events
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            SpeechWorkerEvent::LocalModelState { .. }
+        ));
+        let audio = recording(vec![0.0; 160], 16_000);
+        let older = audio.session_id;
+        let newer = SessionId::new();
+        inference.begin_session(older);
+        inference.finalize(
+            audio,
+            rust_protocol::SpeechOutputMode::OriginalLanguage,
+            0,
+            std::time::Instant::now(),
+        );
+        inference.begin_session(newer);
+        inference.cancel_session(older);
+        let newer_is_active = inference.has_active_session();
+        drop(release);
+        assert_eq!(
+            received_events
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            SpeechWorkerEvent::Cancelled { session_id: older }
+        );
+        inference.cancel_session(newer);
+        inference.shutdown();
+        assert!(
+            newer_is_active,
+            "cancelling an older finalization must not release the newer capture"
+        );
     }
 
     #[test]

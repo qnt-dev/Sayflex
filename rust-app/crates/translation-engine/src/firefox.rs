@@ -1,4 +1,4 @@
-use std::{path::Path, time::Instant};
+use std::{borrow::Cow, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use fxtranslate::{
@@ -218,7 +218,8 @@ fn translate_paragraphs_with(
         let trailing = &body[body_end..];
         output.push_str(leading);
         if !content.is_empty() {
-            let translated = translate(source, target, content)?;
+            let model_input = normalize_named_date_input(content, source);
+            let translated = translate(source, target, &model_input)?;
             if translated.text.trim().is_empty() {
                 bail!("compact translation runtime returned an empty result");
             }
@@ -258,6 +259,36 @@ fn completion_from_terminations(terminations: &[DecodeTermination]) -> FragmentC
     }
 }
 
+/// Normalize missing OCR whitespace only in recognized English named dates.
+/// The source block remains untouched, and its original digits are still
+/// checked against the model output by protected-value validation.
+fn normalize_named_date_input(text: &str, source: TranslationLanguage) -> Cow<'_, str> {
+    if source != TranslationLanguage::English {
+        return Cow::Borrowed(text);
+    }
+    let bytes = text.as_bytes();
+    let mut normalized = None::<String>;
+    let mut copied_until = 0;
+    for (comma, _) in text.match_indices(',') {
+        let mut number_start = comma;
+        while number_start > 0 && bytes[number_start - 1].is_ascii_digit() {
+            number_start -= 1;
+        }
+        if rust_app_core::text_values::named_month_date_comma(text, number_start, comma) {
+            let output = normalized.get_or_insert_with(|| String::with_capacity(text.len() + 1));
+            output.push_str(&text[copied_until..=comma]);
+            output.push(' ');
+            copied_until = comma + 1;
+        }
+    }
+    if let Some(mut normalized) = normalized {
+        normalized.push_str(&text[copied_until..]);
+        Cow::Owned(normalized)
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 fn paragraph_units(text: &str) -> Vec<(&str, &str)> {
     let bytes = text.as_bytes();
     let mut units = Vec::new();
@@ -288,7 +319,8 @@ mod tests {
     use rust_protocol::TranslationLanguage;
 
     use super::{
-        FragmentCompletion, FragmentTranslation, find_direction, translate_paragraphs_with,
+        FragmentCompletion, FragmentTranslation, find_direction, normalize_named_date_input,
+        translate_paragraphs_with,
     };
     use crate::{FirefoxDirectionDescriptor, TranslationCancelled};
 
@@ -304,6 +336,87 @@ mod tests {
             target_vocab_file: "vocab.spm".to_owned(),
             shortlist_file: "lex.bin".to_owned(),
         }
+    }
+
+    #[test]
+    fn named_date_input_is_spaced_only_at_the_firefox_model_boundary() {
+        let source = String::from("  February 10,2026\n\nMarch 1,2027.  ");
+        let mut inputs = Vec::new();
+        let output = translate_paragraphs_with(
+            &source,
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+            || true,
+            |_, _, input| {
+                inputs.push(input.to_owned());
+                Ok(FragmentTranslation::completed("перевод"))
+            },
+            |_, _, _| true,
+        )
+        .unwrap();
+        assert_eq!(inputs, ["February 10, 2026", "March 1, 2027."]);
+        assert_eq!(source, "  February 10,2026\n\nMarch 1,2027.  ");
+        assert_eq!(output.text, "  перевод\n\nперевод  ");
+    }
+
+    #[test]
+    fn named_date_input_normalizes_all_months_and_multiple_dates_without_changing_digits() {
+        for month in [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ] {
+            let input = format!("Date: {month} 10,2026; next {month} 31,2027.");
+            assert_eq!(
+                normalize_named_date_input(&input, TranslationLanguage::English),
+                input.replace(',', ", "),
+                "{month}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_date_input_leaves_other_numeric_grammar_and_non_english_input_untouched() {
+        for input in [
+            "February 10, 2026",
+            "10,2026",
+            "Cost 10,2026",
+            "February 1,234",
+            "February 10,2026%",
+            "February 10,2026s",
+            "February 10,2026.1",
+            "February 10,2026/1",
+            "February 10,2026,1",
+            "February -10,2026",
+            "February 0,2026",
+            "February 32,2026",
+            "February10,2026",
+            "id-February 10,2026",
+            "https://example.test/10,2026",
+            "{February 10,2026}",
+            "Русский текст 10,2026",
+            "February 10,20261",
+        ] {
+            let normalized = normalize_named_date_input(input, TranslationLanguage::English);
+            assert!(
+                matches!(normalized, std::borrow::Cow::Borrowed(_)),
+                "{input}"
+            );
+            assert_eq!(normalized, input);
+        }
+        assert_eq!(
+            normalize_named_date_input("February 10,2026", TranslationLanguage::Russian),
+            "February 10,2026"
+        );
     }
 
     #[test]

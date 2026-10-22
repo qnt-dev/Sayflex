@@ -1,9 +1,12 @@
 use std::{
     ffi::c_void,
-    mem, ptr, thread,
+    mem, ptr,
+    sync::{Mutex, MutexGuard},
+    thread,
     time::{Duration, Instant},
 };
 
+use rust_protocol::TargetSnapshot;
 use thiserror::Error;
 use windows_sys::Win32::{
     Foundation::{GlobalFree, HANDLE, HWND, LPARAM, LRESULT, WPARAM},
@@ -43,10 +46,14 @@ pub enum ClipboardError {
     InvalidData,
     #[error("the target application changed before paste")]
     TargetChanged,
+    #[error("insertion into a password or protected field is blocked")]
+    Protected,
     #[error("paste shortcut injection failed")]
     Paste,
     #[error("the target did not request the insertion payload")]
     NotDelivered,
+    #[error("paste was dispatched but delivery is unconfirmed; do not retry automatically")]
+    DeliveryUnconfirmed,
     #[error("the clipboard was superseded before the target requested the insertion payload")]
     Superseded,
     #[error("OLE clipboard operation failed with HRESULT {0:#010x}")]
@@ -69,7 +76,71 @@ pub struct ClipboardApartment {
     initialized: bool,
 }
 
+/// A capture owns only fully materialized data. Its private message-only
+/// window distinguishes our CloseClipboard format synthesis from a new Copy.
+struct ClipboardCaptureOwner {
+    hwnd: HWND,
+}
+
+impl ClipboardCaptureOwner {
+    fn create() -> Result<Self, ClipboardError> {
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                ptr::null_mut(),
+                GetModuleHandleW(ptr::null()),
+                ptr::null(),
+            )
+        };
+        if hwnd.is_null() {
+            return Err(ClipboardError::Allocation);
+        }
+        Ok(Self { hwnd })
+    }
+
+    fn settled_sequence(&self) -> Result<u32, ClipboardError> {
+        // Closing a write can synthesize additional text formats. Reopen to
+        // observe the settled token, but only while this exact window still
+        // owns the clipboard; a foreign or anonymous publisher is never ours.
+        with_open_clipboard_owner(self.hwnd, || {
+            settled_capture_sequence(
+                self.hwnd as usize as u64,
+                unsafe { GetClipboardOwner() } as usize as u64,
+                unsafe { GetClipboardSequenceNumber() },
+            )
+        })
+    }
+}
+
+impl Drop for ClipboardCaptureOwner {
+    fn drop(&mut self) {
+        // Every format was provided with a real data handle. Destroying this
+        // owner does not require rendering or replacing the restored clipboard.
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+        }
+    }
+}
+
 const PASTE_READ_ACK_TIMEOUT: Duration = Duration::from_millis(2_500);
+static CLIPBOARD_TRANSACTION: Mutex<()> = Mutex::new(());
+
+pub(crate) fn begin_clipboard_transaction() -> Result<MutexGuard<'static, ()>, ClipboardError> {
+    // Never wait on the insertion STA: it must keep servicing COM/window
+    // messages, including delayed clipboard rendering for other processes.
+    CLIPBOARD_TRANSACTION
+        .try_lock()
+        .map_err(|_| ClipboardError::Busy)
+}
 // Clipboard brokers and synchronizers can materialize delayed data before an
 // Electron/Chromium editor consumes the paste command. Keep the transaction
 // alive long enough for that editor to read the already-materialized payload;
@@ -240,18 +311,27 @@ impl ClipboardPasteHost {
             if self.state.render_failed {
                 return Err(ClipboardError::Allocation);
             }
-            if target_contains_payload() {
-                return Ok(ClipboardReadOutcome::TargetVerified);
-            }
-            if self.state.rendered && self.state.target_requested {
-                self.wait_until_clipboard_released(deadline);
-                return Ok(ClipboardReadOutcome::TargetRead);
+            if let Some(outcome) =
+                acknowledged_read_outcome(&self.state, &mut target_contains_payload)
+            {
+                if outcome == ClipboardReadOutcome::TargetRead {
+                    self.wait_until_clipboard_released(deadline);
+                }
+                return Ok(outcome);
             }
             if !self.owns_clipboard() {
-                return Ok(ClipboardReadOutcome::Superseded);
+                return Ok(if self.state.rendered {
+                    ClipboardReadOutcome::DispatchedUnverified
+                } else {
+                    ClipboardReadOutcome::Superseded
+                });
             }
             if !target_still_focused() {
-                return Ok(ClipboardReadOutcome::TargetChanged);
+                return Ok(if self.state.rendered {
+                    ClipboardReadOutcome::DispatchedUnverified
+                } else {
+                    ClipboardReadOutcome::TargetChanged
+                });
             }
             if self.state.rendered
                 && !verification_available
@@ -369,6 +449,21 @@ enum ClipboardReadOutcome {
     TimedOut,
 }
 
+fn acknowledged_read_outcome(
+    state: &ClipboardRenderState,
+    mut target_contains_payload: impl FnMut() -> bool,
+) -> Option<ClipboardReadOutcome> {
+    if state.rendered && state.target_requested {
+        // The identified target already requested this exact payload. An
+        // optional UIA provider must not delay that independent proof.
+        Some(ClipboardReadOutcome::TargetRead)
+    } else if target_contains_payload() {
+        Some(ClipboardReadOutcome::TargetVerified)
+    } else {
+        None
+    }
+}
+
 unsafe extern "system" fn clipboard_render_window_proc(
     hwnd: HWND,
     message: u32,
@@ -482,27 +577,76 @@ impl Drop for ClipboardApartment {
 }
 
 pub fn set_text(text: &str) -> Result<(), ClipboardError> {
-    set_text_with_policy(text, ClipboardPolicy::Normal)
+    let _transaction = begin_clipboard_transaction()?;
+    set_text_unlocked(text)
 }
 
-fn set_private_text(text: &str) -> Result<(), ClipboardError> {
-    set_text_with_policy(text, ClipboardPolicy::EphemeralPrivate)
-}
-
-#[derive(Clone, Copy)]
-enum ClipboardPolicy {
-    Normal,
-    EphemeralPrivate,
-}
-
-fn set_text_with_policy(text: &str, policy: ClipboardPolicy) -> Result<(), ClipboardError> {
+fn set_private_text_if_current(
+    owner: &ClipboardCaptureOwner,
+    text: &str,
+    expected_sequence: u32,
+    private_sequence: &mut Option<u32>,
+) -> Result<u32, ClipboardError> {
+    // Allocate before opening or modifying the clipboard. Compare and write
+    // must share one OpenClipboard transaction, including partial failures.
     let mut payloads = vec![(
         u32::from(CF_UNICODETEXT),
         GlobalAllocation::from_utf16(text)?,
     )];
-    if matches!(policy, ClipboardPolicy::EphemeralPrivate) {
-        payloads.extend(private_format_payloads()?);
-    }
+    payloads.extend(private_format_payloads()?);
+    let mut changed = false;
+    let publication = with_open_clipboard_owner(owner.hwnd, || {
+        publish_if_sequence_current(
+            expected_sequence,
+            unsafe { GetClipboardSequenceNumber() },
+            || {
+                if unsafe { EmptyClipboard() } == 0 {
+                    return Err(ClipboardError::Busy);
+                }
+                changed = true;
+                let result = payloads.iter_mut().try_for_each(|(format, payload)| {
+                    if unsafe { SetClipboardData(*format, payload.handle) }.is_null() {
+                        return Err(ClipboardError::Allocation);
+                    }
+                    payload.release_to_clipboard();
+                    Ok(())
+                });
+                // This remains our mutation on partial failure. Capture its
+                // sequence while foreign writers are still excluded.
+                let owned = unsafe { GetClipboardSequenceNumber() };
+                *private_sequence = Some(owned);
+                result.map(|()| owned)
+            },
+        )
+    });
+    let settled = if changed {
+        match owner.settled_sequence() {
+            Ok(sequence) => {
+                *private_sequence = Some(sequence);
+                Some(sequence)
+            }
+            Err(error) => {
+                // Without a proven post-close owner, do not adopt a new token
+                // or restore our snapshot over possibly newer clipboard data.
+                *private_sequence = None;
+                crate::diagnostic_line(&format!(
+                    "clipboard_capture settlement=failed error={error}"
+                ));
+                return Err(ClipboardError::Superseded);
+            }
+        }
+    } else {
+        None
+    };
+    publication?.ok_or(ClipboardError::Superseded)?;
+    settled.ok_or(ClipboardError::Superseded)
+}
+
+fn set_text_unlocked(text: &str) -> Result<(), ClipboardError> {
+    let mut payloads = vec![(
+        u32::from(CF_UNICODETEXT),
+        GlobalAllocation::from_utf16(text)?,
+    )];
 
     with_open_clipboard(|| {
         if unsafe { EmptyClipboard() } == 0 {
@@ -592,39 +736,96 @@ impl Drop for GlobalAllocation {
     }
 }
 
-pub fn get_text() -> Result<String, ClipboardError> {
+fn get_text_while_open() -> Result<String, ClipboardError> {
+    let handle = unsafe { GetClipboardData(CF_UNICODETEXT.into()) };
+    if handle.is_null() {
+        return Err(ClipboardError::NoText);
+    }
+    let pointer = unsafe { GlobalLock(handle) }.cast::<u16>();
+    if pointer.is_null() {
+        return Err(ClipboardError::InvalidData);
+    }
+    let units = unsafe { GlobalSize(handle) } / mem::size_of::<u16>();
+    let slice = unsafe { std::slice::from_raw_parts(pointer, units) };
+    let length = slice.iter().position(|unit| *unit == 0).unwrap_or(units);
+    let text = String::from_utf16(&slice[..length]).map_err(|_| ClipboardError::InvalidData);
+    unsafe {
+        let _ = GlobalUnlock(handle);
+    }
+    text
+}
+
+fn get_target_copied_text(
+    original_sequence: u32,
+    target: TargetSnapshot,
+    owned_sequence: &mut Option<u32>,
+) -> Result<(String, u32), ClipboardError> {
     with_open_clipboard(|| {
-        let handle = unsafe { GetClipboardData(CF_UNICODETEXT.into()) };
-        if handle.is_null() {
-            return Err(ClipboardError::NoText);
-        }
-        let pointer = unsafe { GlobalLock(handle) }.cast::<u16>();
-        if pointer.is_null() {
-            return Err(ClipboardError::InvalidData);
-        }
-        let units = unsafe { GlobalSize(handle) } / mem::size_of::<u16>();
-        let slice = unsafe { std::slice::from_raw_parts(pointer, units) };
-        let length = slice.iter().position(|unit| *unit == 0).unwrap_or(units);
-        let text = String::from_utf16(&slice[..length]).map_err(|_| ClipboardError::InvalidData);
-        unsafe {
-            let _ = GlobalUnlock(handle);
-        }
-        text
+        let owner = unsafe { GetClipboardOwner() };
+        let mut owner_pid = 0;
+        let owner_root = if owner.is_null() {
+            owner
+        } else {
+            unsafe {
+                GetWindowThreadProcessId(owner, &mut owner_pid);
+            }
+            unsafe { GetAncestor(owner, GA_ROOT) }
+        };
+        acquire_target_copy(
+            original_sequence,
+            unsafe { GetClipboardSequenceNumber() },
+            request_is_from_target(
+                owner_pid,
+                target.process_id,
+                owner_root as usize as u64,
+                target.window_handle,
+            ),
+            || {
+                let text = get_text_while_open();
+                // Delayed rendering can advance this sequence while the
+                // clipboard is open, but no foreign Copy can interleave.
+                let sequence = unsafe { GetClipboardSequenceNumber() };
+                *owned_sequence = Some(sequence);
+                text.map(|text| (text, sequence))
+            },
+        )
     })
 }
 
+fn acquire_target_copy<T>(
+    original_sequence: u32,
+    current_sequence: u32,
+    owner_is_target: bool,
+    read: impl FnOnce() -> Result<T, ClipboardError>,
+) -> Result<T, ClipboardError> {
+    // The first observed change may be EmptyClipboard while the source still
+    // holds the lock. Anchor to its completed publication here, but only when
+    // the actual owner identifies the target. Unknown/foreign Copy is never
+    // adopted, inspected or later restored over.
+    if current_sequence == original_sequence || !owner_is_target {
+        return Err(ClipboardError::Superseded);
+    }
+    read()
+}
+
 pub fn capture_selection(
-    target_still_focused: impl Fn() -> bool,
+    target: TargetSnapshot,
     send_direct_copy: impl FnOnce() -> Result<(), ClipboardError>,
     send_shortcut_copy: impl FnOnce() -> Result<(), ClipboardError>,
 ) -> Result<ClipboardCapture, ClipboardError> {
+    let _transaction = begin_clipboard_transaction()?;
+    let target_still_focused = || crate::inject::is_foreground(target);
     let _apartment = ClipboardApartment::initialize()?;
-    let snapshot = ClipboardSnapshot::capture()?;
+    let owner = ClipboardCaptureOwner::create()?;
+    let (snapshot, original_sequence) = ClipboardSnapshot::capture_consistent()?;
     if !target_still_focused() {
         return Err(ClipboardError::TargetChanged);
     }
 
-    let original_sequence = unsafe { GetClipboardSequenceNumber() };
+    if unsafe { GetClipboardSequenceNumber() } != original_sequence {
+        return Err(ClipboardError::Superseded);
+    }
+    let mut retry_sequence = original_sequence;
     let _ = send_direct_copy();
 
     // WM_COPY is synchronous, so an unchanged sequence can fall through
@@ -634,11 +835,13 @@ pub fn capture_selection(
     if unsafe { GetClipboardSequenceNumber() } != original_sequence {
         match finish_copy_attempt(
             &snapshot,
-            &target_still_focused,
+            &owner,
+            target,
             original_sequence,
             ClipboardCaptureMethod::WindowMessage,
             Duration::ZERO,
             Duration::from_millis(250),
+            &mut retry_sequence,
         ) {
             Ok(captured) => return Ok(captured),
             Err(error) if is_retryable_capture_error(&error) => {
@@ -654,27 +857,40 @@ pub fn capture_selection(
         return Err(ClipboardError::TargetChanged);
     }
     let shortcut_sequence = unsafe { GetClipboardSequenceNumber() };
+    if shortcut_sequence != retry_sequence {
+        return Err(ClipboardError::Superseded);
+    }
     send_shortcut_copy()?;
     finish_copy_attempt(
         &snapshot,
-        &target_still_focused,
+        &owner,
+        target,
         shortcut_sequence,
         ClipboardCaptureMethod::Shortcut,
         Duration::from_millis(1_500),
         Duration::from_millis(800),
+        &mut retry_sequence,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_copy_attempt(
     snapshot: &ClipboardSnapshot,
-    target_still_focused: &impl Fn() -> bool,
+    owner: &ClipboardCaptureOwner,
+    target: TargetSnapshot,
     original_sequence: u32,
     method: ClipboardCaptureMethod,
     change_timeout: Duration,
     read_timeout: Duration,
+    retry_sequence: &mut u32,
 ) -> Result<ClipboardCapture, ClipboardError> {
     let deadline = Instant::now() + change_timeout;
-    while unsafe { GetClipboardSequenceNumber() } == original_sequence {
+    let target_still_focused = || crate::inject::is_foreground(target);
+    loop {
+        let current = unsafe { GetClipboardSequenceNumber() };
+        if current != original_sequence {
+            break;
+        }
         if !target_still_focused() {
             return Err(ClipboardError::TargetChanged);
         }
@@ -683,7 +899,6 @@ fn finish_copy_attempt(
         }
         thread::sleep(Duration::from_millis(5));
     }
-    let copied_sequence = unsafe { GetClipboardSequenceNumber() };
     let stable_for = if method == ClipboardCaptureMethod::Shortcut {
         Duration::from_millis(40)
     } else {
@@ -691,7 +906,9 @@ fn finish_copy_attempt(
     };
     let mut private_sequence = None;
     let text = claim_copied_text(
-        target_still_focused,
+        owner,
+        target,
+        original_sequence,
         stable_for,
         read_timeout,
         &mut private_sequence,
@@ -699,17 +916,17 @@ fn finish_copy_attempt(
     match text {
         Ok(text) => {
             if let Some(sequence) = private_sequence {
-                restore_if_current(snapshot, sequence)?;
+                *retry_sequence = snapshot
+                    .restore_sequence_if_current(owner, sequence)?
+                    .ok_or(ClipboardError::Superseded)?;
             }
             Ok(ClipboardCapture { text, method })
         }
         Err(error) => {
             if let Some(sequence) = private_sequence {
-                restore_if_current(snapshot, sequence)?;
-            } else if target_still_focused()
-                && unsafe { GetClipboardSequenceNumber() } == copied_sequence
-            {
-                let _ = snapshot.restore_if_current(copied_sequence)?;
+                *retry_sequence = snapshot
+                    .restore_sequence_if_current(owner, sequence)?
+                    .ok_or(ClipboardError::Superseded)?;
             }
             Err(error)
         }
@@ -717,10 +934,32 @@ fn finish_copy_attempt(
 }
 
 fn claim_copied_text(
+    owner: &ClipboardCaptureOwner,
+    target: TargetSnapshot,
+    original_sequence: u32,
+    stable_for: Duration,
+    timeout: Duration,
+    private_sequence: &mut Option<u32>,
+) -> Result<String, ClipboardError> {
+    claim_copied_text_using(
+        &|| crate::inject::is_foreground(target),
+        stable_for,
+        timeout,
+        private_sequence,
+        |owned| get_target_copied_text(original_sequence, target, owned),
+        |text, sequence, private| set_private_text_if_current(owner, text, sequence, private),
+        || unsafe { GetClipboardSequenceNumber() },
+    )
+}
+
+fn claim_copied_text_using(
     target_still_focused: &impl Fn() -> bool,
     stable_for: Duration,
     timeout: Duration,
     private_sequence: &mut Option<u32>,
+    mut read: impl FnMut(&mut Option<u32>) -> Result<(String, u32), ClipboardError>,
+    mut publish: impl FnMut(&str, u32, &mut Option<u32>) -> Result<u32, ClipboardError>,
+    current_sequence: impl Fn() -> u32,
 ) -> Result<String, ClipboardError> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -731,13 +970,18 @@ fn claim_copied_text(
         // A source commonly increments the sequence at EmptyClipboard, before
         // delayed rendering has made CF_UNICODETEXT readable. Keep polling the
         // actual text instead of treating that transient gap as a failed Copy.
-        let text = match get_text() {
+        let (text, copied_sequence) = match read(private_sequence) {
             Ok(text) => text,
             Err(error) if is_transient_read_error(&error) && Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(5));
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if error == ClipboardError::Superseded {
+                    *private_sequence = None;
+                }
+                return Err(error);
+            }
         };
 
         // A foreign Copy command cannot attach the Windows privacy formats.
@@ -745,15 +989,19 @@ fn claim_copied_text(
         // captured selection merely because a privacy format registration or
         // clipboard transaction failed. The original snapshot is restored on
         // both paths.
-        if let Err(error) = set_private_text(&text) {
-            let current = unsafe { GetClipboardSequenceNumber() };
-            *private_sequence = Some(current);
+        *private_sequence = Some(copied_sequence);
+        let published = publish(&text, copied_sequence, private_sequence);
+        if let Err(error) = published {
+            if error == ClipboardError::Superseded {
+                *private_sequence = None;
+                return Err(error);
+            }
             crate::diagnostic_line(&format!(
                 "clipboard_capture privacy_marking=failed error={error}"
             ));
             return Ok(text);
         }
-        let owned = unsafe { GetClipboardSequenceNumber() };
+        let owned = published.expect("publication succeeded");
         *private_sequence = Some(owned);
         if stable_for.is_zero() {
             return Ok(text);
@@ -768,9 +1016,9 @@ fn claim_copied_text(
                 return Ok(text);
             }
             thread::sleep(Duration::from_millis(3));
-            if unsafe { GetClipboardSequenceNumber() } != owned {
+            if current_sequence() != owned {
                 *private_sequence = None;
-                break;
+                return Err(ClipboardError::Superseded);
             }
         }
     }
@@ -793,15 +1041,20 @@ fn is_retryable_capture_error(error: &ClipboardError) -> bool {
     )
 }
 
-fn restore_if_current(
-    snapshot: &ClipboardSnapshot,
-    expected_sequence: u32,
-) -> Result<bool, ClipboardError> {
-    snapshot.restore_if_current(expected_sequence)
-}
-
 fn clipboard_sequence_still_owned(expected_sequence: u32, current_sequence: u32) -> bool {
     expected_sequence == current_sequence
+}
+
+fn settled_capture_sequence(
+    owned_window: u64,
+    observed_owner: u64,
+    settled_sequence: u32,
+) -> Result<u32, ClipboardError> {
+    if owned_window != 0 && observed_owner == owned_window {
+        Ok(settled_sequence)
+    } else {
+        Err(ClipboardError::Superseded)
+    }
 }
 
 fn publish_precondition_holds(expected_sequence: u32, current_sequence: u32) -> bool {
@@ -869,15 +1122,19 @@ pub struct ClipboardPasteReceipt {
 /// before the private delayed-rendered payload is published. Restoration is
 /// attempted only while this host is still the clipboard owner; a concurrent
 /// user Copy always wins.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_paste(
     host: &mut ClipboardPasteHost,
     target_still_focused: impl Fn() -> bool,
     verification_available: bool,
     target_contains_payload: impl FnMut() -> bool,
+    validate_before_dispatch: impl FnOnce() -> Result<(), ClipboardError>,
     send_paste: impl FnOnce() -> Result<(), ClipboardError>,
     target_process_id: u32,
     payload: &str,
 ) -> Result<ClipboardPasteReceipt, ClipboardError> {
+    // The insertion adapter owns the transaction guard across route selection
+    // and dispatch, so a capture cannot race a native insertion either.
     if !target_still_focused() {
         return Err(ClipboardError::TargetChanged);
     }
@@ -891,10 +1148,14 @@ pub fn dispatch_paste(
     ) {
         Ok(publication) => publication,
         Err(error) => {
-            if host.owns_clipboard() {
-                let expected_sequence = unsafe { GetClipboardSequenceNumber() };
-                let _ = snapshot.restore_if_current(expected_sequence)?;
-            }
+            // Even failure cleanup must check ownership inside OpenClipboard.
+            // Sampling a sequence after an outside owner check could adopt a
+            // newer user Copy as if it were our failed publication.
+            let failed_publication = ClipboardPublication {
+                generation: host.state.generation,
+                replacement_sequence: original_sequence,
+            };
+            let _ = host.restore_snapshot_if_owned(&snapshot, failed_publication)?;
             return Err(error);
         }
     };
@@ -904,11 +1165,20 @@ pub fn dispatch_paste(
         let _ = host.restore_snapshot_if_owned(&snapshot, publication)?;
         return Err(ClipboardError::TargetChanged);
     }
-    if !host.owns_publication(publication) {
-        return Err(ClipboardError::Superseded);
-    }
-    if let Err(error) = send_paste() {
-        let _ = host.restore_snapshot_if_owned(&snapshot, publication)?;
+    let dispatch = validate_before_dispatch().and_then(|()| {
+        // A provider check may take time: recheck our publication afterwards,
+        // immediately before injecting, so a new Copy never becomes payload.
+        if !host.owns_publication(publication) {
+            return Err(ClipboardError::Superseded);
+        }
+        send_paste()
+    });
+    if let Err(error) = dispatch {
+        if let Err(restore_error) = host.restore_snapshot_if_owned(&snapshot, publication) {
+            crate::diagnostic_line(&format!(
+                "clipboard_transaction restore=failed after=dispatch_error error={restore_error}"
+            ));
+        }
         return Err(error);
     }
 
@@ -973,13 +1243,16 @@ fn settled_disposition(
                 ClipboardPasteDisposition::PayloadReadRestoreFailed
             }
         }),
-        ClipboardReadOutcome::DispatchedUnverified => {
-            if restored? {
-                Ok(ClipboardPasteDisposition::DispatchedUnverifiedAndRestored)
-            } else {
-                Err(ClipboardError::Superseded)
+        ClipboardReadOutcome::DispatchedUnverified => match restored {
+            Ok(true) => Ok(ClipboardPasteDisposition::DispatchedUnverifiedAndRestored),
+            Ok(false) => Err(ClipboardError::DeliveryUnconfirmed),
+            Err(error) => {
+                crate::diagnostic_line(&format!(
+                    "clipboard_transaction restore=failed after=dispatched_unverified error={error}"
+                ));
+                Err(ClipboardError::DeliveryUnconfirmed)
             }
-        }
+        },
         ClipboardReadOutcome::TargetChanged => {
             restored?;
             Err(ClipboardError::TargetChanged)
@@ -1168,9 +1441,13 @@ impl ClipboardSnapshot {
             .collect()
     }
 
-    fn restore_if_current(&self, expected_sequence: u32) -> Result<bool, ClipboardError> {
+    fn restore_sequence_if_current(
+        &self,
+        owner: &ClipboardCaptureOwner,
+        expected_sequence: u32,
+    ) -> Result<Option<u32>, ClipboardError> {
         let mut formats = self.prepare_restore()?;
-        with_open_clipboard(|| {
+        let restored = with_open_clipboard_owner(owner.hwnd, || {
             let current_sequence = unsafe { GetClipboardSequenceNumber() };
             restore_preserved_formats_if_current(
                 &mut formats,
@@ -1192,7 +1469,19 @@ impl ClipboardSnapshot {
                     Ok(())
                 },
             )
-        })
+        })?;
+        if !restored {
+            return Ok(None);
+        }
+        // Restoration writes all saved formats directly; it does not hand
+        // ownership to an OLE data object. Like publication, it can synthesize
+        // formats when closed, so the retry token must be settled under owner
+        // verification rather than captured inside the preceding write.
+        match owner.settled_sequence() {
+            Ok(sequence) => Ok(Some(sequence)),
+            Err(ClipboardError::Superseded) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -1222,12 +1511,177 @@ fn with_open_clipboard_owner<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardError, ClipboardFormatSnapshot, ClipboardPublication, ClipboardSnapshot,
-        GMEM_MOVEABLE, GlobalAlloc, clipboard_sequence_still_owned, collect_preservable_formats,
-        is_retryable_capture_error, is_transient_read_error, publication_still_owned,
-        publish_if_sequence_current, publish_precondition_holds, request_is_from_target,
-        restore_preserved_formats_if_current, restore_preserved_formats_if_publication_owned,
+        ClipboardError, ClipboardFormatSnapshot, ClipboardPublication, ClipboardReadOutcome,
+        ClipboardRenderState, ClipboardSnapshot, GMEM_MOVEABLE, GlobalAlloc,
+        acknowledged_read_outcome, begin_clipboard_transaction, claim_copied_text_using,
+        clipboard_sequence_still_owned, collect_preservable_formats, is_retryable_capture_error,
+        is_transient_read_error, publication_still_owned, publish_if_sequence_current,
+        publish_precondition_holds, request_is_from_target, restore_preserved_formats_if_current,
+        restore_preserved_formats_if_publication_owned,
     };
+    use std::{cell::Cell, time::Duration};
+
+    #[test]
+    fn capture_accepts_its_own_post_close_synthesized_sequence() {
+        let mut owned = None;
+        let result = claim_copied_text_using(
+            &|| true,
+            Duration::from_millis(1),
+            Duration::from_millis(100),
+            &mut owned,
+            |_| Ok(("owned synthetic selection".to_owned(), 45_196)),
+            |_, _, token| {
+                // Native Windows regression: SetClipboardData reported 45202,
+                // then CloseClipboard synthesized formats and advanced to 45205.
+                *token = Some(45_202);
+                super::settled_capture_sequence(500, 500, 45_205)
+            },
+            || 45_205,
+        );
+        assert_eq!(result, Ok("owned synthetic selection".to_owned()));
+        assert_eq!(owned, Some(45_205));
+    }
+
+    #[test]
+    fn capture_never_adopts_a_foreign_or_unknown_post_close_sequence() {
+        for (own_window, observed_owner) in [(500, 600), (500, 0), (0, 0)] {
+            let reads = Cell::new(0);
+            let mut owned = None;
+            let result = claim_copied_text_using(
+                &|| true,
+                Duration::ZERO,
+                Duration::from_millis(100),
+                &mut owned,
+                |_| {
+                    reads.set(reads.get() + 1);
+                    Ok(("owned synthetic selection".to_owned(), 41))
+                },
+                |_, _, token| {
+                    *token = Some(42);
+                    super::settled_capture_sequence(own_window, observed_owner, 99)
+                },
+                || 99,
+            );
+            assert_eq!(result, Err(ClipboardError::Superseded));
+            assert_eq!(
+                owned, None,
+                "a newer or anonymous Copy is not ours to restore"
+            );
+            assert_eq!(reads.get(), 1, "do not recapture foreign clipboard text");
+        }
+    }
+
+    #[test]
+    fn a_foreign_copy_before_the_first_completed_read_is_never_claimed() {
+        let mut read = false;
+        let result = super::acquire_target_copy(40, 41, false, || {
+            read = true;
+            Ok("foreign value")
+        });
+        assert_eq!(result, Err(ClipboardError::Superseded));
+        assert!(!read);
+    }
+
+    #[test]
+    fn a_target_completing_empty_then_set_before_open_is_still_capturable() {
+        let result = super::acquire_target_copy(40, 42, true, || Ok("selected text"));
+        assert_eq!(result, Ok("selected text"));
+    }
+    #[test]
+    fn a_proven_target_read_does_not_wait_on_an_optional_uia_provider() {
+        let state = ClipboardRenderState {
+            rendered: true,
+            target_requested: true,
+            ..Default::default()
+        };
+        let mut provider_called = false;
+        let result = acknowledged_read_outcome(&state, || {
+            provider_called = true;
+            false
+        });
+        assert_eq!(result, Some(ClipboardReadOutcome::TargetRead));
+        assert!(
+            !provider_called,
+            "the target already supplied a consumption acknowledgement"
+        );
+    }
+
+    #[test]
+    fn anonymous_materialization_requires_either_verification_or_the_full_lease() {
+        let state = ClipboardRenderState {
+            rendered: true,
+            ..Default::default()
+        };
+        assert_eq!(acknowledged_read_outcome(&state, || false), None);
+        assert_eq!(
+            acknowledged_read_outcome(&state, || true),
+            Some(ClipboardReadOutcome::TargetVerified)
+        );
+    }
+
+    #[test]
+    fn capture_and_insert_transactions_cannot_overlap_or_block_the_sta() {
+        let first = begin_clipboard_transaction().expect("first transaction");
+        let second = std::thread::spawn(|| begin_clipboard_transaction().map(|_| ()))
+            .join()
+            .expect("contending operation must return immediately");
+        drop(first);
+        assert_eq!(second, Err(ClipboardError::Busy));
+        assert!(begin_clipboard_transaction().is_ok());
+    }
+
+    #[test]
+    fn failed_privacy_publication_never_claims_a_new_foreign_sequence() {
+        let mut owned = None;
+        let result = claim_copied_text_using(
+            &|| true,
+            Duration::ZERO,
+            Duration::from_millis(100),
+            &mut owned,
+            |_| Ok(("selection".to_owned(), 41)),
+            |_, _, _| Err(ClipboardError::Busy),
+            || 99,
+        );
+        assert_eq!(result, Ok("selection".to_owned()));
+        assert_ne!(owned, Some(99), "a failed writer cannot own a foreign Copy");
+    }
+
+    #[test]
+    fn a_foreign_copy_before_privacy_publication_aborts_capture() {
+        let mut owned = None;
+        let result = claim_copied_text_using(
+            &|| true,
+            Duration::ZERO,
+            Duration::from_millis(100),
+            &mut owned,
+            |_| Ok(("selection".to_owned(), 41)),
+            |_, _, _| Err(ClipboardError::Superseded),
+            || 99,
+        );
+        assert_eq!(result, Err(ClipboardError::Superseded));
+        assert_eq!(owned, None);
+    }
+
+    #[test]
+    fn a_new_copy_after_publication_is_never_recaptured_or_restored() {
+        let reads = Cell::new(0);
+        let mut owned = None;
+        let result = claim_copied_text_using(
+            &|| true,
+            Duration::from_millis(20),
+            Duration::from_millis(30),
+            &mut owned,
+            |_| {
+                reads.set(reads.get() + 1);
+                Ok(("selection".to_owned(), 41))
+            },
+            |_, _, _| Ok(42),
+            || 99,
+        );
+        assert_eq!(result, Err(ClipboardError::Superseded));
+        assert_eq!(reads.get(), 1);
+        assert_eq!(owned, None);
+    }
 
     #[test]
     fn a_user_copy_between_capture_and_publish_prevents_replacement() {
@@ -1455,6 +1909,15 @@ mod settled_disposition_tests {
     };
 
     #[test]
+    fn an_unverified_dispatched_paste_is_not_reported_as_not_delivered_on_restore_failure() {
+        let result = settled_disposition(
+            ClipboardReadOutcome::DispatchedUnverified,
+            Err(ClipboardError::Busy),
+        );
+        assert_eq!(result, Err(ClipboardError::DeliveryUnconfirmed));
+    }
+
+    #[test]
     fn a_restore_failure_after_a_verified_paste_is_still_delivered() {
         assert!(matches!(
             settled_disposition(
@@ -1481,7 +1944,7 @@ mod settled_disposition_tests {
         ));
         assert!(matches!(
             settled_disposition(ClipboardReadOutcome::DispatchedUnverified, Ok(false)),
-            Err(ClipboardError::Superseded)
+            Err(ClipboardError::DeliveryUnconfirmed)
         ));
         assert!(matches!(
             settled_disposition(ClipboardReadOutcome::TimedOut, Ok(true)),

@@ -12,7 +12,7 @@ mod reconstruct;
 
 pub use reconstruct::{
     ReconstructedBlock, ReconstructedElement, ReconstructedText, ReconstructedVisualRow,
-    reconstruct_text, reconstruct_visual_rows,
+    reconstruct_text, reconstruct_visual_paragraphs, reconstruct_visual_rows,
 };
 
 #[cfg(feature = "ppocr")]
@@ -220,6 +220,14 @@ mod tests {
     #[test]
     fn preserves_inference_geometry() {
         let line = OcrLine {
+            quad: Some(rust_protocol::PhysicalQuad {
+                points: [
+                    rust_protocol::PhysicalPoint { x: 10, y: 12 },
+                    rust_protocol::PhysicalPoint { x: 90, y: 20 },
+                    rust_protocol::PhysicalPoint { x: 85, y: 28 },
+                    rust_protocol::PhysicalPoint { x: 10, y: 20 },
+                ],
+            }),
             text: "fixture".to_owned(),
             bounds: PhysicalRect {
                 x: 10,

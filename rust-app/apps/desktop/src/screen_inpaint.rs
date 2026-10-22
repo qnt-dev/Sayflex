@@ -395,6 +395,18 @@ pub(crate) fn repaired_pixels(
     regions: &[PixelRect],
     protected: &[PixelRect],
 ) -> Vec<u8> {
+    repaired_pixels_with_sampling_exclusions(frame, regions, protected, &[]).0
+}
+
+/// Extra exclusions affect background sampling only. Unlike `protected`,
+/// they do not preserve pixels inside a replacement region. False means a
+/// region had no observed background; that region retains its source pixels.
+pub(crate) fn repaired_pixels_with_sampling_exclusions(
+    frame: &RgbaFrame,
+    regions: &[PixelRect],
+    protected: &[PixelRect],
+    sampling_exclusions: &[PixelRect],
+) -> (Vec<u8>, bool) {
     let (width, height) = (i64::from(frame.rect.width), i64::from(frame.rect.height));
     let row_bytes = width as usize * 4;
     let mut pixels = Vec::with_capacity(row_bytes * height as usize);
@@ -428,10 +440,21 @@ pub(crate) fn repaired_pixels(
             blocked[row].fill(true);
         }
     }
-    for region in &regions {
-        fill_region(frame, &masked, &blocked, *region, &mut pixels);
+    for excluded in sampling_exclusions {
+        let excluded = excluded.clip(width, height);
+        if excluded.is_empty() {
+            continue;
+        }
+        for y in excluded.top..excluded.bottom {
+            blocked[(y * width + excluded.left) as usize..(y * width + excluded.right) as usize]
+                .fill(true);
+        }
     }
-    pixels
+    let mut complete = true;
+    for region in &regions {
+        complete &= fill_region(frame, &masked, &blocked, *region, &mut pixels);
+    }
+    (pixels, complete)
 }
 
 type Side = Option<Vec<[f32; 3]>>;
@@ -607,11 +630,29 @@ fn fill_region(
     blocked: &[bool],
     region: PixelRect,
     pixels: &mut [u8],
-) {
+) -> bool {
     let width = i64::from(frame.rect.width);
     let mut sides = Sides::sample(frame, blocked, region, (region.height() / 2).clamp(4, 24));
     if sides.is_empty() {
         sides = Sides::sample(frame, blocked, region, 96);
+    }
+    if sides.is_empty() {
+        // Neighbouring lines can block every axial ray while clean corners
+        // remain. Use only observed, unblocked pixels; never infer a colour
+        // from the text being removed or silently replace it with black.
+        let Some(background) = unblocked_background(frame, blocked) else {
+            return false;
+        };
+        for y in region.top..region.bottom {
+            for x in region.left..region.right {
+                let at = (y * width + x) as usize;
+                if masked[at] {
+                    pixels[at * 4..at * 4 + 3].copy_from_slice(&background);
+                    pixels[at * 4 + 3] = 255;
+                }
+            }
+        }
+        return true;
     }
     let across = (region.height() / 3).clamp(2, 16) as usize;
     let along = (region.height() / 8).clamp(1, 6) as usize;
@@ -669,6 +710,32 @@ fn fill_region(
             pixels[offset + 3] = 255;
         }
     }
+    true
+}
+
+fn unblocked_background(frame: &RgbaFrame, blocked: &[bool]) -> Option<[u8; 3]> {
+    let mut channels: [Vec<u8>; 3] = Default::default();
+    let stride = blocked.len().div_ceil(4096).max(1);
+    let width = frame.rect.width as usize;
+    for index in (0..blocked.len()).step_by(stride) {
+        if !blocked[index]
+            && let Some(pixel) = frame.pixel((index % width) as u32, (index / width) as u32)
+        {
+            for (channel, value) in channels.iter_mut().zip(pixel) {
+                channel.push(value);
+            }
+        }
+    }
+    if channels[0].is_empty() {
+        // A narrow clean margin can fall between the bounded sample points.
+        let index = blocked.iter().position(|blocked| !blocked)?;
+        let [r, g, b, _] = frame.pixel((index % width) as u32, (index / width) as u32)?;
+        return Some([r, g, b]);
+    }
+    Some(channels.map(|mut values| {
+        let middle = values.len() / 2;
+        *values.select_nth_unstable(middle).1
+    }))
 }
 
 #[cfg(test)]
@@ -676,7 +743,9 @@ mod tests {
     use rust_platform_windows::screen_capture::RgbaFrame;
     use rust_protocol::PhysicalRect;
 
-    use super::{PixelRect, glyph_metrics, repaired_pixels};
+    use super::{
+        PixelRect, glyph_metrics, repaired_pixels, repaired_pixels_with_sampling_exclusions,
+    };
 
     fn frame(width: u32, height: u32, paint: impl Fn(u32, u32) -> [u8; 3]) -> RgbaFrame {
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
@@ -944,5 +1013,67 @@ mod tests {
 
         let offset = (30 * 140 + 61) * 4;
         assert_eq!(&pixels[offset..offset + 3], &[240, 236, 228]);
+    }
+
+    #[test]
+    fn sampling_exclusion_does_not_preserve_ink_in_the_paint_target() {
+        let frame = frame(100, 70, |x, y| {
+            if ((25..75).contains(&x) && (25..38).contains(&y))
+                || ((10..90).contains(&x) && (35..55).contains(&y))
+            {
+                [15; 3]
+            } else {
+                [230; 3]
+            }
+        });
+        let (pixels, complete) = repaired_pixels_with_sampling_exclusions(
+            &frame,
+            &[rect(20, 20, 80, 40)],
+            &[rect(48, 28, 52, 32)],
+            &[rect(10, 35, 90, 55)],
+        );
+        assert!(complete);
+        assert!(
+            pixels[(37 * 100 + 50) * 4] >= 220,
+            "overlapping source ink must still be erased"
+        );
+        assert_eq!(
+            pixels[(30 * 100 + 50) * 4],
+            15,
+            "explicit protected pixels stay unchanged"
+        );
+        assert_eq!(
+            pixels[(45 * 100 + 50) * 4],
+            15,
+            "sampling exclusion is not another paint target"
+        );
+        assert_eq!(frame.pixel(50, 37).unwrap()[0], 15);
+    }
+
+    #[test]
+    fn blocked_sampling_rays_use_clean_corners_and_report_no_background_honestly() {
+        let target = rect(20, 20, 40, 40);
+        let exclusions = [
+            rect(20, 0, 40, 20),
+            rect(20, 40, 40, 60),
+            rect(0, 20, 20, 40),
+            rect(40, 20, 60, 40),
+        ];
+        let frame = frame(60, 60, |x, y| {
+            if (20..40).contains(&x) || (20..40).contains(&y) {
+                [15; 3]
+            } else {
+                [230; 3]
+            }
+        });
+        let (pixels, complete) =
+            repaired_pixels_with_sampling_exclusions(&frame, &[target], &[], &exclusions);
+        assert!(complete);
+        assert_eq!(pixels[(30 * 60 + 30) * 4], 230);
+        assert_eq!(pixels[(10 * 60 + 30) * 4], 15);
+        let (pixels, complete) =
+            repaired_pixels_with_sampling_exclusions(&frame, &[target], &[], &[rect(0, 0, 60, 60)]);
+        assert!(!complete);
+        assert_eq!(pixels, frame.pixels);
     }
 }

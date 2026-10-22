@@ -208,7 +208,8 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
     let catalog = BuiltInCatalog::load()?;
     let installer = ModelInstaller::new(models_root);
     let fetcher = HttpFetcher::new("model-manager")?;
-    let history = history_actor::start(history_path, events.clone())?;
+    let history_actor = history_actor::start(history_path, events.clone())?;
+    let history = history_actor.commands();
     if protocol_smoke {
         return run_protocol_smoke(&events, &catalog, &installer);
     }
@@ -484,7 +485,7 @@ fn run(events: Sender<SpeechWorkerEvent>, protocol_smoke: bool) -> Result<()> {
     transcription.send(TranscriptionCommand::Shutdown);
     speculation.shutdown();
     inference.shutdown();
-    let _ = history.send(HistoryCommand::Shutdown);
+    history_actor.shutdown_and_join()?;
     Ok(())
 }
 

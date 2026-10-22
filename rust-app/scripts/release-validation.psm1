@@ -526,4 +526,87 @@ function Get-MsixArtifactFailures {
     return $failures
 }
 
-Export-ModuleMember -Function Get-SayFlexInteractiveSmokeCheckIds, Get-SayFlexAutomatedSmokeCheckIds, Get-InstallerArtifactFailures, Get-SmokeEvidenceFailures, Get-DelayedClipboardImageReceiptFailures, Get-MsixLayoutFailures, Get-MsixArtifactFailures
+function Get-InstalledPayloadFilePaths {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$AppDirectory)
+
+    $root = [IO.Path]::GetFullPath($AppDirectory).TrimEnd('\', '/')
+    $installerLocale = Join-Path $root 'installer-language'
+    Get-ChildItem -LiteralPath $root -File -Recurse |
+        Where-Object {
+            $_.Name -notmatch '^unins\d+\.(exe|dat|msg)$' -and
+            -not $_.FullName.Equals($installerLocale, [StringComparison]::OrdinalIgnoreCase)
+        } |
+        ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\', '/') } |
+        Sort-Object
+}
+
+function Get-DesktopInferenceImportFailures {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DesktopPath)
+
+    # Inspect the actual PE import directory, not arbitrary matching strings.
+    # The current desktop uses OpenGL; inference runtimes belong to workers.
+    # Revisit this explicit boundary if the UI deliberately adopts D3D12.
+    try {
+        $bytes = [IO.File]::ReadAllBytes($DesktopPath)
+        if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5a4d) {
+            throw 'missing DOS header'
+        }
+        $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+        if ($pe -lt 64 -or $pe + 24 -gt $bytes.Length -or
+            [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw 'invalid PE header' }
+        $sectionCount = [BitConverter]::ToUInt16($bytes, $pe + 6)
+        $optionalSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
+        $optional = $pe + 24
+        if ($optionalSize -lt 128 -or $optional + $optionalSize -gt $bytes.Length -or
+            [BitConverter]::ToUInt16($bytes, $optional) -ne 0x20b) { throw 'expected a PE32+ image' }
+        $importRva = [BitConverter]::ToUInt32($bytes, $optional + 120)
+        $importSize = [BitConverter]::ToUInt32($bytes, $optional + 124)
+        if ($importRva -eq 0) { return }
+        $sections = @(
+            for ($index = 0; $index -lt $sectionCount; $index++) {
+                $section = $optional + $optionalSize + $index * 40
+                [pscustomobject]@{
+                    rva = [BitConverter]::ToUInt32($bytes, $section + 12)
+                    size = [BitConverter]::ToUInt32($bytes, $section + 16)
+                    raw = [BitConverter]::ToUInt32($bytes, $section + 20)
+                }
+            }
+        )
+        function Get-ImportFileOffset([uint32]$Rva) {
+            foreach ($section in $sections) {
+                if ([long]$Rva -ge $section.rva -and [long]$Rva -lt ([long]$section.rva + $section.size)) {
+                    $offset = [long]$section.raw + $Rva - $section.rva
+                    if ($offset -ge $bytes.Length) { throw 'import offset exceeds file size' }
+                    return [int]$offset
+                }
+            }
+            throw 'import RVA is outside the file sections'
+        }
+        $failures = New-Object System.Collections.Generic.List[string]
+        $terminated = $false
+        for ($index = 0; $index -lt [Math]::Floor($importSize / 20); $index++) {
+            $descriptor = Get-ImportFileOffset ($importRva + $index * 20)
+            $fields = @(0, 4, 8, 12, 16 | ForEach-Object { [BitConverter]::ToUInt32($bytes, $descriptor + $_) })
+            if (@($fields | Where-Object { $_ -ne 0 }).Count -eq 0) { $terminated = $true; break }
+            $nameOffset = Get-ImportFileOffset $fields[3]
+            $nameLength = 0
+            while ($nameLength -lt 260 -and $nameOffset + $nameLength -lt $bytes.Length -and
+                $bytes[$nameOffset + $nameLength] -ne 0) { $nameLength++ }
+            if ($nameLength -eq 260 -or $nameOffset + $nameLength -ge $bytes.Length) {
+                throw 'unterminated import name'
+            }
+            $name = [Text.Encoding]::ASCII.GetString($bytes, $nameOffset, $nameLength)
+            if ($name -match '^(DirectML|D3D12|onnxruntime[^\\/]*)\.dll$') {
+                $failures.Add("SayFlex.exe directly imports $name; rebuild desktop separately from the OCR worker feature graph")
+            }
+        }
+        if (-not $terminated) { throw 'unterminated import descriptor table' }
+        return $failures
+    } catch {
+        return "SayFlex.exe PE import inspection failed: $($_.Exception.Message)"
+    }
+}
+
+Export-ModuleMember -Function Get-SayFlexInteractiveSmokeCheckIds, Get-SayFlexAutomatedSmokeCheckIds, Get-InstallerArtifactFailures, Get-SmokeEvidenceFailures, Get-DelayedClipboardImageReceiptFailures, Get-MsixLayoutFailures, Get-MsixArtifactFailures, Get-DesktopInferenceImportFailures, Get-InstalledPayloadFilePaths

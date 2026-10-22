@@ -9,6 +9,7 @@ license.workspace = true
 anyhow = "1.0.100"
 fxtranslate = { version = "=0.4.2", default-features = false, features = ["fast", "icu-segmenter"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rust-app-core = { version = "0.8.0", path = "../app-core" }
 rust-model-manager = { version = "0.8.0", path = "../model-manager" }
 rust-protocol = { version = "0.8.0", path = "../protocol" }
 serde.workspace = true
@@ -16,6 +17,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.48.0", features = ["macros", "net", "rt", "time"] }
 uuid.workspace = true
+unicode-segmentation.workspace = true
 whatlang = "0.18.0"
 
 [dev-dependencies]

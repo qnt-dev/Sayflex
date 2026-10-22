@@ -12,7 +12,9 @@ pub struct BlurredBackdrop {
 pub mod credentials;
 #[cfg(windows)]
 mod file_dialog;
+mod gpu_adapters;
 mod job;
+pub use gpu_adapters::nvidia_adapter_name;
 #[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
@@ -48,8 +50,8 @@ pub use overlay::{
     configure_transparent_overlay_window, disable_translation_live_backdrop,
     enable_translation_live_backdrop, overlay_window_is_cloaked,
     position_screen_result_window_for_region, prepare_action_window,
-    prepare_blue_glass_overlay_window, prepare_overlay_window, prepare_translation_window,
-    prepare_transparent_overlay_window, primary_pointer_button_is_down,
+    prepare_blue_glass_overlay_window, prepare_overlay_frame, prepare_overlay_window,
+    prepare_translation_window, prepare_transparent_overlay_window, primary_pointer_button_is_down,
     reconcile_interactive_overlay_window_contract, reconcile_overlay_window_contract,
     request_repaint, restore_target_if_our_action_window_activated, reveal_overlay_window,
     screen_result_logical_work_area, set_screen_result_window_pinned,
@@ -278,6 +280,11 @@ pub fn reveal_overlay_window(_window_handle: u64) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn request_repaint(_window_handle: u64) {}
+
+#[cfg(not(windows))]
+pub fn prepare_overlay_frame(_window_handle: u64) -> Result<bool, String> {
+    Ok(false)
+}
 
 #[cfg(not(windows))]
 pub fn verify_overlay_window_contract(
@@ -814,28 +821,14 @@ pub fn user_locale_name() -> String {
 /// Called before any window exists, because the shell reads it when the first
 /// one is created.
 pub fn name_this_application_to_the_shell() -> Result<(), String> {
-    const APP_ID: &[u16] = &[
-        b'S' as u16,
-        b'a' as u16,
-        b'y' as u16,
-        b'F' as u16,
-        b'l' as u16,
-        b'e' as u16,
-        b'x' as u16,
-        b'.' as u16,
-        b'D' as u16,
-        b'e' as u16,
-        b's' as u16,
-        b'k' as u16,
-        b't' as u16,
-        b'o' as u16,
-        b'p' as u16,
-        0,
-    ];
-    // SAFETY: the string is NUL-terminated UTF-16 with a static lifetime, and
+    let app_id: Vec<u16> = rust_app_core::product::desktop_app_id()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: the string is NUL-terminated UTF-16 and lives through the call, and
     // the call takes nothing else.
     let result = unsafe {
-        windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(APP_ID.as_ptr())
+        windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr())
     };
     if result < 0 {
         // Not fatal: the shell falls back to deriving an id from the

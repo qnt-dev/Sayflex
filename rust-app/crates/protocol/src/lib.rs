@@ -20,7 +20,7 @@ use uuid::Uuid;
 /// happily. A desktop and a worker from those two builds would have agreed they
 /// understood each other and then quietly disagreed about where a translation
 /// came from.
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 34;
 /// Source identity injected by the release builder. Development builds say so
 /// explicitly instead of pretending to belong to an arbitrary checkout.
 pub const BUILD_COMMIT: &str = match option_env!("SAYFLEX_BUILD_COMMIT") {
@@ -989,6 +989,53 @@ pub struct PhysicalRect {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Crop-local text corners in reading orientation: top-left, top-right,
+/// bottom-right, bottom-left. Coordinates may lie on the crop's far edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalQuad {
+    pub points: [PhysicalPoint; 4],
+}
+
+impl PhysicalQuad {
+    /// A non-degenerate convex polygon, clockwise in screen coordinates.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        (0..4).all(|index| {
+            let a = self.points[index];
+            let b = self.points[(index + 1) % 4];
+            let c = self.points[(index + 2) % 4];
+            let ab = (
+                i128::from(b.x) - i128::from(a.x),
+                i128::from(b.y) - i128::from(a.y),
+            );
+            let bc = (
+                i128::from(c.x) - i128::from(b.x),
+                i128::from(c.y) - i128::from(b.y),
+            );
+            ab.0 * bc.1 - ab.1 * bc.0 > 0
+        })
+    }
+
+    #[must_use]
+    pub fn is_within(self, bounds: PhysicalRect) -> bool {
+        let right = i64::from(bounds.x) + i64::from(bounds.width);
+        let bottom = i64::from(bounds.y) + i64::from(bounds.height);
+        self.is_valid()
+            && self.points.iter().all(|point| {
+                point.x >= bounds.x
+                    && point.y >= bounds.y
+                    && i64::from(point.x) <= right
+                    && i64::from(point.y) <= bottom
+            })
+    }
+}
+
 pub const MAX_SCREEN_BLOCKS: usize = 512;
 pub const MAX_SCREEN_BLOCK_ID_BYTES: usize = 128;
 pub const MAX_SCREEN_BLOCK_TEXT_BYTES: usize = 16 * 1024;
@@ -1050,8 +1097,13 @@ pub struct ScreenTextBlock {
     pub block_id: ScreenBlockId,
     pub source_text: String,
     pub bounds: PhysicalRect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quad: Option<PhysicalQuad>,
     #[serde(default)]
     pub fragments: Vec<PhysicalRect>,
+    /// Empty for legacy rectangles, otherwise one exact quad per fragment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fragment_quads: Vec<PhysicalQuad>,
     pub confidence_milli: u16,
 }
 
@@ -1217,6 +1269,8 @@ pub enum OcrPixelFormat {
 pub struct OcrLine {
     pub text: String,
     pub bounds: PhysicalRect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quad: Option<PhysicalQuad>,
     pub confidence_milli: u16,
 }
 
@@ -1434,6 +1488,17 @@ fn validate_screen_blocks(
                 || fragment.height == 0
                 || !physical_rect_contains(block.bounds, *fragment)
         }) {
+            return Err(TranslationCommandValidationError::InvalidBlockBounds);
+        }
+        if block.quad.is_some_and(|quad| !quad.is_within(block.bounds))
+            || (!block.fragment_quads.is_empty()
+                && (block.fragment_quads.len() != block.fragments.len()
+                    || block
+                        .fragment_quads
+                        .iter()
+                        .zip(&block.fragments)
+                        .any(|(quad, bounds)| !quad.is_within(*bounds))))
+        {
             return Err(TranslationCommandValidationError::InvalidBlockBounds);
         }
         if block.confidence_milli > 1_000 {
@@ -2251,6 +2316,8 @@ mod tests {
                     width: 320,
                     height: 42,
                 },
+                quad: None,
+                fragment_quads: Vec::new(),
                 fragments: vec![PhysicalRect {
                     x: -120,
                     y: 48,
@@ -2310,6 +2377,78 @@ mod tests {
         }))
         .unwrap();
         assert!(legacy.fragments.is_empty());
+        assert!(legacy.quad.is_none());
+        assert!(legacy.fragment_quads.is_empty());
+    }
+
+    #[test]
+    fn screen_quads_round_trip_and_invalid_geometry_is_rejected() {
+        let value = serde_json::json!({
+            "block_id": "slanted-line", "source_text": "A line",
+            "bounds": { "x": 10, "y": 20, "width": 110, "height": 40 },
+            "quad": { "points": [
+                {"x": 15, "y": 20}, {"x": 120, "y": 40},
+                {"x": 115, "y": 60}, {"x": 10, "y": 40}
+            ] },
+            "fragments": [{ "x": 10, "y": 20, "width": 110, "height": 40 }],
+            "fragment_quads": [{ "points": [
+                {"x": 15, "y": 20}, {"x": 120, "y": 40},
+                {"x": 115, "y": 60}, {"x": 10, "y": 40}
+            ] }], "confidence_milli": 950
+        });
+        let block: ScreenTextBlock = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&block).unwrap(), value);
+        assert!(
+            super::validate_screen_blocks(std::slice::from_ref(&block), &SourceContext::default())
+                .is_ok()
+        );
+        let mut invalid = block.clone();
+        invalid.fragment_quads.push(block.quad.unwrap());
+        assert!(super::validate_screen_blocks(&[invalid], &SourceContext::default()).is_err());
+        let mut invalid = block.clone();
+        invalid.quad.as_mut().unwrap().points.swap(1, 2);
+        assert!(super::validate_screen_blocks(&[invalid], &SourceContext::default()).is_err());
+        let mut invalid = block;
+        invalid.fragment_quads[0].points[0].x = -1;
+        assert!(super::validate_screen_blocks(&[invalid], &SourceContext::default()).is_err());
+    }
+
+    #[test]
+    fn physical_quad_validation_handles_extreme_coordinates_without_overflow() {
+        use super::{PhysicalPoint, PhysicalQuad};
+        let quad = PhysicalQuad {
+            points: [
+                PhysicalPoint {
+                    x: i32::MIN,
+                    y: i32::MIN,
+                },
+                PhysicalPoint {
+                    x: i32::MAX,
+                    y: i32::MIN,
+                },
+                PhysicalPoint {
+                    x: i32::MAX,
+                    y: i32::MAX,
+                },
+                PhysicalPoint {
+                    x: i32::MIN,
+                    y: i32::MAX,
+                },
+            ],
+        };
+        assert!(quad.is_valid());
+        assert!(quad.is_within(PhysicalRect {
+            x: i32::MIN,
+            y: i32::MIN,
+            width: u32::MAX,
+            height: u32::MAX
+        }));
+        assert!(!quad.is_within(PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100
+        }));
     }
 
     #[test]
@@ -2326,6 +2465,8 @@ mod tests {
                     width: 100,
                     height: 20,
                 },
+                quad: None,
+                fragment_quads: Vec::new(),
                 fragments: vec![PhysicalRect {
                     x: 200,
                     y: 20,
@@ -2357,6 +2498,8 @@ mod tests {
                 width: 10,
                 height: 10,
             },
+            quad: None,
+            fragment_quads: Vec::new(),
             fragments: Vec::new(),
             confidence_milli: 900,
         };
@@ -2611,8 +2754,8 @@ mod wire_schema_tests {
     #[test]
     fn the_wire_shape_belongs_to_this_version() {
         assert_eq!(
-            PROTOCOL_VERSION, 33,
-            "every fingerprint below was written for protocol 33: if a shape \
+            PROTOCOL_VERSION, 34,
+            "every fingerprint below was written for protocol 34: if a shape \
              changes, this number changes with it"
         );
     }
@@ -3085,6 +3228,17 @@ mod complete_wire_schema_tests {
         }
     }
 
+    fn screen_quad(x: i32) -> PhysicalQuad {
+        PhysicalQuad {
+            points: [
+                PhysicalPoint { x, y: 2 },
+                PhysicalPoint { x: x + 3, y: 3 },
+                PhysicalPoint { x: x + 3, y: 6 },
+                PhysicalPoint { x, y: 5 },
+            ],
+        }
+    }
+
     fn screen_block() -> ScreenTextBlock {
         ScreenTextBlock {
             block_id: ScreenBlockId::from("block"),
@@ -3095,6 +3249,8 @@ mod complete_wire_schema_tests {
                 width: 3,
                 height: 4,
             },
+            quad: Some(screen_quad(-1)),
+            fragment_quads: vec![screen_quad(-1)],
             fragments: vec![PhysicalRect {
                 x: -1,
                 y: 2,
@@ -3274,6 +3430,7 @@ mod complete_wire_schema_tests {
             OcrWorkerEvent::Recognized {
                 request_id,
                 lines: vec![OcrLine {
+                    quad: Some(screen_quad(1)),
                     text: "text".to_owned(),
                     bounds: PhysicalRect {
                         x: 1,
@@ -3867,7 +4024,7 @@ mod complete_wire_schema_tests {
 
         assert_eq!(
             stable_hash(&schema),
-            0x1e8c_74dc_9ac8_7925,
+            0x32d9_4633_7b1d_7510,
             "protocol {PROTOCOL_VERSION} wire schema changed:\n{}",
             schema.join("\n")
         );

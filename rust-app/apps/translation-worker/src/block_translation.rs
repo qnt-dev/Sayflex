@@ -5,6 +5,7 @@ use rust_protocol::{
     BlockCompletion, GlossaryEntry, ScreenTextBlock, SourceContext, TranslatedScreenBlock,
     TranslationBackendCapabilities,
 };
+use rust_translation_engine::protected_values_match;
 
 /// Immutable input assembled before a backend request starts.  Keeping the
 /// OCR blocks, context and glossary guidance together prevents the worker from
@@ -64,10 +65,7 @@ pub(crate) fn validate_completed_blocks(
             .remove(&source.block_id)
             .ok_or_else(|| anyhow!("translation omitted a screen block id"))?;
         if translated.completion == BlockCompletion::Completed {
-            if translated.translated_text.trim().is_empty() {
-                bail!("translation completed with an empty screen block");
-            }
-            validate_protected_values(&source.source_text, &translated.translated_text)?;
+            validate_partial_block(plan, &translated)?;
         }
         ordered.push(translated);
     }
@@ -77,79 +75,26 @@ pub(crate) fn validate_completed_blocks(
     Ok(ordered)
 }
 
-fn validate_protected_values(source: &str, translated: &str) -> Result<()> {
-    let expected = protected_values(source);
-    let actual = protected_values(translated);
-    if expected != actual {
-        bail!("translation changed protected values: expected {expected:?}, received {actual:?}");
+pub(crate) fn validate_partial_block(
+    plan: &BlockTranslationPlan,
+    block: &TranslatedScreenBlock,
+) -> Result<()> {
+    let source = plan
+        .blocks
+        .iter()
+        .find(|source| source.block_id == block.block_id)
+        .ok_or_else(|| anyhow!("translation returned an unknown screen block id"))?;
+    if block.completion != BlockCompletion::Completed || block.translated_text.trim().is_empty() {
+        bail!("translation completed with an empty or incomplete screen block");
     }
-    Ok(())
+    validate_protected_values(&source.source_text, &block.translated_text)
 }
 
-fn protected_values(text: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let chars = text.char_indices().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < chars.len() {
-        let (start, character) = chars[index];
-        let signed_number = matches!(character, '+' | '-')
-            && chars
-                .get(index + 1)
-                .is_some_and(|(_, next)| next.is_ascii_digit())
-            && index
-                .checked_sub(1)
-                .and_then(|previous| chars.get(previous))
-                .is_none_or(|(_, previous)| !previous.is_alphanumeric() && *previous != '_');
-        if character.is_ascii_digit() || signed_number {
-            let mut end = start + character.len_utf8();
-            index += 1;
-            while index < chars.len() {
-                let (byte, next) = chars[index];
-                let numeric_separator = matches!(next, '.' | ',' | ':' | '-' | '/')
-                    && chars
-                        .get(index + 1)
-                        .is_some_and(|(_, following)| following.is_ascii_digit());
-                if next.is_ascii_digit() || numeric_separator || next == '%' {
-                    end = byte + next.len_utf8();
-                    index += 1;
-                    if next == '%' {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            values.push(text[start..end].to_owned());
-            continue;
-        }
-        if character == '{'
-            && let Some(relative_end) = text[start..].find('}')
-        {
-            let end = start + relative_end + 1;
-            values.push(text[start..end].to_owned());
-            while index < chars.len() && chars[index].0 < end {
-                index += 1;
-            }
-            continue;
-        }
-        if matches!(character, '™' | '©' | '®') {
-            values.push(character.to_string());
-        }
-        index += 1;
+fn validate_protected_values(source: &str, translated: &str) -> Result<()> {
+    if !protected_values_match(source, translated) {
+        bail!("translation changed protected values (protected_values_changed)");
     }
-    for token in text.split_whitespace() {
-        let token = token.trim_matches(|character: char| {
-            matches!(
-                character,
-                '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '!' | '?'
-            )
-        });
-        if token.starts_with("https://") || token.starts_with("http://") {
-            values.push(token.to_owned());
-        }
-    }
-    values.sort();
-    values
+    Ok(())
 }
 
 #[cfg(test)]
@@ -171,6 +116,8 @@ mod tests {
                 width: 100,
                 height: 20,
             },
+            quad: None,
+            fragment_quads: Vec::new(),
             fragments: Vec::new(),
             confidence_milli: 900,
         }
@@ -183,6 +130,94 @@ mod tests {
             completion: BlockCompletion::Completed,
             failure_message: None,
         }
+    }
+
+    #[test]
+    fn named_month_date_is_valid_at_partial_and_final_worker_boundaries() {
+        let plan = BlockTranslationPlan::new(
+            vec![source("a", "February 10,2026. Collect within 30 days.")],
+            SourceContext::default(),
+            Vec::new(),
+            TranslationBackendCapabilities::limited(),
+        )
+        .unwrap();
+        let block = translated("a", "10 февраля 2026. Заберите в течение 30 дней.");
+        assert!(super::validate_partial_block(&plan, &block).is_ok());
+        assert!(validate_completed_blocks(&plan, vec![block]).is_ok());
+        for changed in [
+            "11 февраля 2026, срок 30 дней",
+            "10 февраля 2027, срок 30 дней",
+        ] {
+            assert!(super::validate_partial_block(&plan, &translated("a", changed)).is_err());
+        }
+    }
+
+    #[test]
+    fn attached_seconds_decimal_locale_is_valid_at_worker_partial_and_final_boundaries() {
+        let plan = BlockTranslationPlan::new(
+            vec![source("a", "lasts 4.6 seconds. 0.2s after")],
+            SourceContext::default(),
+            Vec::new(),
+            TranslationBackendCapabilities::structured(),
+        )
+        .unwrap();
+        let block = translated("a", "длится 4,6 секунды. Через 0,2 с");
+        assert!(super::validate_partial_block(&plan, &block).is_ok());
+        assert!(validate_completed_blocks(&plan, vec![block]).is_ok());
+    }
+
+    #[test]
+    fn worker_rejects_changed_time_values_and_decimal_identifier_spelling() {
+        for (input, output) in [
+            ("0.2s", "0,3 с"),
+            ("-0.2s", "0,2 с"),
+            ("0.2s 0.2s", "0,2 с"),
+            ("0.2s", "0,2%"),
+            ("1.234s", "1,234с"),
+            ("id0.2s", "id0,2s"),
+            ("0.2serial", "0,2serial"),
+            ("https://example.test/0.2s", "https://example.test/0,2s"),
+            ("{delay_0.2s}", "{delay_0,2s}"),
+        ] {
+            let plan = BlockTranslationPlan::new(
+                vec![source("a", input)],
+                SourceContext::default(),
+                Vec::new(),
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+            let block = translated("a", output);
+            assert!(
+                super::validate_partial_block(&plan, &block).is_err(),
+                "{input:?}"
+            );
+            assert!(
+                validate_completed_blocks(&plan, vec![block]).is_err(),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_validation_rejects_unsafe_rows_before_publication() {
+        let plan = BlockTranslationPlan::new(
+            vec![source("a", "Damage 25")],
+            SourceContext::default(),
+            Vec::new(),
+            TranslationBackendCapabilities::structured(),
+        )
+        .unwrap();
+        assert!(super::validate_partial_block(&plan, &translated("a", "Урон 25")).is_ok());
+        for block in [
+            translated("unknown", "Урон 25"),
+            translated("a", "Урон 9"),
+            translated("a", " "),
+        ] {
+            assert!(super::validate_partial_block(&plan, &block).is_err());
+        }
+        let mut failed = translated("a", "Урон 25");
+        failed.completion = BlockCompletion::Failed;
+        assert!(super::validate_partial_block(&plan, &failed).is_err());
     }
 
     #[test]
@@ -284,5 +319,127 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn protected_value_failure_does_not_reveal_source_or_translation_tokens() {
+        let plan = BlockTranslationPlan::new(
+            vec![source(
+                "a",
+                "Open https://private.invalid/?token=SOURCE_SECRET {private_placeholder} 25",
+            )],
+            SourceContext::default(),
+            Vec::new(),
+            TranslationBackendCapabilities::structured(),
+        )
+        .unwrap();
+        let error = validate_completed_blocks(
+            &plan,
+            vec![translated(
+                "a",
+                "Открыть https://other.invalid/?token=TRANSLATION_SECRET {changed_placeholder} 26",
+            )],
+        )
+        .unwrap_err();
+
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("protected_values_changed"),
+            "{diagnostic}"
+        );
+        for private_value in [
+            "SECRET",
+            "private.invalid",
+            "other.invalid",
+            "placeholder",
+            "25",
+            "26",
+        ] {
+            assert!(!diagnostic.contains(private_value), "{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn completed_blocks_accept_unambiguous_decimal_locale_changes() {
+        let plan = BlockTranslationPlan::new(
+            vec![source(
+                "a",
+                "Gain 35% evasion for 6.5 seconds, with -0.25 and +2.50%",
+            )],
+            SourceContext::default(),
+            Vec::new(),
+            TranslationBackendCapabilities::structured(),
+        )
+        .unwrap();
+        let output = validate_completed_blocks(
+            &plan,
+            vec![translated(
+                "a",
+                "Уклонение 35% на 6,5 секунды, с -0,25 и +2,50%",
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(output[0].completion, BlockCompletion::Completed);
+        assert_eq!(
+            output[0].translated_text,
+            "Уклонение 35% на 6,5 секунды, с -0,25 и +2,50%"
+        );
+    }
+
+    #[test]
+    fn completed_blocks_keep_unchanged_numbers_when_unit_spacing_changes() {
+        for (original, result) in [
+            ("Duration 6.5s", "Длительность 6.5 секунды"),
+            ("Duration 6,5s", "Длительность 6,5 секунды"),
+            ("Duration 6.5 seconds", "Длительность 6.5с"),
+            (
+                "Duration 6.5s and 7.5 seconds",
+                "Длительность 6.5 секунды и 7,5 секунды",
+            ),
+            ("Version v6.5 and value 6.5", "Версия v6.5 и значение 6,5"),
+        ] {
+            let plan = BlockTranslationPlan::new(
+                vec![source("a", original)],
+                SourceContext::default(),
+                Vec::new(),
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+            assert!(validate_completed_blocks(&plan, vec![translated("a", result)]).is_ok());
+        }
+    }
+
+    #[test]
+    fn decimal_locale_validation_rejects_real_changes_and_ambiguous_tokens() {
+        for (original, changed) in [
+            ("Duration 6.5", "Длительность 6,6"),
+            ("Change -6.5", "Изменить 6,5"),
+            ("Change 6.5 and 6.5", "Изменить 6,5"),
+            ("Rate 6.5%", "Ставка 6,5"),
+            ("Cost 1,234", "Стоимость 1.234"),
+            ("Cost 1,234.50", "Стоимость 1.234,50"),
+            ("Date 12.10.2026", "Дата 12,10,2026"),
+            ("Version v6.5", "Версия v6,5"),
+            ("Item item_6.5", "Предмет item_6,5"),
+            ("Build release-6.5", "Сборка release-6,5"),
+            ("Build 6.5.exe", "Сборка 6,5.exe"),
+            ("Version v6.5", "Версия 6,5"),
+            (
+                "Open https://example.test/6.5",
+                "Открыть https://example.test/6,5",
+            ),
+            ("Value {amount6.5}", "Значение {amount6,5}"),
+        ] {
+            let plan = BlockTranslationPlan::new(
+                vec![source("a", original)],
+                SourceContext::default(),
+                Vec::new(),
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+
+            assert!(validate_completed_blocks(&plan, vec![translated("a", changed)]).is_err());
+        }
     }
 }

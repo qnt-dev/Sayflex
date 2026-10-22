@@ -1,8 +1,11 @@
-use rust_ocr_engine::{ReconstructedElement, reconstruct_text, reconstruct_visual_rows};
-use rust_protocol::{OcrFailureKind, OcrLine, PhysicalRect};
+use rust_ocr_engine::{
+    ReconstructedElement, reconstruct_text, reconstruct_visual_paragraphs, reconstruct_visual_rows,
+};
+use rust_protocol::{OcrFailureKind, OcrLine, PhysicalPoint, PhysicalQuad, PhysicalRect};
 
 fn line(text: &str, x: i32, y: i32, width: u32, confidence_milli: u16) -> OcrLine {
     OcrLine {
+        quad: None,
         text: text.to_owned(),
         bounds: PhysicalRect {
             x,
@@ -36,6 +39,7 @@ fn element(
     confidence_milli: u16,
 ) -> ReconstructedElement {
     ReconstructedElement {
+        quad: None,
         text: text.to_owned(),
         bounds: PhysicalRect {
             x,
@@ -116,6 +120,205 @@ fn a_word_split_by_the_detector_still_joins_its_row() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].text, "Lightning Bolt base cooldown");
+}
+
+#[test]
+fn overlapping_bounds_of_slanted_lines_do_not_form_one_visual_row() {
+    // An inclined long line has a tall axis-aligned box. These two boxes
+    // overlap heavily even though their actual text baselines are distinct.
+    // Old captures have only these rectangles, so the fallback must be safe.
+    let first = element("First complete line", 140, 170, 1240, 280, 980);
+    let second = element("Second complete line", 130, 215, 1240, 285, 980);
+
+    let rows = reconstruct_visual_rows(&[first, second]);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].text, "First complete line");
+    assert_eq!(rows[1].text, "Second complete line");
+}
+
+fn tilted_element(text: &str, x: f64, y: f64, width: f64, degrees: f64) -> ReconstructedElement {
+    let angle = degrees.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let points = [(x, y), (x + width, y), (x + width, y + 20.0), (x, y + 20.0)].map(|(x, y)| {
+        PhysicalPoint {
+            x: (200.0 + x * cos - y * sin).round() as i32,
+            y: (200.0 + x * sin + y * cos).round() as i32,
+        }
+    });
+    let left = points.iter().map(|point| point.x).min().unwrap();
+    let top = points.iter().map(|point| point.y).min().unwrap();
+    let right = points.iter().map(|point| point.x).max().unwrap();
+    let bottom = points.iter().map(|point| point.y).max().unwrap();
+    let mut result = element(
+        text,
+        left,
+        top,
+        (right - left) as u32,
+        (bottom - top) as u32,
+        980,
+    );
+    result.quad = Some(PhysicalQuad { points });
+    result
+}
+
+#[test]
+fn positive_and_negative_slopes_keep_distinct_baselines_and_exact_quads() {
+    for degrees in [-18.0, 12.0] {
+        let first = tilted_element("First line", 0.0, 0.0, 600.0, degrees);
+        let second = tilted_element("Second line", 0.0, 32.0, 600.0, degrees);
+        let rows = reconstruct_visual_rows(&[first.clone(), second.clone()]);
+        assert_eq!(rows.len(), 2, "slope {degrees}");
+        assert_eq!(rows[0].quad, first.quad);
+        assert_eq!(rows[1].quad, second.quad);
+        assert_eq!(rows[0].fragment_quads, vec![first.quad.unwrap()]);
+    }
+}
+
+#[test]
+fn tilted_word_fragments_merge_in_local_baseline_coordinates() {
+    let first = tilted_element("A complete", 0.0, 0.0, 110.0, 15.0);
+    let second = tilted_element("phrase", 118.0, 0.0, 70.0, 15.0);
+    let rows = reconstruct_visual_rows(&[first.clone(), second.clone()]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "A complete phrase");
+    assert_eq!(
+        rows[0].fragment_quads,
+        vec![first.quad.unwrap(), second.quad.unwrap()]
+    );
+    assert!(rows[0].quad.unwrap().is_within(rows[0].bounds));
+    assert_eq!(rows[0].fragments, vec![first.bounds, second.bounds]);
+}
+
+#[test]
+fn perspective_quad_survives_reconstruction_without_becoming_a_rectangle() {
+    let quad = PhysicalQuad {
+        points: [
+            PhysicalPoint { x: 10, y: 10 },
+            PhysicalPoint { x: 410, y: 70 },
+            PhysicalPoint { x: 405, y: 96 },
+            PhysicalPoint { x: 7, y: 35 },
+        ],
+    };
+    let source = OcrLine {
+        text: "A perspective line".to_owned(),
+        bounds: PhysicalRect {
+            x: 7,
+            y: 10,
+            width: 403,
+            height: 86,
+        },
+        quad: Some(quad),
+        confidence_milli: 980,
+    };
+    let reconstructed = reconstruct_text(&[source], 650).unwrap();
+    let rows = reconstruct_visual_rows(&reconstructed.elements);
+    assert_eq!(rows[0].quad, Some(quad));
+    assert_eq!(rows[0].fragment_quads, vec![quad]);
+}
+
+#[test]
+fn invalid_quad_uses_legacy_bounds_without_panicking() {
+    let mut source = element("A line", 0, 0, 100, 20, 980);
+    source.quad = Some(PhysicalQuad {
+        points: [PhysicalPoint { x: 0, y: 0 }; 4],
+    });
+    let rows = reconstruct_visual_rows(&[source]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].quad, None);
+    assert!(rows[0].fragment_quads.is_empty());
+}
+
+#[test]
+fn tilted_reading_order_uses_baselines_instead_of_box_tops() {
+    // The longer second line's AABB starts above the shorter first line.
+    let first = tilted_element("First short line", 0.0, 0.0, 120.0, -18.0);
+    let second = tilted_element("Second longer line", 0.0, 32.0, 600.0, -18.0);
+    let lines = [second, first].map(|element| OcrLine {
+        text: element.text,
+        bounds: element.bounds,
+        quad: element.quad,
+        confidence_milli: element.confidence_milli,
+    });
+    let reconstructed = reconstruct_text(&lines, 650).unwrap();
+    assert_eq!(reconstructed.elements[0].text, "First short line");
+    assert_eq!(reconstructed.elements[1].text, "Second longer line");
+}
+
+#[test]
+fn document_paragraphs_keep_date_short_signature_and_line_masks_separate() {
+    let elements = [
+        ("Recipient", 0.0, 0.0, 140.0),
+        ("April 12,2030", 800.0, 40.0, 220.0),
+        ("First paragraph begins", 0.0, 100.0, 1000.0),
+        ("A sentence ends here.", 0.0, 132.0, 1000.0),
+        ("The next sentence continues", 0.0, 164.0, 1000.0),
+        ("and finishes.", 0.0, 196.0, 180.0),
+        ("Second paragraph begins", 0.0, 260.0, 1000.0),
+        ("and continues", 0.0, 292.0, 1000.0),
+        ("before finishing.", 0.0, 324.0, 180.0),
+        ("Thank you.", 0.0, 356.0, 180.0),
+        ("Sincerely,", 0.0, 420.0, 130.0),
+        ("A. Example", 0.0, 452.0, 150.0),
+    ]
+    .map(|(text, x, y, width)| tilted_element(text, x, y, width, 11.0));
+    let rows = reconstruct_visual_rows(&elements);
+    assert_eq!(rows.len(), elements.len());
+    let blocks = reconstruct_visual_paragraphs(&rows);
+    assert_eq!(blocks.len(), 7);
+    assert_eq!(blocks[1].text, "April 12,2030");
+    assert_eq!(blocks[2].fragments.len(), 4);
+    assert_eq!(blocks[3].fragments.len(), 3);
+    assert_eq!(blocks[4].text, "Thank you.");
+    assert_eq!(blocks[5].text, "Sincerely,");
+    assert_eq!(blocks[6].text, "A. Example");
+    assert_eq!(
+        blocks[2].fragment_quads,
+        elements[2..6]
+            .iter()
+            .map(|element| element.quad.unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        blocks
+            .iter()
+            .all(|block| block.quad.unwrap().is_within(block.bounds))
+    );
+}
+
+#[test]
+fn paragraph_grouping_respects_columns_spacing_and_maximum_line_count() {
+    for next in [
+        tilted_element("Other column", 720.0, 32.0, 600.0, 11.0),
+        tilted_element("Another paragraph", 0.0, 64.0, 600.0, 11.0),
+    ] {
+        let rows =
+            reconstruct_visual_rows(&[tilted_element("Long line", 0.0, 0.0, 600.0, 11.0), next]);
+        assert_eq!(reconstruct_visual_paragraphs(&rows).len(), 2);
+    }
+    let elements = (0..8)
+        .map(|index| tilted_element("Long line", 0.0, f64::from(index) * 32.0, 600.0, 11.0))
+        .collect::<Vec<_>>();
+    let blocks = reconstruct_visual_paragraphs(&reconstruct_visual_rows(&elements));
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].fragments.len(), 6);
+    assert_eq!(blocks[1].fragments.len(), 2);
+}
+
+#[test]
+fn an_increased_baseline_gap_ends_the_paragraph_even_with_padded_ocr_boxes() {
+    // OCR box padding can make even a blank-line gap smaller than 1.8 box
+    // heights. Compare it with the paragraph's established baseline spacing.
+    let elements = [
+        tilted_element("Long first line", 0.0, 0.0, 600.0, 11.0),
+        tilted_element("Long second line", 0.0, 16.0, 600.0, 11.0),
+        tilted_element("Long third line", 0.0, 32.0, 600.0, 11.0),
+        tilted_element("Thank you.", 0.0, 62.0, 180.0, 11.0),
+    ];
+    let blocks = reconstruct_visual_paragraphs(&reconstruct_visual_rows(&elements));
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].fragments.len(), 3);
+    assert_eq!(blocks[1].text, "Thank you.");
 }
 
 #[test]

@@ -129,6 +129,7 @@ struct PresentationState {
     /// `Partial`'s frame — and revealing then would put the partial on screen
     /// with no one left to ask for a frame of the final text.
     accepted_revision: Option<u64>,
+    failed_ticket: Option<PresentationTicket>,
 }
 
 impl PresentationState {
@@ -140,6 +141,7 @@ impl PresentationState {
             content_ready: matches!(policy, ContentPolicy::AlwaysRenderable),
             content_revision: 0,
             accepted_revision: None,
+            failed_ticket: None,
         }
     }
 }
@@ -168,6 +170,7 @@ impl PresentationState {
     }
 
     fn next_ticket(&mut self, window_handle: u64) -> PresentationTicket {
+        self.failed_ticket = None;
         let ticket = PresentationTicket {
             generation: self.next_generation,
             window_handle,
@@ -280,6 +283,29 @@ impl PresentationState {
         Some(ticket.window_handle)
     }
 
+    fn fail(&mut self, ticket: PresentationTicket) -> Option<u64> {
+        let handle = self.cancel(ticket)?;
+        self.failed_ticket = Some(ticket);
+        Some(handle)
+    }
+
+    fn is_current_failure(&self, ticket: PresentationTicket) -> bool {
+        self.failed_ticket == Some(ticket)
+            && self.phase
+                == PresentationPhase::Parked {
+                    window_handle: ticket.window_handle,
+                }
+    }
+
+    fn pending_ticket(&self) -> Option<PresentationTicket> {
+        match self.phase {
+            PresentationPhase::AwaitingFrame(ticket) | PresentationPhase::RevealQueued(ticket) => {
+                Some(ticket)
+            }
+            _ => None,
+        }
+    }
+
     /// Back to however empty this overlay starts.
     ///
     /// A window that has been put away has nothing on it as far as the next
@@ -291,6 +317,8 @@ impl PresentationState {
     }
 
     fn retire(&mut self) -> Option<(u64, Option<u64>)> {
+        self.forget_content();
+        self.failed_ticket = None;
         let (window_handle, generation) = match self.phase {
             PresentationPhase::Detached | PresentationPhase::Parked { .. } => return None,
             PresentationPhase::Preparing(ticket)
@@ -313,12 +341,14 @@ impl PresentationState {
 }
 
 type PresentedCallback = Arc<dyn Fn(u64) + Send + Sync>;
+type FailedCallback = Arc<dyn Fn(PresentationTicket, &str) + Send + Sync>;
 type RenderedFrameCallback = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub(crate) struct OverlayPresenter {
     state: Arc<Mutex<PresentationState>>,
     rendered_frame_callback: Arc<Mutex<Option<RenderedFrameCallback>>>,
+    failed_callback: Arc<Mutex<Option<FailedCallback>>>,
     /// Held here as well as in the rendering notifier, because the watchdog
     /// completes the same transition and owes the same notification.
     name: &'static str,
@@ -349,6 +379,40 @@ impl CaptureExcludedOverlay {
 }
 
 impl OverlayPresenter {
+    pub(crate) fn set_failure_callback(
+        &self,
+        callback: impl Fn(PresentationTicket, &str) + Send + Sync + 'static,
+    ) {
+        *self
+            .failed_callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(callback));
+    }
+
+    pub(crate) fn is_current_failure(&self, ticket: PresentationTicket) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_current_failure(ticket)
+    }
+
+    pub(crate) fn current_failure_ticket(&self) -> Option<PresentationTicket> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .failed_ticket
+            .filter(|ticket| state.is_current_failure(*ticket))
+    }
+
+    pub(crate) fn pending_ticket(&self) -> Option<PresentationTicket> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_ticket()
+    }
+
     #[cfg(all(feature = "inspect", feature = "screen-translation"))]
     pub(crate) fn is_presented_at(&self, window_handle: u64) -> bool {
         self.state
@@ -416,6 +480,8 @@ impl OverlayPresenter {
         let started_revision = Arc::clone(&drawing_revision);
         let rendered_frame_callback = Arc::new(Mutex::new(None::<RenderedFrameCallback>));
         let render_callback = Arc::clone(&rendered_frame_callback);
+        let failed_callback = Arc::new(Mutex::new(None::<FailedCallback>));
+        let render_failure_callback = Arc::clone(&failed_callback);
         let callback = on_presented;
         window
             .set_rendering_notifier(move |rendering_state, _graphics_api| {
@@ -480,6 +546,7 @@ impl OverlayPresenter {
 
                 let queued_state = Arc::clone(&render_state);
                 let queued_callback = callback.clone();
+                let queued_failure_callback = Arc::clone(&render_failure_callback);
                 let queue_result = slint::invoke_from_event_loop(move || {
                     // Deliberately not disarmed first. This runs after the
                     // event loop gets to it, and by then the content may have
@@ -494,16 +561,25 @@ impl OverlayPresenter {
                         contract,
                         ticket,
                         &queued_callback,
+                        &queued_failure_callback,
                         None,
                     );
                 });
 
                 if let Err(error) = queue_result {
-                    render_state
+                    let failed = render_state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .cancel(ticket);
-                    let _ = rust_platform_windows::conceal_overlay_window(ticket.window_handle);
+                        .fail(ticket);
+                    if failed.is_some() {
+                        let _ = rust_platform_windows::conceal_overlay_window(ticket.window_handle);
+                        notify_failure(
+                            &render_state,
+                            &render_failure_callback,
+                            ticket,
+                            &error.to_string(),
+                        );
+                    }
                     rust_app_core::diagnostics::log_line(&format!(
                         "{name} transition=failed generation={} stage=queue_reveal error={error}",
                         ticket.generation
@@ -514,6 +590,7 @@ impl OverlayPresenter {
         Ok(Self {
             state,
             rendered_frame_callback,
+            failed_callback,
             name,
             contract,
         })
@@ -627,6 +704,27 @@ impl OverlayPresenter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .await_frame(ticket)?;
+        // Both toolkit and native visibility must permit drawing before the
+        // first-frame gate. A long-lived compact HWND was observed app-cloaked
+        // but without WS_VISIBLE; asking it to repaint never produced a frame.
+        // Keep the cloak through toolkit show and native visibility repair so
+        // neither a stale frame nor an empty surface can become visible.
+        reconcile_and_verify_contract(self.contract, ticket.window_handle, true)?;
+        let toolkit_visible = window.is_visible();
+        window
+            .show()
+            .map_err(|error| format!("could not resume overlay rendering: {error}"))?;
+        reconcile_contract(self.contract, ticket.window_handle)?;
+        let native_visibility_restored =
+            rust_platform_windows::prepare_overlay_frame(ticket.window_handle)?;
+        reconcile_and_verify_contract(self.contract, ticket.window_handle, true)?;
+        if !toolkit_visible || native_visibility_restored {
+            rust_app_core::diagnostics::log_line(&format!(
+                "{} transition=frame_surface_restored generation={} hwnd={} \
+                 toolkit_visible={toolkit_visible} native_visibility_restored={native_visibility_restored}",
+                self.name, ticket.generation, ticket.window_handle
+            ));
+        }
         window.request_redraw();
         rust_app_core::diagnostics::log_line(&format!(
             "{} transition=awaiting_frame generation={} hwnd={}",
@@ -670,25 +768,25 @@ impl OverlayPresenter {
         });
 
         let state = Arc::clone(&self.state);
+        let failed_callback = Arc::clone(&self.failed_callback);
         let contract = self.contract;
         let timer = slint::Timer::default();
         timer.start(slint::TimerMode::SingleShot, FRAME_DEADLINE, move || {
-            let overdue = matches!(
-                state
+            let failed = {
+                let mut state = state
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .phase,
-                PresentationPhase::AwaitingFrame(waiting) if waiting == ticket
-            );
-            if !overdue {
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.phase == PresentationPhase::AwaitingFrame(ticket) {
+                    state.fail(ticket)
+                } else {
+                    None
+                }
+            };
+            if failed.is_none() {
                 return;
             }
             // Nothing was ever drawn for this presentation. Showing the window
             // now would show whatever was on it before, which is nothing.
-            state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .cancel(ticket);
             // Both timers go, including the repeating one asking for the frame.
             // Without this it kept waking every forty milliseconds to check a
             // ticket that had already been given up on, until the next show
@@ -702,6 +800,12 @@ impl OverlayPresenter {
                 ticket.window_handle,
                 FRAME_DEADLINE.as_millis()
             ));
+            notify_failure(
+                &state,
+                &failed_callback,
+                ticket,
+                "rendered frame did not arrive before the presentation deadline",
+            );
         });
         FRAME_WATCHDOGS.with_borrow_mut(|timers| {
             timers.insert(key_of(ticket), timer);
@@ -771,9 +875,10 @@ impl OverlayPresenter {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .cancel(ticket);
+            .fail(ticket);
         if let Some(window_handle) = window_handle {
             let _ = rust_platform_windows::conceal_overlay_window(window_handle);
+            notify_failure(&self.state, &self.failed_callback, ticket, error);
         }
         window.request_redraw();
         rust_app_core::diagnostics::log_line(&format!(
@@ -821,6 +926,7 @@ fn reveal_revealable(
     contract: OverlayContract,
     ticket: PresentationTicket,
     callback: &Option<PresentedCallback>,
+    failed_callback: &Arc<Mutex<Option<FailedCallback>>>,
     recovered: Option<&str>,
 ) {
     let can_reveal = state
@@ -856,16 +962,41 @@ fn reveal_revealable(
             }
         }
         Err(error) => {
-            state
+            let failed = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .cancel(ticket);
-            let _ = rust_platform_windows::conceal_overlay_window(ticket.window_handle);
+                .fail(ticket);
+            if failed.is_some() {
+                let _ = rust_platform_windows::conceal_overlay_window(ticket.window_handle);
+                notify_failure(state, failed_callback, ticket, &error);
+            }
             rust_app_core::diagnostics::log_line(&format!(
                 "{name} transition=failed generation={} stage=reveal error={error}",
                 ticket.generation
             ));
         }
+    }
+}
+
+fn notify_failure(
+    state: &Arc<Mutex<PresentationState>>,
+    callback: &Arc<Mutex<Option<FailedCallback>>>,
+    ticket: PresentationTicket,
+    error: &str,
+) {
+    if !state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_current_failure(ticket)
+    {
+        return;
+    }
+    let callback = callback
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(callback) = callback {
+        callback(ticket, error);
     }
 }
 
@@ -950,6 +1081,7 @@ pub(crate) mod test_utils {
         OverlayPresenter {
             state: Arc::new(Mutex::new(state)),
             rendered_frame_callback: Arc::new(Mutex::new(None)),
+            failed_callback: Arc::new(Mutex::new(None)),
             name: "screen_result_position_test",
             contract: OverlayContract::Interactive,
         }
@@ -978,6 +1110,72 @@ pub(crate) mod test_utils {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .begin_prepare()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod failure_callback_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{
+        FRAME_DEADLINE, OverlayContract, reveal_revealable, test_utils::attached_presenter,
+    };
+
+    #[test]
+    fn frame_deadline_notifies_the_owner_once_for_the_failed_ticket() {
+        i_slint_backend_testing::init_no_event_loop();
+        let presenter = attached_presenter(u64::MAX);
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let delivered = Arc::clone(&failures);
+        presenter.set_failure_callback(move |ticket, _| delivered.lock().unwrap().push(ticket));
+        let ticket = {
+            let mut state = presenter.state.lock().unwrap();
+            let ticket = state.begin_prepare().unwrap();
+            state.content_changed(true);
+            state.await_frame(ticket).unwrap();
+            ticket
+        };
+        presenter.arm_watchdog(ticket);
+
+        i_slint_backend_testing::mock_elapsed_time(
+            FRAME_DEADLINE + std::time::Duration::from_millis(1),
+        );
+
+        assert_eq!(*failures.lock().unwrap(), vec![ticket]);
+        assert!(presenter.is_current_failure(ticket));
+        i_slint_backend_testing::mock_elapsed_time(FRAME_DEADLINE);
+        assert_eq!(failures.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn native_reveal_failure_notifies_the_owner_and_is_invalidated_by_the_next_show() {
+        i_slint_backend_testing::init_no_event_loop();
+        let presenter = attached_presenter(u64::MAX);
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let delivered = Arc::clone(&failures);
+        presenter.set_failure_callback(move |ticket, _| delivered.lock().unwrap().push(ticket));
+        let ticket = {
+            let mut state = presenter.state.lock().unwrap();
+            let ticket = state.begin_prepare().unwrap();
+            state.content_changed(true);
+            state.await_frame(ticket).unwrap();
+            state.frame_rendered().unwrap()
+        };
+
+        reveal_revealable(
+            &presenter.state,
+            "failed_reveal_test",
+            OverlayContract::Interactive,
+            ticket,
+            &None,
+            &presenter.failed_callback,
+            None,
+        );
+
+        assert_eq!(*failures.lock().unwrap(), vec![ticket]);
+        assert!(presenter.is_current_failure(ticket));
+        presenter.state.lock().unwrap().begin_prepare().unwrap();
+        assert!(!presenter.is_current_failure(ticket));
     }
 }
 
@@ -1105,6 +1303,7 @@ mod tests {
             content_ready: true,
             content_revision: 1,
             accepted_revision: None,
+            failed_ticket: None,
         };
         assert_eq!(by_frame.frame_rendered(), Some(ticket));
 
@@ -1115,6 +1314,7 @@ mod tests {
             content_ready: false,
             content_revision: 0,
             accepted_revision: None,
+            failed_ticket: None,
         };
         assert_eq!(by_cancel.cancel(ticket), Some(42));
 
@@ -1125,6 +1325,7 @@ mod tests {
             content_ready: false,
             content_revision: 0,
             accepted_revision: None,
+            failed_ticket: None,
         };
         assert!(by_retire.retire().is_some());
     }
@@ -1216,6 +1417,71 @@ mod content_gate_tests {
     }
 
     #[test]
+    fn retiring_a_request_cannot_supply_content_to_its_replacement() {
+        let mut state = parked();
+        let dismissed = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(dismissed).unwrap();
+        state.retire();
+
+        let replacement = state.begin_prepare().unwrap();
+        state.await_frame(replacement).unwrap();
+
+        assert_eq!(state.frame_rendered(), None);
+        assert!(!state.can_reveal(dismissed));
+    }
+
+    #[test]
+    fn stale_deadline_cannot_cancel_terminal_content_recovering_after_timeout() {
+        let mut state = parked();
+        let expired = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(expired).unwrap();
+        assert_eq!(state.cancel(expired), Some(4242));
+
+        state.content_changed(true);
+        let terminal = state.begin_prepare().unwrap();
+        state.await_frame(terminal).unwrap();
+        assert_ne!(terminal.generation(), expired.generation());
+
+        assert_eq!(state.cancel(expired), None);
+        assert_eq!(state.frame_rendered(), Some(terminal));
+        assert!(state.complete_reveal(terminal));
+    }
+
+    #[test]
+    fn current_frame_failure_can_be_delivered_to_the_owner() {
+        let mut state = parked();
+        let ticket = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(ticket).unwrap();
+
+        assert_eq!(state.fail(ticket), Some(4242));
+        assert!(state.is_current_failure(ticket));
+        assert_eq!(state.fail(ticket), None, "a failure is published only once");
+    }
+
+    #[test]
+    fn delayed_failure_cannot_replace_a_new_presentation_or_resurrect_a_dismissal() {
+        let mut state = parked();
+        let failed = state.begin_prepare().unwrap();
+        state.await_frame(failed).unwrap();
+        state.fail(failed);
+        assert!(state.is_current_failure(failed));
+
+        let replacement = state.begin_prepare().unwrap();
+        state.content_changed(true);
+        state.await_frame(replacement).unwrap();
+        assert!(!state.is_current_failure(failed));
+        assert_eq!(state.fail(failed), None);
+        state.fail(replacement);
+        assert!(state.is_current_failure(replacement));
+
+        state.retire();
+        assert!(!state.is_current_failure(replacement));
+    }
+
+    #[test]
     fn a_frame_drawn_before_there_was_anything_to_draw_reveals_nothing() {
         // The defect this replaces, exactly: the card is transparent until the
         // owner has content for it, the first frame is drawn in that state, and
@@ -1279,6 +1545,7 @@ mod content_gate_tests {
         state.await_frame(ticket).unwrap();
         assert_eq!(state.frame_rendered(), Some(ticket));
         assert!(state.can_reveal(ticket), "the reveal is queued");
+        assert_eq!(state.pending_ticket(), Some(ticket));
 
         let (_, waiting) = state.content_changed(true);
 
@@ -1288,6 +1555,7 @@ mod content_gate_tests {
             "and the queued reveal is taken back rather than showing the partial"
         );
         assert_eq!(state.phase, PresentationPhase::AwaitingFrame(ticket));
+        assert_eq!(state.pending_ticket(), Some(ticket));
 
         // The next frame carries the final text and reveals it.
         assert_eq!(state.frame_rendered(), Some(ticket));

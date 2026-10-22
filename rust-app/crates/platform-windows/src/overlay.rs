@@ -469,6 +469,35 @@ pub fn request_repaint(window_handle: u64) {
     }
 }
 
+/// Makes a cloaked surface eligible for WM_PAINT without revealing it.
+///
+/// A reused preview can lose WS_VISIBLE while its DWM app cloak stays set.
+/// Invalidating that hidden HWND cannot produce the frame required by the
+/// presenter. Repairing visibility only in `reveal_overlay_window` is too late:
+/// the frame gate prevents that function from ever being reached.
+pub fn prepare_overlay_frame(window_handle: u64) -> Result<bool, String> {
+    if !overlay_window_is_app_cloaked(window_handle)? {
+        return Err("overlay frame preparation requires an app-cloaked window".to_owned());
+    }
+    let hwnd = window_handle as usize as HWND;
+    // SAFETY: DwmGetWindowAttribute above validated the live HWND. Keep the
+    // app cloak in place and restore native visibility without activation.
+    let restored = unsafe {
+        let hidden = IsWindowVisible(hwnd) == 0;
+        if hidden {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        if IsWindowVisible(hwnd) == 0 {
+            return Err("overlay remained hidden while preparing its frame".to_owned());
+        }
+        hidden
+    };
+    if !overlay_window_is_app_cloaked(window_handle)? {
+        return Err("overlay lost its app cloak while preparing its frame".to_owned());
+    }
+    Ok(restored)
+}
+
 pub fn reveal_overlay_window(window_handle: u64) -> Result<(), String> {
     let hwnd = window_handle as usize as HWND;
     if hwnd.is_null() {
@@ -2136,14 +2165,15 @@ mod screen_result_contract_tests {
     use std::ptr::null_mut;
 
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, WS_EX_TOPMOST,
-        WS_OVERLAPPEDWINDOW,
+        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetForegroundWindow,
+        GetWindowLongPtrW, IsWindowVisible, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
     };
 
     use super::{
         borderless_drag_position, clear_screen_result_window_mode, conceal_overlay_window,
         configure_screen_result_window, move_screen_result_window_client,
-        position_screen_result_window_for_region, reconcile_interactive_overlay_window_contract,
+        overlay_window_is_app_cloaked, position_screen_result_window_for_region,
+        prepare_overlay_frame, reconcile_interactive_overlay_window_contract,
         reveal_overlay_window, set_screen_result_window_pinned,
     };
 
@@ -2236,6 +2266,34 @@ mod screen_result_contract_tests {
         let error = reveal_overlay_window(window.handle())
             .expect_err("an off-screen parked result must not count as presented");
         assert!(error.contains("parked"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn frame_preparation_restores_native_visibility_without_uncloaking_or_activating() {
+        let window = TestWindow::create();
+        configure_screen_result_window(window.handle(), false).unwrap();
+        conceal_overlay_window(window.handle()).unwrap();
+        assert_eq!(unsafe { IsWindowVisible(window.0) }, 0);
+        let foreground = unsafe { GetForegroundWindow() };
+
+        prepare_overlay_frame(window.handle()).unwrap();
+
+        assert_ne!(
+            unsafe { IsWindowVisible(window.0) },
+            0,
+            "a hidden native window cannot acknowledge the frame needed for its reveal"
+        );
+        assert!(overlay_window_is_app_cloaked(window.handle()).unwrap());
+        assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+    }
+
+    #[test]
+    fn frame_preparation_refuses_to_show_a_window_without_the_cloak() {
+        let window = TestWindow::create();
+
+        assert!(prepare_overlay_frame(window.handle()).is_err());
+
+        assert_eq!(unsafe { IsWindowVisible(window.0) }, 0);
     }
 
     #[test]

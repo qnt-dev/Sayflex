@@ -10,7 +10,7 @@ mod providers;
 mod runtime;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, BufWriter, Write},
     path::PathBuf,
     sync::{
@@ -28,20 +28,20 @@ use history_actor::TranslationHistoryActor;
 use runtime::{LlamaRuntimeManager, RUNTIME_DOWNLOAD_BYTES};
 use rust_model_manager::{BundleInstaller, CancelToken, HttpFetcher, ModelInstallError};
 use rust_protocol::{
-    BlockCompletion, GlossaryOrigin, PROTOCOL_VERSION, RequestId, ScreenTextBlock, SourceContext,
-    TranslatedScreenBlock, TranslationAttemptReport, TranslationBackendCapabilities,
+    BlockCompletion, GlossaryOrigin, PROTOCOL_VERSION, RequestId, ScreenBlockId, ScreenTextBlock,
+    SourceContext, TranslatedScreenBlock, TranslationAttemptReport, TranslationBackendCapabilities,
     TranslationFailureKind, TranslationFailureReport, TranslationHistoryEntry, TranslationLanguage,
     TranslationLanguagePolicy, TranslationModelSummary, TranslationProviderEntry,
     TranslationResult, TranslationTier, TranslationWorkerCommand, TranslationWorkerEvent,
 };
 use rust_translation_engine::{
-    TranslationCancelled, TranslationCatalog, TranslationEngine, TranslationPackDescriptor,
-    detect_language,
+    TRANSLATION_OPERATION_TIMEOUT, TranslationCancelled, TranslationCatalog, TranslationEngine,
+    TranslationPackDescriptor, detect_language_with_policy,
 };
 
 use crate::providers::{Providers, Routed};
 use crate::{
-    block_translation::{BlockTranslationPlan, validate_completed_blocks},
+    block_translation::{BlockTranslationPlan, validate_completed_blocks, validate_partial_block},
     provider_actor::ProviderActorHandle,
 };
 
@@ -484,7 +484,15 @@ impl WorkerState {
         writer: &EventWriter,
         source: TranslationLanguage,
         target: TranslationLanguage,
+        deadline: Instant,
+        is_current: &impl Fn() -> bool,
     ) -> Result<TranslationTier> {
+        if !is_current() {
+            return Err(TranslationCancelled.into());
+        }
+        if Instant::now() >= deadline {
+            bail!("translation exceeded its operation deadline");
+        }
         if !self.local_model_enabled {
             return Err(anyhow!("the local translation engine is disabled"));
         }
@@ -1196,7 +1204,8 @@ fn resolve_direction(
     if !language_policy.is_valid() {
         anyhow::bail!("primary and secondary translation languages are the same");
     }
-    let source = source_language.unwrap_or_else(|| detect_language(text));
+    let source =
+        source_language.unwrap_or_else(|| detect_language_with_policy(text, language_policy));
     let target = target_language.unwrap_or_else(|| language_policy.target_for(source));
     if source == target {
         anyhow::bail!("source and target languages are the same");
@@ -1359,115 +1368,102 @@ fn translate_text_request(
     }
 
     // The engine, and only now the worker's state.
-    let state = &mut *recover_lock(state);
-    let local_failure_kind = if state.selected_tier.is_some() {
-        TranslationFailureKind::Internal
-    } else {
-        TranslationFailureKind::LocalModelMissing
-    };
-    let tier = state
-        .ensure_engine(writer, source, target)
-        .map_err(|error| {
-            if let Some(LocalPackSelectionError::Missing { catalog_id }) =
-                error.downcast_ref::<LocalPackSelectionError>()
-            {
-                return TranslationRequestFailure(TranslationFailureReport {
-                    kind: TranslationFailureKind::LocalModelMissing,
-                    provider_id: None,
-                    retry_after_ms: None,
-                    required_catalog_id: Some(catalog_id.clone()),
-                    detail: format!("{error:#}"),
-                    attempts: provider_attempts.clone(),
-                })
-                .into();
-            }
-            let kind = if error
-                .downcast_ref::<LocalPackSelectionError>()
-                .is_some_and(|error| matches!(error, LocalPackSelectionError::UnsupportedPair))
-            {
-                TranslationFailureKind::UnsupportedRequest
-            } else {
-                local_failure_kind.clone()
-            };
-            request_failure(kind, format!("{error:#}"), provider_attempts.clone())
-        })?;
-    let mut last_partial_at = None;
-    let mut last_partial_text = String::new();
-    let output = state
-        .engine
-        .as_mut()
-        .ok_or_else(|| {
-            request_failure(
-                local_failure_kind,
-                "translation engine failed to initialize",
-                provider_attempts.clone(),
+    with_request_engine(state, writer, |state| {
+        let local_failure_kind = if state.selected_tier.is_some() {
+            TranslationFailureKind::Internal
+        } else {
+            TranslationFailureKind::LocalModelMissing
+        };
+        let tier = state
+            .ensure_engine(
+                writer,
+                source,
+                target,
+                started + TRANSLATION_OPERATION_TIMEOUT,
+                &is_current,
             )
-        })?
-        .translate_streaming(
-            &text,
-            Some(source),
-            Some(target),
-            &is_current,
-            |partial, progress| {
-                if !is_current() {
-                    return false;
-                }
-                let now = Instant::now();
-                let should_emit = last_partial_at.is_none()
-                    || last_partial_at.is_some_and(|last: Instant| {
-                        now.duration_since(last) >= Duration::from_millis(30)
-                    })
-                    || partial.ends_with(['\n', '.', '!', '?']);
-                if should_emit && partial != last_partial_text {
-                    if writer
-                        .send(&TranslationWorkerEvent::Partial {
-                            request_id,
-                            translated_text: partial.to_owned(),
-                            first_token_duration_ms: progress.first_token_duration_ms,
-                            tokenize_duration_ms: progress.tokenize_duration_ms,
-                            chunk_index: progress.chunk_index,
-                            chunk_count: progress.chunk_count,
-                        })
-                        .is_err()
-                    {
-                        return false;
-                    }
-                    last_partial_at = Some(now);
-                    partial.clone_into(&mut last_partial_text);
-                }
-                true
-            },
-        )
-        .map_err(|error| {
-            if error.downcast_ref::<TranslationCancelled>().is_some() {
-                error
-            } else {
+            .map_err(|error| {
+                local_engine_failure(error, local_failure_kind.clone(), provider_attempts.clone())
+            })?;
+        let mut last_partial_at = None;
+        let mut last_partial_text = String::new();
+        let output = state
+            .engine
+            .as_mut()
+            .ok_or_else(|| {
                 request_failure(
-                    TranslationFailureKind::Internal,
-                    format!("{error:#}"),
+                    local_failure_kind,
+                    "translation engine failed to initialize",
                     provider_attempts.clone(),
                 )
-            }
-        })?;
-    if !is_current() {
-        return Err(TranslationCancelled.into());
-    }
-    let result = TranslationResult {
-        request_id,
-        source_text: text,
-        translated_text: output.text,
-        source_language: output.source_language,
-        target_language: output.target_language,
-        tier: Some(tier),
-        provider: None,
-        attempts: provider_attempts,
-        processing_duration_ms: elapsed_ms(started),
-        first_token_duration_ms: output.first_token_duration_ms,
-        backend_request_count: output.backend_request_count,
-        tokenize_duration_ms: output.tokenize_duration_ms,
-        chunk_count: output.chunk_count,
-    };
-    finish(state, writer, result)
+            })?
+            .translate_streaming_until(
+                &text,
+                Some(source),
+                Some(target),
+                started + TRANSLATION_OPERATION_TIMEOUT,
+                &is_current,
+                |partial, progress| {
+                    if !is_current() {
+                        return false;
+                    }
+                    let now = Instant::now();
+                    let should_emit = last_partial_at.is_none()
+                        || last_partial_at.is_some_and(|last: Instant| {
+                            now.duration_since(last) >= Duration::from_millis(30)
+                        })
+                        || partial.ends_with(['\n', '.', '!', '?']);
+                    if should_emit && partial != last_partial_text {
+                        if writer
+                            .send(&TranslationWorkerEvent::Partial {
+                                request_id,
+                                translated_text: partial.to_owned(),
+                                first_token_duration_ms: progress.first_token_duration_ms,
+                                tokenize_duration_ms: progress.tokenize_duration_ms,
+                                chunk_index: progress.chunk_index,
+                                chunk_count: progress.chunk_count,
+                            })
+                            .is_err()
+                        {
+                            return false;
+                        }
+                        last_partial_at = Some(now);
+                        partial.clone_into(&mut last_partial_text);
+                    }
+                    true
+                },
+            )
+            .map_err(|error| {
+                if error.downcast_ref::<TranslationCancelled>().is_some() {
+                    error
+                } else {
+                    request_failure(
+                        TranslationFailureKind::Internal,
+                        format!("{error:#}"),
+                        provider_attempts.clone(),
+                    )
+                }
+            })?;
+        if !is_current() {
+            return Err(TranslationCancelled.into());
+        }
+        let result = TranslationResult {
+            request_id,
+            source_text: text,
+            translated_text: output.text,
+            source_language: output.source_language,
+            target_language: output.target_language,
+            tier: Some(tier),
+            provider: None,
+            attempts: provider_attempts,
+            processing_duration_ms: elapsed_ms(started),
+            first_token_duration_ms: output.first_token_duration_ms,
+            backend_request_count: output.backend_request_count,
+            tokenize_duration_ms: output.tokenize_duration_ms,
+            chunk_count: output.chunk_count,
+        };
+        finish(state, writer, result)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1506,8 +1502,12 @@ fn translate_blocks_request(
     }
 
     let mut glossary_matches = Vec::new();
+    let mut published = HashMap::new();
     let mut glossary_ids = HashSet::new();
     for block in &blocks {
+        if rust_app_core::text_values::is_numeric_only_text(&block.source_text) {
+            continue;
+        }
         for entry in glossary.lookup(
             block.source_text.clone(),
             source,
@@ -1521,43 +1521,64 @@ fn translate_blocks_request(
         }
     }
 
-    if let Some(snapshot) = providers {
-        let plan = BlockTranslationPlan::new(
-            blocks.clone(),
-            context.clone(),
-            Vec::new(),
+    let plan = BlockTranslationPlan::new(
+        blocks,
+        context,
+        glossary_matches,
+        TranslationBackendCapabilities::structured(),
+    )?;
+
+    let publication_context = ScreenBlockPublicationContext {
+        request_id,
+        base_revision,
+        source_language: source,
+        target_language: target,
+        started,
+    };
+    publish_numeric_screen_blocks(
+        &plan,
+        writer,
+        publication_context,
+        &mut published,
+        &is_current,
+    )?;
+    let preserved_numeric_count = published.len();
+    if preserved_numeric_count == plan.blocks.len() {
+        let translated = merge_screen_blocks(&plan, Vec::new(), &published)?;
+        return publish_screen_blocks(
+            writer,
+            publication_context,
+            translated,
             TranslationBackendCapabilities::limited(),
-        )?;
-        let mut translated = Vec::with_capacity(blocks.len());
-        let mut use_local = false;
-        for block in &blocks {
-            if !is_current() {
-                return Err(TranslationCancelled.into());
-            }
-            match snapshot.translate_started(
-                &block.source_text,
-                Some(source.code()),
-                target.code(),
-                started,
-                &is_current,
-            ) {
-                Routed::Translated { text, .. } => translated.push(TranslatedScreenBlock {
-                    block_id: block.block_id.clone(),
-                    translated_text: text,
-                    completion: BlockCompletion::Completed,
-                    failure_message: None,
-                }),
-                Routed::UseLocalEngine { .. } => {
-                    use_local = true;
-                    break;
-                }
-                Routed::Cancelled => return Err(TranslationCancelled.into()),
-                Routed::Exhausted { failure } => {
-                    return Err(TranslationRequestFailure(failure).into());
-                }
-            }
-        }
-        if !use_local {
+            &mut published,
+            &is_current,
+        );
+    }
+
+    if let Some(snapshot) = providers {
+        let publication_context = ScreenBlockPublicationContext {
+            request_id,
+            base_revision,
+            source_language: source,
+            target_language: target,
+            started,
+        };
+        if let Some(translated) = translate_provider_blocks(
+            &plan,
+            writer,
+            publication_context,
+            &mut published,
+            &is_current,
+            |block| {
+                snapshot.translate_started(
+                    &block.source_text,
+                    Some(source.code()),
+                    target.code(),
+                    started,
+                    &is_current,
+                )
+            },
+        )? {
             let translated = validate_completed_blocks(&plan, translated)?;
             publish_screen_blocks(
                 writer,
@@ -1569,48 +1590,248 @@ fn translate_blocks_request(
                     started,
                 },
                 translated,
-                plan.backend_capabilities,
+                TranslationBackendCapabilities::limited(),
+                &mut published,
                 &is_current,
             )?;
             return Ok(());
         }
     }
 
-    let state = &mut *recover_lock(state);
-    let _tier = state.ensure_engine(writer, source, target)?;
-    let plan = BlockTranslationPlan::new(
-        blocks,
-        context,
-        glossary_matches,
-        TranslationBackendCapabilities::structured(),
-    )?;
-    let output = state
-        .engine
-        .as_mut()
-        .ok_or_else(|| anyhow!("translation engine failed to initialize"))?
-        .translate_blocks(
-            &plan.blocks,
-            &plan.context,
-            &plan.glossary_matches,
-            Some(source),
-            Some(target),
-            &is_current,
+    let retained_cloud_blocks = published.len() > preserved_numeric_count;
+    with_request_engine(state, writer, |state| {
+        let failure_kind = if state.selected_tier.is_some() {
+            TranslationFailureKind::Internal
+        } else {
+            TranslationFailureKind::LocalModelMissing
+        };
+        let _tier = state
+            .ensure_engine(
+                writer,
+                source,
+                target,
+                started + TRANSLATION_OPERATION_TIMEOUT,
+                &is_current,
+            )
+            .map_err(|error| local_engine_failure(error, failure_kind, Vec::new()))?;
+        let local_plan = BlockTranslationPlan::new(
+            unpublished_screen_blocks(&plan, &published),
+            plan.context.clone(),
+            plan.glossary_matches.clone(),
+            plan.backend_capabilities,
         )?;
-    let translated = validate_completed_blocks(&plan, output.blocks)?;
-    publish_screen_blocks(
-        writer,
-        ScreenBlockPublicationContext {
+        let publication_context = ScreenBlockPublicationContext {
             request_id,
             base_revision,
             source_language: source,
             target_language: target,
             started,
-        },
-        translated,
-        output.capabilities,
-        &is_current,
-    )?;
-    release_engine_unless_warm(state.keep_warm, &mut state.engine, writer)
+        };
+        let mut publication_error = None;
+        let output = state
+            .engine
+            .as_mut()
+            .ok_or_else(|| anyhow!("translation engine failed to initialize"))?
+            .translate_blocks_streaming_until(
+                &local_plan.blocks,
+                &local_plan.context,
+                &local_plan.glossary_matches,
+                Some(source),
+                Some(target),
+                started + TRANSLATION_OPERATION_TIMEOUT,
+                &is_current,
+                |block| {
+                    let result = validate_partial_block(&local_plan, block).and_then(|()| {
+                        publish_screen_block(
+                            writer,
+                            publication_context,
+                            block,
+                            &mut published,
+                            &is_current,
+                        )
+                    });
+                    if let Err(error) = result {
+                        publication_error = Some(error);
+                        false
+                    } else {
+                        true
+                    }
+                },
+            );
+        if let Some(error) = publication_error {
+            return Err(error);
+        }
+        let output = output?;
+        let translated = validate_completed_blocks(&local_plan, output.blocks)?;
+        let translated = merge_screen_blocks(&plan, translated, &published)?;
+        publish_screen_blocks(
+            writer,
+            ScreenBlockPublicationContext {
+                request_id,
+                base_revision,
+                source_language: source,
+                target_language: target,
+                started,
+            },
+            translated,
+            if retained_cloud_blocks {
+                TranslationBackendCapabilities::limited()
+            } else {
+                output.capabilities
+            },
+            &mut published,
+            &is_current,
+        )?;
+        release_engine_unless_warm(state.keep_warm, &mut state.engine, writer)
+    })
+}
+
+fn publish_numeric_screen_blocks(
+    plan: &BlockTranslationPlan,
+    writer: &EventWriter,
+    context: ScreenBlockPublicationContext,
+    published: &mut HashMap<ScreenBlockId, String>,
+    is_current: &impl Fn() -> bool,
+) -> Result<()> {
+    for block in &plan.blocks {
+        if !is_current() {
+            return Err(TranslationCancelled.into());
+        }
+        if !rust_app_core::text_values::is_numeric_only_text(&block.source_text) {
+            continue;
+        }
+        let preserved = TranslatedScreenBlock {
+            block_id: block.block_id.clone(),
+            translated_text: block.source_text.clone(),
+            completion: BlockCompletion::Completed,
+            failure_message: None,
+        };
+        validate_partial_block(plan, &preserved)?;
+        publish_screen_block(writer, context, &preserved, published, is_current)?;
+    }
+    Ok(())
+}
+
+fn unpublished_screen_blocks(
+    plan: &BlockTranslationPlan,
+    published: &HashMap<ScreenBlockId, String>,
+) -> Vec<ScreenTextBlock> {
+    plan.blocks
+        .iter()
+        .filter(|block| !published.contains_key(&block.block_id))
+        .cloned()
+        .collect()
+}
+
+fn local_engine_failure(
+    error: anyhow::Error,
+    fallback: TranslationFailureKind,
+    attempts: Vec<TranslationAttemptReport>,
+) -> anyhow::Error {
+    if error.downcast_ref::<TranslationCancelled>().is_some() {
+        return error;
+    }
+    if let Some(LocalPackSelectionError::Missing { catalog_id }) =
+        error.downcast_ref::<LocalPackSelectionError>()
+    {
+        return TranslationRequestFailure(TranslationFailureReport {
+            kind: TranslationFailureKind::LocalModelMissing,
+            provider_id: None,
+            retry_after_ms: None,
+            required_catalog_id: Some(catalog_id.clone()),
+            detail: format!("{error:#}"),
+            attempts,
+        })
+        .into();
+    }
+    let kind = if error
+        .downcast_ref::<LocalPackSelectionError>()
+        .is_some_and(|error| matches!(error, LocalPackSelectionError::UnsupportedPair))
+    {
+        TranslationFailureKind::UnsupportedRequest
+    } else {
+        fallback
+    };
+    request_failure(kind, format!("{error:#}"), attempts)
+}
+
+fn merge_screen_blocks(
+    plan: &BlockTranslationPlan,
+    mut translated: Vec<TranslatedScreenBlock>,
+    published: &HashMap<ScreenBlockId, String>,
+) -> Result<Vec<TranslatedScreenBlock>> {
+    for (block_id, text) in published {
+        if let Some(block) = translated.iter().find(|block| &block.block_id == block_id) {
+            if block.completion != BlockCompletion::Completed || &block.translated_text != text {
+                bail!("translation attempted to replace an accepted screen block");
+            }
+        } else {
+            translated.push(TranslatedScreenBlock {
+                block_id: block_id.clone(),
+                translated_text: text.clone(),
+                completion: BlockCompletion::Completed,
+                failure_message: None,
+            });
+        }
+    }
+    validate_completed_blocks(plan, translated)
+}
+
+fn with_request_engine<T>(
+    state: &Mutex<WorkerState>,
+    writer: &EventWriter,
+    operation: impl FnOnce(&mut WorkerState) -> Result<T>,
+) -> Result<T> {
+    let mut state = recover_lock(state);
+    let result = operation(&mut state);
+    let keep_warm = state.keep_warm;
+    // Keep ownership until the request's resident allocation has been released.
+    // An installer or a subsequent request must not replace it between the
+    // operation and cleanup. Preserve the original failure if output is closed.
+    let cleanup = release_engine_unless_warm(keep_warm, &mut state.engine, writer);
+    result.and_then(|value| cleanup.map(|()| value))
+}
+
+fn translate_provider_blocks(
+    plan: &BlockTranslationPlan,
+    writer: &EventWriter,
+    context: ScreenBlockPublicationContext,
+    published: &mut HashMap<ScreenBlockId, String>,
+    is_current: &impl Fn() -> bool,
+    mut route: impl FnMut(&ScreenTextBlock) -> Routed,
+) -> Result<Option<Vec<TranslatedScreenBlock>>> {
+    let mut translated = Vec::with_capacity(plan.blocks.len());
+    for block in &plan.blocks {
+        if !is_current() {
+            return Err(TranslationCancelled.into());
+        }
+        if let Some(accepted) = published.get(&block.block_id) {
+            translated.push(TranslatedScreenBlock {
+                block_id: block.block_id.clone(),
+                translated_text: accepted.clone(),
+                completion: BlockCompletion::Completed,
+                failure_message: None,
+            });
+            continue;
+        }
+        match route(block) {
+            Routed::Translated { text, .. } => {
+                let translated_block = TranslatedScreenBlock {
+                    block_id: block.block_id.clone(),
+                    translated_text: text,
+                    completion: BlockCompletion::Completed,
+                    failure_message: None,
+                };
+                validate_partial_block(plan, &translated_block)?;
+                publish_screen_block(writer, context, &translated_block, published, is_current)?;
+                translated.push(translated_block);
+            }
+            Routed::UseLocalEngine { .. } => return Ok(None),
+            Routed::Cancelled => return Err(TranslationCancelled.into()),
+            Routed::Exhausted { failure } => return Err(TranslationRequestFailure(failure).into()),
+        }
+    }
+    Ok(Some(translated))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1627,24 +1848,25 @@ fn publish_screen_blocks(
     context: ScreenBlockPublicationContext,
     blocks: Vec<TranslatedScreenBlock>,
     capabilities: TranslationBackendCapabilities,
+    published: &mut HashMap<ScreenBlockId, String>,
     is_current: &impl Fn() -> bool,
 ) -> Result<()> {
     if !is_current() {
         return Err(TranslationCancelled.into());
     }
     for block in &blocks {
-        if block.completion == BlockCompletion::Completed {
-            writer.send(&TranslationWorkerEvent::ScreenBlockPartial {
-                request_id: context.request_id,
-                base_revision: context.base_revision,
-                block_id: block.block_id.clone(),
-                translated_text: block.translated_text.clone(),
-            })?;
-        }
+        publish_screen_block(writer, context, block, published, is_current)?;
     }
     if !is_current() {
         return Err(TranslationCancelled.into());
     }
+    eprintln!(
+        "screen_translation_completed request_id={} partial_count={} total_count={} elapsed_ms={}",
+        context.request_id,
+        published.len(),
+        blocks.len(),
+        elapsed_ms(context.started)
+    );
     writer.send(&TranslationWorkerEvent::ScreenBlocksCompleted {
         request_id: context.request_id,
         base_revision: context.base_revision,
@@ -1654,6 +1876,421 @@ fn publish_screen_blocks(
         capabilities,
         processing_duration_ms: elapsed_ms(context.started),
     })
+}
+
+fn publish_screen_block(
+    writer: &EventWriter,
+    context: ScreenBlockPublicationContext,
+    block: &TranslatedScreenBlock,
+    published: &mut HashMap<ScreenBlockId, String>,
+    is_current: &impl Fn() -> bool,
+) -> Result<()> {
+    if !is_current() {
+        return Err(TranslationCancelled.into());
+    }
+    if block.completion != BlockCompletion::Completed {
+        return Ok(());
+    }
+    if let Some(previous) = published.get(&block.block_id) {
+        if previous != &block.translated_text {
+            bail!("translation attempted to replace an accepted screen block");
+        }
+        return Ok(());
+    }
+    writer.send(&TranslationWorkerEvent::ScreenBlockPartial {
+        request_id: context.request_id,
+        base_revision: context.base_revision,
+        block_id: block.block_id.clone(),
+        translated_text: block.translated_text.clone(),
+    })?;
+    published.insert(block.block_id.clone(), block.translated_text.clone());
+    if published.len() == 1 {
+        eprintln!(
+            "screen_translation_first_partial request_id={} elapsed_ms={}",
+            context.request_id,
+            elapsed_ms(context.started)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod screen_progress_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_passthrough_finishes_without_model_and_cancellation_publishes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (history, history_thread) =
+            TranslationHistoryActor::start(root.path().join("history.json")).unwrap();
+        let (glossary, glossary_thread) =
+            GlossaryActor::start(root.path().join("glossary.json")).unwrap();
+        let mut worker = WorkerState::new(history.clone()).unwrap();
+        worker.local_model_enabled = false;
+        worker.installer = BundleInstaller::new(root.path().join("missing-models"));
+        worker.runtime = LlamaRuntimeManager::new(root.path().join("missing-runtime"));
+        let state = Arc::new(Mutex::new(worker));
+        let mut plan = provider_plan();
+        plan.blocks[0].source_text = "198-5130".into();
+        plan.blocks[1].source_text = "+25 35% 002-03".into();
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let result = translate_blocks_request(
+            &state,
+            None,
+            &writer,
+            RequestId::new(),
+            0,
+            plan.blocks.clone(),
+            plan.context.clone(),
+            Some(TranslationLanguage::English),
+            Some(TranslationLanguage::Russian),
+            TranslationLanguagePolicy::default(),
+            &glossary,
+            || true,
+        );
+        let emitted = received.try_iter().collect::<Vec<_>>();
+        let cancelled = translate_blocks_request(
+            &state,
+            None,
+            &writer,
+            RequestId::new(),
+            0,
+            plan.blocks.clone(),
+            plan.context.clone(),
+            Some(TranslationLanguage::English),
+            Some(TranslationLanguage::Russian),
+            TranslationLanguagePolicy::default(),
+            &glossary,
+            || false,
+        );
+        glossary.shutdown();
+        glossary_thread.join().unwrap();
+        history.shutdown();
+        history_thread.join().unwrap();
+        result.unwrap();
+        assert!(recover_lock(&state).engine.is_none());
+        assert_eq!(emitted.len(), 3, "two partials and final completion only");
+        let TranslationWorkerEvent::ScreenBlocksCompleted { blocks, .. } = emitted.last().unwrap()
+        else {
+            panic!("numeric request must complete without any backend");
+        };
+        for (source, translated) in plan.blocks.iter().zip(blocks) {
+            assert_eq!(source.block_id, translated.block_id);
+            assert_eq!(source.source_text, translated.translated_text);
+            assert_eq!(translated.completion, BlockCompletion::Completed);
+        }
+        assert!(
+            cancelled
+                .unwrap_err()
+                .downcast_ref::<TranslationCancelled>()
+                .is_some()
+        );
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn numeric_passthrough_never_routes_to_provider_but_mixed_text_stays_validated() {
+        let mut plan = provider_plan();
+        plan.blocks[0].source_text = "198-5130".into();
+        for mixed_result in ["Урон 25", "Урон 26"] {
+            let (events, received) = mpsc::channel();
+            let writer = EventWriter { events };
+            let mut published = HashMap::new();
+            let mut routed = Vec::new();
+            publish_numeric_screen_blocks(&plan, &writer, context(), &mut published, &|| true)
+                .unwrap();
+            let result = translate_provider_blocks(
+                &plan,
+                &writer,
+                context(),
+                &mut published,
+                &|| true,
+                |block| {
+                    routed.push(block.block_id.clone());
+                    Routed::Translated {
+                        provider: "fixture".into(),
+                        text: mixed_result.into(),
+                        attempts: Vec::new(),
+                    }
+                },
+            );
+            assert_eq!(routed, vec![ScreenBlockId::from("b")]);
+            assert_eq!(
+                published.get(&ScreenBlockId::from("a")).map(String::as_str),
+                Some("198-5130")
+            );
+            if mixed_result == "Урон 25" {
+                let output = result.unwrap().unwrap();
+                assert_eq!(output[0].translated_text, "198-5130");
+                assert_eq!(output[1].translated_text, mixed_result);
+                assert_eq!(received.try_iter().count(), 2);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(received.try_iter().count(), 1);
+            }
+        }
+    }
+
+    fn provider_plan() -> BlockTranslationPlan {
+        BlockTranslationPlan::new(
+            ["a", "b"]
+                .into_iter()
+                .map(|id| ScreenTextBlock {
+                    block_id: id.into(),
+                    source_text: "Damage 25".into(),
+                    bounds: rust_protocol::PhysicalRect {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 20,
+                    },
+                    quad: None,
+                    fragment_quads: Vec::new(),
+                    fragments: Vec::new(),
+                    confidence_milli: 900,
+                })
+                .collect(),
+            SourceContext::default(),
+            Vec::new(),
+            TranslationBackendCapabilities::limited(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cloud_success_is_published_before_the_next_route_and_survives_later_failure() {
+        for cancelled in [false, true] {
+            let (events, received) = mpsc::channel();
+            let writer = EventWriter { events };
+            let mut published = HashMap::new();
+            let result = translate_provider_blocks(
+                &provider_plan(),
+                &writer,
+                context(),
+                &mut published,
+                &|| true,
+                |block| {
+                    if block.block_id.as_str() == "a" {
+                        Routed::Translated {
+                            provider: "fixture".into(),
+                            text: "Урон 25".into(),
+                            attempts: Vec::new(),
+                        }
+                    } else {
+                        assert!(
+                            matches!(received.try_recv(), Ok(TranslationWorkerEvent::ScreenBlockPartial { block_id, .. }) if block_id.as_str() == "a")
+                        );
+                        if cancelled {
+                            Routed::Cancelled
+                        } else {
+                            Routed::Exhausted {
+                                failure: TranslationFailureReport {
+                                    kind: TranslationFailureKind::Internal,
+                                    provider_id: Some("fixture".into()),
+                                    retry_after_ms: None,
+                                    required_catalog_id: None,
+                                    detail: "fixture provider failure".into(),
+                                    attempts: Vec::new(),
+                                },
+                            }
+                        }
+                    }
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                published.get(&ScreenBlockId::from("a")).map(String::as_str),
+                Some("Урон 25")
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_success_survives_local_fallback_and_invalid_rows_are_not_published() {
+        for last_route in ["local", "invalid"] {
+            let (events, received) = mpsc::channel();
+            let writer = EventWriter { events };
+            let mut published = HashMap::new();
+            let result = translate_provider_blocks(
+                &provider_plan(),
+                &writer,
+                context(),
+                &mut published,
+                &|| true,
+                |block| {
+                    if block.block_id.as_str() == "a" {
+                        Routed::Translated {
+                            provider: "fixture".into(),
+                            text: "Урон 25".into(),
+                            attempts: Vec::new(),
+                        }
+                    } else if last_route == "local" {
+                        Routed::UseLocalEngine {
+                            attempts: Vec::new(),
+                        }
+                    } else {
+                        Routed::Translated {
+                            provider: "fixture".into(),
+                            text: "Урон 26".into(),
+                            attempts: Vec::new(),
+                        }
+                    }
+                },
+            );
+            if last_route == "local" {
+                assert!(matches!(result, Ok(None)));
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(
+                published.get(&ScreenBlockId::from("a")).map(String::as_str),
+                Some("Урон 25")
+            );
+            assert!(!published.contains_key(&ScreenBlockId::from("b")));
+            assert_eq!(received.try_iter().count(), 1);
+        }
+    }
+
+    #[test]
+    fn local_fallback_only_requests_pending_rows_and_merges_without_replacing_cloud_success() {
+        let plan = provider_plan();
+        let published = HashMap::from([(ScreenBlockId::from("a"), "Урон 25".to_owned())]);
+        let pending = unpublished_screen_blocks(&plan, &published);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|block| block.block_id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        let local = TranslatedScreenBlock {
+            block_id: "b".into(),
+            translated_text: "Повреждение 25".into(),
+            completion: BlockCompletion::Completed,
+            failure_message: None,
+        };
+        let merged = merge_screen_blocks(&plan, vec![local], &published).unwrap();
+        assert_eq!(
+            merged
+                .iter()
+                .map(|block| (block.block_id.as_str(), block.translated_text.as_str()))
+                .collect::<Vec<_>>(),
+            [("a", "Урон 25"), ("b", "Повреждение 25")]
+        );
+        let replaced = TranslatedScreenBlock {
+            block_id: "a".into(),
+            translated_text: "Замена 25".into(),
+            completion: BlockCompletion::Completed,
+            failure_message: None,
+        };
+        assert!(merge_screen_blocks(&plan, vec![replaced], &published).is_err());
+    }
+
+    fn context() -> ScreenBlockPublicationContext {
+        ScreenBlockPublicationContext {
+            request_id: RequestId::new(),
+            base_revision: 3,
+            source_language: TranslationLanguage::English,
+            target_language: TranslationLanguage::Russian,
+            started: Instant::now(),
+        }
+    }
+
+    fn translated() -> TranslatedScreenBlock {
+        TranslatedScreenBlock {
+            block_id: ScreenBlockId::from("a"),
+            translated_text: "Урон 25".to_owned(),
+            completion: BlockCompletion::Completed,
+            failure_message: None,
+        }
+    }
+
+    #[test]
+    fn screen_final_completion_keeps_streamed_rows_without_duplicate_partials() {
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let mut published = HashMap::new();
+        let context = context();
+        let accepted = translated();
+        let failed = TranslatedScreenBlock {
+            block_id: ScreenBlockId::from("b"),
+            translated_text: String::new(),
+            completion: BlockCompletion::Failed,
+            failure_message: Some("screen translation interrupted (backend_failure)".to_owned()),
+        };
+        publish_screen_block(&writer, context, &accepted, &mut published, &|| true).unwrap();
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            TranslationWorkerEvent::ScreenBlockPartial { .. }
+        ));
+        publish_screen_blocks(
+            &writer,
+            context,
+            vec![accepted, failed],
+            TranslationBackendCapabilities::structured(),
+            &mut published,
+            &|| true,
+        )
+        .unwrap();
+        match received.try_recv().unwrap() {
+            TranslationWorkerEvent::ScreenBlocksCompleted {
+                blocks,
+                source_language,
+                target_language,
+                ..
+            } => {
+                assert_eq!(blocks.len(), 2);
+                assert_eq!(blocks[0].translated_text, "Урон 25");
+                assert_eq!(blocks[1].completion, BlockCompletion::Failed);
+                assert_eq!(source_language, TranslationLanguage::English);
+                assert_eq!(target_language, TranslationLanguage::Russian);
+            }
+            event => panic!("expected terminal completion, got {event:?}"),
+        }
+        assert_eq!(received.try_iter().count(), 0);
+    }
+
+    #[test]
+    fn screen_partial_writer_failure_is_returned_without_recording_publication() {
+        let (events, received) = mpsc::channel();
+        drop(received);
+        let writer = EventWriter { events };
+        let mut published = HashMap::new();
+        assert!(
+            publish_screen_block(&writer, context(), &translated(), &mut published, &|| true)
+                .is_err()
+        );
+        assert!(published.is_empty());
+    }
+
+    #[test]
+    fn screen_partial_is_sent_once_and_cannot_be_replaced() {
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let mut published = HashMap::new();
+        let context = context();
+        let mut block = translated();
+        publish_screen_block(&writer, context, &block, &mut published, &|| true).unwrap();
+        publish_screen_block(&writer, context, &block, &mut published, &|| true).unwrap();
+        assert_eq!(received.try_iter().count(), 1);
+        block.translated_text = "Иной текст 25".to_owned();
+        assert!(publish_screen_block(&writer, context, &block, &mut published, &|| true).is_err());
+        assert_eq!(received.try_iter().count(), 0);
+    }
+
+    #[test]
+    fn screen_partial_never_publishes_failed_or_stale_rows() {
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let mut published = HashMap::new();
+        let context = context();
+        let mut block = translated();
+        assert!(publish_screen_block(&writer, context, &block, &mut published, &|| false).is_err());
+        block.completion = BlockCompletion::Failed;
+        publish_screen_block(&writer, context, &block, &mut published, &|| true).unwrap();
+        assert_eq!(received.try_iter().count(), 0);
+    }
 }
 
 /// With keep-warm off the engine lives for one request. Dropping it without a
@@ -1689,11 +2326,12 @@ fn finish(state: &mut WorkerState, writer: &EventWriter, result: TranslationResu
         result: result.clone(),
         created_unix_ms,
     });
-    writer.send(&TranslationWorkerEvent::Completed {
+    let result = writer.send(&TranslationWorkerEvent::Completed {
         result,
         created_unix_ms,
-    })?;
-    release_engine_unless_warm(state.keep_warm, &mut state.engine, writer)
+    });
+    let cleanup = release_engine_unless_warm(state.keep_warm, &mut state.engine, writer);
+    result.and(cleanup)
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -1976,6 +2614,89 @@ mod direction_tests {
     }
 
     #[test]
+    fn noisy_english_screen_text_uses_the_installed_english_russian_package() {
+        let catalog = TranslationCatalog::load().unwrap();
+        for text in [
+            "Wrapped up past your usage limit Resets at 5:40 PM Learn more\n2\nGet more usage\nX\nc",
+            "Wrapped up past your usage limit  Resets at 5:40 PM О Learn more\nGet more usage\nХ\nо,",
+            "Wrappedup past your usage limit  Resets at 5:40 PM Learn more\nGet more usage\nХ",
+            "Wrappedup past your usage limit\nResets at 5:40 PM\nLearn more\nGet more usage\nХ",
+        ] {
+            let (source, target) =
+                resolve_direction(text, None, None, TranslationLanguagePolicy::default()).unwrap();
+            assert_eq!(
+                (source, target),
+                (TranslationLanguage::English, TranslationLanguage::Russian),
+                "{text}",
+            );
+            assert_eq!(
+                select_local_catalog_id(
+                    &catalog,
+                    Some(rust_protocol::TranslationTier::Compact),
+                    Some("firefox-ru-en-v3.1"),
+                    source,
+                    target,
+                    |id| id == "firefox-ru-en-v3.1",
+                )
+                .unwrap(),
+                "firefox-ru-en-v3.1",
+            );
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_word_uses_the_configured_pair_instead_of_an_unrelated_language() {
+        assert_eq!(
+            resolve_direction(
+                "hello",
+                None,
+                None,
+                TranslationLanguagePolicy {
+                    primary: TranslationLanguage::German,
+                    secondary: TranslationLanguage::French,
+                },
+            )
+            .unwrap(),
+            (TranslationLanguage::German, TranslationLanguage::French),
+        );
+    }
+
+    #[test]
+    fn explicit_languages_override_screen_detection_and_the_configured_pair() {
+        assert_eq!(
+            resolve_direction(
+                "Wrapped up past your usage limit Resets at 5:40 PM Learn more",
+                Some(TranslationLanguage::French),
+                Some(TranslationLanguage::German),
+                TranslationLanguagePolicy::default(),
+            )
+            .unwrap(),
+            (TranslationLanguage::French, TranslationLanguage::German),
+        );
+    }
+
+    #[test]
+    fn real_languages_outside_the_configured_pair_keep_their_direction() {
+        for (text, expected) in [
+            ("Bonjour tout le monde", TranslationLanguage::French),
+            ("En savoir plus", TranslationLanguage::French),
+            ("Guten Morgen", TranslationLanguage::German),
+            ("Mehr erfahren", TranslationLanguage::German),
+            ("Hola mundo", TranslationLanguage::Spanish),
+            (
+                "Це повне українське речення.",
+                TranslationLanguage::Ukrainian,
+            ),
+        ] {
+            assert_eq!(
+                resolve_direction(text, None, None, TranslationLanguagePolicy::default()).unwrap(),
+                (expected, TranslationLanguage::English),
+                "{text}",
+            );
+        }
+    }
+
+    #[test]
     fn compact_mode_names_the_exact_package_that_is_missing() {
         let catalog = TranslationCatalog::load().unwrap();
 
@@ -2234,5 +2955,159 @@ mod keep_warm_release_tests {
 
         assert!(slot.is_some());
         assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn local_request_failure_releases_its_engine_without_masking_the_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let (history, history_thread) =
+            super::TranslationHistoryActor::start(root.path().join("history.json")).unwrap();
+        let mut state = super::WorkerState::new(history.clone()).unwrap();
+        state.keep_warm = false;
+        state.engine = Some(engine());
+        state.selected_tier = None;
+        let state = std::sync::Arc::new(std::sync::Mutex::new(state));
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        let result = super::translate_request(
+            &state,
+            None,
+            &writer,
+            super::Asked::Text {
+                request_id: rust_protocol::RequestId::new(),
+                text: "Hello".into(),
+                source_language: Some(rust_protocol::TranslationLanguage::English),
+                target_language: Some(rust_protocol::TranslationLanguage::Russian),
+                language_policy: rust_protocol::TranslationLanguagePolicy::default(),
+            },
+            || true,
+        );
+        history.shutdown();
+        history_thread.join().unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no translation model")
+        );
+        assert!(super::recover_lock(&state).engine.is_none());
+        assert!(received.try_iter().any(|event| matches!(
+            event,
+            TranslationWorkerEvent::LocalModelState { loaded: false, .. }
+        )));
+    }
+
+    #[test]
+    fn request_cleanup_covers_success_failure_and_cancel_while_holding_the_owner_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let (history, history_thread) =
+            super::TranslationHistoryActor::start(root.path().join("history.json")).unwrap();
+        for warm in [false, true] {
+            for outcome in ["success", "failure", "cancelled"] {
+                let mut state = super::WorkerState::new(history.clone()).unwrap();
+                state.keep_warm = warm;
+                state.engine = Some(engine());
+                let state = std::sync::Mutex::new(state);
+                let (events, received) = mpsc::channel();
+                let result = super::with_request_engine(&state, &EventWriter { events }, |_| {
+                    assert!(
+                        state.try_lock().is_err(),
+                        "the request must retain exclusive ownership"
+                    );
+                    match outcome {
+                        "success" => Ok(()),
+                        "failure" => Err(anyhow::anyhow!("fixture failure")),
+                        _ => Err(rust_translation_engine::TranslationCancelled.into()),
+                    }
+                });
+                assert_eq!(result.is_ok(), outcome == "success");
+                if outcome == "cancelled" {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .downcast_ref::<rust_translation_engine::TranslationCancelled>()
+                            .is_some()
+                    );
+                }
+                assert_eq!(
+                    super::recover_lock(&state).engine.is_some(),
+                    warm,
+                    "{outcome}, warm={warm}"
+                );
+                assert_eq!(received.try_iter().count(), usize::from(!warm));
+            }
+        }
+        history.shutdown();
+        history_thread.join().unwrap();
+    }
+
+    #[test]
+    fn expired_or_cancelled_worker_request_never_initializes_a_model() {
+        let root = tempfile::tempdir().unwrap();
+        let (history, history_thread) =
+            super::TranslationHistoryActor::start(root.path().join("history.json")).unwrap();
+        let mut state = super::WorkerState::new(history.clone()).unwrap();
+        let (events, received) = mpsc::channel();
+        let writer = EventWriter { events };
+        for cancelled in [false, true] {
+            let error = state
+                .ensure_engine(
+                    &writer,
+                    rust_protocol::TranslationLanguage::English,
+                    rust_protocol::TranslationLanguage::Russian,
+                    std::time::Instant::now(),
+                    &|| !cancelled,
+                )
+                .unwrap_err();
+            if cancelled {
+                assert!(
+                    error
+                        .downcast_ref::<rust_translation_engine::TranslationCancelled>()
+                        .is_some(),
+                    "{error:#}"
+                );
+            } else {
+                assert!(error.to_string().contains("deadline"), "{error:#}");
+            }
+            assert!(state.engine.is_none());
+            assert!(received.try_recv().is_err());
+        }
+        history.shutdown();
+        history_thread.join().unwrap();
+    }
+
+    #[test]
+    fn closed_completion_stream_still_releases_a_cold_engine() {
+        let root = tempfile::tempdir().unwrap();
+        let (history, history_thread) =
+            super::TranslationHistoryActor::start(root.path().join("history.json")).unwrap();
+        let mut state = super::WorkerState::new(history.clone()).unwrap();
+        state.keep_warm = false;
+        state.engine = Some(engine());
+        let (events, received) = mpsc::channel();
+        drop(received);
+        let result = super::finish(
+            &mut state,
+            &EventWriter { events },
+            rust_protocol::TranslationResult {
+                request_id: rust_protocol::RequestId::new(),
+                source_text: "Hello".into(),
+                translated_text: "Привет".into(),
+                source_language: rust_protocol::TranslationLanguage::English,
+                target_language: rust_protocol::TranslationLanguage::Russian,
+                tier: None,
+                provider: Some("fixture".into()),
+                attempts: Vec::new(),
+                processing_duration_ms: 1,
+                first_token_duration_ms: 0,
+                backend_request_count: 1,
+                tokenize_duration_ms: 0,
+                chunk_count: 1,
+            },
+        );
+        history.shutdown();
+        history_thread.join().unwrap();
+        assert!(result.is_err());
+        assert!(state.engine.is_none());
     }
 }

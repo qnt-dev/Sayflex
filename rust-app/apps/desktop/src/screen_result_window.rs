@@ -10,8 +10,8 @@ use std::{
     collections::HashMap,
     rc::Rc,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -20,7 +20,9 @@ use slint::{ComponentHandle, PhysicalPosition, winit_030::WinitWindowAccessor};
 
 use crate::{
     RuntimeEvent, ScreenTranslationWindow, dispatch_runtime_event, native_window_handle,
-    overlay_presenter::{CaptureExcludedOverlay, OverlayContract, OverlayPresenter},
+    overlay_presenter::{
+        CaptureExcludedOverlay, OverlayContract, OverlayPresenter, PresentationTicket,
+    },
     slint_window_handle,
 };
 
@@ -35,6 +37,8 @@ pub(crate) struct ScreenResultWindowSlot {
     pinned: Rc<Cell<bool>>,
     retired: Arc<AtomicBool>,
     retire_count: Rc<Cell<u32>>,
+    presentation_anchor: Arc<Mutex<Option<PhysicalRect>>>,
+    attachment_failure: Rc<Cell<Option<u64>>>,
 }
 
 impl ScreenResultWindowSlot {
@@ -55,6 +59,25 @@ impl ScreenResultWindowSlot {
         self.pinned.get()
     }
 
+    pub(crate) fn is_current_presentation_failure(&self, ticket: PresentationTicket) -> bool {
+        !self.retired.load(Ordering::Acquire)
+            && self
+                .presenter
+                .as_ref()
+                .is_some_and(|presenter| presenter.is_current_failure(ticket))
+    }
+
+    fn record_attachment_failure(&self) -> u64 {
+        static NEXT_FAILURE: AtomicU64 = AtomicU64::new(1);
+        let attempt = NEXT_FAILURE.fetch_add(1, Ordering::Relaxed);
+        self.attachment_failure.set(Some(attempt));
+        attempt
+    }
+
+    pub(crate) fn is_current_attachment_failure(&self, attempt: u64) -> bool {
+        !self.retired.load(Ordering::Acquire) && self.attachment_failure.get() == Some(attempt)
+    }
+
     #[cfg(test)]
     fn component_id(&self) -> usize {
         Rc::as_ptr(&self.window) as usize
@@ -72,6 +95,8 @@ impl ScreenResultWindowSlot {
             pinned: Rc::new(Cell::new(false)),
             retired: Arc::new(AtomicBool::new(false)),
             retire_count: Rc::new(Cell::new(0)),
+            presentation_anchor: Arc::new(Mutex::new(None)),
+            attachment_failure: Rc::new(Cell::new(None)),
         }
     }
 
@@ -196,6 +221,22 @@ pub(crate) fn create_screen_result_window(
             }
         })),
     )?;
+    let presentation_anchor = Arc::new(Mutex::new(None));
+    let failure_anchor = Arc::clone(&presentation_anchor);
+    presenter.set_failure_callback(move |ticket, error| {
+        let anchor = *failure_anchor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(anchor) = anchor {
+            dispatch_runtime_event(RuntimeEvent::ScreenResultPresentationFailed {
+                request_id,
+                anchor,
+                error: error.to_owned(),
+                presentation: Some(ticket),
+                attachment_attempt: None,
+            });
+        }
+    });
     wire_screen_result_window(&window);
     Ok(ScreenResultWindowSlot {
         window,
@@ -207,6 +248,8 @@ pub(crate) fn create_screen_result_window(
         pinned: Rc::new(Cell::new(false)),
         retired: Arc::new(AtomicBool::new(false)),
         retire_count: Rc::new(Cell::new(0)),
+        presentation_anchor,
+        attachment_failure: Rc::new(Cell::new(None)),
     })
 }
 
@@ -217,9 +260,16 @@ pub(crate) fn present_screen_result(
     if slot.retired.load(Ordering::Acquire) {
         return Err("screen-result window is already retired".to_owned());
     }
+    // A queued attachment error belongs only to the attempt that produced it.
+    // Starting another presentation invalidates it even before the next frame.
+    slot.attachment_failure.set(None);
+    *slot
+        .presentation_anchor
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(anchor);
     slot.window.window().set_size(slint::LogicalSize::new(
         slot.window.get_screen_content_width(),
-        slot.window.get_screen_content_height() + 38.0,
+        slot.window.get_screen_content_height() + 38.0 + slot.window.get_screen_notice_height(),
     ));
     if slot.attached.get() {
         return present_attached(slot, anchor);
@@ -271,17 +321,39 @@ pub(crate) fn present_screen_result(
                     .ok_or_else(|| "screen-result presenter is unavailable".to_owned())?
                     .attach(handle)?;
                 pending.attached.set(true);
+                pending.attachment_failure.set(None);
                 present_attached(&pending, anchor)
             });
         if let Err(error) = result {
-            rust_app_core::diagnostics::log_line(&format!(
-                "screen_result request={} stage=attach result=failed error={error}",
-                pending.request_id
-            ));
+            pending.shown.set(false);
+            dispatch_runtime_event(attachment_failure_event(&pending, anchor, error));
         }
     })
     .map_err(|error| format!("could not schedule screen-result attachment: {error}"))?;
     Ok(())
+}
+
+fn attachment_failure_event(
+    slot: &ScreenResultWindowSlot,
+    anchor: PhysicalRect,
+    error: String,
+) -> RuntimeEvent {
+    // abort_prepare already reports its ticket. Keep that identity when the
+    // enclosing attachment future also receives the error, so this duplicate
+    // cannot later retire a newer presentation of the same request.
+    let presentation = slot
+        .presenter
+        .as_ref()
+        .and_then(OverlayPresenter::current_failure_ticket);
+    RuntimeEvent::ScreenResultPresentationFailed {
+        request_id: slot.request_id,
+        anchor,
+        error,
+        presentation,
+        attachment_attempt: presentation
+            .is_none()
+            .then(|| slot.record_attachment_failure()),
+    }
 }
 
 fn present_attached(slot: &ScreenResultWindowSlot, anchor: PhysicalRect) -> Result<(), String> {
@@ -301,7 +373,13 @@ fn present_attached(slot: &ScreenResultWindowSlot, anchor: PhysicalRect) -> Resu
         .saturating_add(i64::from(anchor.height))
         .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     presenter.content_changed(slot.window.window(), true);
-    let ticket = if slot.window.get_prepared() {
+    // A completion or view change can land before the previous update's first
+    // frame. content_changed has already invalidated its queued reveal; keep
+    // that ticket and its watchdog instead of trying to prepare a second one.
+    let pending = presenter.pending_ticket();
+    let ticket = if let Some(ticket) = pending {
+        ticket
+    } else if slot.window.get_prepared() && presenter.has_active_presentation() {
         presenter.begin_refresh()?
     } else {
         presenter.begin_prepare()?
@@ -316,7 +394,9 @@ fn present_attached(slot: &ScreenResultWindowSlot, anchor: PhysicalRect) -> Resu
         presenter.abort_prepare(slot.window.window(), ticket, "position", &error);
         return Err(error);
     }
-    if let Err(error) = presenter.await_frame(slot.window.window(), ticket) {
+    if pending.is_none()
+        && let Err(error) = presenter.await_frame(slot.window.window(), ticket)
+    {
         presenter.abort_prepare(slot.window.window(), ticket, "await_frame", &error);
         return Err(error);
     }
@@ -326,7 +406,10 @@ fn present_attached(slot: &ScreenResultWindowSlot, anchor: PhysicalRect) -> Resu
 pub(crate) fn pin_screen_result(slot: &ScreenResultWindowSlot, pinned: bool) -> Result<(), String> {
     let handle = slot.handle();
     if handle == 0 {
-        return Err("native screen-result HWND is unavailable".to_owned());
+        // A retry can inherit pinning before Slint has created its HWND.
+        slot.pinned.set(pinned);
+        slot.window.set_pinned(pinned);
+        return Ok(());
     }
     rust_platform_windows::set_screen_result_window_pinned(handle, pinned)?;
     slot.pinned.set(pinned);
@@ -402,6 +485,18 @@ fn wire_screen_result_window(window: &ScreenTranslationWindow) {
     window.on_screen_editor_retry_requested(|| {
         dispatch_runtime_event(RuntimeEvent::ScreenEditorRetry);
     });
+    {
+        let weak = window.as_weak();
+        window.on_screen_translation_retry_requested(move || {
+            if let Some(window) = weak.upgrade()
+                && let Some(window_handle) = slint_window_handle(window.window())
+            {
+                dispatch_runtime_event(RuntimeEvent::ScreenTranslationRetryRequested {
+                    window_handle,
+                });
+            }
+        });
+    }
     {
         let weak = window.as_weak();
         window.on_screen_view_state_changed(move |mode| {
@@ -608,22 +703,16 @@ mod screen_result_window_tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn first_result_is_positioned_on_screen_after_prepare_parks_the_window() {
+    fn native_test_slot() -> (ScreenResultWindowSlot, windows_sys::Win32::Foundation::HWND) {
         use std::{
             ptr::null_mut,
             rc::Rc,
-            sync::{Arc, atomic::AtomicBool},
+            sync::{Arc, Mutex, atomic::AtomicBool},
         };
 
-        use rust_protocol::PhysicalRect;
-        use slint::ComponentHandle;
-        use windows_sys::Win32::Foundation::RECT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, GetWindowRect, WS_OVERLAPPEDWINDOW,
-        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, WS_OVERLAPPEDWINDOW};
 
-        use super::{ScreenTranslationWindow, present_attached};
+        use super::ScreenTranslationWindow;
 
         i_slint_backend_testing::init_no_event_loop();
         let class = "STATIC\0".encode_utf16().collect::<Vec<_>>();
@@ -659,7 +748,98 @@ mod screen_result_window_tests {
             pinned: Rc::new(Cell::new(false)),
             retired: Arc::new(AtomicBool::new(false)),
             retire_count: Rc::new(Cell::new(0)),
+            presentation_anchor: Arc::new(Mutex::new(None)),
+            attachment_failure: Rc::new(Cell::new(None)),
         };
+        (slot, native)
+    }
+
+    #[cfg(windows)]
+    fn clean_up_native_test_slot(
+        slot: &ScreenResultWindowSlot,
+        native: windows_sys::Win32::Foundation::HWND,
+    ) {
+        use slint::ComponentHandle;
+        slot.presenter
+            .as_ref()
+            .unwrap()
+            .retire(slot.window.window(), "test_cleanup");
+        rust_platform_windows::clear_screen_result_window_mode(slot.handle());
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(native) };
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delayed_attachment_failure_cannot_retire_a_successful_later_presentation() {
+        let (slot, native) = native_test_slot();
+        let failed_attempt = slot.record_attachment_failure();
+        assert!(slot.is_current_attachment_failure(failed_attempt));
+
+        super::present_screen_result(
+            &slot,
+            rust_protocol::PhysicalRect {
+                x: 100,
+                y: 100,
+                width: 200,
+                height: 100,
+            },
+        )
+        .expect("a later attached presentation succeeds");
+
+        assert!(
+            !slot.is_current_attachment_failure(failed_attempt),
+            "the delayed pre-attachment error must not retire the successful newer presentation"
+        );
+        clean_up_native_test_slot(&slot, native);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn attachment_error_after_prepare_preserves_the_failed_presentation_ticket() {
+        use slint::ComponentHandle;
+        let (slot, native) = native_test_slot();
+        let anchor = rust_protocol::PhysicalRect {
+            x: 100,
+            y: 100,
+            width: 200,
+            height: 100,
+        };
+        super::present_screen_result(&slot, anchor).unwrap();
+        let presenter = slot.presenter.as_ref().unwrap();
+        let ticket = presenter.pending_ticket().unwrap();
+        presenter.abort_prepare(
+            slot.window.window(),
+            ticket,
+            "test",
+            "failed after attachment",
+        );
+
+        let super::RuntimeEvent::ScreenResultPresentationFailed {
+            presentation,
+            attachment_attempt,
+            ..
+        } = super::attachment_failure_event(&slot, anchor, "failed after attachment".into())
+        else {
+            panic!("expected a presentation failure");
+        };
+        assert_eq!(
+            presentation,
+            Some(ticket),
+            "the post-attachment failure must retain its presenter generation"
+        );
+        assert_eq!(attachment_attempt, None);
+        clean_up_native_test_slot(&slot, native);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_result_is_positioned_on_screen_after_prepare_parks_the_window() {
+        use super::present_attached;
+        use rust_protocol::PhysicalRect;
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+        let (slot, native) = native_test_slot();
 
         present_attached(
             &slot,
@@ -671,6 +851,21 @@ mod screen_result_window_tests {
             },
         )
         .unwrap();
+        slot.window
+            .set_screen_translation_notice("Translation completed before the first frame".into());
+        assert!(
+            present_attached(
+                &slot,
+                PhysicalRect {
+                    x: 100,
+                    y: 100,
+                    width: 200,
+                    height: 100
+                },
+            )
+            .is_ok(),
+            "a content update while the first frame is pending must reuse that presentation"
+        );
         let mut rect = RECT::default();
         assert_ne!(unsafe { GetWindowRect(native, &mut rect) }, 0);
         assert!(
@@ -680,11 +875,6 @@ mod screen_result_window_tests {
             rect.top
         );
 
-        slot.presenter
-            .as_ref()
-            .unwrap()
-            .retire(slot.window.window(), "test_cleanup");
-        rust_platform_windows::clear_screen_result_window_mode(handle);
-        unsafe { DestroyWindow(native) };
+        clean_up_native_test_slot(&slot, native);
     }
 }

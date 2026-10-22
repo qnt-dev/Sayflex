@@ -5,6 +5,7 @@ export struct ScreenBlockOverlay {
     block-id: string,
     source: string,
     translation: string,
+    failed: bool,
     x: float,
     y: float,
     width: float,
@@ -21,6 +22,7 @@ export struct ScreenBlockOverlay {
     overflow: bool,
     callout: bool,
     font-size: float,
+    angle: float,
     font-weight: int,
     // On the picture the text is drawn straight onto the rebuilt background
     // in the source's colour; DUAL's source-and-translation pair sits on a
@@ -304,6 +306,11 @@ export component ScreenImageResult inherits Rectangle {
     in property <bool> saved: false;
     in property <bool> save-error: false;
     in property <bool> copied: false;
+    in property <int> failed-blocks: 0;
+    in property <bool> translating: false;
+    in property <string> translation-notice;
+    in property <bool> translation-retry-enabled: true;
+    in property <length> notice-height: root.failed-blocks > 0 || root.translating || root.translation-notice != "" ? 52px : 0px;
     in property <bool> dim-other-blocks: false;
     in property <bool> use-fixture-blocks: true;
     in property <[ScreenBlockOverlay]> blocks;
@@ -341,6 +348,7 @@ export component ScreenImageResult inherits Rectangle {
     callback copy-text-requested();
     callback save-file-requested();
     callback delete-image-requested();
+    callback translation-retry-requested();
 
     border-radius: 9px;
     border-width: 0px;
@@ -378,14 +386,29 @@ export component ScreenImageResult inherits Rectangle {
     OverlayButton { x: 14px; y: 7px; width: 44px; label: "ORIG"; active: root.view-mode == 1; clicked => { root.view-requested(1); } }
     OverlayButton { x: 64px; y: 7px; width: 44px; label: "DUAL"; active: root.view-mode == 2; clicked => { root.view-requested(2); } }
     OverlayButton { x: 114px; y: 7px; width: 78px; label: "ON IMAGE"; active: root.view-mode == 3; clicked => { root.view-requested(3); } }
-    OverlayButton { x: 198px; y: 7px; width: 32px; label: "↓"; accessible-name: @tr("Save file"); enabled: !root.image-expired; clicked => { root.save-file-requested(); } }
-    OverlayButton { x: 236px; y: 7px; width: 38px; label: "DEL"; accessible-name: @tr("Delete image"); enabled: !root.image-expired; clicked => { root.delete-image-requested(); } }
+    OverlayButton { x: 198px; y: 7px; width: 32px; label: "↓"; accessible-name: @tr("Save file"); enabled: !root.image-expired && !root.translating; clicked => { root.save-file-requested(); } }
+    OverlayButton { x: 236px; y: 7px; width: 38px; label: "DEL"; accessible-name: @tr("Delete image"); enabled: !root.image-expired && !root.translating; clicked => { root.delete-image-requested(); } }
     OverlayButton { x: parent.width - 96px; y: 7px; width: 44px; label: "PIN"; active: root.pinned; clicked => { root.pin-requested(); } }
     OverlayButton { x: parent.width - 46px; y: 7px; width: 38px; label: "×"; accessible-name: @tr("Close"); clicked => { root.close-requested(); } }
+    if root.notice-height > 0px: Rectangle {
+        x: 0px; y: 38px; width: parent.width; height: root.notice-height;
+        background: #30291eff;
+        Text {
+            x: 10px; y: 4px; width: parent.width - 126px; height: parent.height - 8px;
+            text: root.translating ? @tr("Translating…") : root.translation-notice != "" ? root.translation-notice : @tr("Some parts could not be translated. The original text is marked.");
+            color: #f2d6a1; font-size: 12px; wrap: word-wrap; vertical-alignment: center;
+        }
+        OverlayButton {
+            x: parent.width - 110px; y: (parent.height - self.height) / 2;
+            width: 100px; label: @tr("Retry translation");
+            enabled: root.translation-retry-enabled && !root.translating && !root.image-expired && !root.editor-visible;
+            clicked => { root.translation-retry-requested(); }
+        }
+    }
     content := Rectangle {
-        x: 0px; y: 38px;
+        x: 0px; y: 38px + root.notice-height;
         width: parent.width;
-        height: parent.height - 38px;
+        height: parent.height - 38px - root.notice-height;
         background: #0b0d11;
         clip: true;
 
@@ -469,6 +492,8 @@ export component ScreenImageResult inherits Rectangle {
                 y: block.y * 1px;
                 width: block.width * 1px;
                 height: block.height * 1px;
+                transform-origin: { x: 0px, y: 0px };
+                transform-rotation: block.angle * 1deg;
                 source-text: block.source;
                 translated-text: block.translation;
                 dual: root.view-mode == 2;
@@ -583,7 +608,7 @@ export component ScreenImageResult inherits Rectangle {
                 if root.use-fixture-blocks: Text { text: root.end-turn-translation; color: Theme.text; font-size: 14px; font-weight: 470; }
                 for block in root.blocks: Text {
                     visible: !root.use-fixture-blocks;
-                    text: block.translation;
+                    text: block.failed ? @tr("Not translated") + ": " + block.source : block.translation;
                     color: Theme.text;
                     font-size: 14px;
                     font-weight: 470;
@@ -656,9 +681,16 @@ export component ScreenImageResult inherits Rectangle {
 export component ScreenTranslationWindow inherits Window {
     title: @tr("Screen translation result");
     preferred-width: root.screen-content-width * 1px;
-    preferred-height: (root.screen-content-height + 38) * 1px;
+    preferred-height: max(
+        (root.screen-content-height + 38 + root.screen-notice-height) * 1px,
+        root.screen-editor-visible ? (340 + root.screen-notice-height) * 1px : 0px
+    );
     min-width: 380px;
-    min-height: 340px;
+    // Keep the toolbar usable without stretching short captures. Large results
+    // retain their existing resize floor; small ones fit the image and notice.
+    min-height: root.screen-editor-visible
+        ? (340 + root.screen-notice-height) * 1px
+        : min(340px, root.preferred-height);
     no-frame: true;
     always-on-top: false;
     background: transparent;
@@ -670,6 +702,11 @@ export component ScreenTranslationWindow inherits Window {
     in-out property <bool> pin-enabled: true;
     // Set when the input host confirms the copy, cleared with new content.
     in-out property <bool> screen-copied: false;
+    in-out property <int> screen-failed-blocks: 0;
+    in-out property <bool> screen-translating: false;
+    in-out property <string> screen-translation-notice;
+    in-out property <bool> screen-translation-retry-enabled: true;
+    out property <float> screen-notice-height: screen-failed-blocks > 0 || screen-translating || screen-translation-notice != "" ? 52 : 0;
     in-out property <image> screen-crop-image;
     in-out property <image> screen-repaired-image;
     in-out property <bool> screen-use-repaired-image: false;
@@ -683,10 +720,29 @@ export component ScreenTranslationWindow inherits Window {
     out property <float> screen-scroll-offset: image-view.scroll-offset;
     out property <float> screen-scroll-x: image-view.scroll-x;
     out property <float> screen-visible-width: root.width / 1px;
-    out property <float> screen-visible-height: (root.height - 38px) / 1px;
+    out property <float> screen-visible-height: (root.height - 38px) / 1px - root.screen-notice-height;
     in-out property <int> screen-view-mode: 3;
     in-out property <int> screen-selected-block: -1;
     in-out property <bool> screen-editor-visible: false;
+    property <length> before-editor-height: 0px;
+    property <bool> before-editor-fit-content: false;
+    property <length> expanded-editor-height: 0px;
+    changed screen-editor-visible => {
+        if root.screen-editor-visible {
+            root.before-editor-height = root.height;
+            root.before-editor-fit-content = abs(root.height
+                - (root.screen-content-height + 38 + root.screen-notice-height) * 1px) <= 1px;
+            root.expanded-editor-height = max(root.height, (340 + root.screen-notice-height) * 1px);
+            root.height = root.expanded-editor-height;
+        } else if root.before-editor-height > 0px
+            && abs(root.height - root.expanded-editor-height) <= 1px {
+            // Native minimums grow the surface but do not shrink it again.
+            // Restore only our expansion; keep a size the user chose instead.
+            // A successful edit may have removed the last failure notice.
+            root.height = root.before-editor-fit-content
+                ? root.preferred-height : root.before-editor-height;
+        }
+    }
     in-out property <bool> screen-image-expired: false;
     in-out property <bool> screen-saved: false;
     in-out property <bool> screen-save-error: false;
@@ -720,6 +776,7 @@ export component ScreenTranslationWindow inherits Window {
     callback screen-editor-confirm-requested();
     callback screen-editor-cancel-requested();
     callback screen-editor-retry-requested();
+    callback screen-translation-retry-requested();
 
     measure-item := Text {
         visible: false;
@@ -745,6 +802,10 @@ export component ScreenTranslationWindow inherits Window {
         editor-visible: root.screen-editor-visible;
         image-expired: root.screen-image-expired;
         copied: root.screen-copied;
+        failed-blocks: root.screen-failed-blocks;
+        translating: root.screen-translating;
+        translation-notice: root.screen-translation-notice;
+        translation-retry-enabled: root.screen-translation-retry-enabled;
         saved: root.screen-saved;
         save-error: root.screen-save-error;
         dim-other-blocks: root.screen-editor-visible;
@@ -780,8 +841,10 @@ export component ScreenTranslationWindow inherits Window {
             root.screen-block-selected(block);
         }
         block-edit-requested(block) => {
-            root.screen-selected-block = block;
-            root.screen-block-edit-requested(block);
+            if !root.screen-translating {
+                root.screen-selected-block = block;
+                root.screen-block-edit-requested(block);
+            }
         }
         copy-text-requested => { root.screen-copy-text-requested(); }
         save-file-requested => { root.screen-save-file-requested(); }
@@ -790,6 +853,7 @@ export component ScreenTranslationWindow inherits Window {
         confirm-requested => { root.screen-editor-confirm-requested(); }
         cancel-requested => { root.screen-editor-cancel-requested(); }
         retry-requested => { root.screen-editor-retry-requested(); }
+        translation-retry-requested => { root.screen-translation-retry-requested(); }
     }
     resize-corner := TouchArea {
         x: parent.width - 10px;

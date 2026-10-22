@@ -71,7 +71,24 @@ impl SettingsStorage {
         self.load_recovering_with_origin().settings
     }
 
+    #[cfg(test)]
     pub(crate) fn load_recovering_with_origin(&self) -> LoadedSettings {
+        self.load_recovering_with_installer_language(None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_recovering_with_installer_locale(
+        &self,
+        installer_locale: Option<UiLocale>,
+    ) -> LoadedSettings {
+        let language = installer_locale.map(crate::installer_locale::InstallerLanguage::Legacy);
+        self.load_recovering_with_installer_language(language.as_ref())
+    }
+
+    pub(crate) fn load_recovering_with_installer_language(
+        &self,
+        language: Option<&crate::installer_locale::InstallerLanguage>,
+    ) -> LoadedSettings {
         let previous = self.previous();
         let temporary = self.temporary();
         let mut candidates = [&self.primary, &previous, &temporary]
@@ -97,9 +114,21 @@ impl SettingsStorage {
             self.quarantine(&path, &error);
         }
 
-        let Some((source, bytes, _, settings)) = valid.into_iter().next() else {
+        let Some((source, bytes, _, mut settings)) = valid.into_iter().next() else {
+            let mut settings = SavedSettings::default();
+            if let Some(language) = language {
+                settings.ui_locale = language.locale();
+                if let crate::installer_locale::InstallerLanguage::Request {
+                    installation_id, ..
+                } = language
+                {
+                    settings.applied_installer_language_id = Some(installation_id.clone());
+                }
+            }
+            // No profile is written until the user confirms the first-run
+            // choice. A cancelled prompt sees this durable request again.
             return LoadedSettings {
-                settings: SavedSettings::default(),
+                settings,
                 needs_first_run_choice: true,
             };
         };
@@ -110,6 +139,29 @@ impl SettingsStorage {
                 "settings recovery=loaded source={} reinstall=failed error={error}",
                 source.display()
             ));
+        }
+        if let Some(crate::installer_locale::InstallerLanguage::Request {
+            locale,
+            installation_id,
+        }) = language
+            && settings.applied_installer_language_id.as_deref() != Some(installation_id.as_str())
+        {
+            settings.ui_locale = *locale;
+            let mut requested = settings.clone();
+            requested.applied_installer_language_id = Some(installation_id.clone());
+            match self.replace_installer_language_atomically(&requested) {
+                Ok(()) => {
+                    settings = requested;
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "installer_language result=applied locale={} installation_id={installation_id}",
+                        locale.code()
+                    ));
+                }
+                Err(error) => rust_app_core::diagnostics::log_line(&format!(
+                    "installer_language result=save_failed locale={} installation_id={installation_id} retry=pending error={error}",
+                    locale.code()
+                )),
+            }
         }
         LoadedSettings {
             settings,
@@ -123,22 +175,37 @@ impl SettingsStorage {
     }
 
     fn replace_bytes_atomically(&self, bytes: &[u8]) -> io::Result<()> {
+        self.replace_bytes_using_temporary(bytes, &self.temporary())
+    }
+
+    fn replace_installer_language_atomically(&self, settings: &SavedSettings) -> io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(settings).map_err(io::Error::other)?;
+        // A failed request must not look consumed when ordinary startup
+        // recovery inspects .tmp. Retain its separate temporary for diagnosis;
+        // only the atomic primary replacement consumes locale and ID together.
+        self.replace_bytes_using_temporary(
+            &bytes,
+            &self.primary.with_extension("installer-language.tmp"),
+        )
+    }
+
+    fn replace_bytes_using_temporary(&self, bytes: &[u8], temporary: &Path) -> io::Result<()> {
         if let Some(parent) = self.primary.parent() {
             fs::create_dir_all(parent)?;
         }
-        let temporary = self.temporary();
-        let mut file = File::create(&temporary)?;
+        let mut file = File::create(temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
 
         let previous = self.previous();
-        // On failure the fully flushed temporary candidate remains available
-        // for startup recovery. ReplaceFileW replaces an existing backup as
-        // part of the same operation; deleting it first would create a window
+        // A failed ordinary .tmp remains available for startup recovery; a
+        // failed installer request uses its separate, ignored temporary.
+        // ReplaceFileW replaces an existing backup as part of the same
+        // operation; deleting it first would create a window
         // in which a failed replacement had also destroyed the last known-good
         // document.
-        rust_platform_windows::replace_file_atomically(&self.primary, &temporary, &previous)?;
+        rust_platform_windows::replace_file_atomically(&self.primary, temporary, &previous)?;
         Ok(())
     }
 
@@ -178,6 +245,7 @@ pub(crate) const DEFAULT_SCREENSHOT_RETENTION_BYTES: u64 = 500 * 1024 * 1024;
 pub(crate) struct SavedSettings {
     pub(crate) schema_version: u32,
     pub(crate) ui_locale: UiLocale,
+    pub(crate) applied_installer_language_id: Option<String>,
     pub(crate) selected_model_id: Option<String>,
     pub(crate) speech_backend_preference: SpeechBackendPreference,
     pub(crate) output_mode: SpeechOutputMode,
@@ -216,15 +284,16 @@ impl Default for SavedSettings {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
             ui_locale: UiLocale::System,
+            applied_installer_language_id: None,
             selected_model_id: None,
             speech_backend_preference: SpeechBackendPreference::default(),
             output_mode: SpeechOutputMode::default(),
             dictation_language: DictationLanguage::default(),
             fast_release_previews: true,
-            visualizer_style: VisualizerStyle::default(),
+            visualizer_style: VisualizerStyle::FlowSphere,
             circular_spectrum_palette: CircularSpectrumPalette::default(),
             broadcast_mic_palette: BroadcastMicPalette::default(),
-            flow_sphere_palette: flow_sphere::FlowSpherePalette::default(),
+            flow_sphere_palette: flow_sphere::FlowSpherePalette::BlackYellow,
             pulse_matrix_palette: pulse_matrix::PulseMatrixPalette::default(),
             writing_slate_surface: WritingSlateSurface::default(),
             companion_home_position: None,
@@ -273,6 +342,11 @@ impl<'de> Deserialize<'de> for SavedSettings {
         let mut settings = Self::default();
         read(&document, "schema_version", &mut settings.schema_version);
         read(&document, "ui_locale", &mut settings.ui_locale);
+        read(
+            &document,
+            "applied_installer_language_id",
+            &mut settings.applied_installer_language_id,
+        );
         read(
             &document,
             "selected_model_id",
@@ -417,6 +491,7 @@ impl SavedSettings {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
             ui_locale: state.ui_locale,
+            applied_installer_language_id: state.applied_installer_language_id.clone(),
             selected_model_id: Some(state.selected_model_id.clone()),
             speech_backend_preference: state.speech_backend_preference,
             output_mode: state.output_mode,
@@ -453,6 +528,10 @@ impl SavedSettings {
     /// apply. A value outside it comes from a hand edit or an older build, and
     /// is not a reason to refuse to start.
     fn sanitized(mut self) -> Self {
+        self.applied_installer_language_id = self
+            .applied_installer_language_id
+            .filter(|id| crate::installer_locale::valid_installation_id(id))
+            .map(|id| id.to_ascii_lowercase());
         self.translation_blur_radius = self
             .translation_blur_radius
             .min(MAX_TRANSLATION_BLUR_RADIUS);
@@ -500,7 +579,8 @@ fn parse_settings_checked(bytes: &[u8]) -> Result<SavedSettings, serde_json::Err
 }
 
 pub(crate) fn load_settings() -> LoadedSettings {
-    SettingsStorage::new(settings_path()).load_recovering_with_origin()
+    SettingsStorage::new(settings_path())
+        .load_recovering_with_installer_language(crate::installer_locale::load().as_ref())
 }
 
 const TRANSCRIPTION_PROVIDER_IDS: [&str; 6] =
@@ -652,7 +732,7 @@ mod settings_document_tests {
     fn retired_visualizers_migrate_to_the_first_supported_style() {
         assert_eq!(
             SavedSettings::default().visualizer_style,
-            VisualizerStyle::BroadcastMic
+            VisualizerStyle::FlowSphere
         );
         for retired in ["voice_orb", "symmetric_spectrum", "fluid_ribbon"] {
             let document = format!(r#"{{"visualizer_style":"{retired}"}}"#);
@@ -700,7 +780,10 @@ mod settings_document_tests {
             br#"{"visualizer_style": "orb", "history_enabled": false, "layout_enabled": false}"#,
         );
 
-        assert_eq!(settings.visualizer_style, VisualizerStyle::default());
+        assert_eq!(
+            settings.visualizer_style,
+            SavedSettings::default().visualizer_style
+        );
         assert!(!settings.history_enabled);
         assert!(!settings.layout_enabled);
     }
@@ -912,6 +995,363 @@ mod settings_document_tests {
 
         assert!(loaded.needs_first_run_choice);
         assert_eq!(loaded.settings, SavedSettings::default());
+    }
+
+    #[test]
+    fn installer_locale_survives_deferred_launch_and_cancelled_first_run() {
+        let directory = tempdir().unwrap();
+        let installation = directory.path().join("installation");
+        fs::create_dir(&installation).unwrap();
+        fs::write(
+            installation.join(crate::installer_locale::SEED_FILE_NAME),
+            "russian",
+        )
+        .unwrap();
+        let primary = directory.path().join("profile/settings.json");
+        let storage = SettingsStorage::new(primary.clone());
+
+        // The installer did not launch the app, and the user can cancel the
+        // first-run prompt. Neither condition may discard the language seed.
+        for _ in 0..2 {
+            let loaded = storage.load_recovering_with_installer_locale(
+                crate::installer_locale::load_from_directory(&installation)
+                    .map(|seed| seed.locale()),
+            );
+            assert!(loaded.needs_first_run_choice);
+            assert_eq!(
+                loaded.settings.ui_locale,
+                crate::localization::UiLocale::Russian
+            );
+            assert!(!primary.exists());
+        }
+
+        let loaded = storage
+            .load_recovering_with_installer_locale(Some(crate::localization::UiLocale::Russian));
+        storage.replace_atomically(&loaded.settings).unwrap();
+        fs::write(
+            installation.join(crate::installer_locale::SEED_FILE_NAME),
+            "english",
+        )
+        .unwrap();
+        let restarted = storage.load_recovering_with_installer_locale(
+            crate::installer_locale::load_from_directory(&installation).map(|seed| seed.locale()),
+        );
+        assert!(!restarted.needs_first_run_choice);
+        assert_eq!(
+            restarted.settings.ui_locale,
+            crate::localization::UiLocale::Russian
+        );
+    }
+
+    #[test]
+    fn installer_locale_never_overwrites_a_stored_preference_including_system() {
+        for locale in [
+            crate::localization::UiLocale::French,
+            crate::localization::UiLocale::System,
+        ] {
+            let directory = tempdir().unwrap();
+            let primary = directory.path().join("settings.json");
+            let storage = SettingsStorage::new(primary.clone());
+            let settings = SavedSettings {
+                ui_locale: locale,
+                history_enabled: false,
+                ..SavedSettings::default()
+            };
+            storage.replace_atomically(&settings).unwrap();
+            let before = fs::read(&primary).unwrap();
+
+            let loaded = storage.load_recovering_with_installer_locale(Some(
+                crate::localization::UiLocale::Russian,
+            ));
+
+            assert_eq!(loaded.settings.ui_locale, locale);
+            assert!(!loaded.settings.history_enabled);
+            assert_eq!(fs::read(&primary).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn legacy_installer_locale_does_not_change_an_existing_profile_even_without_a_locale() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        fs::write(&primary, br#"{"history_enabled":false}"#).unwrap();
+        let storage = SettingsStorage::new(primary);
+
+        let loaded = storage
+            .load_recovering_with_installer_locale(Some(crate::localization::UiLocale::Russian));
+
+        assert!(!loaded.needs_first_run_choice);
+        assert!(!loaded.settings.history_enabled);
+        assert_eq!(
+            loaded.settings.ui_locale,
+            crate::localization::UiLocale::System
+        );
+    }
+
+    const INSTALLATION_ONE: &str = "01234567-89ab-cdef-0123-456789abcdef";
+    const INSTALLATION_TWO: &str = "11234567-89ab-cdef-0123-456789abcdef";
+
+    fn russian_installation(id: &str) -> crate::installer_locale::InstallerLanguage {
+        crate::installer_locale::InstallerLanguage::Request {
+            locale: crate::localization::UiLocale::Russian,
+            installation_id: id.to_owned(),
+        }
+    }
+
+    fn applied_installation(settings: &SavedSettings) -> Option<String> {
+        serde_json::to_value(settings).unwrap()["applied_installer_language_id"]
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn installer_request_overrides_system_once_and_a_new_installation_applies_again() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let storage = SettingsStorage::new(primary.clone());
+        let saved = SavedSettings {
+            history_enabled: false,
+            selected_model_id: Some("existing-model".into()),
+            ..SavedSettings::default()
+        };
+        storage.replace_atomically(&saved).unwrap();
+        let request = russian_installation(INSTALLATION_ONE);
+        let loaded = storage.load_recovering_with_installer_language(Some(&request));
+        assert_eq!(
+            loaded.settings.ui_locale,
+            crate::localization::UiLocale::Russian
+        );
+        assert!(
+            !loaded.needs_first_run_choice,
+            "upgrade must not repeat the model choice"
+        );
+        assert!(!loaded.settings.history_enabled);
+        assert_eq!(
+            loaded.settings.selected_model_id.as_deref(),
+            Some("existing-model")
+        );
+        let committed = parse_settings(&fs::read(&primary).unwrap());
+        assert_eq!(committed.ui_locale, crate::localization::UiLocale::Russian);
+        assert_eq!(
+            applied_installation(&committed).as_deref(),
+            Some(INSTALLATION_ONE)
+        );
+
+        let mut state = AppState::new(
+            "existing-model".into(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &loaded.settings,
+        );
+        state.ui_locale = crate::localization::UiLocale::French;
+        storage
+            .replace_atomically(&SavedSettings::from_state(&state))
+            .unwrap();
+        let restarted = storage.load_recovering_with_installer_language(Some(&request));
+        assert_eq!(
+            restarted.settings.ui_locale,
+            crate::localization::UiLocale::French,
+            "an in-app language change must survive the unchanged installer file"
+        );
+        let reinstall = storage
+            .load_recovering_with_installer_language(Some(&russian_installation(INSTALLATION_TWO)));
+        assert_eq!(
+            reinstall.settings.ui_locale,
+            crate::localization::UiLocale::Russian
+        );
+        assert_eq!(
+            applied_installation(&reinstall.settings).as_deref(),
+            Some(INSTALLATION_TWO)
+        );
+        assert!(!reinstall.needs_first_run_choice);
+    }
+
+    #[test]
+    fn installer_request_fresh_cancel_keeps_onboarding_pending_until_choice_is_saved() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let storage = SettingsStorage::new(primary.clone());
+        let request = russian_installation(INSTALLATION_ONE);
+        for _ in 0..2 {
+            let loaded = storage.load_recovering_with_installer_language(Some(&request));
+            assert!(loaded.needs_first_run_choice);
+            assert_eq!(
+                loaded.settings.ui_locale,
+                crate::localization::UiLocale::Russian
+            );
+            assert!(
+                !primary.exists(),
+                "opening/cancelling onboarding must not create a complete profile"
+            );
+            assert!(!primary.with_extension("tmp").exists());
+        }
+        let loaded = storage.load_recovering_with_installer_language(Some(&request));
+        let accepted = apply_first_run_choice(
+            loaded.settings,
+            FirstRunChoice {
+                download_recommended_speech_model: false,
+            },
+        );
+        storage.replace_atomically(&accepted).unwrap();
+        assert_eq!(
+            applied_installation(&parse_settings(&fs::read(&primary).unwrap())).as_deref(),
+            Some(INSTALLATION_ONE)
+        );
+        let restarted = storage.load_recovering_with_installer_language(Some(&request));
+        assert!(!restarted.needs_first_run_choice);
+        assert!(
+            restarted
+                .settings
+                .transcription_providers
+                .iter()
+                .all(|provider| !provider.enabled)
+        );
+    }
+
+    #[test]
+    fn installer_request_marker_survives_recovery_and_app_state_saves() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let original = serde_json::json!({"ui_locale":"french", "history_enabled":false,
+            "applied_installer_language_id":INSTALLATION_ONE});
+        fs::write(primary.with_extension("previous"), original.to_string()).unwrap();
+        fs::write(&primary, "broken").unwrap();
+        let storage = SettingsStorage::new(primary.clone());
+        let loaded = storage
+            .load_recovering_with_installer_language(Some(&russian_installation(INSTALLATION_ONE)));
+        assert_eq!(
+            loaded.settings.ui_locale,
+            crate::localization::UiLocale::French
+        );
+        assert!(!loaded.needs_first_run_choice);
+        assert!(!loaded.settings.history_enabled);
+        let state = AppState::new(
+            "existing-model".into(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &loaded.settings,
+        );
+        storage
+            .replace_atomically(&SavedSettings::from_state(&state))
+            .unwrap();
+        assert_eq!(
+            applied_installation(&parse_settings(&fs::read(primary).unwrap())).as_deref(),
+            Some(INSTALLATION_ONE)
+        );
+    }
+
+    #[test]
+    fn installer_request_failed_persistence_keeps_old_file_and_retries_without_consuming() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        let previous = primary.with_extension("previous");
+        let backup = br#"{"ui_locale":"english","history_enabled":true}"#;
+        fs::write(&previous, backup).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let original = serde_json::json!({"ui_locale":"system", "history_enabled":false,
+            "applied_installer_language_id":INSTALLATION_ONE})
+        .to_string();
+        fs::write(&primary, &original).unwrap();
+        let blocked_temporary = primary.with_extension("installer-language.tmp");
+        fs::create_dir(&blocked_temporary).unwrap();
+        let storage = SettingsStorage::new(primary.clone());
+        let request = russian_installation(INSTALLATION_TWO);
+        let failed = storage.load_recovering_with_installer_language(Some(&request));
+        assert_eq!(
+            failed.settings.ui_locale,
+            crate::localization::UiLocale::Russian
+        );
+        assert_eq!(
+            applied_installation(&failed.settings).as_deref(),
+            Some(INSTALLATION_ONE)
+        );
+        assert!(!failed.needs_first_run_choice);
+        assert_eq!(fs::read_to_string(&primary).unwrap(), original);
+        assert!(
+            !primary.with_extension("tmp").exists(),
+            "failed request must not be a consumed recovery candidate"
+        );
+        fs::remove_dir(blocked_temporary).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+
+            // Real ReplaceFileW failure after the complete request temporary
+            // has been flushed. Read sharing allows startup to read primary;
+            // withholding write/delete sharing prevents its replacement.
+            let held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0x0000_0001) // FILE_SHARE_READ
+                .open(&primary)
+                .unwrap();
+            let failed = storage.load_recovering_with_installer_language(Some(&request));
+            assert_eq!(
+                failed.settings.ui_locale,
+                crate::localization::UiLocale::Russian
+            );
+            assert_eq!(
+                applied_installation(&failed.settings).as_deref(),
+                Some(INSTALLATION_ONE)
+            );
+            let failed_request = primary.with_extension("installer-language.tmp");
+            assert_eq!(
+                applied_installation(&parse_settings(&fs::read(failed_request).unwrap()))
+                    .as_deref(),
+                Some(INSTALLATION_TWO),
+                "the complete request existed before ReplaceFileW failed"
+            );
+            let recovered = storage.load_recovering_with_origin();
+            assert_eq!(
+                recovered.settings.ui_locale,
+                crate::localization::UiLocale::System
+            );
+            assert_eq!(
+                applied_installation(&recovered.settings).as_deref(),
+                Some(INSTALLATION_ONE),
+                "a failed request temporary must never count as consumed on restart"
+            );
+            assert!(!recovered.needs_first_run_choice);
+            assert_eq!(fs::read_to_string(&primary).unwrap(), original);
+            assert_eq!(fs::read(&previous).unwrap(), backup);
+            drop(held);
+        }
+        let retried = storage.load_recovering_with_installer_language(Some(&request));
+        assert_eq!(
+            retried.settings.ui_locale,
+            crate::localization::UiLocale::Russian
+        );
+        assert_eq!(
+            applied_installation(&retried.settings).as_deref(),
+            Some(INSTALLATION_TWO)
+        );
+        assert!(!retried.settings.history_enabled);
+    }
+
+    #[test]
+    fn installer_locale_preserves_the_explicit_locale_of_the_recovered_candidate() {
+        let directory = tempdir().unwrap();
+        let primary = directory.path().join("settings.json");
+        fs::write(
+            primary.with_extension("previous"),
+            br#"{"ui_locale":"system","history_enabled":false}"#,
+        )
+        .unwrap();
+        fs::write(&primary, b"broken").unwrap();
+        let storage = SettingsStorage::new(primary.clone());
+
+        let loaded = storage
+            .load_recovering_with_installer_locale(Some(crate::localization::UiLocale::Russian));
+
+        assert!(!loaded.needs_first_run_choice);
+        assert_eq!(
+            loaded.settings.ui_locale,
+            crate::localization::UiLocale::System
+        );
+        assert!(!loaded.settings.history_enabled);
+        assert_eq!(
+            parse_settings(&fs::read(primary).unwrap()).ui_locale,
+            crate::localization::UiLocale::System
+        );
     }
 
     #[test]

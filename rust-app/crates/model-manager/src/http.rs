@@ -52,13 +52,24 @@ pub struct HttpFetcher {
     runtime: Runtime,
     user_agent: String,
     cancellation: CancelToken,
+    https_only: bool,
 }
 
 impl HttpFetcher {
+    /// Requires HTTPS for the initial URL and every redirect.
+    pub fn https_only(component: &str) -> Result<Self, ModelInstallError> {
+        Self::build(component, true)
+    }
+
     /// `component` names the caller in the user agent, so a server log can tell
     /// a speech model download from a translation pack download.
     pub fn new(component: &str) -> Result<Self, ModelInstallError> {
+        Self::build(component, false)
+    }
+
+    fn build(component: &str, https_only: bool) -> Result<Self, ModelInstallError> {
         let client = Client::builder()
+            .https_only(https_only)
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(60 * 60 * 6))
             .build()
@@ -72,6 +83,7 @@ impl HttpFetcher {
             runtime,
             user_agent: format!("{} {component}", rust_app_core::product::USER_AGENT_PRODUCT),
             cancellation: CancelToken::default(),
+            https_only,
         })
     }
 
@@ -90,6 +102,11 @@ impl ArtifactFetcher for HttpFetcher {
         expected_bytes: u64,
         progress: &mut dyn FnMut(DownloadProgress),
     ) -> Result<(), ModelInstallError> {
+        if self.https_only && reqwest::Url::parse(url).map_or(true, |url| url.scheme() != "https") {
+            return Err(ModelInstallError::Download(
+                "this component requires HTTPS".into(),
+            ));
+        }
         let mut last_error = String::new();
         for attempt in 0..MAX_ATTEMPTS {
             if self.cancellation.is_cancelled() {
@@ -237,6 +254,23 @@ mod tests {
 
     use super::HttpFetcher;
     use crate::{ArtifactFetcher, ModelInstallError};
+
+    #[test]
+    fn https_only_fetcher_rejects_http_even_when_a_partial_file_is_complete() {
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("complete.bin");
+        std::fs::write(&destination, b"complete").unwrap();
+        let fetcher = HttpFetcher::https_only("cuda-runtime-test").unwrap();
+        let result = fetcher.fetch(
+            "http://127.0.0.1:9/runtime.zip",
+            &destination,
+            8,
+            &mut |_| {},
+        );
+        assert!(
+            matches!(result, Err(ModelInstallError::Download(message)) if message.contains("HTTPS"))
+        );
+    }
 
     #[test]
     fn cancellation_interrupts_a_stalled_response_body() {

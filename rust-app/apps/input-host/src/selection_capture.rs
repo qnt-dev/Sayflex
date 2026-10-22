@@ -123,7 +123,7 @@ pub fn capture_clipboard_after_release(
     let shortcut = target::selection_copy_shortcut(target);
     let clipboard_started = Instant::now();
     let captured = clipboard::capture_selection(
-        || inject::is_foreground(target),
+        target,
         || inject::copy_message(target).map_err(|_| clipboard::ClipboardError::InvalidData),
         || inject::copy_shortcut(shortcut).map_err(|_| clipboard::ClipboardError::InvalidData),
     )?;

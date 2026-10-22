@@ -33,6 +33,16 @@ pub fn deliver(
     target_snapshot: TargetSnapshot,
     payload: &str,
 ) -> Result<DeliveryReceipt, DeliveryFailure> {
+    let _transaction =
+        clipboard::begin_clipboard_transaction().map_err(|error| DeliveryFailure {
+            method: InsertionMethod::ClipboardTransaction,
+            state: DeliveryFailureState::NotDelivered,
+            message: error.to_string(),
+        })?;
+    // Protection checks are mandatory for every route, including test routes
+    // that disable UIA acknowledgement. Unknown UIA remains compatible.
+    let baseline = ensure_insertion_allowed(target_snapshot)
+        .map_err(|error| injection_failure(InsertionMethod::NativeEditMessage, error))?;
     let force_clipboard_transaction =
         std::env::var("SAYFLEX_INSERTION_SMOKE_FORCE_CLIPBOARD_TRANSACTION").as_deref() == Ok("1");
 
@@ -70,24 +80,19 @@ pub fn deliver(
         }
         Ok(false) => {}
         Err(error) => {
-            return Err(DeliveryFailure {
-                method: InsertionMethod::NativeEditMessage,
-                state: DeliveryFailureState::Ambiguous,
-                message: format!("native edit adapter failed: {error}"),
-            });
+            return Err(injection_failure(InsertionMethod::NativeEditMessage, error));
         }
     }
 
     let shortcut = target::paste_shortcut(target_snapshot);
-    // UI Automation is an optional acknowledgement channel, not permission to
-    // attempt a paste. Electron/Chromium providers can temporarily expose no
-    // readable text even though their focused editor accepts Ctrl+V normally.
+    // UIA text is an optional acknowledgement channel. A positive protected
+    // result is a terminal denial independently of that optional text.
     let verification_disabled_for_smoke =
         std::env::var("SAYFLEX_INSERTION_SMOKE_DISABLE_UIA_VERIFY").as_deref() == Ok("1");
     let baseline = if verification_disabled_for_smoke {
         None
     } else {
-        observed_focused_text(target_snapshot)
+        baseline
     };
     let verification_available = baseline.is_some();
     let mut last_observation = Instant::now() - Duration::from_millis(75);
@@ -104,9 +109,31 @@ pub fn deliver(
             }
             last_observation = Instant::now();
             observed_focused_text(target_snapshot)
+                .ok()
+                .flatten()
                 .is_some_and(|current| payload_was_inserted(baseline, &current, payload))
         },
-        || inject::paste_shortcut(shortcut).map_err(|_| clipboard::ClipboardError::Paste),
+        || {
+            // Snapshotting/publishing can take time; protection and focus
+            // must be checked again at the actual fallback dispatch.
+            ensure_insertion_allowed(target_snapshot)
+                .map(|_| ())
+                .map_err(|error| match error {
+                    inject::InjectionError::Protected => clipboard::ClipboardError::Protected,
+                    inject::InjectionError::TargetChanged => {
+                        clipboard::ClipboardError::TargetChanged
+                    }
+                    _ => clipboard::ClipboardError::Paste,
+                })
+        },
+        || {
+            inject::paste_shortcut(shortcut).map_err(|error| match error {
+                inject::InjectionError::Partial { .. } => {
+                    clipboard::ClipboardError::DeliveryUnconfirmed
+                }
+                _ => clipboard::ClipboardError::Paste,
+            })
+        },
         target_snapshot.process_id,
         payload,
     )
@@ -135,10 +162,12 @@ pub fn deliver(
     .map_err(|error| DeliveryFailure {
         method: InsertionMethod::ClipboardTransaction,
         state: match error {
+            clipboard::ClipboardError::DeliveryUnconfirmed => DeliveryFailureState::Ambiguous,
             clipboard::ClipboardError::TargetChanged | clipboard::ClipboardError::Superseded => {
                 DeliveryFailureState::Superseded
             }
             clipboard::ClipboardError::NotDelivered
+            | clipboard::ClipboardError::Protected
             | clipboard::ClipboardError::Paste
             | clipboard::ClipboardError::Busy
             | clipboard::ClipboardError::Allocation
@@ -151,12 +180,56 @@ pub fn deliver(
     })
 }
 
-fn observed_focused_text(target: TargetSnapshot) -> Option<String> {
-    match uia_selection::focused_text(target) {
-        Ok(uia_selection::FocusedTextOutcome::Text(text)) => Some(text),
-        Ok(uia_selection::FocusedTextOutcome::Unavailable)
-        | Ok(uia_selection::FocusedTextOutcome::Protected)
-        | Err(_) => None,
+fn observed_focused_text(target: TargetSnapshot) -> Result<Option<String>, inject::InjectionError> {
+    observed_focused_text_result(uia_selection::focused_text(target))
+}
+
+fn observed_focused_text_result(
+    observation: Result<uia_selection::FocusedTextOutcome, uia_selection::SelectionError>,
+) -> Result<Option<String>, inject::InjectionError> {
+    match observation {
+        Ok(uia_selection::FocusedTextOutcome::Text(text)) => Ok(Some(text)),
+        Ok(uia_selection::FocusedTextOutcome::Protected) => Err(inject::InjectionError::Protected),
+        Ok(uia_selection::FocusedTextOutcome::TargetChanged) => {
+            Err(inject::InjectionError::TargetChanged)
+        }
+        Ok(uia_selection::FocusedTextOutcome::Unavailable) | Err(_) => Ok(None),
+    }
+}
+
+pub(crate) fn ensure_insertion_allowed(
+    target: TargetSnapshot,
+) -> Result<Option<String>, inject::InjectionError> {
+    ensure_insertion_allowed_using(
+        || inject::ensure_target_not_protected(target),
+        || uia_selection::focused_text(target),
+    )
+}
+
+fn ensure_insertion_allowed_using(
+    mut native_focus: impl FnMut() -> Result<u64, inject::InjectionError>,
+    observe: impl FnOnce() -> Result<uia_selection::FocusedTextOutcome, uia_selection::SelectionError>,
+) -> Result<Option<String>, inject::InjectionError> {
+    let before = native_focus()?;
+    let observed = observed_focused_text_result(observe())?;
+    let after = native_focus()?;
+    if before != after {
+        return Err(inject::InjectionError::TargetChanged);
+    }
+    Ok(observed)
+}
+
+fn injection_failure(method: InsertionMethod, error: inject::InjectionError) -> DeliveryFailure {
+    DeliveryFailure {
+        method,
+        state: match error {
+            inject::InjectionError::Protected | inject::InjectionError::PhysicalModifiersHeld => {
+                DeliveryFailureState::NotDelivered
+            }
+            inject::InjectionError::TargetChanged => DeliveryFailureState::Superseded,
+            inject::InjectionError::Partial { .. } => DeliveryFailureState::Ambiguous,
+        },
+        message: error.to_string(),
     }
 }
 
@@ -177,7 +250,79 @@ fn payload_was_inserted(baseline: &str, current: &str, payload: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::payload_was_inserted;
+    use super::{
+        ensure_insertion_allowed_using, observed_focused_text_result, payload_was_inserted,
+    };
+    use crate::inject::InjectionError;
+    use crate::uia_selection::{FocusedTextOutcome, SelectionError};
+
+    #[test]
+    fn protected_uia_cannot_become_an_unverified_paste() {
+        let mut delivered = false;
+        let result = observed_focused_text_result(Ok(FocusedTextOutcome::Protected)).map(|_| {
+            delivered = true;
+        });
+        assert!(result.is_err());
+        assert!(!delivered);
+    }
+
+    #[test]
+    fn unavailable_uia_and_provider_errors_keep_compatibility_fallback() {
+        for observation in [
+            Ok(FocusedTextOutcome::Unavailable),
+            Err(SelectionError::Timeout),
+        ] {
+            assert!(matches!(
+                observed_focused_text_result(observation),
+                Ok(None)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_native_password_blocks_before_uia_or_any_delivery_adapter() {
+        let mut delivered = false;
+        let result = ensure_insertion_allowed_using(
+            || Err(InjectionError::Protected),
+            || panic!("positive native protection must deny immediately"),
+        )
+        .map(|_| delivered = true);
+        assert!(matches!(result, Err(InjectionError::Protected)));
+        assert!(!delivered);
+    }
+
+    #[test]
+    fn a_password_discovered_at_dispatch_recheck_cannot_reach_paste() {
+        let mut checks = 0;
+        let mut delivered = false;
+        let result = ensure_insertion_allowed_using(
+            || {
+                checks += 1;
+                if checks == 1 {
+                    Ok(10)
+                } else {
+                    Err(InjectionError::Protected)
+                }
+            },
+            || Ok(FocusedTextOutcome::Unavailable),
+        )
+        .map(|_| delivered = true);
+        assert!(matches!(result, Err(InjectionError::Protected)));
+        assert!(!delivered);
+    }
+
+    #[test]
+    fn changing_native_focus_during_the_provider_read_cancels_delivery() {
+        let mut focus = 10;
+        let result = ensure_insertion_allowed_using(
+            || {
+                focus += 1;
+                Ok(focus)
+            },
+            || Ok(FocusedTextOutcome::Text("old editor".to_owned())),
+        );
+        assert!(matches!(result, Err(InjectionError::TargetChanged)));
+    }
 
     #[test]
     fn verification_requires_one_new_exact_payload_occurrence() {

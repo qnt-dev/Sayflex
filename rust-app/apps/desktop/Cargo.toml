@@ -31,7 +31,11 @@ slint-build.workspace = true
 winresource = "0.1.23"
 
 [dev-dependencies]
-i-slint-backend-testing = { version = "1.17.1", features = ["renderer-software"] }
+i-slint-backend-testing = { version = "1.17.1", features = ["renderer-software", "renderer-skia"] }
+# Slint 1.17's Windows Skia crate requires a surface feature even for its
+# headless CPU renderer. This is test-only and is not shipped in the desktop.
+i-slint-renderer-skia = { version = "=1.17.1", default-features = false, features = ["softbuffer"] }
+i-slint-core = { version = "=1.17.1", default-features = false }
 rqrr = { version = "0.11.0", default-features = false }
 tempfile.workspace = true
 

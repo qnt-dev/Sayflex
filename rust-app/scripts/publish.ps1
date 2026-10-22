@@ -5,10 +5,16 @@ param(
     [switch]$KeepBuildArtifacts,
     [string]$SigningThumbprint,
     [switch]$RequireSignature,
-    [string]$VulkanTarget
+    [string]$VulkanTarget,
+    # An isolated, explicitly unofficial local package. Normal publishing keeps
+    # its clean-source and signature gates; this mode never uploads anything.
+    [switch]$TestNvidia
 )
 
 $ErrorActionPreference = 'Stop'
+if ($TestNvidia -and ($RequireSignature -or -not [string]::IsNullOrWhiteSpace($SigningThumbprint))) {
+    throw 'The local test package cannot use public-release signing options.'
+}
 if ($RequireSignature -and [string]::IsNullOrWhiteSpace($SigningThumbprint)) {
     throw 'A public artifact requires -SigningThumbprint.'
 }
@@ -18,8 +24,12 @@ if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-f]{40}$') {
     throw 'The release source commit could not be identified.'
 }
 $dirty = @(& git -C $rustRoot status --porcelain)
-if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
+if ($LASTEXITCODE -ne 0 -or (-not $TestNvidia -and $dirty.Count -ne 0)) {
     throw 'A release must be built from a clean committed worktree.'
+}
+if ($TestNvidia) {
+    Import-Module (Join-Path $PSScriptRoot 'test-nvidia-packaging.psm1') -Force
+    $sourceSnapshot = Get-TestNvidiaSourceSnapshot -RepositoryPath $rustRoot
 }
 
 # One publish at a time.
@@ -36,14 +46,19 @@ if (-not $publishMutex.WaitOne(0)) {
         'They share their build and staging directories, so a second one would destroy the first.'
     )
 }
-$output = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'dist\app'))
+$outputRelative = if ($TestNvidia) { 'dist\test-nvidia\app' } else { 'dist\app' }
+$output = [System.IO.Path]::GetFullPath((Join-Path $rustRoot $outputRelative))
 $profile = $Configuration.ToLowerInvariant()
-$cpuTarget = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'target\publish-cpu'))
-$cudaTarget = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'target\publish-cuda'))
+$cpuTargetRelative = if ($TestNvidia) { 'target' } else { 'target\publish-cpu' }
+$cudaTargetRelative = if ($TestNvidia) { 'target' } else { 'target\publish-cuda' }
+$cpuTarget = [System.IO.Path]::GetFullPath((Join-Path $rustRoot $cpuTargetRelative))
+$cudaTarget = [System.IO.Path]::GetFullPath((Join-Path $rustRoot $cudaTargetRelative))
 # whisper.cpp builds its Vulkan shader generator as a deeply nested CMake project.
 # Keep this target deliberately short so MSBuild stays below MAX_PATH on Windows.
 $vulkanTarget = [System.IO.Path]::GetFullPath(
-    $(if ([string]::IsNullOrWhiteSpace($VulkanTarget)) { 'C:\sf-build\v' } else { $VulkanTarget })
+    $(if ([string]::IsNullOrWhiteSpace($VulkanTarget)) {
+        if ($TestNvidia) { 'C:\sf-build\nt' } else { 'C:\sf-build\v' }
+    } else { $VulkanTarget })
 )
 $temporaryTargets = @($cpuTarget, $cudaTarget, $vulkanTarget)
 $cudaArchitectures = '75-virtual;80-virtual;86-real;89-real;120a-real;121a-real'
@@ -154,6 +169,8 @@ $previousGeneratorInstance = $env:CMAKE_GENERATOR_INSTANCE
 $previousBuildCommit = $env:SAYFLEX_BUILD_COMMIT
 $previousOcrBundle = $env:SAYFLEX_OCR_BUNDLE
 $previousRequireSimd = $env:FXTRANSLATE_REQUIRE_SIMD
+$previousNativeCReleaseFlags = $env:CMAKE_C_FLAGS_RELEASE
+$previousNativeCxxReleaseFlags = $env:CMAKE_CXX_FLAGS_RELEASE
 $publishSucceeded = $false
 
 try {
@@ -167,20 +184,58 @@ try {
     # The compact translator's int8 SIMD kernel must be compiled in. Without
     # this, a C++ build failure silently shipped the ~8x slower scalar kernel.
     $env:FXTRANSLATE_REQUIRE_SIMD = '1'
+    # cmake-rs 0.1.58 replaces MSVC's Release flags when the generator is
+    # implicit, dropping /O2. Pin native optimization for whisper/ggml too;
+    # Cargo's --release optimizes Rust but cannot repair these CMake flags.
+    $env:CMAKE_C_FLAGS_RELEASE = '/MD /O2 /Ob2 /DNDEBUG'
+    $env:CMAKE_CXX_FLAGS_RELEASE = '/MD /O2 /Ob2 /DNDEBUG'
     New-Item -ItemType Directory -Force -Path $output | Out-Null
     Get-ChildItem -LiteralPath $output -Force -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force
-    foreach ($target in $temporaryTargets) {
-        if (Test-Path -LiteralPath $target) {
-            Assert-OwnedBuildTarget $target
-            Remove-Item -LiteralPath $target -Recurse -Force
+    if (-not $TestNvidia) {
+        foreach ($target in $temporaryTargets) {
+            if (Test-Path -LiteralPath $target) {
+                Assert-OwnedBuildTarget $target
+                Remove-Item -LiteralPath $target -Recurse -Force
+            }
         }
+    }
+    if ($TestNvidia) {
+        # This must precede every executable probe, including OCR staging.
+        Set-Content -LiteralPath (Join-Path $output 'sayflex-test-channel') -Value 'test-nvidia' -Encoding ascii
+        @'
+SayFlex Test - local NVIDIA runtime experiment
+
+This is an unsigned, unofficial local test build, not a public release.
+Install: %LOCALAPPDATA%\Programs\SayFlex-Test-Nvidia
+Separate settings, history, models and runtimes: %LOCALAPPDATA%\SayFlex-Test-Nvidia
+The normal SayFlex installation and data are not imported or modified.
+Windows autostart is disabled for this build. Launch it from SayFlex Test.
+
+The included CUDA speech worker contains statically linked NVIDIA runtime-loader code.
+NVIDIA cuBLAS DLLs are not bundled; their separate download requires your
+explicit action in the test app.
+CPU/Vulkan speech and translation remain available without that download.
+This build is for local functional testing and is not approved by SignPath Foundation.
+Separating the DLL download does not remove the NVIDIA code embedded in the worker.
+
+Uninstall only "SayFlex Test" in Windows Settings > Apps. Its private data
+is retained. To remove it as well, close SayFlex Test and manually delete
+only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
+'@ | Set-Content -LiteralPath (Join-Path $output 'TEST-BUILD-README.txt') -Encoding utf8
     }
 
     Push-Location $rustRoot
     try {
-        & $cargoPath build --locked --target-dir $cpuTarget --profile $profile --workspace
+        & $cargoPath build --locked --target-dir $cpuTarget --profile $profile --workspace --exclude sayflex-desktop
         if ($LASTEXITCODE -ne 0) { throw 'The Rust workspace build failed.' }
+
+        # The workspace enables PP-OCR for the OCR worker. Cargo unifies that
+        # dependency feature into desktop too, unnecessarily linking ONNX and
+        # DirectML into the UI. Build desktop separately before staging, retaining
+        # the full-featured worker executables produced by the workspace build.
+        & $cargoPath build --locked --target-dir $cpuTarget --profile $profile -p sayflex-desktop
+        if ($LASTEXITCODE -ne 0) { throw 'The isolated desktop build failed.' }
 
         $binaryMap = [ordered]@{
             'sayflex-speech-worker.exe' = 'SayFlex.Speech.Cpu.exe'
@@ -196,7 +251,8 @@ try {
         }
         # Symbols stay beside the payload, never inside it: panic logs record
         # module offsets, and these PDBs from the same build resolve them.
-        $symbolsOutput = [System.IO.Path]::GetFullPath((Join-Path $rustRoot 'dist\symbols'))
+        $symbolsRelative = if ($TestNvidia) { 'dist\test-nvidia\symbols' } else { 'dist\symbols' }
+        $symbolsOutput = [System.IO.Path]::GetFullPath((Join-Path $rustRoot $symbolsRelative))
         New-Item -ItemType Directory -Force -Path $symbolsOutput | Out-Null
         Get-ChildItem -LiteralPath $symbolsOutput -Force -ErrorAction SilentlyContinue |
             Remove-Item -Recurse -Force
@@ -234,6 +290,10 @@ try {
             Copy-Item -LiteralPath (Join-Path $rustRoot $document) `
                 -Destination (Join-Path $output $document)
         }
+        if ($TestNvidia) {
+            & (Join-Path $PSScriptRoot 'generate-third-party-notices.ps1') `
+                -OutputPath (Join-Path $output 'THIRD_PARTY_NOTICES.md') -TestNvidia
+        }
 
         $env:CUDA_PATH = $cudaRoot
         $env:CMAKE_CUDA_ARCHITECTURES = $cudaArchitectures
@@ -266,14 +326,16 @@ try {
         Copy-Item -LiteralPath (Join-Path $vulkanTarget "$profile\sayflex-speech-worker.exe") `
             -Destination (Join-Path $output 'SayFlex.Speech.Vulkan.exe')
 
-        $cudaRuntimeOutput = Join-Path $output 'runtimes\cuda'
-        New-Item -ItemType Directory -Force -Path $cudaRuntimeOutput | Out-Null
-        foreach ($dll in @('cublas64_13.dll', 'cublasLt64_13.dll')) {
-            $source = Join-Path $cudaRoot "bin\x64\$dll"
-            if (-not (Test-Path -LiteralPath $source)) {
-                throw "The CUDA runtime is incomplete: $source is missing."
+        if (-not $TestNvidia) {
+            $cudaRuntimeOutput = Join-Path $output 'runtimes\cuda'
+            New-Item -ItemType Directory -Force -Path $cudaRuntimeOutput | Out-Null
+            foreach ($dll in @('cublas64_13.dll', 'cublasLt64_13.dll')) {
+                $source = Join-Path $cudaRoot "bin\x64\$dll"
+                if (-not (Test-Path -LiteralPath $source)) {
+                    throw "The CUDA runtime is incomplete: $source is missing."
+                }
+                Copy-Item -LiteralPath $source -Destination (Join-Path $cudaRuntimeOutput $dll)
             }
-            Copy-Item -LiteralPath $source -Destination (Join-Path $cudaRuntimeOutput $dll)
         }
 
         if (-not [string]::IsNullOrWhiteSpace($SigningThumbprint)) {
@@ -307,6 +369,10 @@ try {
                     probe = 'whisper_model_warmup'
                 }
             )
+        }
+        if ($TestNvidia) {
+            $manifest.backends[0].runtime_directory = 'external-managed-runtime'
+            $manifest.backends[0].runtime_bundled = $false
         }
         $manifest | ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $output 'speech-backends.json') -Encoding utf8
@@ -346,7 +412,7 @@ try {
                     }
                 }
         )
-        [ordered]@{
+        $buildManifest = [ordered]@{
             schema_version = 1
             product = 'SayFlex'
             version = $sourceVersion
@@ -355,12 +421,22 @@ try {
             cargo_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $rustRoot 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
             built_utc = [DateTime]::UtcNow.ToString('o')
             files = $payloadFiles
-        } | ConvertTo-Json -Depth 6 |
+        }
+        if ($TestNvidia) {
+            Assert-TestNvidiaSourceUnchanged -RepositoryPath $rustRoot -Snapshot $sourceSnapshot
+            $buildManifest.channel = 'test-nvidia'
+            $buildManifest.build_kind = 'local_test'
+            $buildManifest.official_release = $false
+            $buildManifest.source_snapshot = $sourceSnapshot
+            Assert-TestNvidiaPayload -AppDirectory $output -Manifest ([pscustomobject]$buildManifest)
+        }
+        $buildManifest | ConvertTo-Json -Depth 8 |
             Set-Content -LiteralPath (Join-Path $output 'build-manifest.json') -Encoding utf8
 
         & (Join-Path $PSScriptRoot 'validate-release.ps1') `
             -AppDirectory $output `
-            -RequireSignature:$RequireSignature
+            -RequireSignature:$RequireSignature `
+            -TestNvidia:$TestNvidia
         if ($LASTEXITCODE -ne 0) { throw 'Release validation failed.' }
         $publishSucceeded = $true
     }
@@ -378,8 +454,10 @@ finally {
     $env:CMAKE_GENERATOR_INSTANCE = $previousGeneratorInstance
     $env:SAYFLEX_BUILD_COMMIT = $previousBuildCommit
     $env:FXTRANSLATE_REQUIRE_SIMD = $previousRequireSimd
+    $env:CMAKE_C_FLAGS_RELEASE = $previousNativeCReleaseFlags
+    $env:CMAKE_CXX_FLAGS_RELEASE = $previousNativeCxxReleaseFlags
     $env:SAYFLEX_OCR_BUNDLE = $previousOcrBundle
-    if (-not $KeepBuildArtifacts) {
+    if (-not $KeepBuildArtifacts -and -not $TestNvidia) {
         foreach ($target in $temporaryTargets) {
             if (Test-Path -LiteralPath $target) {
                 Assert-OwnedBuildTarget $target
@@ -390,5 +468,6 @@ finally {
 }
 
 if ($publishSucceeded) {
-    Write-Host "SayFlex universal release published to $output"
+    $label = if ($TestNvidia) { 'SayFlex local NVIDIA test build' } else { 'SayFlex universal release' }
+    Write-Host "$label staged at $output"
 }

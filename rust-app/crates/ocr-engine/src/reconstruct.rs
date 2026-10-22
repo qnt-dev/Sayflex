@@ -1,4 +1,4 @@
-use rust_protocol::{OcrFailureKind, OcrLine};
+use rust_protocol::{OcrFailureKind, OcrLine, PhysicalPoint, PhysicalQuad, PhysicalRect};
 
 const MAX_DENSE_BLOCK_LINES: u64 = 6;
 
@@ -25,6 +25,7 @@ pub struct ReconstructedBlock {
 pub struct ReconstructedElement {
     pub text: String,
     pub bounds: rust_protocol::PhysicalRect,
+    pub quad: Option<PhysicalQuad>,
     pub confidence_milli: u16,
 }
 
@@ -32,7 +33,9 @@ pub struct ReconstructedElement {
 pub struct ReconstructedVisualRow {
     pub text: String,
     pub bounds: rust_protocol::PhysicalRect,
+    pub quad: Option<PhysicalQuad>,
     pub fragments: Vec<rust_protocol::PhysicalRect>,
+    pub fragment_quads: Vec<PhysicalQuad>,
     pub confidence_milli: u16,
 }
 
@@ -54,10 +57,107 @@ pub fn reconstruct_visual_rows(elements: &[ReconstructedElement]) -> Vec<Reconst
     rows.into_iter().map(VisualRowBuilder::finish).collect()
 }
 
+/// Conservatively join wrapped document lines after detecting visual rows.
+/// Short labels, separate columns, dates and unknown legacy geometry retain
+/// their own blocks. Exact line polygons remain available for source masks.
+pub fn reconstruct_visual_paragraphs(
+    rows: &[ReconstructedVisualRow],
+) -> Vec<ReconstructedVisualRow> {
+    let mut paragraphs: Vec<ReconstructedVisualRow> = Vec::new();
+    let mut previous: Option<&ReconstructedVisualRow> = None;
+    let mut line_count = 0_u64;
+    let mut previous_step: Option<f64> = None;
+    for row in rows {
+        let step = previous.and_then(|previous| {
+            let frame = QuadFrame::new(previous.quad?);
+            let a = frame.extent(previous.quad?);
+            let b = frame.extent(row.quad?);
+            Some((b.1 + b.3 - a.1 - a.3) * 0.5)
+        });
+        let joins = previous.is_some_and(|previous| paragraph_continues(previous, row))
+            // Detector polygons include padding around the ink. Once a
+            // paragraph establishes its spacing, a larger blank-line gap
+            // must not be mistaken for another line of that paragraph.
+            && previous_step.zip(step).is_none_or(|(previous, next)| next <= previous * 1.5)
+            && line_count < MAX_DENSE_BLOCK_LINES
+            && paragraphs.last().is_some_and(|paragraph| {
+                paragraph.text.len() + row.text.len()
+                    < rust_protocol::MAX_SCREEN_BLOCK_TEXT_BYTES
+            });
+        if joins {
+            let paragraph = paragraphs.last_mut().expect("previous paragraph");
+            let old_count = paragraph.fragments.len() as u64;
+            let next_count = row.fragments.len() as u64;
+            let confidence = u64::from(paragraph.confidence_milli) * old_count
+                + u64::from(row.confidence_milli) * next_count;
+            if lexical_hyphen_continuation(&paragraph.text, &row.text) {
+                paragraph.text.pop();
+                paragraph.text.push_str(row.text.trim());
+            } else {
+                append_visual_fragment(&mut paragraph.text, &row.text);
+            }
+            paragraph.fragments.extend_from_slice(&row.fragments);
+            paragraph
+                .fragment_quads
+                .extend_from_slice(&row.fragment_quads);
+            let quad = QuadFrame::new(paragraph.quad.expect("validated paragraph geometry"))
+                .enclose(&paragraph.fragment_quads);
+            paragraph.quad = Some(quad);
+            paragraph.bounds =
+                union_rect(union_rect(paragraph.bounds, row.bounds), quad_bounds(quad));
+            paragraph.confidence_milli = (confidence / (old_count + next_count).max(1)) as u16;
+            line_count += 1;
+        } else {
+            paragraphs.push(row.clone());
+            line_count = 1;
+        }
+        previous_step = if joins { step } else { None };
+        previous = Some(row);
+    }
+    paragraphs
+}
+
+fn paragraph_continues(previous: &ReconstructedVisualRow, next: &ReconstructedVisualRow) -> bool {
+    let (Some(previous_quad), Some(next_quad)) = (previous.quad, next.quad) else {
+        return false;
+    };
+    if !previous_quad.is_within(previous.bounds)
+        || !next_quad.is_within(next.bounds)
+        || previous.fragment_quads.is_empty()
+        || next.fragment_quads.is_empty()
+        || previous.fragment_quads.len() != previous.fragments.len()
+        || next.fragment_quads.len() != next.fragments.len()
+        || starts_list_item(&next.text)
+    {
+        return false;
+    }
+    let frame = QuadFrame::new(previous_quad);
+    let other = QuadFrame::new(next_quad);
+    if frame.x * other.x + frame.y * other.y < 3_f64.to_radians().cos() {
+        return false;
+    }
+    let a = frame.extent(previous_quad);
+    let b = frame.extent(next_quad);
+    let height = (a.3 - a.1).max(1.0);
+    let next_height = (b.3 - b.1).max(1.0);
+    let step = (b.1 + b.3 - a.1 - a.3) * 0.5;
+    let minimum_height = height.min(next_height);
+    let maximum_height = height.max(next_height);
+    // A short final line ends a paragraph. A full-width line may contain a
+    // sentence ending, so punctuation alone is not a paragraph boundary.
+    a.2 - a.0 >= height * 12.0
+        && maximum_height <= minimum_height * 1.4
+        && (a.0 - b.0).abs() <= maximum_height
+        && step >= minimum_height * 0.75
+        && step <= maximum_height * 1.8
+}
+
 struct VisualRowBuilder {
     text: String,
     bounds: rust_protocol::PhysicalRect,
+    quad: Option<PhysicalQuad>,
     fragments: Vec<rust_protocol::PhysicalRect>,
+    fragment_quads: Vec<PhysicalQuad>,
     confidence_total: u64,
     fragment_count: u64,
     contains_unmergeable_noise: bool,
@@ -65,10 +165,13 @@ struct VisualRowBuilder {
 
 impl VisualRowBuilder {
     fn new(element: &ReconstructedElement) -> Self {
+        let quad = element.quad.filter(|quad| quad.is_within(element.bounds));
         Self {
             text: element.text.clone(),
             bounds: element.bounds,
+            quad,
             fragments: vec![element.bounds],
+            fragment_quads: quad.into_iter().collect(),
             confidence_total: u64::from(element.confidence_milli),
             fragment_count: 1,
             contains_unmergeable_noise: is_unmergeable_noise(element),
@@ -78,6 +181,15 @@ impl VisualRowBuilder {
     fn accepts(&self, element: &ReconstructedElement) -> bool {
         if self.contains_unmergeable_noise || is_unmergeable_noise(element) {
             return false;
+        }
+        match (
+            self.quad,
+            element.quad.filter(|quad| quad.is_within(element.bounds)),
+        ) {
+            (Some(row), Some(next)) => return oriented_fragments_share_row(row, next),
+            // Unknown orientation must not enlarge a known slanted line.
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
         }
         let row_top = i64::from(self.bounds.y);
         let row_bottom = row_top.saturating_add(i64::from(self.bounds.height));
@@ -95,6 +207,12 @@ impl VisualRowBuilder {
         let row_right = row_left.saturating_add(i64::from(self.bounds.width));
         let element_left = i64::from(element.bounds.x);
         let element_right = element_left.saturating_add(i64::from(element.bounds.width));
+        let horizontal_overlap = row_right.min(element_right) - row_left.max(element_left);
+        if horizontal_overlap.saturating_mul(4)
+            > i64::from(self.bounds.width.min(element.bounds.width))
+        {
+            return false;
+        }
         let horizontal_gap = if row_right < element_left {
             element_left.saturating_sub(row_right)
         } else if element_right < row_left {
@@ -113,6 +231,10 @@ impl VisualRowBuilder {
     }
 
     fn baseline_distance(&self, element: &ReconstructedElement) -> u64 {
+        if let (Some(row), Some(next)) = (self.quad, element.quad) {
+            let frame = QuadFrame::new(row);
+            return (frame.extent(row).3 - frame.extent(next).3).abs().round() as u64;
+        }
         let row_baseline = i64::from(self.bounds.y).saturating_add(i64::from(self.bounds.height));
         let element_baseline =
             i64::from(element.bounds.y).saturating_add(i64::from(element.bounds.height));
@@ -123,6 +245,12 @@ impl VisualRowBuilder {
         append_visual_fragment(&mut self.text, &element.text);
         self.fragments.push(element.bounds);
         self.bounds = union_rect(self.bounds, element.bounds);
+        if let (Some(row), Some(next)) = (self.quad, element.quad) {
+            self.fragment_quads.push(next);
+            let quad = QuadFrame::new(row).enclose(&self.fragment_quads);
+            self.bounds = union_rect(self.bounds, quad_bounds(quad));
+            self.quad = Some(quad);
+        }
         self.confidence_total = self
             .confidence_total
             .saturating_add(u64::from(element.confidence_milli));
@@ -133,10 +261,115 @@ impl VisualRowBuilder {
         ReconstructedVisualRow {
             text: self.text,
             bounds: self.bounds,
+            quad: self.quad,
             fragments: self.fragments,
+            fragment_quads: self.fragment_quads,
             confidence_milli: u16::try_from(self.confidence_total / self.fragment_count.max(1))
                 .unwrap_or(u16::MAX),
         }
+    }
+}
+
+/// Use the text's own baseline/normal axes, not the tall screen-aligned
+/// rectangle produced by an inclined line. Coordinates remain crop-local.
+#[derive(Clone, Copy)]
+struct QuadFrame {
+    x: f64,
+    y: f64,
+}
+
+impl QuadFrame {
+    fn new(quad: PhysicalQuad) -> Self {
+        let [tl, tr, br, bl] = quad.points;
+        let x = f64::from(tr.x) - f64::from(tl.x) + f64::from(br.x) - f64::from(bl.x);
+        let y = f64::from(tr.y) - f64::from(tl.y) + f64::from(br.y) - f64::from(bl.y);
+        let length = x.hypot(y).max(1.0);
+        Self {
+            x: x / length,
+            y: y / length,
+        }
+    }
+
+    fn extent(self, quad: PhysicalQuad) -> (f64, f64, f64, f64) {
+        quad.points.iter().fold(
+            (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            ),
+            |(left, top, right, bottom), point| {
+                let x = f64::from(point.x) * self.x + f64::from(point.y) * self.y;
+                let y = -f64::from(point.x) * self.y + f64::from(point.y) * self.x;
+                (left.min(x), top.min(y), right.max(x), bottom.max(y))
+            },
+        )
+    }
+
+    fn enclose(self, quads: &[PhysicalQuad]) -> PhysicalQuad {
+        let (left, top, right, bottom) = quads.iter().map(|quad| self.extent(*quad)).fold(
+            (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            ),
+            |a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),
+        );
+        PhysicalQuad {
+            points: [(left, top), (right, top), (right, bottom), (left, bottom)].map(|(x, y)| {
+                PhysicalPoint {
+                    x: (x * self.x - y * self.y).round() as i32,
+                    y: (x * self.y + y * self.x).round() as i32,
+                }
+            }),
+        }
+    }
+}
+
+fn oriented_fragments_share_row(row: PhysicalQuad, next: PhysicalQuad) -> bool {
+    let frame = QuadFrame::new(row);
+    let other = QuadFrame::new(next);
+    // Five degrees permits detector noise, without joining different slopes.
+    if frame.x * other.x + frame.y * other.y < 5_f64.to_radians().cos() {
+        return false;
+    }
+    let a = frame.extent(row);
+    let b = frame.extent(next);
+    let height = (a.3 - a.1).min(b.3 - b.1).max(1.0);
+    let vertical_overlap = a.3.min(b.3) - a.1.max(b.1);
+    let horizontal_overlap = a.2.min(b.2) - a.0.max(b.0);
+    let width = (a.2 - a.0).min(b.2 - b.0).max(1.0);
+    vertical_overlap >= height * 0.45
+        && horizontal_overlap <= width * 0.25
+        && -horizontal_overlap <= 12_f64.max(height * 0.5)
+}
+
+fn quad_bounds(quad: PhysicalQuad) -> PhysicalRect {
+    let left = quad
+        .points
+        .iter()
+        .map(|point| point.x)
+        .min()
+        .unwrap_or_default();
+    let top = quad
+        .points
+        .iter()
+        .map(|point| point.y)
+        .min()
+        .unwrap_or_default();
+    let right = quad
+        .points
+        .iter()
+        .map(|point| point.x)
+        .max()
+        .unwrap_or(left);
+    let bottom = quad.points.iter().map(|point| point.y).max().unwrap_or(top);
+    PhysicalRect {
+        x: left,
+        y: top,
+        width: u32::try_from(i64::from(right) - i64::from(left)).unwrap_or(u32::MAX),
+        height: u32::try_from(i64::from(bottom) - i64::from(top)).unwrap_or(u32::MAX),
     }
 }
 
@@ -192,6 +425,7 @@ struct AcceptedLine<'a> {
     index: usize,
     text: &'a str,
     source: &'a OcrLine,
+    reading_bounds: PhysicalRect,
 }
 
 #[derive(Default)]
@@ -204,8 +438,8 @@ struct Column<'a> {
 
 impl<'a> Column<'a> {
     fn new(line: AcceptedLine<'a>) -> Self {
-        let left = i64::from(line.source.bounds.x);
-        let right = left.saturating_add(i64::from(line.source.bounds.width));
+        let left = i64::from(line.reading_bounds.x);
+        let right = left.saturating_add(i64::from(line.reading_bounds.width));
         Self {
             lines: vec![line],
             left_sum: left,
@@ -219,8 +453,8 @@ impl<'a> Column<'a> {
     }
 
     fn accepts(&self, line: AcceptedLine<'_>, tolerance: i64) -> bool {
-        let left = i64::from(line.source.bounds.x);
-        let right = left.saturating_add(i64::from(line.source.bounds.width));
+        let left = i64::from(line.reading_bounds.x);
+        let right = left.saturating_add(i64::from(line.reading_bounds.width));
         let overlap = self.max_x.min(right).saturating_sub(self.min_x.max(left));
         let line_width = right.saturating_sub(left).max(1);
         let column_width = self.max_x.saturating_sub(self.min_x).max(1);
@@ -229,8 +463,8 @@ impl<'a> Column<'a> {
     }
 
     fn push(&mut self, line: AcceptedLine<'a>) {
-        let left = i64::from(line.source.bounds.x);
-        let right = left.saturating_add(i64::from(line.source.bounds.width));
+        let left = i64::from(line.reading_bounds.x);
+        let right = left.saturating_add(i64::from(line.reading_bounds.width));
         self.lines.push(line);
         self.left_sum = self.left_sum.saturating_add(left);
         self.min_x = self.min_x.min(left);
@@ -252,6 +486,7 @@ pub fn reconstruct_text(
                     index,
                     text,
                     source,
+                    reading_bounds: source.bounds,
                 },
             )
         })
@@ -260,18 +495,63 @@ pub fn reconstruct_text(
         return Err(OcrFailureKind::NoText);
     }
 
-    let median_height = median(accepted.iter().map(|line| line.source.bounds.height.max(1)));
-    let median_width = median(accepted.iter().map(|line| line.source.bounds.width.max(1)));
+    // A coherently tilted document needs deskewed reading order as well as
+    // deskewed row grouping. Keep the physical rectangles/quads untouched.
+    let mut angles = accepted
+        .iter()
+        .filter_map(|line| {
+            line.source
+                .quad
+                .filter(|quad| quad.is_within(line.source.bounds))
+                .map(|quad| {
+                    let frame = QuadFrame::new(quad);
+                    frame.y.atan2(frame.x)
+                })
+        })
+        .collect::<Vec<_>>();
+    angles.sort_by(f64::total_cmp);
+    if let Some(&angle) = angles.get(angles.len() / 2) {
+        let coherent = angles
+            .iter()
+            .filter(|other| (**other - angle).abs() <= 5_f64.to_radians())
+            .count();
+        if coherent * 2 >= accepted.len() && angle.abs() > 1_f64.to_radians() {
+            let (y, x) = angle.sin_cos();
+            let frame = QuadFrame { x, y };
+            for line in &mut accepted {
+                if let Some(quad) = line
+                    .source
+                    .quad
+                    .filter(|quad| quad.is_within(line.source.bounds))
+                {
+                    let (left, top, right, bottom) = frame.extent(quad);
+                    line.reading_bounds = PhysicalRect {
+                        x: left.floor() as i32,
+                        y: top.floor() as i32,
+                        width: (right.ceil() - left.floor()).max(1.0) as u32,
+                        height: (bottom.ceil() - top.floor()).max(1.0) as u32,
+                    };
+                }
+            }
+        }
+    }
+
+    let median_height = median(
+        accepted
+            .iter()
+            .map(|line| line.reading_bounds.height.max(1)),
+    );
+    let median_width = median(accepted.iter().map(|line| line.reading_bounds.width.max(1)));
     let column_tolerance = i64::from((median_height * 3).max(median_width * 2 / 5));
 
-    accepted.sort_by_key(|line| (line.source.bounds.x, line.source.bounds.y, line.index));
+    accepted.sort_by_key(|line| (line.reading_bounds.x, line.reading_bounds.y, line.index));
     let mut columns: Vec<Column<'_>> = Vec::new();
     for line in accepted.iter().copied() {
         let target = columns
             .iter()
             .enumerate()
             .filter(|(_, column)| column.accepts(line, column_tolerance))
-            .min_by_key(|(_, column)| i64::from(line.source.bounds.x).abs_diff(column.anchor_x()))
+            .min_by_key(|(_, column)| i64::from(line.reading_bounds.x).abs_diff(column.anchor_x()))
             .map(|(index, _)| index);
         if let Some(index) = target {
             columns[index].push(line);
@@ -287,11 +567,17 @@ pub fn reconstruct_text(
     for column in &mut columns {
         column
             .lines
-            .sort_by_key(|line| (line.source.bounds.y, line.source.bounds.x, line.index));
-        elements.extend(column.lines.iter().map(|line| ReconstructedElement {
-            text: line.text.to_owned(),
-            bounds: line.source.bounds,
-            confidence_milli: line.source.confidence_milli,
+            .sort_by_key(|line| (line.reading_bounds.y, line.reading_bounds.x, line.index));
+        elements.extend(column.lines.iter().map(|line| {
+            ReconstructedElement {
+                text: line.text.to_owned(),
+                bounds: line.source.bounds,
+                quad: line
+                    .source
+                    .quad
+                    .filter(|quad| quad.is_within(line.source.bounds)),
+                confidence_milli: line.source.confidence_milli,
+            }
         }));
         blocks.extend(reconstruct_column(&column.lines, paragraph_gap));
     }
@@ -331,10 +617,10 @@ fn reconstruct_column(lines: &[AcceptedLine<'_>], paragraph_gap: i64) -> Vec<Rec
             .get(index + 1)
             .is_some_and(|next| lexical_hyphen_continuation(line.text, next.text));
         let starts_paragraph = previous.is_some_and(|previous| {
-            let previous_bottom = i64::from(previous.source.bounds.y)
-                .saturating_add(i64::from(previous.source.bounds.height));
+            let previous_bottom = i64::from(previous.reading_bounds.y)
+                .saturating_add(i64::from(previous.reading_bounds.height));
             let vertical_gap =
-                i64::from(line.source.bounds.y).saturating_sub(previous_bottom) > paragraph_gap;
+                i64::from(line.reading_bounds.y).saturating_sub(previous_bottom) > paragraph_gap;
             let explicit_list_item = starts_list_item(line.text);
             let dense_block_limit = current.as_ref().is_some_and(|block| {
                 block.line_count >= MAX_DENSE_BLOCK_LINES

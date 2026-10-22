@@ -1,6 +1,7 @@
-use rust_protocol::{BlockCompletion, PhysicalRect, ScreenBlockId};
+use rust_protocol::{BlockCompletion, PhysicalQuad, PhysicalRect, ScreenBlockId};
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
+use crate::screen_geometry::{OrientedBox, repair_oriented};
 use crate::screen_inpaint::{GlyphMetrics, PixelRect, glyph_metrics, repaired_pixels};
 use crate::screen_result::ScreenResultSnapshot;
 use crate::{ScreenBlockOverlay, ScreenConnectorOverlay, ScreenTranslationWindow};
@@ -106,6 +107,8 @@ pub(crate) struct BlockLayoutInput {
     pub(crate) translation: String,
     pub(crate) bounds: CropLocalRect,
     pub(crate) fragments: Vec<CropLocalRect>,
+    pub(crate) quad: Option<PhysicalQuad>,
+    pub(crate) fragment_quads: Vec<PhysicalQuad>,
     pub(crate) complete: bool,
     pub(crate) confidence_milli: u16,
 }
@@ -158,6 +161,7 @@ pub(crate) struct BlockLayout {
     pub(crate) source_y: f32,
     pub(crate) source_width: f32,
     pub(crate) source_height: f32,
+    pub(crate) source_quad: Option<PhysicalQuad>,
     pub(crate) low_confidence: bool,
     pub(crate) replace_source: bool,
     pub(crate) placed: bool,
@@ -168,6 +172,7 @@ pub(crate) struct BlockLayout {
     pub(crate) font_size: f32,
     pub(crate) bold: bool,
     /// The source text's own colours, when the picture shows them.
+    pub(crate) angle: f32,
     pub(crate) source_ink: Option<[u8; 3]>,
     pub(crate) source_background: Option<[u8; 3]>,
 }
@@ -199,6 +204,7 @@ pub(crate) struct ScreenResultLayoutPlan {
     pub(crate) content_height: u32,
     pub(crate) viewport_height: u32,
     pub(crate) masks: Vec<MaskLayout>,
+    pub(crate) oriented_masks: Vec<PhysicalQuad>,
     pub(crate) connectors: Vec<ConnectorLayout>,
     pub(crate) unplaceable_rows: Vec<ScreenBlockId>,
 }
@@ -314,6 +320,7 @@ pub(crate) fn plan_screen_result_layout_with_frame(
         content_height: image_height,
         viewport_height: image_height,
         masks: Vec::new(),
+        oriented_masks: Vec::new(),
         connectors: Vec::new(),
         unplaceable_rows: Vec::new(),
     };
@@ -342,13 +349,12 @@ pub(crate) fn plan_screen_result_layout_with_frame(
             source_y: source.1,
             source_width: source.2,
             source_height: source.3,
+            source_quad: block.quad,
             low_confidence: block.confidence_milli < 650,
             replace_source,
             placed: false,
             callout: false,
-            not_placeable: overlay_mode
-                && !block.complete
-                && block.source.chars().any(char::is_alphabetic),
+            not_placeable: overlay_mode && !block.complete,
             editable_source: overlay_mode
                 && block.complete
                 && !replace_source
@@ -356,9 +362,32 @@ pub(crate) fn plan_screen_result_layout_with_frame(
             overflow: false,
             font_size: MIN_FONT_SIZE,
             bold: false,
+            angle: 0.0,
             source_ink: None,
             source_background: None,
         };
+        if replace_source
+            && let Some(oriented) = block.quad.and_then(OrientedBox::new)
+            && oriented.angle.abs() >= 2.0
+        {
+            place_oriented_block(
+                &mut row,
+                block,
+                oriented,
+                (scale_x, scale_y),
+                projection,
+                measurer,
+                frame,
+            );
+            plan.oriented_masks
+                .extend(if block.fragment_quads.is_empty() {
+                    block.quad.into_iter().collect::<Vec<_>>()
+                } else {
+                    block.fragment_quads.clone()
+                });
+            plan.blocks.push(row);
+            continue;
+        }
         if replace_source {
             // The source glyphs, when the picture is at hand, set the size,
             // weight and colour of the translation and where it starts.
@@ -515,6 +544,81 @@ pub(crate) fn plan_screen_result_layout_with_frame(
         plan.blocks.push(row);
     }
     plan
+}
+
+fn place_oriented_block(
+    row: &mut BlockLayout,
+    block: &BlockLayoutInput,
+    oriented: OrientedBox,
+    scale: (f32, f32),
+    projection: ResultViewMode,
+    measurer: &dyn ScreenTextMeasurer,
+    frame: Option<&rust_platform_windows::screen_capture::RgbaFrame>,
+) {
+    // Use one actual line for glyph metrics. A paragraph's tall envelope is
+    // never interpreted as the height of one enormous font.
+    let line = block
+        .fragment_quads
+        .first()
+        .copied()
+        .and_then(OrientedBox::new)
+        .unwrap_or(oriented);
+    let patch = frame.and_then(|frame| line.rectified(frame, 8));
+    let line_bounds = CropLocalRect {
+        x: 8,
+        y: 8,
+        width: line.width.ceil() as u32,
+        height: line.height.ceil() as u32,
+    };
+    let metrics = patch.as_ref().and_then(|patch| {
+        glyph_metrics(
+            patch,
+            pixel_rect(line_bounds),
+            (8, 8 + i64::from(line_bounds.width)),
+        )
+    });
+    let em = source_em(&block.source, line_bounds, metrics.as_ref());
+    row.bold = metrics
+        .as_ref()
+        .is_some_and(|m| m.stroke >= (em * BOLD_STROKE_RATIO).max(BOLD_STROKE_MINIMUM));
+    row.source_ink = metrics.as_ref().map(|m| m.ink);
+    row.source_background = metrics.as_ref().map(|m| m.background).or_else(|| {
+        patch
+            .as_ref()
+            .and_then(|patch| crate::screen_inpaint::ring_median(patch, pixel_rect(line_bounds)))
+    });
+    row.display_translation = presented_translation(&block.source, &block.translation);
+    row.x = oriented.x * scale.0;
+    row.y = oriented.y * scale.1;
+    row.width = (oriented.width * scale.0).max(1.0);
+    row.height = (oriented.height * scale.1).max(1.0);
+    row.angle = oriented.angle;
+    let text = projected_text(row, projection);
+    let text_width = (row.width - TEXT_HORIZONTAL_PADDING).max(1.0);
+    let text_height = (row.height - TEXT_VERTICAL_PADDING).max(1.0);
+    let fits = |font| {
+        let size = measurer.measure(&text, text_width, font, row.bold);
+        // Slint reports intrinsic (unwrapped) preferred width but measures
+        // preferred height at the supplied wrapping width. Requiring that
+        // intrinsic width to fit shrank whole paragraphs to the minimum font.
+        size.width.is_finite()
+            && size.height.is_finite()
+            && size.height > 0.0
+            && size.height <= text_height + 0.5
+    };
+    let mut low = MIN_FONT_SIZE;
+    let mut high = (em * scale.1).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+    for _ in 0..8 {
+        let mid = (low + high) * 0.5;
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    row.font_size = low;
+    row.placed = true;
+    row.overflow = !fits(low);
 }
 
 fn pixel_rect(rect: CropLocalRect) -> PixelRect {
@@ -1031,11 +1135,25 @@ pub(crate) fn apply_snapshot(
 ) -> Result<Vec<BlockLayout>, String> {
     let requested_mode = preview.get_screen_view_mode();
     preview.set_screen_copied(false);
+    let translating = preview.get_screen_translating();
+    preview.set_screen_failed_blocks(if translating {
+        0
+    } else {
+        snapshot
+            .blocks
+            .iter()
+            .filter(|block| {
+                block.completion != BlockCompletion::Completed || block.failure_message.is_some()
+            })
+            .count() as i32
+    });
     let crop_size = CropPixelSize::from_screen_rect(snapshot.crop_rect);
     let inputs = snapshot
         .blocks
         .iter()
         .map(|block| BlockLayoutInput {
+            quad: block.quad,
+            fragment_quads: block.fragment_quads.clone(),
             block_id: block.block_id.clone(),
             source: block.source.clone(),
             translation: block.translation.clone(),
@@ -1057,12 +1175,15 @@ pub(crate) fn apply_snapshot(
         snapshot.crop_rect.width,
         snapshot.crop_rect.height,
     ))
-    .map(|(width, height)| LogicalWorkArea { width, height })
+    .map(|(width, height)| LogicalWorkArea {
+        width,
+        height: height - preview.get_screen_notice_height(),
+    })
     .unwrap_or(LogicalWorkArea {
         width: 1280.0,
-        height: 720.0,
+        height: 720.0 - preview.get_screen_notice_height(),
     });
-    let plan = plan_screen_result_layout_with_frame(
+    let mut plan = plan_screen_result_layout_with_frame(
         crop_size,
         &inputs,
         ResultViewMode::from_ui(requested_mode),
@@ -1070,7 +1191,6 @@ pub(crate) fn apply_snapshot(
         &SlintScreenTextMeasurer { window: preview },
         snapshot.crop.as_deref(),
     );
-    let layouts = &plan.blocks;
     let frame = snapshot.crop.as_deref();
     let scale = frame.map(|frame| {
         (
@@ -1078,6 +1198,28 @@ pub(crate) fn apply_snapshot(
             plan.image_height as f32 / frame.rect.height.max(1) as f32,
         )
     });
+    let repaired = frame
+        .zip(scale)
+        .filter(|_| !plan.masks.is_empty() || !plan.oriented_masks.is_empty())
+        .map(|(frame, scale)| {
+            let (image, failed_quads) = repaired_image(frame, &plan, scale);
+            // If the picture offers no safe background sample, retain its
+            // pixels and use the existing opaque label instead of guessing.
+            for block in &mut plan.blocks {
+                if inputs.iter().any(|input| {
+                    input.block_id == block.block_id
+                        && (input
+                            .fragment_quads
+                            .iter()
+                            .any(|quad| failed_quads.contains(quad))
+                            || input.quad.is_some_and(|quad| failed_quads.contains(&quad)))
+                }) {
+                    block.callout = true;
+                }
+            }
+            image
+        });
+    let layouts = &plan.blocks;
     let rows = layouts
         .iter()
         .map(|block| {
@@ -1087,10 +1229,14 @@ pub(crate) fn apply_snapshot(
                 })
             });
             let ink = label_ink(block.source_ink, background);
+            let incomplete = inputs
+                .iter()
+                .any(|input| input.block_id == block.block_id && !input.complete);
             ScreenBlockOverlay {
                 block_id: block.block_id.as_str().into(),
                 source: block.source.clone().into(),
                 translation: block.display_translation.clone().into(),
+                failed: !translating && incomplete,
                 x: block.x,
                 y: block.y,
                 width: block.width,
@@ -1103,10 +1249,11 @@ pub(crate) fn apply_snapshot(
                 replace_source: block.replace_source,
                 placed: block.placed,
                 callout: block.callout,
-                not_placeable: block.not_placeable,
+                not_placeable: block.not_placeable && !(translating && incomplete),
                 editable_source: block.editable_source,
                 overflow: block.overflow,
                 font_size: block.font_size,
+                angle: block.angle,
                 font_weight: if block.bold {
                     BOLD_WEIGHT
                 } else {
@@ -1131,10 +1278,6 @@ pub(crate) fn apply_snapshot(
             end_y: connector.end_y,
         })
         .collect::<Vec<_>>();
-    let repaired = frame
-        .zip(scale)
-        .filter(|_| !plan.masks.is_empty())
-        .map(|(frame, scale)| repaired_image(frame, &plan, scale));
     preview.set_screen_blocks(ModelRc::new(VecModel::from(rows)));
     preview.set_screen_connectors(ModelRc::new(VecModel::from(connectors)));
     preview.set_screen_image_content_width(plan.image_width as f32);
@@ -1164,7 +1307,7 @@ fn repaired_image(
     frame: &rust_platform_windows::screen_capture::RgbaFrame,
     plan: &ScreenResultLayoutPlan,
     scale: (f32, f32),
-) -> Image {
+) -> (Image, Vec<PhysicalQuad>) {
     let to_pixels = |(x, y, width, height): LayoutRect| PixelRect {
         left: (x / scale.0).floor() as i64,
         top: (y / scale.1).floor() as i64,
@@ -1196,12 +1339,44 @@ fn repaired_image(
             ))
         })
         .collect::<Vec<_>>();
-    let pixels = repaired_pixels(frame, &regions, &protected);
-    Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-        &pixels,
-        frame.rect.width,
-        frame.rect.height,
-    ))
+    let mut pixels = repaired_pixels(frame, &regions, &protected);
+    let protected_quads = plan
+        .blocks
+        .iter()
+        .filter(|block| !block.replace_source)
+        .map(|block| {
+            if let Some(quad) = block.source_quad {
+                return quad;
+            }
+            let r = to_pixels((
+                block.source_x,
+                block.source_y,
+                block.source_width,
+                block.source_height,
+            ));
+            PhysicalQuad {
+                points: [
+                    (r.left, r.top),
+                    (r.right, r.top),
+                    (r.right, r.bottom),
+                    (r.left, r.bottom),
+                ]
+                .map(|(x, y)| rust_protocol::PhysicalPoint {
+                    x: x as i32,
+                    y: y as i32,
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let failed = repair_oriented(frame, &mut pixels, &plan.oriented_masks, &protected_quads);
+    (
+        Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+            &pixels,
+            frame.rect.width,
+            frame.rect.height,
+        )),
+        failed,
+    )
 }
 
 /// The design's plate, kept where the picture offers no colour: a callout
@@ -1406,10 +1581,153 @@ mod tests {
     }
 
     #[test]
+    fn tilted_paragraph_uses_line_height_for_font_and_exact_strips_for_masks() {
+        use rust_protocol::{PhysicalPoint, PhysicalQuad};
+        let quad = |points: [(i32, i32); 4]| PhysicalQuad {
+            points: points.map(|(x, y)| PhysicalPoint { x, y }),
+        };
+        let first = quad([(100, 80), (700, 200), (694, 230), (94, 110)]);
+        let second = quad([(92, 120), (692, 240), (686, 270), (86, 150)]);
+        let envelope = quad([(100, 80), (700, 200), (686, 270), (86, 150)]);
+        let block = BlockLayoutInput {
+            block_id: ScreenBlockId::from("paragraph"),
+            source: "A paragraph with two separate lines of text".into(),
+            translation: "Перевод абзаца сохраняет наклон обеих строк текста.".into(),
+            bounds: local_rect(86, 80, 614, 190),
+            fragments: vec![local_rect(94, 80, 606, 150), local_rect(86, 120, 606, 150)],
+            quad: Some(envelope),
+            fragment_quads: vec![first, second],
+            complete: true,
+            confidence_milli: 960,
+        };
+        let plan = plan_screen_result_layout(
+            crop_size(900, 500),
+            std::slice::from_ref(&block),
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 1000.0,
+                height: 700.0,
+            },
+            &normal_measurer(),
+        );
+        let row = &plan.blocks[0];
+        assert!(row.placed && !row.overflow);
+        assert!((row.angle - 11.31).abs() < 0.1);
+        assert!(
+            row.font_size < 25.0,
+            "the paragraph AABB must not define font size"
+        );
+        assert!(plan.masks.is_empty());
+        assert_eq!(plan.oriented_masks, vec![first, second]);
+        let original = plan_screen_result_layout(
+            crop_size(900, 500),
+            &[block],
+            ResultViewMode::Original,
+            LogicalWorkArea {
+                width: 1000.0,
+                height: 700.0,
+            },
+            &normal_measurer(),
+        );
+        assert!(original.oriented_masks.is_empty());
+        assert!(!original.blocks[0].placed);
+    }
+
+    #[test]
+    fn tilted_wrapped_paragraph_uses_actual_slint_height_without_shrinking_to_minimum() {
+        use rust_protocol::{PhysicalPoint, PhysicalQuad};
+        use slint::ComponentHandle;
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("skia".into()),
+            },
+        )))
+        .unwrap();
+        let window = crate::ScreenTranslationWindow::new().unwrap();
+        window.show().unwrap();
+        let quad = |points: [(i32, i32); 4]| PhysicalQuad {
+            points: points.map(|(x, y)| PhysicalPoint { x, y }),
+        };
+        let first = quad([(100, 80), (700, 200), (692, 240), (92, 120)]);
+        let second = quad([(90, 130), (690, 250), (682, 290), (82, 170)]);
+        let block = BlockLayoutInput {
+            block_id: ScreenBlockId::from("wrapped"),
+            source: "A paragraph containing several words which need to wrap into two lines.".into(),
+            translation: "Перевод длинного абзаца должен сохранять читаемый размер шрифта и переноситься на следующую строку.".into(),
+            bounds: local_rect(82, 80, 618, 210),
+            fragments: vec![local_rect(92, 80, 608, 160), local_rect(82, 130, 608, 160)],
+            quad: Some(quad([(100, 80), (700, 200), (682, 290), (82, 170)])),
+            fragment_quads: vec![first, second],
+            complete: true,
+            confidence_milli: 960,
+        };
+        let measurer = super::SlintScreenTextMeasurer { window: &window };
+        let measured = measurer.measure(&block.translation, 600.0, 22.0, false);
+        assert!(
+            measured.width > 600.0,
+            "fixture must exercise Slint intrinsic width"
+        );
+        assert!(measured.height < 90.0, "wrapped text fits the paragraph");
+        let plan = plan_screen_result_layout(
+            crop_size(900, 500),
+            &[block],
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 1000.0,
+                height: 700.0,
+            },
+            &measurer,
+        );
+        assert!(
+            plan.blocks[0].font_size > 18.0,
+            "a fitting paragraph must remain readable"
+        );
+        assert!(!plan.blocks[0].overflow);
+    }
+
+    #[test]
+    fn failed_numeric_block_keeps_its_pixels_and_has_a_visible_failure_marker() {
+        let blocks = [BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
+            block_id: ScreenBlockId::from("cooldown"),
+            source: "30".into(),
+            translation: String::new(),
+            bounds: local_rect(100, 25, 35, 26),
+            fragments: vec![local_rect(100, 25, 35, 26)],
+            complete: false,
+            confidence_milli: 1000,
+        }];
+        let plan = plan_screen_result_layout(
+            crop_size(483, 232),
+            &blocks,
+            ResultViewMode::OnImage,
+            LogicalWorkArea {
+                width: 1280.0,
+                height: 720.0,
+            },
+            &normal_measurer(),
+        );
+        assert!(
+            plan.blocks[0].not_placeable,
+            "every failed block needs a visible marker"
+        );
+        assert!(!plan.blocks[0].replace_source);
+        assert!(
+            plan.masks.is_empty(),
+            "failed source pixels must remain intact"
+        );
+    }
+
+    #[test]
     fn in_place_arc_lightning_keeps_overlapping_ocr_rows_at_their_source() {
         // Recorded Arc Lightning description: the OCR rectangles already overlap.
         let blocks = [
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("description"),
                 source: "Hurls a bolt of lightning that leaps through nearby enemy units that"
                     .into(),
@@ -1421,6 +1739,8 @@ mod tests {
                 confidence_milli: 980,
             },
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("damage"),
                 source: "deal damage.".into(),
                 translation: "наносит урон.".into(),
@@ -1455,6 +1775,8 @@ mod tests {
     #[test]
     fn in_place_translation_grows_from_its_source_without_an_external_panel() {
         let block = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("immunity"),
             source: "PIERCES SPELL IMMUNITY: No".into(),
             translation: "ПРОБИВАЕТ ИММУНИТЕТ К МАГИИ: Нет".into(),
@@ -1505,6 +1827,8 @@ mod tests {
         // text with 12 px glyphs (ascenders and descenders) and thin ones.
         let frame = strokes(673, 427, &[(20, 41, 140, 340, 4), (54, 66, 140, 600, 1)]);
         let heading = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("arc-title"),
             source: "ARC LIGHTNING".into(),
             translation: "Дуговая молния".into(),
@@ -1514,6 +1838,8 @@ mod tests {
             confidence_milli: 980,
         };
         let body = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("arc-body"),
             source: "Hurls a bolt of lightning that leaps through nearby enemy units".into(),
             translation: "Бросает молнию, которая перепрыгивает через ближайших врагов".into(),
@@ -1574,6 +1900,8 @@ mod tests {
     #[test]
     fn dual_mode_measures_the_actual_source_and_translation_projection() {
         let block = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("dual"),
             source: "Cooldown".to_owned(),
             translation: "Перезарядка".to_owned(),
@@ -1612,6 +1940,8 @@ mod tests {
         let long = "A translation that needs more room than its source region can safely provide"
             .repeat(4);
         let block = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("safe"),
             source: "Short".to_owned(),
             translation: long,
@@ -1644,6 +1974,8 @@ mod tests {
     fn translated_zeus_rows_are_visible_even_when_russian_exceeds_ocr_boxes() {
         let blocks = vec![
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("description"),
                 source: "Hurls a bolt of lightning that leaps through nearby enemy units that"
                     .to_owned(),
@@ -1656,6 +1988,8 @@ mod tests {
                 confidence_milli: 956,
             },
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("description-continuation"),
                 source: "deal damage.".to_owned(),
                 translation: "наносит урон.".to_owned(),
@@ -1665,6 +1999,8 @@ mod tests {
                 confidence_milli: 969,
             },
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("damage-type"),
                 source: "DAMAGE TYPE: Magical".to_owned(),
                 translation: "ТИП УРОНА: Магический".to_owned(),
@@ -1674,6 +2010,8 @@ mod tests {
                 confidence_milli: 980,
             },
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("mana-number"),
                 source: "85 / 90 / 95 / 100".to_owned(),
                 translation: "85 / 90 / 95 / 100".to_owned(),
@@ -1741,6 +2079,8 @@ mod tests {
         )
         .unwrap();
         let block = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("long-description"),
             source: "Short source".to_owned(),
             translation:
@@ -1788,6 +2128,8 @@ mod tests {
         )
         .unwrap();
         let block = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("long-description"),
             source: "Short source".to_owned(),
             translation:
@@ -1819,6 +2161,8 @@ mod tests {
     #[test]
     fn dual_in_place_label_reserves_height_for_both_source_and_translation() {
         let block = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("long-description"),
             source: "An English sentence that spans several lines when shown in a narrow card"
                 .to_owned(),
@@ -1876,6 +2220,8 @@ mod tests {
         )
         .unwrap();
         let block = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("text"),
             source: "Short".to_owned(),
             translation:
@@ -1904,6 +2250,8 @@ mod tests {
     #[test]
     fn original_projection_keeps_original_image_size_without_hidden_callouts() {
         let block = BlockLayoutInput {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from("text"),
             source: "Short".to_owned(),
             translation: "Длинный перевод, который не помещается на месте исходной надписи"
@@ -1967,6 +2315,8 @@ mod tests {
             crop: Some(Arc::new(frame)),
             crop_rect,
             blocks: vec![crate::screen_result::ScreenResultBlockSnapshot {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("overflow"),
                 source: "Short source".to_owned(),
                 translation: "Длинный перевод для читаемой строки на исходном изображении "
@@ -2049,6 +2399,102 @@ mod tests {
         let original = window.window().take_snapshot().unwrap();
         assert!(!window.get_screen_use_repaired_image());
         assert_eq!(sample(&original, 190, 36 + 38), [30, 30, 30]);
+    }
+
+    #[test]
+    fn snapshot_without_safe_background_keeps_pixels_and_renders_opaque_fallback() {
+        use std::sync::Arc;
+
+        use rust_protocol::{
+            BlockCompletion, PhysicalPoint, PhysicalQuad, RequestId, SourceContext,
+        };
+        use slint::{ComponentHandle, LogicalSize, Model};
+
+        // Headless Skia renders the production rotation; the minimal software
+        // renderer ignores it and could not verify this label's actual plate.
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("skia".into()),
+            },
+        )))
+        .unwrap();
+        let mut frame = page(400, 250, [240, 240, 240]);
+        for y in 115..135 {
+            for x in 90..110 {
+                let offset = ((y * 400 + x) * 4) as usize;
+                frame.pixels[offset..offset + 3].copy_from_slice(&[20, 30, 40]);
+            }
+        }
+        let original = frame.pixels.clone();
+        let crop_rect = frame.rect;
+        // The rotated source occupies every observed pixel. Its apparent
+        // rectification margin is off-image replication, not usable background.
+        let quad = PhysicalQuad {
+            points: [(400, 0), (400, 250), (0, 250), (0, 0)].map(|(x, y)| PhysicalPoint { x, y }),
+        };
+        let snapshot = crate::screen_result::ScreenResultSnapshot {
+            request_id: RequestId::new(),
+            revision: 1,
+            crop: Some(Arc::new(frame)),
+            crop_rect,
+            blocks: vec![crate::screen_result::ScreenResultBlockSnapshot {
+                block_id: ScreenBlockId::from("no-background"),
+                source: "Y".into(),
+                translation: "X".into(),
+                completion: BlockCompletion::Completed,
+                failure_message: None,
+                bounds: crop_rect,
+                fragments: vec![crop_rect],
+                quad: Some(quad),
+                fragment_quads: vec![quad],
+                confidence_milli: 980,
+            }],
+            context: SourceContext::default(),
+            created_unix_ms: 1,
+            expires_unix_ms: u64::MAX,
+        };
+        let window = crate::ScreenTranslationWindow::new().unwrap();
+        window.set_screen_view_mode(3);
+        super::apply_snapshot(&window, &snapshot).unwrap();
+        let row = window.get_screen_blocks().row_data(0).unwrap();
+        assert!(row.placed && row.callout && !row.failed && !row.not_placeable);
+        assert_eq!(row.angle, 90.0);
+        assert_eq!(row.plate.alpha(), 255);
+        assert_eq!(window.get_screen_failed_blocks(), 0);
+        assert_eq!(snapshot.crop.as_ref().unwrap().pixels, original);
+        for image in [
+            window.get_screen_crop_image(),
+            window.get_screen_repaired_image(),
+        ] {
+            assert_eq!(image.to_rgba8().unwrap().as_bytes(), original.as_slice());
+        }
+        assert!(window.get_screen_use_repaired_image());
+
+        window.show().unwrap();
+        window.window().set_size(LogicalSize::new(
+            window.get_screen_content_width(),
+            window.get_screen_content_height() + 38.0,
+        ));
+        let sample = |image: &slint::SharedPixelBuffer<slint::Rgba8Pixel>| {
+            // Inside the source marker, far from the rotated single glyph.
+            let offset = ((125 + 38) * image.width() as usize + 100) * 4;
+            image.as_bytes()[offset..offset + 4].to_vec()
+        };
+        let rendered = window.window().take_snapshot().unwrap();
+        assert_eq!(
+            sample(&rendered),
+            [row.plate.red(), row.plate.green(), row.plate.blue(), 255],
+            "the actual translated label must cover retained source ink opaquely"
+        );
+        assert_ne!(sample(&rendered), [20, 30, 40, 255]);
+
+        window.set_screen_view_mode(1);
+        super::apply_snapshot(&window, &snapshot).unwrap();
+        assert!(!window.get_screen_use_repaired_image());
+        let original_view = window.window().take_snapshot().unwrap();
+        assert_eq!(sample(&original_view), [20, 30, 40, 255]);
     }
 
     fn page(width: u32, height: u32, background: [u8; 3]) -> RgbaFrame {
@@ -2139,6 +2585,188 @@ mod tests {
     }
 
     #[test]
+    fn partial_result_exposes_retry_and_disables_it_while_translating() {
+        use rust_protocol::{BlockCompletion, RequestId, SourceContext};
+        use slint::{
+            ComponentHandle, LogicalPosition, LogicalSize, Model,
+            platform::{PointerEventButton, WindowEvent},
+        };
+        use std::{cell::Cell, rc::Rc, sync::Arc};
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .unwrap();
+        let crop_rect = PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 480,
+            height: 240,
+        };
+        let crop = RgbaFrame::try_new(crop_rect, 480 * 4, vec![40; 480 * 240 * 4]).unwrap();
+        let snapshot = crate::screen_result::ScreenResultSnapshot {
+            request_id: RequestId::new(),
+            revision: 1,
+            crop: Some(Arc::new(crop)),
+            crop_rect,
+            blocks: [
+                (
+                    "title",
+                    "Tier 4 Artifact",
+                    "Артефакт 4 уровня",
+                    BlockCompletion::Completed,
+                ),
+                ("cooldown", "30", "", BlockCompletion::Failed),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, source, translation, completion))| {
+                crate::screen_result::ScreenResultBlockSnapshot {
+                    quad: None,
+                    fragment_quads: Vec::new(),
+                    block_id: ScreenBlockId::from(id),
+                    source: source.into(),
+                    translation: translation.into(),
+                    completion,
+                    failure_message: (completion == BlockCompletion::Failed)
+                        .then(|| "protected_values_changed".into()),
+                    bounds: PhysicalRect {
+                        x: 20,
+                        y: 25 + i as i32 * 60,
+                        width: 200,
+                        height: 30,
+                    },
+                    fragments: vec![],
+                    confidence_milli: 990,
+                }
+            })
+            .collect(),
+            context: SourceContext::default(),
+            created_unix_ms: 1,
+            expires_unix_ms: u64::MAX,
+        };
+        let window = crate::ScreenTranslationWindow::new().unwrap();
+        super::apply_snapshot(&window, &snapshot).unwrap();
+        assert_eq!(window.get_screen_failed_blocks(), 1);
+        let rows = window.get_screen_blocks();
+        assert!(rows.row_data(0).unwrap().placed);
+        assert!(rows.row_data(1).unwrap().failed && rows.row_data(1).unwrap().not_placeable);
+        let count = Rc::new(Cell::new(0));
+        let clicks = count.clone();
+        window.on_screen_translation_retry_requested(move || clicks.set(clicks.get() + 1));
+        window.show().unwrap();
+        window.window().set_size(LogicalSize::new(600.0, 420.0));
+        window.window().take_snapshot().unwrap();
+        let click = || {
+            let position = LogicalPosition::new(545.0, 64.0);
+            window
+                .window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            window.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            window
+                .window()
+                .dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+        };
+        click();
+        assert_eq!(
+            count.get(),
+            1,
+            "visible retry button dispatches one request"
+        );
+        window.set_screen_translating(true);
+        click();
+        assert_eq!(
+            count.get(),
+            1,
+            "processing must not dispatch a duplicate retry"
+        );
+        window.set_screen_translating(false);
+        window.set_screen_translation_retry_enabled(false);
+        click();
+        assert_eq!(
+            count.get(),
+            1,
+            "restored results cannot overwrite lost edit provenance"
+        );
+    }
+
+    #[test]
+    fn busy_image_disables_save_and_delete_until_translation_finishes() {
+        use slint::{
+            ComponentHandle, LogicalPosition, LogicalSize,
+            platform::{PointerEventButton, WindowEvent},
+        };
+        use std::{cell::Cell, rc::Rc};
+
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .unwrap();
+        let window = crate::ScreenTranslationWindow::new().unwrap();
+        let actions = Rc::new(Cell::new([0, 0]));
+        let saved = Rc::clone(&actions);
+        window.on_screen_save_file_requested(move || {
+            let mut counts = saved.get();
+            counts[0] += 1;
+            saved.set(counts);
+        });
+        let deleted = Rc::clone(&actions);
+        window.on_screen_delete_image_requested(move || {
+            let mut counts = deleted.get();
+            counts[1] += 1;
+            deleted.set(counts);
+        });
+        window.set_screen_translating(true);
+        window.show().unwrap();
+        window.window().set_size(LogicalSize::new(600.0, 420.0));
+        window.window().take_snapshot().unwrap();
+        let click = |x| {
+            let position = LogicalPosition::new(x, 20.0);
+            window
+                .window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            window.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            window
+                .window()
+                .dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+        };
+        click(214.0);
+        click(255.0);
+        assert_eq!(
+            actions.get(),
+            [0, 0],
+            "pending image actions must not dispatch"
+        );
+        window.set_screen_translating(false);
+        click(214.0);
+        click(255.0);
+        assert_eq!(
+            actions.get(),
+            [1, 1],
+            "finished image keeps its save/delete actions"
+        );
+    }
+
+    #[test]
     fn screen_result_southeast_corner_requests_resize() {
         use std::{cell::Cell, rc::Rc};
 
@@ -2179,6 +2807,8 @@ mod tests {
     fn block_geometry_scales_and_long_text_grows_within_the_image() {
         let blocks = vec![
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("short"),
                 source: "Menu".to_owned(),
                 translation: "Меню".to_owned(),
@@ -2188,6 +2818,8 @@ mod tests {
                 confidence_milli: 900,
             },
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("long"),
                 source: "Long source".to_owned(),
                 translation:
@@ -2220,6 +2852,8 @@ mod tests {
     fn crop_local_blocks_do_not_subtract_the_physical_screen_origin() {
         let blocks = vec![
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("first"),
                 source: "Focused source contracts: 61 pass, 1 Windows symlink EPERM skip"
                     .to_owned(),
@@ -2231,6 +2865,8 @@ mod tests {
                 confidence_milli: 900,
             },
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("second"),
                 source: "revalidated exact v3 lineage and its installed tree".to_owned(),
                 translation: "Перепроверено точное происхождение v3, установленное дерево и пакет времени выполнения. Старый и новый контент остаются отдельной обязательной проверкой."
@@ -2272,6 +2908,8 @@ mod tests {
             "A translated paragraph that needs readable text near its original place ".repeat(4);
         let blocks = vec![
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("first"),
                 source: "first".to_owned(),
                 translation: long.clone(),
@@ -2281,6 +2919,8 @@ mod tests {
                 confidence_milli: 900,
             },
             BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("second"),
                 source: "second".to_owned(),
                 translation: long,
@@ -2320,6 +2960,8 @@ mod tests {
         let long = "A translated paragraph that cannot fit inside its source rectangle ".repeat(5);
         let blocks = (0..8)
             .map(|index| BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from(format!("block-{index}")),
                 source: format!("source {index}"),
                 translation: long.clone(),
@@ -2342,6 +2984,8 @@ mod tests {
     fn dense_underlays_never_nudge_text_far_from_its_source() {
         let blocks = (0..10)
             .map(|index| BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from(format!("dense-{index}")),
                 source: format!("source {index}"),
                 translation: "A longer translation near the same source row".into(),
@@ -2369,6 +3013,8 @@ mod tests {
         let long = "A translated paragraph that cannot fit inside its source rectangle ".repeat(5);
         let blocks = (0..8)
             .map(|index| BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from(format!("block-{index}")),
                 source: format!("source {index}"),
                 translation: long.clone(),
@@ -2418,6 +3064,8 @@ mod tests {
         let plan = plan_screen_result_layout(
             crop_size(300, 120),
             &[BlockLayoutInput {
+                quad: None,
+                fragment_quads: Vec::new(),
                 block_id: ScreenBlockId::from("proper-name"),
                 source: "Nimbus".into(),
                 translation: "Nimbus".into(),
@@ -2524,6 +3172,8 @@ mod tests {
             .enumerate()
             .map(
                 |(index, (source, translation, x, y, width, height))| BlockLayoutInput {
+                    quad: None,
+                    fragment_quads: Vec::new(),
                     block_id: ScreenBlockId::from(format!("nimbus-{index}")),
                     source: source.to_owned(),
                     translation: translation.to_owned(),
@@ -2845,11 +3495,15 @@ mod tests {
         let Some(output_dir) = std::env::var_os("SAYFLEX_SCREEN_SAMPLE_OUTPUT") else {
             return;
         };
+        // Slint's minimal software renderer ignores arbitrary rotation. Use
+        // the headless Skia renderer for evidence of angled labels.
+        let renderer =
+            std::env::var("SAYFLEX_SCREEN_SAMPLE_RENDERER").unwrap_or_else(|_| "skia".to_owned());
         slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
             i_slint_backend_testing::TestingBackendOptions {
                 mock_time: true,
                 threading: false,
-                renderer_name: Some("software".into()),
+                renderer_name: Some(renderer.into()),
             },
         )))
         .expect("testing platform should initialize once");
@@ -2902,6 +3556,8 @@ mod tests {
                         .find(|translation| translation.block_id == block.block_id)
                         .expect("every recorded source block needs its translation result");
                     crate::screen_result::ScreenResultBlockSnapshot {
+                        quad: block.quad,
+                        fragment_quads: block.fragment_quads.clone(),
                         block_id: block.block_id.clone(),
                         source: block.source_text.clone(),
                         translation: translation.translated_text.clone(),
@@ -2937,6 +3593,8 @@ mod tests {
                     .blocks
                     .iter()
                     .map(|block| super::BlockLayoutInput {
+                        quad: None,
+                        fragment_quads: Vec::new(),
                         block_id: block.block_id.clone(),
                         source: block.source.clone(),
                         translation: block.translation.clone(),

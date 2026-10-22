@@ -982,6 +982,7 @@ mod tests {
             request_id,
             lines: vec![
                 OcrLine {
+                    quad: None,
                     text: "Damage +25%".to_owned(),
                     bounds: PhysicalRect {
                         x: 8,
@@ -992,6 +993,7 @@ mod tests {
                     confidence_milli: 991,
                 },
                 OcrLine {
+                    quad: None,
                     text: "12:45 / 99".to_owned(),
                     bounds: PhysicalRect {
                         x: 8,

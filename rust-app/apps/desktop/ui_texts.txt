@@ -1,4 +1,12 @@
 NoneInstalledYet|None installed yet
+OverviewSpeechDownloading|Downloading speech model
+OverviewSpeechDownloadProgress|{model} · {percent}% downloaded
+OverviewSpeechDownloadUnknown|{model} · Download size is not available yet.
+OverviewSpeechInstalling|Checking and installing speech model
+OverviewSpeechInstallDetail|{model} · Download complete. Checking and installing the model.
+OverviewSpeechPreparing|{model} · Preparing the installed speech model.
+OverviewSelectedSpeechMissing|The selected speech model is not installed.
+OverviewViewDownload|View download
 OneInstalled|1 installed
 ManyInstalled|{count} installed
 NoCompatibleSpeechBackend|No compatible speech backend is active
@@ -208,6 +216,7 @@ TranslationFallbackLocal|Translation completed locally.
 TranslationFallbackProvider|Translation completed with {provider}.
 NoTranslationProviderAvailable|No translation provider is available. Enable a local model or a cloud provider in Settings.
 LocalTranslationModelUnavailable|The local translation model is not installed or ready. Choose a model in Settings.
+TranslationPackageMissing|{model}: translation package not installed. Open Models to install it.
 TranslationFailedTryAgain|Translation failed. Try again or check Providers.
 Account|Account
 Region|Region
@@ -220,7 +229,7 @@ DictationStillProcessing|The dictation is still processing; it will be inserted 
 InsertedTargetAdapter|Inserted through the target adapter in {milliseconds} ms
 InsertedPrivateTransaction|Inserted; the target read the text in {milliseconds} ms
 VerifiedInsertion|Inserted and verified in {milliseconds} ms
-PasteDispatched|Pasted; the target did not confirm it ({milliseconds} ms)
+PasteDispatched|Paste requested; delivery not confirmed ({milliseconds} ms)
 InputProtocolMismatch|Input worker protocol mismatch. Reinstall the complete application.
 SpeechProtocolMismatch|Speech worker protocol mismatch. Reinstall the complete application.
 CloudSpeechLocalDisabled|Cloud speech is ready. The local speech engine is disabled.
@@ -337,6 +346,25 @@ ScreenOcrModelUnavailable|The local screen-reading model is not installed. Insta
 ScreenOcrLanguageUnavailable|This language is not available for local screen reading.
 ScreenOcrWorkerFailed|Screen text recognition stopped unexpectedly. Try again.
 ScreenTranslationRestoreFailed|The saved screen translation could not be restored.
+ScreenTranslationBusy|Another screen translation is running. Wait for it to finish.
 ScreenTranslationCancelled|Screen translation was cancelled.
 CompactModelDownloadOffer|Download {model} ({size}) to translate this language pair.
 DownloadModel|Download model
+CudaCheckingInstallation|Checking NVIDIA components…
+CudaNotInstalled|NVIDIA components are not installed.
+CudaDownloading|Downloading from NVIDIA: {received} / {total} MB
+CudaVerifying|Verifying the NVIDIA download…
+CudaInstalling|Installing NVIDIA components…
+CudaCancelling|Cancelling the NVIDIA download…
+CudaInstalled|Installed. CUDA is not active with a ready speech model.
+CudaActive|CUDA is active and the speech model is ready.
+CudaWaitingForModel|NVIDIA is selected. A ready local speech model is required for CUDA dictation.
+CudaCancelled|Download cancelled. You can try again.
+CudaFailed|NVIDIA components could not be installed. You can retry.
+CudaDownloadSize|Optional download: {size} MB from NVIDIA.
+CudaActionFailed|Could not complete this action: {error}
+CudaAcceptDownload|Accept and download
+CudaRetryDownload|Retry download
+CudaGpuDetected|Detected GPU: {gpu}. Compatibility is checked when you activate.
+CudaNoGpuDetected|No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation.
+CudaGpuUnknown|GPU detection was unavailable. Activation checks NVIDIA compatibility.

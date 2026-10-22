@@ -248,23 +248,59 @@ impl SpmVocab {
             .unwrap_or("")
     }
 
-    /// Decode token ids back to text: concatenate pieces, turn `▁` into spaces,
-    /// strip the leading space, and skip control/unknown pieces.
+    /// Decode token ids back to text, reconstructing consecutive byte pieces
+    /// as UTF-8. Only normal pieces turn `▁` into spaces and strip leading
+    /// whitespace; raw byte content is preserved. Skip control/unknown pieces.
     pub fn decode(&self, ids: &[u32]) -> String {
         let mut out = String::new();
+        let mut byte_run = Vec::new();
         for &id in ids {
             let t = self
                 .types
                 .get(id as usize)
                 .copied()
                 .unwrap_or(PieceType::Normal);
+            if t == PieceType::Byte {
+                if let Some(byte) = parse_byte_piece(self.piece(id)) {
+                    byte_run.push(byte);
+                    continue;
+                }
+            }
+            // Invisible control pieces also separate byte runs, as in
+            // SentencePieceProcessor::ProcessBytePieces.
+            append_byte_run(&mut out, &mut byte_run);
             if t == PieceType::Control || t == PieceType::Unknown {
                 continue;
             }
-            out.push_str(self.piece(id));
+            for character in self.piece(id).chars() {
+                let character = if character == SPACE { ' ' } else { character };
+                if out.is_empty() && character.is_whitespace() {
+                    continue;
+                }
+                out.push(character);
+            }
         }
-        out.replace(SPACE, " ").trim_start().to_string()
+        append_byte_run(&mut out, &mut byte_run);
+        out
     }
+}
+
+fn append_byte_run(out: &mut String, bytes: &mut Vec<u8>) {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if let Some(length) = utf8_char_len(&bytes[offset..]) {
+            if let Ok(character) = std::str::from_utf8(&bytes[offset..offset + length]) {
+                out.push_str(character);
+                offset += length;
+                continue;
+            }
+        }
+        // The reference consumes one invalid byte at a time, including
+        // truncated, overlong and surrogate sequences (not one invalid run).
+        out.push('\u{fffd}');
+        offset += 1;
+    }
+    bytes.clear();
 }
 
 /// The SentencePiece normalizer: the `precompiled_charsmap` (a darts-clone
@@ -560,6 +596,65 @@ impl<'a> Pb<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn byte_vocab() -> SpmVocab {
+        fn append_piece(model: &mut Vec<u8>, piece: &str, kind: u8) {
+            let mut entry = vec![0x0a, piece.len() as u8];
+            entry.extend_from_slice(piece.as_bytes());
+            entry.extend_from_slice(&[0x18, kind]);
+            model.extend_from_slice(&[0x0a, entry.len() as u8]);
+            model.extend_from_slice(&entry);
+        }
+        let mut model = Vec::new();
+        append_piece(&mut model, "</s>", 3);
+        append_piece(&mut model, "<unk>", 2);
+        append_piece(&mut model, "▁Test", 1);
+        append_piece(&mut model, "▁", 1);
+        append_piece(&mut model, "▁end", 1);
+        for byte in 0..=255 {
+            append_piece(&mut model, &format!("<0x{byte:02X}>"), 6);
+        }
+        SpmVocab::from_bytes(&model)
+    }
+
+    fn byte_ids(bytes: &[u8]) -> Vec<u32> {
+        bytes.iter().map(|byte| 5 + u32::from(*byte)).collect()
+    }
+
+    #[test]
+    fn byte_fallback_decode_reconstructs_utf8_among_normal_pieces() {
+        let vocab = byte_vocab();
+        let mut ids = vec![0, 2, 3];
+        ids.extend(byte_ids("🧪é中".as_bytes()));
+        ids.extend([4, 0]);
+        assert_eq!(vocab.decode(&ids), "Test 🧪é中 end");
+    }
+
+    #[test]
+    fn byte_fallback_decode_keeps_raw_whitespace_and_space_marker_bytes() {
+        let vocab = byte_vocab();
+        assert_eq!(vocab.decode(&byte_ids("\t  ▁".as_bytes())), "\t  ▁");
+        assert_eq!(vocab.decode(&[3, 2, 4]), "Test end");
+    }
+
+    #[test]
+    fn byte_fallback_decode_matches_oracle_invalid_byte_and_piece_boundaries() {
+        let vocab = byte_vocab();
+        // Official SentencePiece emits one replacement per invalid byte,
+        // including a truncated sequence, rather than one per invalid run.
+        for (bytes, expected) in [
+            (&[0xf0, 0x9f][..], "��"),
+            (&[0xc0, 0xaf][..], "��"),
+            (&[0xed, 0xa0, 0x80][..], "���"),
+            (&[0xff, b'A'][..], "�A"),
+        ] {
+            assert_eq!(vocab.decode(&byte_ids(bytes)), expected);
+        }
+        let mut interrupted = byte_ids(&[0xf0]);
+        interrupted.push(0); // even invisible control ends a byte run
+        interrupted.extend(byte_ids(&[0x9f, 0xa7, 0xaa]));
+        assert_eq!(vocab.decode(&interrupted), "����");
+    }
 
     #[test]
     fn normalize_escapes_and_prefixes() {

@@ -4,10 +4,15 @@ param(
     [switch]$SkipPublish,
     [string]$SigningThumbprint,
     [switch]$RequireSignature,
-    [string]$VulkanTarget
+    [string]$VulkanTarget,
+    [switch]$KeepBuildArtifacts,
+    [switch]$TestNvidia
 )
 
 $ErrorActionPreference = 'Stop'
+if ($TestNvidia -and ($RequireSignature -or -not [string]::IsNullOrWhiteSpace($SigningThumbprint))) {
+    throw 'The local test installer cannot use public-release signing options.'
+}
 if ($RequireSignature -and [string]::IsNullOrWhiteSpace($SigningThumbprint)) {
     throw 'A public installer requires -SigningThumbprint.'
 }
@@ -24,10 +29,20 @@ if (-not $SkipPublish) {
         -Configuration Release `
         -SigningThumbprint $SigningThumbprint `
         -RequireSignature:$RequireSignature `
-        -VulkanTarget $VulkanTarget
+        -VulkanTarget $VulkanTarget `
+        -KeepBuildArtifacts:$KeepBuildArtifacts `
+        -TestNvidia:$TestNvidia
     if ($LASTEXITCODE -ne 0) {
         throw 'Rust publishing failed.'
     }
+}
+
+$appRelative = if ($TestNvidia) { 'dist\test-nvidia\app' } else { 'dist\app' }
+$appDirectory = Join-Path $rustRoot $appRelative
+if ($TestNvidia) {
+    # -SkipPublish may reuse only the exact final source snapshot and verified
+    # payload, never arbitrary old executables copied into the test directory.
+    & (Join-Path $PSScriptRoot 'validate-release.ps1') -AppDirectory $appDirectory -TestNvidia
 }
 
 $compilerCandidates = @(
@@ -41,14 +56,18 @@ if (-not $compiler) {
     throw 'Inno Setup 6 was not found.'
 }
 
-& $compiler "/DAppVersion=$Version" (
-    Join-Path $rustRoot 'installer\SayFlex.iss'
-)
+$compilerArguments = @("/DAppVersion=$Version", "/DAppSourceDir=$appDirectory")
+if ($TestNvidia) { $compilerArguments += '/DTestNvidia' }
+$compilerArguments += (Join-Path $rustRoot 'installer\SayFlex.iss')
+& $compiler @compilerArguments
 if ($LASTEXITCODE -ne 0) {
     throw 'Inno Setup compilation failed.'
 }
 
-$installer = Join-Path $rustRoot "dist\SayFlex-$Version-win-x64-setup.exe"
+$installerRelative = if ($TestNvidia) {
+    "dist\test-nvidia\SayFlex-$Version-nvidia-test-win-x64-setup.exe"
+} else { "dist\SayFlex-$Version-win-x64-setup.exe" }
+$installer = Join-Path $rustRoot $installerRelative
 if (-not [string]::IsNullOrWhiteSpace($SigningThumbprint)) {
     & (Join-Path $PSScriptRoot 'sign-artifacts.ps1') `
         -Path $installer `
@@ -66,10 +85,12 @@ Set-Content -LiteralPath "$installer.sha256" -Encoding ascii -NoNewline -Value (
 # script's own run of the validator happens before Inno Setup has produced
 # anything, so it can say nothing about this file.
 & (Join-Path $PSScriptRoot 'validate-release.ps1') `
+    -AppDirectory $appDirectory `
     -InstallerPath $installer `
-    -RequireSignature:$RequireSignature
+    -RequireSignature:$RequireSignature `
+    -TestNvidia:$TestNvidia
 if ($LASTEXITCODE -ne 0) {
     throw 'The installer did not pass validation.'
 }
 
-Write-Host "SayFlex installer created in $(Join-Path $rustRoot 'dist')"
+Write-Host "SayFlex installer created: $installer"

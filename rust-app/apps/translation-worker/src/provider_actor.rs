@@ -496,6 +496,99 @@ mod tests {
     use crate::providers::Providers;
 
     #[test]
+    fn screen_model_failure_is_typed_and_releases_the_request_lock_and_cold_engine() {
+        use rust_protocol::{
+            ScreenTextBlock, SourceContext, TranslationFailureKind, TranslationLanguage,
+            TranslationLanguagePolicy, TranslationTier, TranslationWorkerEvent,
+        };
+        use std::sync::{Arc, Mutex};
+        let directory = tempfile::tempdir().unwrap();
+        let (history, history_thread) =
+            crate::TranslationHistoryActor::start(directory.path().join("history.json")).unwrap();
+        let (glossary, glossary_thread) =
+            crate::GlossaryActor::start(directory.path().join("glossary.json")).unwrap();
+        let mut state = crate::WorkerState::new(history.clone()).unwrap();
+        state.installer = rust_model_manager::BundleInstaller::new(directory.path().join("models"));
+        state.keep_warm = false;
+        state.selected_tier = Some(TranslationTier::Compact);
+        let pack = state
+            .catalog
+            .compact_for_pair(TranslationLanguage::English, TranslationLanguage::Russian)
+            .unwrap()
+            .clone();
+        let expected_pack = pack.id.clone();
+        state.engine = Some(rust_translation_engine::TranslationEngine::new(
+            pack,
+            directory.path().join("models"),
+            directory.path().join("runtime"),
+        ));
+        let state = Arc::new(Mutex::new(state));
+        let actor =
+            ProviderActorHandle::start(Providers::new(directory.path().join("credentials.dat")))
+                .unwrap();
+        let (events, received) = mpsc::channel();
+        let request_id = rust_protocol::RequestId::new();
+        actor
+            .submit(
+                Arc::clone(&state),
+                crate::EventWriter { events },
+                crate::Asked::Blocks {
+                    request_id,
+                    base_revision: 7,
+                    blocks: vec![ScreenTextBlock {
+                        block_id: "a".into(),
+                        source_text: "Damage 25".into(),
+                        bounds: rust_protocol::PhysicalRect {
+                            x: 0,
+                            y: 0,
+                            width: 100,
+                            height: 20,
+                        },
+                        quad: None,
+                        fragment_quads: Vec::new(),
+                        fragments: Vec::new(),
+                        confidence_milli: 900,
+                    }],
+                    context: SourceContext::default(),
+                    source_language: Some(TranslationLanguage::English),
+                    target_language: Some(TranslationLanguage::Russian),
+                    language_policy: TranslationLanguagePolicy::default(),
+                    glossary: glossary.clone(),
+                },
+            )
+            .unwrap();
+        let mut released = false;
+        let failure = loop {
+            match received
+                .recv_timeout(Duration::from_secs(2))
+                .expect("actor terminal result without a mutex deadlock")
+            {
+                TranslationWorkerEvent::LocalModelState { loaded: false, .. } => released = true,
+                TranslationWorkerEvent::RequestFailed {
+                    request_id: failed_id,
+                    failure,
+                } => {
+                    assert_eq!(failed_id, request_id);
+                    break failure;
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        };
+        assert!(actor.shutdown());
+        history.shutdown();
+        history_thread.join().unwrap();
+        glossary.shutdown();
+        glossary_thread.join().unwrap();
+        assert!(released);
+        assert!(state.try_lock().unwrap().engine.is_none());
+        assert_eq!(failure.kind, TranslationFailureKind::LocalModelMissing);
+        assert_eq!(
+            failure.required_catalog_id.as_deref(),
+            Some(expected_pack.as_str())
+        );
+    }
+
+    #[test]
     fn the_request_queue_has_exactly_one_pending_slot() {
         let mut queue = QueueState::<u64>::default();
 

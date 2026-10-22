@@ -25,6 +25,8 @@ pub const E2E_HOTKEY_MARKER: usize = 0x514e_5446_4c45_5845;
 
 #[derive(Debug, Error)]
 pub enum InjectionError {
+    #[error("insertion into a password or protected field is blocked")]
+    Protected,
     #[error("the target application is no longer focused")]
     TargetChanged,
     #[error("physical modifier keys are still held")]
@@ -75,13 +77,14 @@ pub fn insert_native_edit(
             class_name.len() as i32,
         )
     };
-    if copied <= 0
-        || !is_native_edit_class(&String::from_utf16_lossy(&class_name[..copied as usize]))
-    {
+    if copied <= 0 {
         return Ok(false);
     }
     let style = unsafe { GetWindowLongPtrW(information.hwndFocus, GWL_STYLE) };
-    if style & ES_PASSWORD as isize != 0 {
+    if !native_edit_supported(
+        &String::from_utf16_lossy(&class_name[..copied as usize]),
+        style,
+    )? {
         return Ok(false);
     }
     let complete = if add_trailing_space {
@@ -91,6 +94,9 @@ pub fn insert_native_edit(
     };
     let wide = complete.encode_utf16().chain([0]).collect::<Vec<_>>();
     let mut ignored = 0_usize;
+    if ensure_target_not_protected(target)? != information.hwndFocus as usize as u64 {
+        return Err(InjectionError::TargetChanged);
+    }
     // EM_REPLACESEL is a system-defined message below WM_USER, so Windows
     // marshals its UTF-16 pointer across the process boundary. The call returns
     // only after the edit control has processed the replacement.
@@ -120,6 +126,49 @@ fn is_native_edit_class(class_name: &str) -> bool {
     normalized == "edit"
         || normalized.contains("richedit")
         || normalized.starts_with("windowsforms10.edit.")
+}
+
+fn native_edit_supported(class_name: &str, style: isize) -> Result<bool, InjectionError> {
+    if !is_native_edit_class(class_name) {
+        return Ok(false);
+    }
+    if style & ES_PASSWORD as isize != 0 {
+        return Err(InjectionError::Protected);
+    }
+    Ok(true)
+}
+
+/// Recheck the current focused native control immediately before delivery.
+/// An unknown provider stays eligible; a positive password bit never does.
+pub fn ensure_target_not_protected(target: TargetSnapshot) -> Result<u64, InjectionError> {
+    if !is_foreground(target) {
+        return Err(InjectionError::TargetChanged);
+    }
+    let mut information = GUITHREADINFO {
+        cbSize: mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetGUIThreadInfo(target.thread_id, &mut information) } == 0
+        || information.hwndFocus.is_null()
+    {
+        return Ok(0);
+    }
+    let mut class_name = [0_u16; 128];
+    let copied = unsafe {
+        GetClassNameW(
+            information.hwndFocus,
+            class_name.as_mut_ptr(),
+            class_name.len() as i32,
+        )
+    };
+    if copied > 0 {
+        let style = unsafe { GetWindowLongPtrW(information.hwndFocus, GWL_STYLE) };
+        native_edit_supported(
+            &String::from_utf16_lossy(&class_name[..copied as usize]),
+            style,
+        )?;
+    }
+    Ok(information.hwndFocus as usize as u64)
 }
 
 pub fn copy_shortcut(shortcut: SelectionCopyShortcut) -> Result<(), InjectionError> {
@@ -347,7 +396,22 @@ fn send(inputs: &[INPUT]) -> Result<(), InjectionError> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_native_edit_class;
+    use super::{ES_PASSWORD, is_native_edit_class, native_edit_supported};
+
+    #[test]
+    fn a_native_password_is_a_terminal_denial_not_an_unsupported_adapter() {
+        for class in ["Edit", "RICHEDIT50W", "WindowsForms10.EDIT.app"] {
+            assert!(
+                native_edit_supported(class, ES_PASSWORD as isize).is_err(),
+                "{class}"
+            );
+        }
+        assert!(matches!(native_edit_supported("Edit", 0), Ok(true)));
+        assert!(matches!(
+            native_edit_supported("Chrome_RenderWidgetHostHWND", 0),
+            Ok(false)
+        ));
+    }
 
     #[test]
     fn recognizes_native_edit_control_classes() {

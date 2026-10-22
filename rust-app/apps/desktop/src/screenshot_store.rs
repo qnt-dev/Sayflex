@@ -95,20 +95,28 @@ pub(crate) struct ScreenshotStore {
     root: PathBuf,
     retention: Mutex<ScreenshotRetention>,
     deleted: Mutex<HashSet<RequestId>>,
+    pending_captures: Mutex<HashSet<RequestId>>,
     write_lock: Mutex<()>,
 }
 
 impl ScreenshotStore {
+    // Register before the asynchronous capture/OCR/write pipeline begins.
+    pub(crate) fn register_capture(&self, request_id: RequestId) {
+        let _write = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.pending_captures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(request_id);
+    }
+
     pub(crate) fn open_default(
         retention: ScreenshotRetention,
     ) -> Result<Self, ScreenshotStoreError> {
-        let local = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "LOCALAPPDATA is unavailable")
-        })?;
         Self::open(
-            Path::new(&local)
-                .join("SayFlex")
-                .join("screen-translations"),
+            rust_app_core::product::data_root().join("screen-translations"),
             retention,
         )
     }
@@ -124,6 +132,7 @@ impl ScreenshotStore {
             root,
             retention: Mutex::new(retention),
             deleted: Mutex::new(HashSet::new()),
+            pending_captures: Mutex::new(HashSet::new()),
             write_lock: Mutex::new(()),
         })
     }
@@ -222,6 +231,10 @@ impl ScreenshotStore {
         }
         let _ = fs::remove_file(image_previous);
         let _ = fs::remove_file(document_previous);
+        self.pending_captures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&metadata.request_id);
         Ok(Some(document))
     }
 
@@ -251,7 +264,9 @@ impl ScreenshotStore {
                         block_id: block.block_id.clone(),
                         source_text: block.source.clone(),
                         bounds: block.bounds,
+                        quad: block.quad,
                         fragments: block.fragments.clone(),
+                        fragment_quads: block.fragment_quads.clone(),
                         confidence_milli: block.confidence_milli,
                     })
                     .collect(),
@@ -449,6 +464,14 @@ impl ScreenshotStore {
             }
         }
         deleted.extend(request_ids.iter().copied());
+        // A capture can still be in OCR, with no metadata on disk yet. The
+        // same lock serializes registration, writes and this deletion barrier.
+        deleted.extend(
+            self.pending_captures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .drain(),
+        );
         for path in paths {
             if matches!(
                 path.extension().and_then(|extension| extension.to_str()),
@@ -731,13 +754,93 @@ mod tests {
 
     use rust_platform_windows::screen_capture::RgbaFrame;
     use rust_protocol::{
-        BlockCompletion, PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext,
-        TranslatedScreenBlock, TranslationLanguage,
+        BlockCompletion, PhysicalPoint, PhysicalQuad, PhysicalRect, RequestId, ScreenBlockId,
+        ScreenTextBlock, SourceContext, TranslatedScreenBlock, TranslationLanguage,
     };
     use tempfile::tempdir;
 
     use super::{ScreenshotMetadata, ScreenshotRetention, ScreenshotStore, save_frame_permanent};
     use crate::screen_result::{DocumentError, ScreenTranslationDocument, UserTranslationEdit};
+
+    #[test]
+    fn default_store_uses_channel_profile_without_touching_other_captures() {
+        const CHILD_PROFILE: &str = "SAYFLEX_SCREENSHOT_STORE_TEST_PROFILE";
+        const TEST_NAME: &str = "screenshot_store::tests::default_store_uses_channel_profile_without_touching_other_captures";
+
+        // A separate test process is necessary: product selection is cached, and
+        // mutating this process's environment would race unrelated storage tests.
+        if let Some(profile_name) = std::env::var_os(CHILD_PROFILE) {
+            let local = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap());
+            let expected = local.join(profile_name).join("screen-translations");
+            let store = ScreenshotStore::open_default(ScreenshotRetention::default()).unwrap();
+            assert_eq!(store.root, expected);
+            assert!(expected.is_dir());
+            return;
+        }
+
+        let executable = std::env::current_exe().unwrap();
+        let executable_directory = executable.parent().unwrap();
+        let mut search_path = vec![executable_directory.to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            search_path.extend(std::env::split_paths(&existing));
+        }
+        let search_path = std::env::join_paths(search_path).unwrap();
+
+        for (test_channel, existing_profile, expected_profile) in [
+            (false, "SayFlex", "SayFlex"),
+            (true, "SayFlex", "SayFlex-Test-Nvidia"),
+            (false, "StyleFlex", "StyleFlex"),
+        ] {
+            let directory = tempdir().unwrap();
+            let app_directory = directory.path().join("app");
+            let local = directory.path().join("LocalAppData");
+            fs::create_dir_all(&app_directory).unwrap();
+            let existing_captures = local.join(existing_profile).join("screen-translations");
+            fs::create_dir_all(&existing_captures).unwrap();
+            let sentinel = existing_captures.join("existing-user-capture.png");
+            fs::write(&sentinel, b"existing capture must be preserved").unwrap();
+            let child_executable = app_directory.join(executable.file_name().unwrap());
+            if fs::hard_link(&executable, &child_executable).is_err() {
+                fs::copy(&executable, &child_executable).unwrap();
+            }
+            if test_channel {
+                fs::write(
+                    app_directory.join(rust_app_core::product::TEST_CHANNEL_MARKER),
+                    b"",
+                )
+                .unwrap();
+            }
+            let result = std::process::Command::new(&child_executable)
+                .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+                .env(CHILD_PROFILE, expected_profile)
+                .env("LOCALAPPDATA", &local)
+                .env("PATH", &search_path)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "profile {expected_profile}: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                local
+                    .join(expected_profile)
+                    .join("screen-translations")
+                    .is_dir()
+            );
+            assert_eq!(
+                fs::read(&sentinel).unwrap(),
+                b"existing capture must be preserved"
+            );
+            if !test_channel {
+                assert!(!local.join("SayFlex-Test-Nvidia").exists());
+            }
+            if existing_profile == "StyleFlex" {
+                assert!(!local.join("SayFlex").exists());
+            }
+        }
+    }
 
     fn frame(color: u8) -> RgbaFrame {
         RgbaFrame::try_new(
@@ -770,7 +873,9 @@ mod tests {
                     width: 2,
                     height: 1,
                 },
+                quad: None,
                 fragments: Vec::new(),
+                fragment_quads: Vec::new(),
                 confidence_milli: 900,
             }],
             translations: Vec::new(),
@@ -822,19 +927,30 @@ mod tests {
             ScreenshotStore::open_at(directory.path(), ScreenshotRetention::default()).unwrap();
         let request_id = RequestId::new();
         let block_id = ScreenBlockId::from("block-1");
+        let bounds = PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        let quad = PhysicalQuad {
+            points: [
+                PhysicalPoint { x: 0, y: 0 },
+                PhysicalPoint { x: 2, y: 0 },
+                PhysicalPoint { x: 2, y: 1 },
+                PhysicalPoint { x: 0, y: 1 },
+            ],
+        };
         let mut document = ScreenTranslationDocument::new(
             request_id,
             std::sync::Arc::new(frame(4)),
             vec![ScreenTextBlock {
                 block_id: block_id.clone(),
                 source_text: "Cooldown".to_owned(),
-                bounds: PhysicalRect {
-                    x: 0,
-                    y: 0,
-                    width: 2,
-                    height: 1,
-                },
-                fragments: Vec::new(),
+                bounds,
+                quad: Some(quad),
+                fragments: vec![bounds],
+                fragment_quads: vec![quad],
                 confidence_milli: 900,
             }],
             SourceContext::default(),
@@ -859,6 +975,8 @@ mod tests {
         let loaded = store.load_crop(request_id).unwrap().unwrap();
 
         assert_eq!(loaded.metadata.revision, 1);
+        assert_eq!(loaded.metadata.blocks[0].quad, Some(quad));
+        assert_eq!(loaded.metadata.blocks[0].fragment_quads, vec![quad]);
         assert_eq!(
             loaded.metadata.translations[0].translated_text,
             "перезарядка"
@@ -876,6 +994,8 @@ mod tests {
         assert_eq!(target, TranslationLanguage::Russian);
         assert_eq!(restored.revision(), 1);
         assert_eq!(restored.copy_text().unwrap(), "перезарядка");
+        assert_eq!(restored.source_blocks()[0].quad, Some(quad));
+        assert_eq!(restored.source_blocks()[0].fragment_quads, vec![quad]);
     }
 
     #[test]
@@ -888,6 +1008,8 @@ mod tests {
             .remove("fragments");
         let legacy: ScreenshotMetadata = serde_json::from_value(value).unwrap();
         assert!(legacy.blocks[0].fragments.is_empty());
+        assert!(legacy.blocks[0].quad.is_none());
+        assert!(legacy.blocks[0].fragment_quads.is_empty());
 
         let document = ScreenTranslationDocument::new(
             request_id,
@@ -955,7 +1077,9 @@ mod tests {
                     width: 2,
                     height: 1,
                 },
+                quad: None,
                 fragments: Vec::new(),
+                fragment_quads: Vec::new(),
                 confidence_milli: 900,
             }],
             SourceContext::default(),
@@ -1245,5 +1369,31 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn delete_all_invalidates_pending_first_write_but_allows_a_new_capture() {
+        let directory = tempdir().unwrap();
+        let store =
+            ScreenshotStore::open_at(directory.path(), ScreenshotRetention::default()).unwrap();
+        let pending = RequestId::new();
+        store.register_capture(pending);
+        assert_eq!(store.delete_all().unwrap(), 0);
+        assert!(
+            store
+                .persist_crop(metadata(pending, 100, 200), &frame(1))
+                .unwrap()
+                .is_none()
+        );
+        let new_capture = RequestId::new();
+        store.register_capture(new_capture);
+        assert!(
+            store
+                .persist_crop(metadata(new_capture, 100, 200), &frame(2))
+                .unwrap()
+                .is_some()
+        );
+        assert!(store.load_crop(pending).unwrap().is_none());
+        assert!(store.load_crop(new_capture).unwrap().is_some());
     }
 }

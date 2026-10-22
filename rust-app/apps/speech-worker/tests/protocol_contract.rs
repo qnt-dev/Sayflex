@@ -28,14 +28,17 @@ struct Worker {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
+    _data_directory: tempfile::TempDir,
 }
 
 impl Worker {
     fn start() -> Self {
+        let data_directory = tempfile::tempdir().expect("isolated worker data directory");
         let mut command = Command::new(WORKER);
         command
             .arg("--protocol-smoke")
             .env("SAYFLEX_RUN_PROTOCOL_SMOKE", "1")
+            .env("LOCALAPPDATA", data_directory.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -50,6 +53,7 @@ impl Worker {
             child,
             input,
             output,
+            _data_directory: data_directory,
         }
     }
 

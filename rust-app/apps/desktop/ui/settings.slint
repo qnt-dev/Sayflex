@@ -107,7 +107,8 @@ component SettingsNavigation inherits VerticalLayout {
 }
 
 export component SettingsWindow inherits Window {
-    title: "SayFlex";
+    in property <string> window-title: "SayFlex";
+    title: root.window-title;
     icon: @image-url("../assets/tray-icon.svg");
     // Small enough to be worth dragging to. The pages are still drawn at the
     // size they were designed for; the workspace scrolls to whatever is left,
@@ -171,6 +172,15 @@ export component SettingsWindow inherits Window {
     in-out property <int> speech-backend-index: 0;
     in property <bool> speech-backend-verified: false;
     in property <string> speech-backend-detail: "";
+    in property <string> cuda-setup-status: "";
+    in property <string> cuda-setup-description: "";
+    in property <string> cuda-setup-error: "";
+    in property <string> cuda-download-label: @tr("Accept and download");
+    in property <float> cuda-setup-progress: 0;
+    in property <bool> cuda-setup-busy: false;
+    in property <bool> cuda-can-download: false;
+    in property <bool> cuda-can-cancel: false;
+    in property <bool> cuda-can-activate: false;
     in-out property <string> output-mode: "original";
     in-out property <string> output-mode-label: @tr("Original language");
     in property <bool> output-mode-locked: false;
@@ -290,6 +300,10 @@ export component SettingsWindow inherits Window {
     callback set-dictation-language(string);
     callback set-release-mode(string);
     callback select-speech-backend(int);
+    callback download-cuda-runtime();
+    callback cancel-cuda-runtime();
+    callback activate-cuda-runtime();
+    callback open-cuda-license();
     callback select-visualizer(int);
     callback select-circular-palette(int);
     callback select-broadcast-mic-palette(int);
@@ -468,6 +482,19 @@ export component SettingsWindow inherits Window {
                     engine-note: root.speech-backend-detail;
                     backend: root.speech-backend-index;
                     backend-verified: root.speech-backend-verified;
+                    cuda-status: root.cuda-setup-status;
+                    cuda-description: root.cuda-setup-description;
+                    cuda-error: root.cuda-setup-error;
+                    cuda-download-label: root.cuda-download-label;
+                    cuda-progress: root.cuda-setup-progress;
+                    cuda-busy: root.cuda-setup-busy;
+                    cuda-can-download: root.cuda-can-download;
+                    cuda-can-cancel: root.cuda-can-cancel;
+                    cuda-can-activate: root.cuda-can-activate;
+                    download-cuda => { root.download-cuda-runtime(); }
+                    cancel-cuda => { root.cancel-cuda-runtime(); }
+                    activate-cuda => { root.activate-cuda-runtime(); }
+                    open-cuda-license => { root.open-cuda-license(); }
                     output-mode: root.output-mode-label;
                     output-mode-value: root.output-mode;
                     output-locked: root.output-mode-locked;

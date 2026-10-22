@@ -470,7 +470,7 @@ impl Engine {
             .map(|s| s.candidates(src_ids, self.shared_vocab));
 
         let mut out = Vec::new();
-        let mut prev = eos; // decoder is seeded with EOS
+        let mut prev = eos; // placeholder: target position zero ignores the token embedding
         let mut eos_seen = false;
         for step in 0..max_len {
             let top = self.decode_step(prev, step, &context, seq, &mut cells);
@@ -651,6 +651,7 @@ impl Engine {
     // --- decoder -------------------------------------------------------------
 
     /// One decoder step for the token `prev_id` at output position `pos`.
+    /// At position zero Marian supplies a zero embedding, independent of `prev_id`.
     /// Updates the per-layer SSRU cell states and returns the top output `[dim]`.
     pub fn decode_step(
         &self,
@@ -1272,7 +1273,8 @@ impl Engine {
     /// Embed a run of token ids at consecutive positions starting at `start`:
     /// `x_t = √d · Wemb[id_t] + PE(start + t)`. `side` selects the source
     /// (encoder) or target (decoder) embedding — the same matrix for shared-vocab
-    /// models, distinct for split-vocab (CJK) ones.
+    /// models, distinct for split-vocab (CJK) ones. Target position zero uses
+    /// only PE, matching Marian's empty prediction history before its first word.
     fn embed(&self, ids: &[u32], start: usize, side: Side) -> Vec<f32> {
         let mut out = vec![0.0f32; ids.len() * self.config.dim_emb];
         self.embed_into(ids, start, side, &mut out);
@@ -1290,6 +1292,10 @@ impl Engine {
             let dst = &mut out[t * d..(t + 1) * d];
             match side {
                 Side::Source => self.weights.src_embed_row_into(id, dst),
+                // Marian DecoderBase::embeddingsFromPrediction uses zeros for
+                // empty history; EOS is a stop token, not a learned start token.
+                // This shared path covers single and active-batch decoding.
+                Side::Target if start == 0 && t == 0 => dst.fill(0.0),
                 Side::Target => self.weights.trg_embed_row_into(id, dst),
             }
             let pos = (start + t) as f32;
@@ -1457,5 +1463,86 @@ mod completion_tests {
             ),
             vec![DecodeTermination::Eos, DecodeTermination::LengthLimit]
         );
+    }
+}
+
+#[cfg(test)]
+mod decoder_embedding_tests {
+    use super::{Engine, Side};
+    use crate::model::{Bytes, Model, ModelItem};
+    use crate::spm::SpmVocab;
+    use crate::trace::DType;
+    use crate::weights::Weights;
+
+    fn tiny_engine() -> Engine {
+        let yaml = b"dim-emb: 32\ntransformer-heads: 8\nenc-depth: 1\ndec-depth: 1\n";
+        let mut embeddings = vec![7_u8; 32];
+        embeddings.extend_from_slice(&[(-3_i8) as u8; 32]);
+        embeddings.extend_from_slice(&1_f32.to_le_bytes());
+        let model = Model {
+            items: vec![
+                ModelItem {
+                    name: "special:model.yml".into(),
+                    dtype: DType::UInt8,
+                    shape: vec![yaml.len() as i32],
+                    data: Bytes::Owned(yaml.to_vec()),
+                },
+                ModelItem {
+                    name: "Wemb".into(),
+                    dtype: DType::Intgemm8,
+                    shape: vec![2, 32],
+                    data: Bytes::Owned(embeddings),
+                },
+                ModelItem {
+                    name: "none_QuantMultA".into(),
+                    dtype: DType::Float32,
+                    shape: vec![1],
+                    data: Bytes::Owned(1_f32.to_le_bytes().to_vec()),
+                },
+            ],
+        };
+        Engine::new(
+            Weights::new(model).unwrap(),
+            SpmVocab::from_bytes(&[]),
+            SpmVocab::from_bytes(&[]),
+        )
+    }
+
+    #[test]
+    fn marian_decoder_first_embedding_is_zero_before_position_for_every_batch_row() {
+        let engine = tiny_engine();
+        let expected: Vec<f32> = (0..32).map(|c| if c < 16 { 0.0 } else { 1.0 }).collect();
+        // Both single and active-batch decoding call this exact embedding path.
+        for previous_id in [0, 1] {
+            assert_eq!(engine.embed(&[previous_id], 0, Side::Target), expected);
+        }
+        let mut batch = vec![123_f32; 64];
+        for (index, previous_id) in [1, 0].into_iter().enumerate() {
+            engine.embed_into(
+                &[previous_id],
+                0,
+                Side::Target,
+                &mut batch[index * 32..(index + 1) * 32],
+            );
+        }
+        assert_eq!(&batch[..32], expected);
+        assert_eq!(&batch[32..], expected);
+    }
+
+    #[test]
+    fn marian_decoder_bootstrap_keeps_source_zero_and_later_target_positions() {
+        let engine = tiny_engine();
+        for (side, start, ids) in [(Side::Source, 0, vec![0, 1]), (Side::Target, 1, vec![0, 1])] {
+            let actual = engine.embed(&ids, start, side);
+            for (row, id) in ids.into_iter().enumerate() {
+                for column in 0..32 {
+                    let weight = if id == 0 { 7.0 } else { -3.0 };
+                    let position = (start + row) as f32;
+                    let expected = 32_f32.sqrt() * weight
+                        + (position * engine.pe_freq[column] + engine.pe_offs[column]).sin();
+                    assert_eq!(actual[row * 32 + column], expected);
+                }
+            }
+        }
     }
 }

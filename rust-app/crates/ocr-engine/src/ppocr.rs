@@ -20,7 +20,7 @@ use oar_ocr_core::{
     },
     processors::{BoundingBox, LimitType, sort_quad_boxes},
 };
-use rust_protocol::{OcrLanguagePolicy, OcrLine, PhysicalRect};
+use rust_protocol::{OcrLanguagePolicy, OcrLine, PhysicalPoint, PhysicalQuad, PhysicalRect};
 
 use crate::{CancellationToken, InferenceAdapter, OcrDocument, OcrError};
 
@@ -269,6 +269,7 @@ impl PpOcrAdapter {
                 (!text.is_empty()).then(|| OcrLine {
                     text,
                     bounds: bounds_for(&crop.bounds, image_width, image_height),
+                    quad: quad_for(&crop.bounds, image_width, image_height),
                     confidence_milli: confidence_milli(Some(*confidence)),
                 })
             })
@@ -384,6 +385,46 @@ fn preferred_model_families(languages: &[String]) -> Vec<(String, ModelFamily)> 
     families
 }
 
+fn quad_for(bounds: &BoundingBox, image_width: u32, image_height: u32) -> Option<PhysicalQuad> {
+    let mut sorted: [_; 4] = bounds.points.as_slice().try_into().ok()?;
+    if sorted
+        .iter()
+        .any(|point| !point.x.is_finite() || !point.y.is_finite())
+    {
+        return None;
+    }
+    // Match oar-ocr 0.9.2 get_rotate_crop_image: it canonicalizes detector
+    // point order and turns tall rectified crops 90 degrees counterclockwise.
+    // The returned quad must describe the recognition image's reading axes.
+    sorted.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let (tl, bl) = if sorted[1].y < sorted[0].y {
+        (1, 0)
+    } else {
+        (0, 1)
+    };
+    let (tr, br) = if sorted[3].y < sorted[2].y {
+        (3, 2)
+    } else {
+        (2, 3)
+    };
+    let mut points = [sorted[tl], sorted[tr], sorted[br], sorted[bl]];
+    let distance =
+        |a: usize, b: usize| (points[a].x - points[b].x).hypot(points[a].y - points[b].y);
+    let width = distance(0, 1).max(distance(2, 3)).round();
+    let height = distance(0, 3).max(distance(1, 2)).round();
+    if height >= width * 1.5 {
+        points.rotate_left(1);
+    }
+    let quad = PhysicalQuad {
+        points: points.map(|point| PhysicalPoint {
+            x: point.x.round().clamp(0.0, image_width as f32) as i32,
+            y: point.y.round().clamp(0.0, image_height as f32) as i32,
+        }),
+    };
+    quad.is_within(bounds_for(bounds, image_width, image_height))
+        .then_some(quad)
+}
+
 fn bounds_for(bounds: &BoundingBox, image_width: u32, image_height: u32) -> PhysicalRect {
     let points = &bounds.points;
     let min_x = points
@@ -439,6 +480,75 @@ fn postprocess_text(family: ModelFamily, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ModelFamily, postprocess_text, preferred_model_families};
+
+    #[test]
+    fn detector_quad_retains_slope_and_clamps_crop_edges() {
+        use oar_ocr_core::processors::{BoundingBox, Point};
+        let bounds = BoundingBox::new(vec![
+            Point::new(-0.2, 10.0),
+            Point::new(90.0, 30.0),
+            Point::new(88.0, 50.0),
+            Point::new(-0.2, 30.0),
+        ]);
+        let quad = super::quad_for(&bounds, 100, 60).unwrap();
+        assert_eq!(quad.points[0], rust_protocol::PhysicalPoint { x: 0, y: 10 });
+        assert_eq!(
+            quad.points[1],
+            rust_protocol::PhysicalPoint { x: 90, y: 30 }
+        );
+        assert!(quad.is_within(super::bounds_for(&bounds, 100, 60)));
+    }
+
+    #[test]
+    fn malformed_detector_quad_is_not_propagated() {
+        use oar_ocr_core::processors::{BoundingBox, Point};
+        assert_eq!(
+            super::quad_for(&BoundingBox::new(vec![Point::new(1.0, 1.0); 4]), 10, 10),
+            None
+        );
+        assert_eq!(
+            super::quad_for(
+                &BoundingBox::new(vec![Point::new(f32::NAN, 1.0); 4]),
+                10,
+                10
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn quad_corner_order_matches_crop_canonicalization() {
+        use oar_ocr_core::processors::{BoundingBox, Point};
+        let shuffled = BoundingBox::new(vec![
+            Point::new(88.0, 50.0),
+            Point::new(0.0, 10.0),
+            Point::new(0.0, 30.0),
+            Point::new(90.0, 30.0),
+        ]);
+        let quad = super::quad_for(&shuffled, 100, 60).unwrap();
+        assert_eq!(quad.points[0], rust_protocol::PhysicalPoint { x: 0, y: 10 });
+        assert_eq!(
+            quad.points[1],
+            rust_protocol::PhysicalPoint { x: 90, y: 30 }
+        );
+    }
+
+    #[test]
+    fn vertical_quad_follows_the_automatically_rotated_recognition_crop() {
+        use oar_ocr_core::processors::BoundingBox;
+        let bounds = BoundingBox::from_coords(10.0, 20.0, 30.0, 120.0);
+        let quad = super::quad_for(&bounds, 100, 200).unwrap();
+        assert_eq!(
+            quad.points,
+            [
+                rust_protocol::PhysicalPoint { x: 30, y: 20 },
+                rust_protocol::PhysicalPoint { x: 30, y: 120 },
+                rust_protocol::PhysicalPoint { x: 10, y: 120 },
+                rust_protocol::PhysicalPoint { x: 10, y: 20 },
+            ]
+        );
+        assert!(quad.is_within(super::bounds_for(&bounds, 100, 200)));
+    }
 
     #[test]
     fn unsupported_language_has_no_model_family() {
@@ -544,7 +654,35 @@ mod detection_limit_probe {
                     // Visual rows exactly as the desktop builds its screen
                     // blocks, as tab-separated text for fixture scripts.
                     let reconstructed = crate::reconstruct_text(&document.lines, 350).unwrap();
-                    for row in crate::reconstruct_visual_rows(&reconstructed.elements) {
+                    let rows = crate::reconstruct_visual_rows(&reconstructed.elements);
+                    if let Some(output) = std::env::var_os("SAYFLEX_OCR_PROBE_OUTPUT_JSON") {
+                        // A single detector configuration gives one deterministic
+                        // replay file, with no profile or screenshot-store writes.
+                        let blocks = crate::reconstruct_visual_paragraphs(&rows)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, row)| rust_protocol::ScreenTextBlock {
+                                block_id: format!("screen-block-{index:04}").into(),
+                                source_text: row.text,
+                                bounds: row.bounds,
+                                quad: row.quad,
+                                fragments: row.fragments,
+                                fragment_quads: row.fragment_quads,
+                                confidence_milli: row.confidence_milli,
+                            })
+                            .collect::<Vec<_>>();
+                        let rows = rows.iter().map(|row| serde_json::json!({
+                            "text": row.text, "bounds": row.bounds, "quad": row.quad,
+                            "fragments": row.fragments, "fragment_quads": row.fragment_quads,
+                            "confidence_milli": row.confidence_milli,
+                        })).collect::<Vec<_>>();
+                        let value = serde_json::json!({
+                            "width": image.width(), "height": image.height(),
+                            "limit": limit, "lines": document.lines, "rows": rows, "blocks": blocks,
+                        });
+                        std::fs::write(output, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+                    }
+                    for row in rows {
                         let rect = |r: &rust_protocol::PhysicalRect| {
                             format!("{},{},{},{}", r.x, r.y, r.width, r.height)
                         };

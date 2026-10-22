@@ -263,6 +263,56 @@ impl ScreenTranslationCoordinator {
     }
 
     #[cfg(feature = "screen-translation")]
+    pub(crate) fn can_retry(&self, request_id: RequestId) -> bool {
+        self.capabilities.contains_key(&request_id)
+            && self.languages.contains_key(&request_id)
+            && self
+                .documents
+                .get(&request_id)
+                .is_some_and(ScreenTranslationDocument::has_pixels)
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn begin_retry(
+        &mut self,
+        request_id: RequestId,
+        expected_revision: u64,
+    ) -> Result<(RequestId, PhysicalRect), DocumentError> {
+        if self.has_active_work() {
+            return Err(DocumentError::TranslationInProgress);
+        }
+        // A worker can still emit cancellation after publishing its completion.
+        // Give retries a fresh identity so such an event cannot close the retry.
+        let retry_id = RequestId::new();
+        let retried = self
+            .documents
+            .get(&request_id)
+            .ok_or(DocumentError::RequestMismatch)?
+            .retry(retry_id, expected_revision)?;
+        let languages = self
+            .languages
+            .get(&request_id)
+            .copied()
+            .ok_or(DocumentError::IncompleteBlock)?;
+        let capabilities = self
+            .capabilities
+            .get(&request_id)
+            .copied()
+            .ok_or(DocumentError::RetryUnavailable)?;
+        let anchor = retried.crop_rect();
+        self.discard_request(request_id);
+        self.documents.insert(retry_id, retried);
+        self.languages.insert(retry_id, languages);
+        self.capabilities.insert(retry_id, capabilities);
+        self.flow.active = Some(ActiveScreenTranslation {
+            request_id: retry_id,
+            anchor: Some(anchor),
+            stage: ScreenTranslationStage::Translating,
+        });
+        Ok((retry_id, anchor))
+    }
+
+    #[cfg(feature = "screen-translation")]
     pub(crate) fn apply_partial(
         &mut self,
         request_id: RequestId,
@@ -279,6 +329,9 @@ impl ScreenTranslationCoordinator {
         }
         if document.block(&block_id).is_none() {
             return Err(DocumentError::UnknownBlockId);
+        }
+        if translated_text.trim().is_empty() {
+            return Err(DocumentError::IncompleteBlock);
         }
         let (_, partials) = self
             .partials
@@ -308,9 +361,16 @@ impl ScreenTranslationCoordinator {
             .get_mut(&request_id)
             .ok_or(DocumentError::RequestMismatch)?;
         document.apply_machine_blocks(request_id, base_revision, blocks)?;
+        let snapshot = document.result_snapshot()?;
         let projection = ScreenTranslationProjection {
             source_text: document.source_text(),
-            translated_text: document.copy_text()?,
+            translated_text: snapshot
+                .blocks
+                .iter()
+                .filter(|block| block.completion == rust_protocol::BlockCompletion::Completed)
+                .map(|block| block.translation.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
             revision: document.revision(),
             capabilities,
         };
@@ -369,6 +429,36 @@ impl ScreenTranslationCoordinator {
             .copied()
             .ok_or(DocumentError::IncompleteBlock)?;
         Ok((document.result_snapshot()?, source, target))
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn partial_result_snapshot(
+        &self,
+        request_id: RequestId,
+    ) -> Result<ScreenResultSnapshot, DocumentError> {
+        let document = self
+            .documents
+            .get(&request_id)
+            .ok_or(DocumentError::RequestMismatch)?;
+        let (base_revision, partials) = self
+            .partials
+            .get(&request_id)
+            .ok_or(DocumentError::IncompleteBlock)?;
+        if document.revision() != *base_revision {
+            return Err(DocumentError::RevisionMismatch);
+        }
+        document.partial_snapshot(partials)
+    }
+
+    #[cfg(feature = "screen-translation")]
+    pub(crate) fn display_snapshot(
+        &self,
+        request_id: RequestId,
+    ) -> Result<ScreenResultSnapshot, DocumentError> {
+        self.partial_result_snapshot(request_id).or_else(|_| {
+            self.result_snapshot(request_id)
+                .map(|(snapshot, _, _)| snapshot)
+        })
     }
 
     #[cfg(all(test, feature = "screen-translation"))]
@@ -1203,7 +1293,7 @@ mod tests {
         SelectionTerminal, SurfacePresentation, surface_regions_need_rebuild,
     };
     #[cfg(feature = "screen-translation")]
-    use crate::screen_result::ScreenTranslationDocument;
+    use crate::screen_result::{DocumentError, ScreenTranslationDocument};
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect {
         PhysicalRect {
@@ -1250,6 +1340,8 @@ mod tests {
             frame,
             vec![
                 ScreenTextBlock {
+                    quad: None,
+                    fragment_quads: Vec::new(),
                     block_id: ScreenBlockId::from("a"),
                     source_text: "Damage 25".to_owned(),
                     bounds: rect(0, 0, 100, 20),
@@ -1257,6 +1349,8 @@ mod tests {
                     confidence_milli: 900,
                 },
                 ScreenTextBlock {
+                    quad: None,
+                    fragment_quads: Vec::new(),
                     block_id: ScreenBlockId::from("b"),
                     source_text: "Cooldown".to_owned(),
                     bounds: rect(0, 20, 100, 20),
@@ -1744,6 +1838,524 @@ mod tests {
 
     #[cfg(feature = "screen-translation")]
     #[test]
+    fn first_partial_has_an_image_snapshot_without_finishing_or_committing_the_document() {
+        let request_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.begin(request_id);
+        coordinator.selected(request_id, rect(0, 0, 2, 1));
+        coordinator.recognized(request_id);
+        coordinator.insert_document(document(request_id));
+        coordinator
+            .apply_partial(request_id, 0, ScreenBlockId::from("a"), "Урон 25".into())
+            .unwrap();
+
+        let snapshot = coordinator.partial_result_snapshot(request_id).unwrap();
+        assert_eq!(snapshot.request_id, request_id);
+        assert_eq!(snapshot.revision, 0);
+        assert!(snapshot.crop.is_some());
+        assert_eq!(snapshot.blocks[0].translation, "Урон 25");
+        assert_eq!(snapshot.blocks[0].completion, BlockCompletion::Completed);
+        assert_eq!(snapshot.blocks[1].source, "Cooldown");
+        assert_eq!(snapshot.blocks[1].translation, "");
+        assert_ne!(snapshot.blocks[1].completion, BlockCompletion::Completed);
+        assert!(coordinator.has_active_work());
+        assert!(!coordinator.can_retry(request_id));
+        assert_eq!(
+            coordinator.copy_text(request_id),
+            Err(DocumentError::IncompleteBlock)
+        );
+
+        coordinator
+            .apply_completed(
+                request_id,
+                0,
+                vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        coordinator.complete(request_id);
+        assert!(!coordinator.has_active_work());
+        assert_eq!(
+            coordinator.copy_text(request_id).unwrap(),
+            "Урон 25\n\nПерезарядка"
+        );
+        assert_eq!(
+            coordinator.result_snapshot(request_id).unwrap().0.revision,
+            1
+        );
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn retry_partial_snapshot_preserves_manual_text_and_rejects_old_generation() {
+        let original = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.insert_document(document(original));
+        coordinator
+            .apply_completed(
+                original,
+                0,
+                vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        coordinator
+            .save_user_edit(original, &ScreenBlockId::from("a"), 1, "Мой урон 25".into())
+            .unwrap();
+        let (retry, _) = coordinator.begin_retry(original, 2).unwrap();
+        let base = coordinator.translation_input(retry).unwrap().0;
+        coordinator
+            .apply_partial(
+                retry,
+                base,
+                ScreenBlockId::from("a"),
+                "Новый урон 25".into(),
+            )
+            .unwrap();
+        coordinator
+            .apply_partial(
+                retry,
+                base,
+                ScreenBlockId::from("b"),
+                "Новая перезарядка".into(),
+            )
+            .unwrap();
+
+        let snapshot = coordinator.partial_result_snapshot(retry).unwrap();
+        assert_eq!(snapshot.revision, 3);
+        assert_eq!(snapshot.blocks[0].translation, "Мой урон 25");
+        assert_eq!(snapshot.blocks[1].translation, "Новая перезарядка");
+        assert!(coordinator.is_active_work_request(retry));
+        assert!(matches!(
+            coordinator.partial_result_snapshot(original),
+            Err(DocumentError::RequestMismatch)
+        ));
+        assert_eq!(
+            coordinator.apply_partial(retry, base - 1, ScreenBlockId::from("b"), "stale".into()),
+            Err(DocumentError::RevisionMismatch)
+        );
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn empty_or_unknown_partial_cannot_replace_a_validated_translation() {
+        let request_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.insert_document(document(request_id));
+        coordinator
+            .apply_partial(request_id, 0, ScreenBlockId::from("a"), "Урон 25".into())
+            .unwrap();
+        assert_eq!(
+            coordinator.apply_partial(request_id, 0, ScreenBlockId::from("a"), " \n".into()),
+            Err(DocumentError::IncompleteBlock)
+        );
+        assert_eq!(
+            coordinator.apply_partial(
+                request_id,
+                0,
+                ScreenBlockId::from("unknown"),
+                "Неверный".into()
+            ),
+            Err(DocumentError::UnknownBlockId)
+        );
+        assert_eq!(
+            coordinator
+                .partial_result_snapshot(request_id)
+                .unwrap()
+                .blocks[0]
+                .translation,
+            "Урон 25"
+        );
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn view_reflow_uses_current_partials_on_first_capture_and_retry() {
+        let request_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.insert_document(document(request_id));
+        coordinator
+            .apply_partial(request_id, 0, ScreenBlockId::from("a"), "Урон 25".into())
+            .unwrap();
+        assert_eq!(
+            coordinator.display_snapshot(request_id).unwrap().blocks[0].translation,
+            "Урон 25"
+        );
+        coordinator
+            .apply_completed(
+                request_id,
+                0,
+                vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        let (retry, _) = coordinator.begin_retry(request_id, 1).unwrap();
+        assert_eq!(
+            coordinator.display_snapshot(retry).unwrap().blocks[1].translation,
+            "Перезарядка"
+        );
+        coordinator
+            .apply_partial(
+                retry,
+                2,
+                ScreenBlockId::from("b"),
+                "Новая перезарядка".into(),
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator.display_snapshot(retry).unwrap().blocks[1].translation,
+            "Новая перезарядка"
+        );
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn partially_failed_completion_keeps_successes_and_the_crop_displayable_without_allowing_copy()
+    {
+        let request_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.insert_document(document(request_id));
+        let projection = coordinator
+            .apply_completed(
+                request_id,
+                0,
+                vec![
+                    translated("a", "Урон 25"),
+                    TranslatedScreenBlock {
+                        block_id: ScreenBlockId::from("b"),
+                        translated_text: "Cooldown".to_owned(),
+                        completion: BlockCompletion::Failed,
+                        failure_message: Some("Provider timed out".to_owned()),
+                    },
+                ],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .expect("partial failure must still expose the completed result");
+
+        assert_eq!(projection.translated_text, "Урон 25");
+        assert_eq!(
+            coordinator.copy_text(request_id),
+            Err(crate::screen_result::DocumentError::IncompleteBlock)
+        );
+        let (snapshot, source, target) = coordinator.result_snapshot(request_id).unwrap();
+        assert!(snapshot.crop.is_some());
+        assert_eq!(snapshot.revision, 1);
+        assert_eq!(source, TranslationLanguage::English);
+        assert_eq!(target, TranslationLanguage::Russian);
+        assert_eq!(snapshot.blocks[0].translation, "Урон 25");
+        assert_eq!(snapshot.blocks[0].completion, BlockCompletion::Completed);
+        assert_eq!(snapshot.blocks[1].source, "Cooldown");
+        assert_eq!(snapshot.blocks[1].completion, BlockCompletion::Failed);
+        assert_eq!(
+            snapshot.blocks[1].failure_message.as_deref(),
+            Some("Provider timed out")
+        );
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn all_failed_completion_remains_displayable_with_no_translated_copy() {
+        let request_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.insert_document(document(request_id));
+        let projection = coordinator
+            .apply_completed(
+                request_id,
+                0,
+                vec![
+                    TranslatedScreenBlock {
+                        block_id: ScreenBlockId::from("a"),
+                        translated_text: "Damage 25".to_owned(),
+                        completion: BlockCompletion::Failed,
+                        failure_message: Some("Provider timed out".to_owned()),
+                    },
+                    TranslatedScreenBlock {
+                        block_id: ScreenBlockId::from("b"),
+                        translated_text: String::new(),
+                        completion: BlockCompletion::Failed,
+                        failure_message: Some("Provider timed out".to_owned()),
+                    },
+                ],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .expect("an all-failed result must keep its image and retryable source");
+
+        assert!(projection.translated_text.is_empty());
+        assert_eq!(
+            coordinator.copy_text(request_id),
+            Err(crate::screen_result::DocumentError::IncompleteBlock)
+        );
+        let (snapshot, _, _) = coordinator.result_snapshot(request_id).unwrap();
+        assert!(snapshot.crop.is_some());
+        assert_eq!(snapshot.blocks.len(), 2);
+        assert_eq!(snapshot.blocks[0].source, "Damage 25");
+        assert_eq!(snapshot.blocks[1].source, "Cooldown");
+        assert!(snapshot.blocks.iter().all(|block| {
+            block.completion == BlockCompletion::Failed && block.failure_message.is_some()
+        }));
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn retry_preserves_saved_crop_context_and_user_edits_under_a_fresh_request() {
+        let original_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.insert_document(document(original_id));
+        coordinator
+            .apply_completed(
+                original_id,
+                0,
+                vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        coordinator
+            .save_user_edit(
+                original_id,
+                &ScreenBlockId::from("a"),
+                1,
+                "Мой урон 25".to_owned(),
+            )
+            .unwrap();
+        let (before, _, _) = coordinator.result_snapshot(original_id).unwrap();
+
+        let (retry_id, anchor) = coordinator.begin_retry(original_id, 2).unwrap();
+
+        assert_ne!(retry_id, original_id);
+        assert_eq!(anchor, rect(0, 0, 2, 1));
+        assert!(coordinator.is_active_work_request(retry_id));
+        assert!(!coordinator.is_recognizing(retry_id));
+        let (base_revision, blocks, context) = coordinator.translation_input(retry_id).unwrap();
+        assert_eq!(base_revision, 3);
+        assert_eq!(blocks[0].source_text, "Damage 25");
+        assert_eq!(blocks[1].source_text, "Cooldown");
+        assert_eq!(context.domain.as_deref(), Some("dota2"));
+        let (pending, source, target) = coordinator.result_snapshot(retry_id).unwrap();
+        assert!(Arc::ptr_eq(
+            before.crop.as_ref().unwrap(),
+            pending.crop.as_ref().unwrap()
+        ));
+        assert_eq!(pending.created_unix_ms, 100);
+        assert_eq!(pending.expires_unix_ms, 200);
+        assert_eq!(source, TranslationLanguage::English);
+        assert_eq!(target, TranslationLanguage::Russian);
+        assert_eq!(pending.blocks[0].translation, "Мой урон 25");
+        assert_eq!(pending.blocks[1].translation, "Перезарядка");
+
+        coordinator
+            .apply_completed(
+                retry_id,
+                base_revision,
+                vec![
+                    translated("a", "Новый урон 25"),
+                    translated("b", "Восстановление"),
+                ],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        coordinator.complete(retry_id);
+        assert_eq!(
+            coordinator.copy_text(retry_id).unwrap(),
+            "Мой урон 25\n\nВосстановление"
+        );
+
+        let (second_retry, _) = coordinator.begin_retry(retry_id, 4).unwrap();
+        assert_ne!(second_retry, retry_id);
+        assert_eq!(coordinator.translation_input(second_retry).unwrap().0, 5);
+        assert_eq!(
+            coordinator.copy_text(second_retry).unwrap(),
+            "Мой урон 25\n\nВосстановление"
+        );
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn retry_ignores_old_completion_partial_and_cancellation_events() {
+        let original_id = RequestId::new();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.insert_document(document(original_id));
+        coordinator
+            .apply_completed(
+                original_id,
+                0,
+                vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            )
+            .unwrap();
+        let (retry_id, _) = coordinator.begin_retry(original_id, 1).unwrap();
+
+        assert!(
+            coordinator
+                .apply_partial(original_id, 0, ScreenBlockId::from("a"), "stale".to_owned())
+                .is_err()
+        );
+        assert!(
+            coordinator
+                .apply_completed(
+                    original_id,
+                    0,
+                    vec![translated("a", "stale"), translated("b", "stale")],
+                    TranslationLanguage::English,
+                    TranslationLanguage::Russian,
+                    TranslationBackendCapabilities::structured(),
+                )
+                .is_err()
+        );
+        assert_eq!(coordinator.complete(original_id), None);
+        assert_eq!(coordinator.close(original_id), None);
+        assert!(coordinator.is_active_work_request(retry_id));
+        assert_eq!(
+            coordinator.copy_text(retry_id).unwrap(),
+            "Урон 25\n\nПерезарядка"
+        );
+        assert_eq!(
+            coordinator.apply_partial(retry_id, 0, ScreenBlockId::from("a"), "stale".to_owned()),
+            Err(crate::screen_result::DocumentError::RevisionMismatch)
+        );
+        assert!(matches!(
+            coordinator.apply_completed(
+                retry_id,
+                0,
+                vec![translated("a", "stale"), translated("b", "stale")],
+                TranslationLanguage::English,
+                TranslationLanguage::Russian,
+                TranslationBackendCapabilities::structured(),
+            ),
+            Err(crate::screen_result::DocumentError::RevisionMismatch)
+        ));
+        assert!(coordinator.is_active_work_request(retry_id));
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn retry_rejects_busy_stale_missing_or_expired_requests_without_discarding_the_result() {
+        use crate::screen_result::DocumentError;
+
+        for (case, expected_error) in [
+            ("busy", DocumentError::TranslationInProgress),
+            ("stale", DocumentError::RevisionMismatch),
+            ("missing", DocumentError::RequestMismatch),
+            ("expired", DocumentError::PixelsExpired),
+        ] {
+            let original_id = RequestId::new();
+            let other_id = RequestId::new();
+            let mut coordinator = ScreenTranslationCoordinator::default();
+            coordinator.insert_document(document(original_id));
+            coordinator
+                .apply_completed(
+                    original_id,
+                    0,
+                    vec![translated("a", "Урон 25"), translated("b", "Перезарядка")],
+                    TranslationLanguage::English,
+                    TranslationLanguage::Russian,
+                    TranslationBackendCapabilities::structured(),
+                )
+                .unwrap();
+            match case {
+                "busy" => {
+                    coordinator.begin(other_id);
+                }
+                "expired" => {
+                    coordinator.expire_request_pixels(original_id);
+                }
+                _ => {}
+            }
+            assert_eq!(
+                coordinator.can_retry(if case == "missing" {
+                    other_id
+                } else {
+                    original_id
+                }),
+                case != "missing" && case != "expired",
+                "{case}"
+            );
+
+            let outcome = coordinator.begin_retry(
+                if case == "missing" {
+                    other_id
+                } else {
+                    original_id
+                },
+                if case == "stale" { 0 } else { 1 },
+            );
+
+            assert_eq!(outcome, Err(expected_error), "{case}");
+            assert_eq!(
+                coordinator.copy_text(original_id).unwrap(),
+                "Урон 25\n\nПерезарядка",
+                "{case}"
+            );
+            assert_eq!(
+                coordinator.translation_input(original_id).unwrap().0,
+                1,
+                "{case}"
+            );
+            if case == "busy" {
+                assert!(coordinator.is_selecting(other_id));
+            }
+        }
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
+    fn restored_result_cannot_retry_without_the_original_user_edit_provenance() {
+        let request_id = RequestId::new();
+        let mut restored = document(request_id);
+        restored
+            .apply_machine_blocks(
+                request_id,
+                0,
+                vec![
+                    translated("a", "Ручное исправление 25"),
+                    translated("b", "Перезарядка"),
+                ],
+            )
+            .unwrap();
+        let mut coordinator = ScreenTranslationCoordinator::default();
+        coordinator.restore_document(
+            restored,
+            TranslationLanguage::English,
+            TranslationLanguage::Russian,
+        );
+
+        assert_eq!(
+            coordinator.begin_retry(request_id, 1),
+            Err(crate::screen_result::DocumentError::RetryUnavailable)
+        );
+        assert!(!coordinator.can_retry(request_id));
+        assert_eq!(
+            coordinator.copy_text(request_id).unwrap(),
+            "Ручное исправление 25\n\nПерезарядка"
+        );
+        assert!(
+            coordinator
+                .result_snapshot(request_id)
+                .unwrap()
+                .0
+                .crop
+                .is_some()
+        );
+        assert!(!coordinator.has_active_work());
+    }
+
+    #[cfg(feature = "screen-translation")]
+    #[test]
     fn expiring_pixels_reports_every_document_whose_live_image_was_released() {
         let expired = RequestId::new();
         let retained = RequestId::new();
@@ -1756,6 +2368,8 @@ mod tests {
                 retained,
                 frame,
                 vec![ScreenTextBlock {
+                    quad: None,
+                    fragment_quads: Vec::new(),
                     block_id: ScreenBlockId::from("retained"),
                     source_text: "Retained".to_owned(),
                     bounds: rect(0, 0, 1, 1),

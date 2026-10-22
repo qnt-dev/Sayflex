@@ -1467,7 +1467,7 @@ export component FirstRunWindow inherits Window {
     title: @tr("Welcome to SayFlex");
     icon: @image-url("../assets/tray-icon.svg");
     width: 680px;
-    height: 460px;
+    height: 520px;
     background: Sheet.canvas;
     default-font-family: "Segoe UI Variable Text";
 
@@ -1623,6 +1623,13 @@ export component FirstRunWindow inherits Window {
                 wrap: word-wrap;
                 vertical-alignment: center;
             }
+        }
+
+        Text {
+            text: @tr("Have an NVIDIA GPU? After setup, open Settings → Dictation to download optional NVIDIA acceleration separately.");
+            color: Sheet.muted;
+            font-size: Sheet.detail-size;
+            wrap: word-wrap;
         }
 
         Rectangle { vertical-stretch: 1; }

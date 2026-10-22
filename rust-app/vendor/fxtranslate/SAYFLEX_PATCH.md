@@ -1,7 +1,7 @@
 # SayFlex fxtranslate patch
 
 This directory is the exact `fxtranslate 0.4.2` crate source admitted from
-crates.io, plus the narrow completion-reporting patch used by SayFlex.
+crates.io, plus the scoped SayFlex changes documented below.
 
 - Original crates.io checksum:
   `e085babeb3347fe8296e1c4a30b0c5226a284428850746d8e281139909502eb2`
@@ -22,7 +22,35 @@ crates.io, plus the narrow completion-reporting patch used by SayFlex.
   SayFlex translation worker holds its engine in a `Mutex` shared between
   threads, which needs `Send` once the SIMD kernel is live.
 
+- SayFlex change (2026-10-10): `vendor/gemmology/gemmology.h` specializes the
+  AVX2 shifted unsigned-byte/signed-byte dot product. It splits each unsigned
+  activation into low seven bits and its high bit, widens each adjacent-product
+  sum separately, then adds in int32. This prevents `maddubs` int16 saturation
+  on the admitted models' full-range weights. The existing random full-range
+  parity gate now includes AVX2, and a new adversarial multi-row/padded-column
+  regression requires exact scalar equality. No second matmul or buffer is used.
+
+- SayFlex change (2026-10-10): target decoder position zero starts with a zero
+  token embedding before positional encoding, matching Marian's empty history
+  in `DecoderBase::embeddingsFromPrediction` and its shifted training input.
+  The common embedding path covers scalar, timed and active-batch decoding;
+  source position zero and subsequent target positions still use their learned
+  embeddings. A tiny synthetic nonzero embedding fixture exercises these
+  boundaries without depending on a downloaded model.
+  Reference: <https://github.com/mozilla/translations/blob/main/inference/marian-fork/src/models/decoder.h>.
+
+- SayFlex change (2026-10-10): consecutive SentencePiece byte pieces decode as
+  UTF-8, rather than literal `<0xNN>` text. Non-byte pieces end a byte run, raw
+  byte whitespace/`▁` is preserved, and every invalid byte produces U+FFFD as
+  in the reference. Tests cover valid multibyte text, malformed/truncated bytes,
+  control boundaries and the distinction from normal whitespace marker pieces.
+  Checked against official SentencePiece 0.2.2 with the admitted EN-RU vocab;
+  encoding is unchanged.
+  Reference: <https://github.com/google/sentencepiece/blob/master/src/sentencepiece_processor.cc>.
+
 To update, download the newly selected crate version, verify its crates.io
 checksum, replace this directory with that exact source, then reapply and review
-only the completion-reporting diff before updating the workspace patch and lock
-file. Run the vendored library tests and the SayFlex translation-engine tests.
+the documented completion, Windows build, exact-AVX2, decoder bootstrap and
+SentencePiece byte-decoding changes before updating
+the workspace patch and lock file. Run the vendored library tests and the SayFlex
+translation-engine tests.

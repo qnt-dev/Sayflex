@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$OutputPath
+    [string]$OutputPath,
+    [switch]$TestNvidia
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,11 +77,20 @@ $lines.Add('- whisper-rs: <https://github.com/tazz4843/whisper-rs>')
 $lines.Add('')
 $lines.Add('## NVIDIA CUDA runtime')
 $lines.Add('')
+if ($TestNvidia) {
+$lines.Add('This local test installer includes a CUDA speech worker but does not bundle')
+$lines.Add('NVIDIA runtime DLLs. The optional cuBLAS runtime is downloaded separately')
+$lines.Add('only after an explicit user action, under the NVIDIA CUDA Toolkit EULA:')
+$lines.Add('<https://docs.nvidia.com/cuda/eula/>. NVIDIA components are proprietary')
+$lines.Add('and are not covered by the SayFlex MIT license. This separation does not')
+$lines.Add('make a claim about embedded compiler/runtime code or SignPath eligibility.')
+} else {
 $lines.Add('The universal Windows installer includes NVIDIA cuBLAS runtime files')
 $lines.Add('`cublas64_13.dll` and `cublasLt64_13.dll` for its optional CUDA speech')
 $lines.Add('worker. These files are proprietary NVIDIA software, are not covered by')
 $lines.Add('the SayFlex MIT license, and are redistributed under the NVIDIA CUDA')
 $lines.Add('Toolkit EULA: <https://docs.nvidia.com/cuda/eula/>.')
+}
 $lines.Add('')
 $lines.Add('## Translation models')
 $lines.Add('')

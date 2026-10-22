@@ -28,7 +28,7 @@ use slint::{
     winit_030::{
         EventResult, WinitWindowAccessor,
         winit::{
-            event::{ElementState, MouseScrollDelta, WindowEvent},
+            event::{ElementState, WindowEvent},
             keyboard::{KeyCode, ModifiersState, PhysicalKey},
         },
     },
@@ -55,8 +55,9 @@ use crate::{
     settings_document::save_settings,
     settings_projection::{
         departure_badge_localized, departures, history_row_localized, privacy_claim_localized,
-        speech_model_row_localized, tone, translation_model_hint_localized,
-        translation_model_row_localized, translation_model_title_localized,
+        speech_download_overview_localized, speech_model_row_localized, tone,
+        translation_model_hint_localized, translation_model_row_localized,
+        translation_model_title_localized,
     },
     slint_window_handle,
     speech_backend::SpeechBackendPreference,
@@ -150,88 +151,109 @@ fn glossary_context_label(context: &rust_protocol::SourceContext) -> String {
     .to_owned()
 }
 
-#[derive(Clone, Copy)]
-struct SettingsScrollMetrics {
-    current: f32,
-    minimum: f32,
-    maximum: f32,
-    set: fn(&SettingsWindow, f32),
-}
+// Whole mouse-wheel detents use the tested immediate path; Slint still owns
+// hit-testing, clamping and editor/list routing. Other wheel input stays native.
+fn settings_window_event_handler(
+    settings_weak: slint::Weak<SettingsWindow>,
+    state: Rc<RefCell<AppState>>,
+    hotkey_draft: Rc<Cell<Option<(i32, HotkeySpec)>>>,
+) -> impl Fn(&WindowEvent) -> EventResult {
+    let modifiers = Rc::new(Cell::new(ModifiersState::default()));
+    let wheel_scroll = RefCell::new(crate::wheel_scroll::WheelScroll::default());
+    move |event| {
+        let Some(settings) = settings_weak.upgrade() else {
+            return EventResult::Propagate;
+        };
+        if matches!(
+            wheel_scroll.borrow_mut().handle_event(&settings, event),
+            EventResult::PreventDefault
+        ) {
+            return EventResult::PreventDefault;
+        }
+        if let WindowEvent::ModifiersChanged(next) = event {
+            modifiers.set(next.state());
+            return EventResult::Propagate;
+        }
+        let index = settings.get_hotkey_capture_index();
+        if index < 0 {
+            return EventResult::Propagate;
+        }
+        let WindowEvent::KeyboardInput { event, .. } = event else {
+            return EventResult::Propagate;
+        };
+        if event.state != ElementState::Pressed || event.repeat {
+            return EventResult::PreventDefault;
+        }
+        let PhysicalKey::Code(code) = event.physical_key else {
+            set_status_problem(
+                &settings_weak,
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::InvalidGlobalShortcut,
+                ),
+            );
+            return EventResult::PreventDefault;
+        };
+        if code == KeyCode::Escape {
+            hotkey_draft.set(None);
+            settings.set_hotkey_capture_index(-1);
+            settings.set_hotkey_capture_label("".into());
+            settings.set_hotkey_capture_value("".into());
+            settings.set_hotkey_capture_valid(false);
+            sync_hotkey_capture_status(&settings_weak, &state, None);
+            return EventResult::PreventDefault;
+        }
+        if matches!(
+            code,
+            KeyCode::ControlLeft
+                | KeyCode::ControlRight
+                | KeyCode::AltLeft
+                | KeyCode::AltRight
+                | KeyCode::ShiftLeft
+                | KeyCode::ShiftRight
+                | KeyCode::SuperLeft
+                | KeyCode::SuperRight
+        ) {
+            return EventResult::PreventDefault;
+        }
+        let Some(action) = hotkey_action_at(index) else {
+            hotkey_draft.set(None);
+            settings.set_hotkey_capture_index(-1);
+            settings.set_hotkey_capture_value("".into());
+            settings.set_hotkey_capture_valid(false);
+            sync_hotkey_capture_status(&settings_weak, &state, None);
+            return EventResult::PreventDefault;
+        };
+        let Some(virtual_key) = virtual_key_for_code(code) else {
+            set_status_problem(
+                &settings_weak,
+                text(
+                    active_locale(state.borrow().ui_locale),
+                    UiText::AllowedGlobalShortcutKeys,
+                ),
+            );
+            return EventResult::PreventDefault;
+        };
+        let spec = HotkeySpec {
+            modifiers: captured_modifiers(modifiers.get()),
+            virtual_key,
+        };
+        hotkey_draft.set(Some((index, spec)));
+        settings.set_hotkey_capture_value(format_hotkey(spec).into());
 
-fn settings_scroll_metrics(settings: &SettingsWindow) -> SettingsScrollMetrics {
-    let page = settings.get_active_page();
-    let (current, content, shown, set): (f32, f32, f32, fn(&SettingsWindow, f32)) = match page {
-        3 => (
-            settings.get_models_scroll_y(),
-            settings.get_models_scroll_content_height(),
-            settings.get_models_scroll_shown_height(),
-            SettingsWindow::set_models_scroll_y,
-        ),
-        4 => (
-            settings.get_providers_scroll_y(),
-            settings.get_providers_scroll_content_height(),
-            settings.get_providers_scroll_shown_height(),
-            SettingsWindow::set_providers_scroll_y,
-        ),
-        6 => (
-            settings.get_history_scroll_y(),
-            settings.get_history_scroll_content_height(),
-            settings.get_history_scroll_shown_height(),
-            SettingsWindow::set_history_scroll_y,
-        ),
-        7 => (
-            settings.get_glossary_scroll_y(),
-            settings.get_glossary_scroll_content_height(),
-            settings.get_glossary_scroll_shown_height(),
-            SettingsWindow::set_glossary_scroll_y,
-        ),
-        8 => (
-            settings.get_hotkeys_scroll_y(),
-            settings.get_hotkeys_scroll_content_height(),
-            settings.get_hotkeys_scroll_shown_height(),
-            SettingsWindow::set_hotkeys_scroll_y,
-        ),
-        _ => (
-            settings.get_workspace_scroll_y(),
-            settings.get_workspace_scroll_content_height(),
-            settings.get_workspace_scroll_shown_height(),
-            SettingsWindow::set_workspace_scroll_y,
-        ),
-    };
-    SettingsScrollMetrics {
-        current,
-        minimum: (shown - content).min(0.0),
-        maximum: 0.0,
-        set,
-    }
-}
-
-fn handle_mouse_wheel(settings: &SettingsWindow, delta: &MouseScrollDelta) -> bool {
-    let Some(delta) = mouse_wheel_delta(delta) else {
-        return false;
-    };
-    if delta == 0.0 {
-        return false;
-    }
-    let metrics = settings_scroll_metrics(settings);
-    if metrics.minimum >= metrics.maximum {
-        return false;
-    }
-    let next = immediate_wheel_position(metrics.current, metrics.minimum, metrics.maximum, delta);
-    (metrics.set)(settings, next);
-    true
-}
-
-fn immediate_wheel_position(current: f32, minimum: f32, maximum: f32, delta: f32) -> f32 {
-    (current + delta).clamp(minimum, maximum)
-}
-
-fn mouse_wheel_delta(delta: &MouseScrollDelta) -> Option<f32> {
-    match delta {
-        MouseScrollDelta::LineDelta(_, vertical) => Some(*vertical * 60.0),
-        // Pixel deltas carry touchpad gesture information. Slint's native
-        // Flickable owns those phases and inertia.
-        MouseScrollDelta::PixelDelta(_) => None,
+        let mut bindings = state.borrow().hotkeys.clone();
+        bindings.binding_mut(action).spec = spec;
+        match validate_hotkeys(&bindings) {
+            Ok(()) => {
+                settings.set_hotkey_capture_valid(true);
+                sync_hotkey_capture_status(&settings_weak, &state, None);
+            }
+            Err(error) => {
+                settings.set_hotkey_capture_valid(false);
+                sync_hotkey_capture_status(&settings_weak, &state, Some(error.reason));
+            }
+        }
+        EventResult::PreventDefault
     }
 }
 
@@ -306,7 +328,32 @@ pub(crate) fn sync_models(settings: &slint::Weak<SettingsWindow>, state: &Rc<Ref
             locale,
         )
     }));
-    settings.set_model_rows(ModelRc::new(VecModel::from(rows)));
+    let current_rows = settings.get_model_rows();
+    let stable_rows = current_rows
+        .as_any()
+        .downcast_ref::<VecModel<ModelRow>>()
+        .filter(|model| {
+            model.row_count() == rows.len()
+                && rows.iter().enumerate().all(|(index, row)| {
+                    model.row_data(index).is_some_and(|current| {
+                        current.catalog_id == row.catalog_id && current.action_key == row.action_key
+                    })
+                })
+        });
+    if let Some(model) = stable_rows {
+        // A new ModelRc destroys ListView delegates, including a Cancel button
+        // pressed between two download chunks. Update the existing rows so its
+        // pointer grab, hover, focus and accessible identity survive progress.
+        for (index, row) in rows.into_iter().enumerate() {
+            if model.row_data(index).as_ref() != Some(&row) {
+                model.set_row_data(index, row);
+            }
+        }
+    } else {
+        // A held pointer must never activate a different catalog entry or a
+        // newly changed action (for example Cancel becoming Install or Use).
+        settings.set_model_rows(ModelRc::new(VecModel::from(rows)));
+    }
     // The list and the claim above it come from the same facts, so they are
     // refreshed together: a note saying a model is downloading, next to a list
     // showing it installed, is the window disagreeing with itself.
@@ -1042,28 +1089,51 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
     settings.set_departure_badge(departure_badge_localized(&leaving, locale).into());
     settings.set_provider_claim(privacy_claim_localized(&leaving, locale).into());
 
-    let installed_speech = state.models.iter().any(|model| model.installed);
+    let selected_model = state
+        .models
+        .iter()
+        .find(|model| model.catalog_id == state.selected_model_id);
+    let installed_speech = selected_model.is_some_and(|model| model.installed);
+    let model_name = selected_model.map_or(state.selected_model_id.as_str(), |model| {
+        model.display_name.as_str()
+    });
+    let selected_download = speech_download_overview_localized(
+        model_name,
+        installed_speech,
+        state.downloads.get(&state.selected_model_id).copied(),
+        locale,
+    );
     let speech_path_ready = state.speech_path_ready();
     let speech_waits_for_local = state.speech_waits_for_local();
     let (statement, sub) = if speech_path_ready {
         (
-            text(locale, UiText::ReadyTitle),
-            text(locale, UiText::LocalSpeechReady),
+            text(locale, UiText::ReadyTitle).to_owned(),
+            text(locale, UiText::LocalSpeechReady).to_owned(),
         )
+    } else if let Some(progress) = &selected_download {
+        progress.clone()
     } else if speech_waits_for_local && !installed_speech {
         (
-            text(locale, UiText::NoSpeechModel),
-            text(locale, UiText::NoneInstalledYet),
+            text(locale, UiText::OverviewSelectedSpeechMissing).to_owned(),
+            model_name.to_owned(),
         )
     } else if speech_waits_for_local {
         (
-            text(locale, UiText::StartingUp),
-            text(locale, UiText::LocalSpeechStarting),
+            text(locale, UiText::StartingUp).to_owned(),
+            if state.speech_reload_on_next_use {
+                text(locale, UiText::SelectedUnloaded).to_owned()
+            } else {
+                render(
+                    locale,
+                    UiText::OverviewSpeechPreparing,
+                    &[("model", model_name)],
+                )
+            },
         )
     } else {
         (
-            text(locale, UiText::NotReady),
-            text(locale, UiText::SpeechServiceUnavailable),
+            text(locale, UiText::NotReady).to_owned(),
+            text(locale, UiText::SpeechServiceUnavailable).to_owned(),
         )
     };
     settings.set_overview_statement(statement.into());
@@ -1071,8 +1141,14 @@ fn sync_overview(settings: &SettingsWindow, state: &AppState) {
 
     // The note carries the one thing that wants attention, and its button goes
     // where the thing can be dealt with.
-    if speech_waits_for_local && !installed_speech {
-        settings.set_overview_note(text(locale, UiText::NoSpeechModel).into());
+    if let Some((_, detail)) = selected_download {
+        // A working cloud route stays ready above; its optional local download
+        // still has visible progress here. The action only opens Models.
+        settings.set_overview_note(detail.into());
+        settings.set_overview_note_action(text(locale, UiText::OverviewViewDownload).into());
+        settings.set_overview_note_signal(false);
+    } else if speech_waits_for_local && !installed_speech {
+        settings.set_overview_note(text(locale, UiText::OverviewSelectedSpeechMissing).into());
         settings.set_overview_note_action(text(locale, UiText::Install).into());
         settings.set_overview_note_signal(true);
     } else if downloading_now(state) {
@@ -1384,6 +1460,17 @@ pub(crate) fn sync_idle_status(
             text(locale, UiText::ReadyTitle).to_owned(),
             Severity::Progress,
             ready_to_speak_status(&state),
+        )
+    } else if state.speech_waits_for_local()
+        && state
+            .models
+            .iter()
+            .any(|model| model.catalog_id == state.selected_model_id && !model.installed)
+    {
+        (
+            text(locale, UiText::NotReady).to_owned(),
+            Severity::Trouble,
+            text(locale, UiText::OverviewSelectedSpeechMissing).to_owned(),
         )
     } else if state.speech_waits_for_local() {
         (
@@ -2134,7 +2221,11 @@ pub(crate) fn wire_settings(
             if state.borrow().history_clear.is_some() {
                 return;
             }
-            state.borrow_mut().history_clear = Some(crate::HistoryClear::default());
+            {
+                let mut state = state.borrow_mut();
+                state.pending_insert_last = None;
+                state.history_clear = Some(crate::HistoryClear::default());
+            }
             if let Err(error) = workers.speech.send(&SpeechWorkerCommand::ClearHistory) {
                 crate::record_history_clear_answer(
                     &settings_weak,
@@ -2778,101 +2869,10 @@ pub(crate) fn wire_settings(
         let settings_weak = settings.as_weak();
         let state = Rc::clone(state);
         let hotkey_draft = Rc::clone(&hotkey_draft);
-        let modifiers = Rc::new(Cell::new(ModifiersState::default()));
-        settings.window().on_winit_window_event(move |_, event| {
-            if let WindowEvent::ModifiersChanged(next) = event {
-                modifiers.set(next.state());
-                return EventResult::Propagate;
-            }
-            let Some(settings) = settings_weak.upgrade() else {
-                return EventResult::Propagate;
-            };
-            if let WindowEvent::MouseWheel { delta, .. } = event
-                && handle_mouse_wheel(&settings, delta)
-            {
-                return EventResult::PreventDefault;
-            }
-            let index = settings.get_hotkey_capture_index();
-            if index < 0 {
-                return EventResult::Propagate;
-            }
-            let WindowEvent::KeyboardInput { event, .. } = event else {
-                return EventResult::Propagate;
-            };
-            if event.state != ElementState::Pressed || event.repeat {
-                return EventResult::PreventDefault;
-            }
-            let PhysicalKey::Code(code) = event.physical_key else {
-                set_status_problem(
-                    &settings_weak,
-                    text(
-                        active_locale(state.borrow().ui_locale),
-                        UiText::InvalidGlobalShortcut,
-                    ),
-                );
-                return EventResult::PreventDefault;
-            };
-            if code == KeyCode::Escape {
-                hotkey_draft.set(None);
-                settings.set_hotkey_capture_index(-1);
-                settings.set_hotkey_capture_label("".into());
-                settings.set_hotkey_capture_value("".into());
-                settings.set_hotkey_capture_valid(false);
-                sync_hotkey_capture_status(&settings_weak, &state, None);
-                return EventResult::PreventDefault;
-            }
-            if matches!(
-                code,
-                KeyCode::ControlLeft
-                    | KeyCode::ControlRight
-                    | KeyCode::AltLeft
-                    | KeyCode::AltRight
-                    | KeyCode::ShiftLeft
-                    | KeyCode::ShiftRight
-                    | KeyCode::SuperLeft
-                    | KeyCode::SuperRight
-            ) {
-                return EventResult::PreventDefault;
-            }
-            let Some(action) = hotkey_action_at(index) else {
-                hotkey_draft.set(None);
-                settings.set_hotkey_capture_index(-1);
-                settings.set_hotkey_capture_value("".into());
-                settings.set_hotkey_capture_valid(false);
-                sync_hotkey_capture_status(&settings_weak, &state, None);
-                return EventResult::PreventDefault;
-            };
-            let Some(virtual_key) = virtual_key_for_code(code) else {
-                set_status_problem(
-                    &settings_weak,
-                    text(
-                        active_locale(state.borrow().ui_locale),
-                        UiText::AllowedGlobalShortcutKeys,
-                    ),
-                );
-                return EventResult::PreventDefault;
-            };
-            let spec = HotkeySpec {
-                modifiers: captured_modifiers(modifiers.get()),
-                virtual_key,
-            };
-            hotkey_draft.set(Some((index, spec)));
-            settings.set_hotkey_capture_value(format_hotkey(spec).into());
-
-            let mut bindings = state.borrow().hotkeys.clone();
-            bindings.binding_mut(action).spec = spec;
-            match validate_hotkeys(&bindings) {
-                Ok(()) => {
-                    settings.set_hotkey_capture_valid(true);
-                    sync_hotkey_capture_status(&settings_weak, &state, None);
-                }
-                Err(error) => {
-                    settings.set_hotkey_capture_valid(false);
-                    sync_hotkey_capture_status(&settings_weak, &state, Some(error.reason));
-                }
-            }
-            EventResult::PreventDefault
-        });
+        let handler = settings_window_event_handler(settings_weak, state, hotkey_draft);
+        settings
+            .window()
+            .on_winit_window_event(move |_, event| handler(event));
     }
     {
         let settings_weak = settings.as_weak();
@@ -3689,6 +3689,546 @@ mod hotkey_capture_tests {
 }
 
 #[cfg(test)]
+mod overview_lifecycle_tests {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+        time::Duration,
+    };
+
+    use i_slint_backend_testing::ElementHandle;
+    use rust_protocol::{ModelSummary, SpeechOutputMode, TranscriptionProviderStatus};
+    use slint::{ComponentHandle, LogicalPosition, LogicalSize, Model};
+
+    use crate::{
+        AppState, SavedSettings, SettingsWindow, SpeechBackend, localization::UiLocale,
+        settings_projection::Download,
+    };
+
+    fn fixture() -> (SettingsWindow, AppState) {
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .unwrap();
+        let settings = SettingsWindow::new().unwrap();
+        slint::select_bundled_translation("en").unwrap();
+        let mut state = AppState::new(
+            "whisper-large-v3-turbo".into(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        );
+        state.ui_locale = UiLocale::English;
+        state.models.push(ModelSummary {
+            catalog_id: state.selected_model_id.clone(),
+            display_name: "Whisper".into(),
+            description: String::new(),
+            size_bytes: 100,
+            installed: false,
+            selected: true,
+            recommended: true,
+            supports_speech_translation: true,
+        });
+        (settings, state)
+    }
+
+    #[test]
+    fn model_cancel_click_survives_download_progress_between_press_and_release() {
+        use slint::platform::{PointerEventButton, WindowEvent};
+
+        let (settings, mut app) = fixture();
+        app.downloads.insert(
+            app.selected_model_id.clone(),
+            Download {
+                downloaded_bytes: 35,
+                total_bytes: 100,
+            },
+        );
+        let state = Rc::new(RefCell::new(app));
+        super::sync_models(&settings.as_weak(), &state);
+        let cancelled = Rc::new(RefCell::new(Vec::new()));
+        let requests = Rc::clone(&cancelled);
+        settings.on_cancel_model_install(move |id| requests.borrow_mut().push(id.to_string()));
+        settings.set_active_page(3);
+        settings.show().unwrap();
+        settings.window().set_size(LogicalSize::new(1000.0, 720.0));
+        settings.window().take_snapshot().unwrap();
+
+        let cancel = ElementHandle::find_by_accessible_label(&settings, "Cancel")
+            .next()
+            .expect("the downloading row exposes Cancel");
+        let at = cancel.absolute_position();
+        let size = cancel.size();
+        let position = LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+        let press = || {
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+        };
+        let release = || {
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+        };
+        // First prove the rendered hit target and normal click work.
+        press();
+        release();
+        assert_eq!(&*cancelled.borrow(), &["whisper-large-v3-turbo"]);
+        cancelled.borrow_mut().clear();
+
+        press();
+        state
+            .borrow_mut()
+            .downloads
+            .get_mut("whisper-large-v3-turbo")
+            .unwrap()
+            .downloaded_bytes = 36;
+        // This is the production update used for each worker progress event.
+        // A frame between down/up materializes any replaced ListView delegates.
+        super::sync_models(&settings.as_weak(), &state);
+        settings.window().take_snapshot().unwrap();
+        release();
+        assert_eq!(
+            &*cancelled.borrow(),
+            &["whisper-large-v3-turbo"],
+            "progress must not discard the pressed Cancel delegate"
+        );
+        assert!(cancel.is_valid(), "the same accessible button must survive");
+    }
+
+    #[test]
+    fn releasing_cancel_after_terminal_update_never_installs_or_selects_the_model() {
+        use slint::platform::{PointerEventButton, WindowEvent};
+
+        let (settings, mut app) = fixture();
+        app.models[0].selected = false;
+        let mut selected = app.models[0].clone();
+        selected.catalog_id = "other-selected-model".into();
+        selected.selected = true;
+        selected.installed = true;
+        app.selected_model_id.clone_from(&selected.catalog_id);
+        app.models.push(selected);
+        app.speech_ready = true;
+        let state = Rc::new(RefCell::new(app));
+        let chosen = Rc::new(RefCell::new(Vec::new()));
+        let requests = Rc::clone(&chosen);
+        settings.on_choose_model(move |id| requests.borrow_mut().push(id.to_string()));
+        let cancelled = Rc::new(Cell::new(0));
+        let requests = Rc::clone(&cancelled);
+        settings.on_cancel_model_install(move |_| requests.set(requests.get() + 1));
+        settings.set_active_page(3);
+        settings.show().unwrap();
+        settings.window().set_size(LogicalSize::new(1000.0, 720.0));
+
+        let center = |label| {
+            let button = ElementHandle::find_by_accessible_label(&settings, label)
+                .next()
+                .expect("the model action is rendered");
+            let at = button.absolute_position();
+            let size = button.size();
+            LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0)
+        };
+        let press = |position| {
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+        };
+        let release = |position| {
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+        };
+
+        for installed in [false, true] {
+            {
+                let mut app = state.borrow_mut();
+                app.models[0].installed = false;
+                app.downloads.insert(
+                    "whisper-large-v3-turbo".into(),
+                    Download {
+                        downloaded_bytes: 35,
+                        total_bytes: 100,
+                    },
+                );
+            }
+            super::sync_models(&settings.as_weak(), &state);
+            settings.window().take_snapshot().unwrap();
+            let position = center("Cancel");
+            press(position);
+            // Failure exposes Install; completion exposes Use on this
+            // nonselected model. Neither is the action the user pressed.
+            state.borrow_mut().downloads.clear();
+            state.borrow_mut().models[0].installed = installed;
+            super::sync_models(&settings.as_weak(), &state);
+            settings.window().take_snapshot().unwrap();
+            release(position);
+            assert!(
+                chosen.borrow().is_empty(),
+                "releasing Cancel must not invoke the new Install/Use action"
+            );
+            assert_eq!(cancelled.get(), 0);
+
+            let new_action = center(if installed { "Use" } else { "Install" });
+            press(new_action);
+            release(new_action);
+            assert_eq!(&*chosen.borrow(), &["whisper-large-v3-turbo"]);
+            chosen.borrow_mut().clear();
+        }
+    }
+
+    #[test]
+    fn selected_model_cancel_restores_install_and_routes_retry_to_same_model() {
+        use slint::platform::{PointerEventButton, WindowEvent};
+
+        let (settings, mut app) = fixture();
+        app.downloads.insert(
+            app.selected_model_id.clone(),
+            Download {
+                downloaded_bytes: 35,
+                total_bytes: 100,
+            },
+        );
+        let state = Rc::new(RefCell::new(app));
+        let chosen = Rc::new(RefCell::new(Vec::new()));
+        let requests = Rc::clone(&chosen);
+        settings.on_choose_model(move |id| requests.borrow_mut().push(id.to_string()));
+        let cancelled = Rc::new(RefCell::new(Vec::new()));
+        let requests = Rc::clone(&cancelled);
+        let cancel_state = Rc::clone(&state);
+        let weak = settings.as_weak();
+        settings.on_cancel_model_install(move |id| {
+            requests.borrow_mut().push(id.to_string());
+            // Project the same local state change as the production Cancel
+            // callback; the fixture deliberately does not spawn a worker.
+            cancel_state.borrow_mut().downloads.remove(id.as_str());
+            super::sync_models(&weak, &cancel_state);
+        });
+        super::sync_models(&settings.as_weak(), &state);
+        settings.set_active_page(3);
+        settings.show().unwrap();
+        settings.window().set_size(LogicalSize::new(1000.0, 720.0));
+        settings.window().take_snapshot().unwrap();
+
+        let click = |label| {
+            let button = ElementHandle::find_by_accessible_label(&settings, label)
+                .next()
+                .expect("the selected model must expose its current action");
+            let at = button.absolute_position();
+            let size = button.size();
+            let position = LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+            settings
+                .window()
+                .dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+        };
+        click("Cancel");
+        assert_eq!(&*cancelled.borrow(), &["whisper-large-v3-turbo"]);
+        assert!(chosen.borrow().is_empty());
+        settings.window().take_snapshot().unwrap();
+        assert_eq!(
+            settings.get_model_rows().row_data(0).unwrap().action_key,
+            "install"
+        );
+        assert!(state.borrow().models[0].selected);
+        click("Install");
+        assert_eq!(&*chosen.borrow(), &["whisper-large-v3-turbo"]);
+        assert_eq!(cancelled.borrow().len(), 1);
+    }
+
+    #[test]
+    fn model_rows_keep_identity_for_progress_and_reset_for_catalog_or_action_changes() {
+        let (settings, mut app) = fixture();
+        app.downloads.insert(
+            "whisper-large-v3-turbo".into(),
+            Download {
+                downloaded_bytes: 35,
+                total_bytes: 100,
+            },
+        );
+        let state = Rc::new(RefCell::new(app));
+        super::sync_models(&settings.as_weak(), &state);
+        let original = settings.get_model_rows();
+        state
+            .borrow_mut()
+            .downloads
+            .get_mut("whisper-large-v3-turbo")
+            .unwrap()
+            .downloaded_bytes = 36;
+        super::sync_models(&settings.as_weak(), &state);
+        assert!(original == settings.get_model_rows());
+        assert_eq!(original.row_data(0).unwrap().action_key, "cancel");
+        assert_eq!(original.row_data(0).unwrap().state, "36 %");
+
+        state.borrow_mut().models[0].installed = true;
+        super::sync_models(&settings.as_weak(), &state);
+        let installed = settings.get_model_rows();
+        assert!(original != installed);
+        assert_ne!(installed.row_data(0).unwrap().action_key, "cancel");
+        state.borrow_mut().models[0].display_name = "Updated name".into();
+        super::sync_models(&settings.as_weak(), &state);
+        assert!(installed == settings.get_model_rows());
+        assert_eq!(installed.row_data(0).unwrap().title, "Updated name");
+
+        let mut second = state.borrow().models[0].clone();
+        second.catalog_id = "second-model".into();
+        second.selected = false;
+        state.borrow_mut().models.push(second);
+        super::sync_models(&settings.as_weak(), &state);
+        let extended = settings.get_model_rows();
+        assert!(installed != extended);
+        assert_eq!(extended.row_count(), 2);
+        assert_eq!(extended.row_data(1).unwrap().catalog_id, "second-model");
+
+        state.borrow_mut().models.reverse();
+        super::sync_models(&settings.as_weak(), &state);
+        let reordered = settings.get_model_rows();
+        assert!(extended != reordered);
+        assert_eq!(reordered.row_data(0).unwrap().catalog_id, "second-model");
+        assert_eq!(
+            reordered.row_data(1).unwrap().catalog_id,
+            "whisper-large-v3-turbo"
+        );
+    }
+
+    #[test]
+    fn overview_download_progress_replaces_missing_and_action_only_opens_models() {
+        let (settings, mut state) = fixture();
+        state.downloads.insert(
+            state.selected_model_id.clone(),
+            Download {
+                downloaded_bytes: 35,
+                total_bytes: 100,
+            },
+        );
+        super::sync_overview(&settings, &state);
+        assert_eq!(
+            settings.get_overview_statement(),
+            "Downloading speech model"
+        );
+        assert_eq!(settings.get_overview_sub(), "Whisper · 35% downloaded");
+        assert_eq!(settings.get_overview_note_action(), "View download");
+
+        let install_requests = Rc::new(Cell::new(0));
+        let requested = Rc::clone(&install_requests);
+        settings.on_choose_model(move |_| requested.set(requested.get() + 1));
+        settings.show().unwrap();
+        settings.window().set_size(LogicalSize::new(1000.0, 720.0));
+        settings.window().take_snapshot().unwrap();
+        ElementHandle::find_by_accessible_label(&settings, "View download")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+        assert_eq!(settings.get_active_page(), 3);
+        assert_eq!(install_requests.get(), 0);
+    }
+
+    #[test]
+    fn overview_complete_bytes_wait_for_install_and_model_readiness() {
+        let (settings, mut state) = fixture();
+        state.downloads.insert(
+            state.selected_model_id.clone(),
+            Download {
+                downloaded_bytes: 100,
+                total_bytes: 100,
+            },
+        );
+        super::sync_overview(&settings, &state);
+        assert_eq!(
+            settings.get_overview_statement(),
+            "Checking and installing speech model"
+        );
+        assert_eq!(settings.get_overview_note_action(), "View download");
+
+        // A stale final progress event cannot keep an installed model downloading.
+        state.models[0].installed = true;
+        super::sync_overview(&settings, &state);
+        assert_eq!(settings.get_overview_statement(), "Starting up");
+        assert_eq!(
+            settings.get_overview_sub(),
+            "Whisper · Preparing the installed speech model."
+        );
+        assert_ne!(settings.get_overview_note_action(), "View download");
+
+        state.speech_ready = true;
+        state.speech_loaded_model_id = Some(state.selected_model_id.clone());
+        super::sync_overview(&settings, &state);
+        assert_eq!(settings.get_overview_statement(), "Ready");
+    }
+
+    #[test]
+    fn overview_cleared_download_returns_to_missing_for_the_selected_model_only() {
+        let (settings, mut state) = fixture();
+        let mut other = state.models[0].clone();
+        other.catalog_id = "another-model".into();
+        other.installed = true;
+        other.selected = false;
+        state.models.push(other);
+        state.downloads.insert(
+            state.selected_model_id.clone(),
+            Download {
+                downloaded_bytes: 35,
+                total_bytes: 100,
+            },
+        );
+        super::sync_overview(&settings, &state);
+        state.downloads.remove(&state.selected_model_id);
+        // This checks projection after its owner clears the entry, not worker
+        // terminal-event handling; the failure/cancel reason lives in the footer.
+        super::sync_overview(&settings, &state);
+        assert_eq!(
+            settings.get_overview_statement(),
+            "The selected speech model is not installed."
+        );
+        assert_eq!(settings.get_overview_note_action(), "Install");
+        assert!(!settings.get_overview_sub().contains("35%"));
+    }
+
+    #[test]
+    fn overview_unknown_download_size_has_no_invented_percentage() {
+        let (settings, mut state) = fixture();
+        state.downloads.insert(
+            state.selected_model_id.clone(),
+            Download {
+                downloaded_bytes: 35,
+                total_bytes: 0,
+            },
+        );
+        super::sync_overview(&settings, &state);
+        assert_eq!(
+            settings.get_overview_statement(),
+            "Downloading speech model"
+        );
+        assert_eq!(
+            settings.get_overview_sub(),
+            "Whisper · Download size is not available yet."
+        );
+        assert!(!settings.get_overview_note().contains('%'));
+        assert_eq!(settings.get_overview_note_action(), "View download");
+    }
+
+    #[test]
+    fn overview_cloud_ready_remains_ready_while_local_download_is_in_the_note() {
+        let (settings, mut state) = fixture();
+        state.speech_worker_ready = true;
+        state
+            .transcription_providers
+            .push(TranscriptionProviderStatus {
+                id: "groq".into(),
+                position: 0,
+                enabled: true,
+                available: true,
+                detail: String::new(),
+                has_credential: true,
+                credential_hint: None,
+            });
+        state.downloads.insert(
+            state.selected_model_id.clone(),
+            Download {
+                downloaded_bytes: 35,
+                total_bytes: 100,
+            },
+        );
+        super::sync_overview(&settings, &state);
+        assert_eq!(settings.get_overview_statement(), "Ready");
+        assert!(settings.get_overview_note().contains("35%"));
+        assert_eq!(settings.get_overview_note_action(), "View download");
+    }
+
+    #[test]
+    fn overview_russian_progress_and_installing_fit_the_default_window() {
+        let (settings, mut state) = fixture();
+        state.ui_locale = UiLocale::Russian;
+        slint::select_bundled_translation("ru").unwrap();
+        state.models[0].display_name = "Whisper Large V3 Turbo".into();
+        settings.show().unwrap();
+        settings.window().set_size(LogicalSize::new(1000.0, 720.0));
+        for downloaded_bytes in [35, 100] {
+            state.downloads.insert(
+                state.selected_model_id.clone(),
+                Download {
+                    downloaded_bytes,
+                    total_bytes: 100,
+                },
+            );
+            super::sync_overview(&settings, &state);
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+            let shot = settings.window().take_snapshot().unwrap();
+            for label in [settings.get_overview_statement(), "Открыть загрузку".into()]
+            {
+                let element = ElementHandle::find_by_accessible_label(&settings, &label)
+                    .next()
+                    .unwrap();
+                let at = element.absolute_position();
+                let size = element.size();
+                assert!(
+                    at.x >= 0.0 && at.x + size.width <= 1000.0,
+                    "{label}: horizontal clipping at {at:?}, {size:?}"
+                );
+                assert!(
+                    at.y >= 74.0 && at.y + size.height < 628.0,
+                    "{label}: outside workspace at {at:?}, {size:?}"
+                );
+            }
+            if let Some(directory) = std::env::var_os("SAYFLEX_OVERVIEW_RENDER_OUTPUT") {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                let mut encoder = png::Encoder::new(
+                    std::io::BufWriter::new(
+                        std::fs::File::create(
+                            directory.join(format!("overview-ru-{downloaded_bytes}.png")),
+                        )
+                        .unwrap(),
+                    ),
+                    shot.width(),
+                    shot.height(),
+                );
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .unwrap()
+                    .write_image_data(shot.as_bytes())
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod status_refresh_tests {
     use rust_protocol::{HotkeyRejection, SpeechOutputMode};
 
@@ -3698,6 +4238,72 @@ mod status_refresh_tests {
     };
 
     use super::{can_refresh_idle_status, hotkey_rejection_global_message};
+
+    #[test]
+    fn idle_footer_distinguishes_missing_model_from_download_and_warmup() {
+        use std::{cell::RefCell, rc::Rc};
+
+        use rust_protocol::ModelSummary;
+        use slint::ComponentHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let settings = crate::SettingsWindow::new().unwrap();
+        let state = Rc::new(RefCell::new(AppState::new(
+            "whisper-large-v3-turbo".into(),
+            SpeechOutputMode::OriginalLanguage,
+            SpeechBackend::Cpu,
+            &SavedSettings::default(),
+        )));
+        {
+            let mut app = state.borrow_mut();
+            app.ui_locale = UiLocale::English;
+            app.input_ready = true;
+            let catalog_id = app.selected_model_id.clone();
+            app.models.push(ModelSummary {
+                catalog_id,
+                display_name: "Whisper".into(),
+                description: String::new(),
+                size_bytes: 100,
+                installed: false,
+                selected: true,
+                recommended: true,
+                supports_speech_translation: true,
+            });
+        }
+        settings.set_runtime_status("Preparing model".into());
+        super::sync_idle_status(&settings.as_weak(), &state);
+        assert_eq!(settings.get_runtime_status(), "Not ready");
+        assert_eq!(
+            settings.get_indicator_status(),
+            "The selected speech model is not installed."
+        );
+        assert!(settings.get_status_is_a_problem());
+
+        state.borrow_mut().downloads.insert(
+            "whisper-large-v3-turbo".into(),
+            Download {
+                downloaded_bytes: 35,
+                total_bytes: 100,
+            },
+        );
+        settings.set_runtime_status("Preparing model".into());
+        settings.set_indicator_status("Downloading 35%".into());
+        settings.set_status_is_a_problem(false);
+        super::sync_idle_status(&settings.as_weak(), &state);
+        assert_eq!(settings.get_runtime_status(), "Preparing model");
+        assert_eq!(settings.get_indicator_status(), "Downloading 35%");
+        assert!(!settings.get_status_is_a_problem());
+
+        state.borrow_mut().downloads.clear();
+        state.borrow_mut().models[0].installed = true;
+        super::sync_idle_status(&settings.as_weak(), &state);
+        assert_eq!(settings.get_runtime_status(), "Preparing model");
+        assert_eq!(
+            settings.get_indicator_status(),
+            "Speech model is still being prepared."
+        );
+        assert!(!settings.get_status_is_a_problem());
+    }
 
     #[test]
     fn startup_hotkey_conflicts_stay_on_their_row_instead_of_occupying_the_footer() {
@@ -3742,51 +4348,6 @@ mod status_refresh_tests {
         );
 
         assert!(!can_refresh_idle_status(&state));
-    }
-}
-
-#[cfg(test)]
-mod wheel_motion_tests {
-    use slint::winit_030::winit::{dpi::PhysicalPosition, event::MouseScrollDelta};
-
-    use super::{immediate_wheel_position, mouse_wheel_delta};
-
-    #[test]
-    fn detented_wheels_use_the_fast_path_but_touchpads_stay_native() {
-        assert_eq!(
-            mouse_wheel_delta(&MouseScrollDelta::LineDelta(0.0, -1.0)),
-            Some(-60.0)
-        );
-        assert_eq!(
-            mouse_wheel_delta(&MouseScrollDelta::PixelDelta(PhysicalPosition::new(
-                0.0, -24.0
-            ))),
-            None
-        );
-    }
-
-    #[test]
-    fn a_fast_wheel_burst_applies_every_step_immediately() {
-        let mut position = 0.0;
-
-        // A detented wheel is discrete input. Ten detents therefore mean
-        // exactly 600 logical pixels with no timer-driven tail afterwards.
-        for _ in 0..10 {
-            position = immediate_wheel_position(position, -13_600.0, 0.0, -60.0);
-        }
-
-        assert_eq!(position, -600.0);
-    }
-
-    #[test]
-    fn the_first_detent_reaches_its_destination_without_a_follow_up_tick() {
-        assert_eq!(immediate_wheel_position(0.0, -13_600.0, 0.0, -60.0), -60.0);
-    }
-
-    #[test]
-    fn wheel_destinations_are_clamped_to_both_ends_of_the_page() {
-        assert_eq!(immediate_wheel_position(-490.0, -500.0, 0.0, -60.0), -500.0);
-        assert_eq!(immediate_wheel_position(-10.0, -500.0, 0.0, 60.0), 0.0);
     }
 }
 
@@ -3960,5 +4521,507 @@ mod navigation_scroll_tests {
             );
         }
         drop(seed);
+    }
+}
+
+#[cfg(test)]
+mod winit_scroll_routing_tests {
+    use super::settings_window_event_handler;
+    use i_slint_backend_testing::ElementHandle;
+    use i_slint_core::{
+        input::{MouseEvent, TouchPhase as SlintTouchPhase},
+        lengths::LogicalPoint,
+        window::WindowInner,
+    };
+    use slint::winit_030::{
+        EventResult,
+        winit::{
+            dpi::PhysicalPosition,
+            event::{DeviceId, MouseScrollDelta, TouchPhase, WindowEvent},
+        },
+    };
+    use slint::{ComponentHandle, LogicalPosition, LogicalSize, ModelRc, VecModel};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+        time::Duration,
+    };
+
+    fn window(
+        page: i32,
+        height: f32,
+    ) -> (crate::SettingsWindow, impl Fn(&WindowEvent) -> EventResult) {
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        )))
+        .unwrap();
+        let settings = crate::SettingsWindow::new().unwrap();
+        slint::select_bundled_translation("en").unwrap();
+        settings.set_active_page(page);
+        settings.set_model_rows(ModelRc::new(VecModel::from(
+            (0..30)
+                .map(|index| crate::ModelRow {
+                    catalog_id: format!("fixture-{index}").into(),
+                    section: "Speech".into(),
+                    title: format!("Fixture model {index}").into(),
+                    detail: "Static model row for scrolling".into(),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        settings.set_history_rows(ModelRc::new(VecModel::from(
+            (0..100)
+                .map(|index| crate::HistoryRow {
+                    text: format!("fixture row {index}").into(),
+                    detail: "fixture detail".into(),
+                    origin: "local".into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+        settings.set_glossary_rows(ModelRc::new(VecModel::from(
+            (0..30)
+                .map(|index| crate::GlossaryRow {
+                    entry_id: index.to_string().into(),
+                    source: format!("source {index}").into(),
+                    translation: "translated".into(),
+                    languages: "EN → RU".into(),
+                    context: "fixture".into(),
+                    example: "fixture".into(),
+                    origin: "confirmed".into(),
+                    updated: "today".into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+        settings.show().unwrap();
+        settings.window().set_size(LogicalSize::new(1000.0, height));
+        settle(&settings);
+        let state = Rc::new(RefCell::new(crate::AppState::new(
+            "fixture".into(),
+            rust_protocol::SpeechOutputMode::OriginalLanguage,
+            crate::SpeechBackend::Cpu,
+            &crate::SavedSettings::default(),
+        )));
+        let handler =
+            settings_window_event_handler(settings.as_weak(), state, Rc::new(Cell::new(None)));
+        (settings, handler)
+    }
+
+    fn settle(settings: &crate::SettingsWindow) {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(500));
+        slint::platform::update_timers_and_animations();
+        settings.window().take_snapshot().unwrap();
+    }
+
+    fn center(item: ElementHandle) -> LogicalPosition {
+        let at = item.absolute_position();
+        let size = item.size();
+        LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0)
+    }
+
+    // This invokes the same closure installed on the real Winit window first.
+    // Propagated events use the backend's internal wheel entrypoint and phases:
+    // public PointerScrolled uses Cancelled and bypasses Winit's animation path.
+    fn wheel(
+        settings: &crate::SettingsWindow,
+        handler: &impl Fn(&WindowEvent) -> EventResult,
+        position: LogicalPosition,
+        delta: MouseScrollDelta,
+    ) -> bool {
+        wheel_with_phase(settings, handler, position, delta, TouchPhase::Moved)
+    }
+
+    fn wheel_with_phase(
+        settings: &crate::SettingsWindow,
+        handler: &impl Fn(&WindowEvent) -> EventResult,
+        position: LogicalPosition,
+        delta: MouseScrollDelta,
+        phase: TouchPhase,
+    ) -> bool {
+        let scale = f64::from(settings.window().scale_factor());
+        handler(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(
+                f64::from(position.x) * scale,
+                f64::from(position.y) * scale,
+            ),
+        });
+        settings
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        let intercepted = matches!(
+            handler(&WindowEvent::MouseWheel {
+                device_id: DeviceId::dummy(),
+                delta,
+                phase,
+            }),
+            EventResult::PreventDefault
+        );
+        if !intercepted {
+            let (delta_x, delta_y) = match delta {
+                MouseScrollDelta::LineDelta(x, y) => (x * 60.0, y * 60.0),
+                MouseScrollDelta::PixelDelta(delta) => {
+                    ((delta.x / scale) as f32, (delta.y / scale) as f32)
+                }
+            };
+            let phase = match phase {
+                TouchPhase::Started => SlintTouchPhase::Started,
+                TouchPhase::Moved => SlintTouchPhase::Moved,
+                TouchPhase::Ended => SlintTouchPhase::Ended,
+                TouchPhase::Cancelled => SlintTouchPhase::Cancelled,
+            };
+            WindowInner::from_pub(settings.window()).process_mouse_input(MouseEvent::Wheel {
+                position: LogicalPoint::new(position.x, position.y),
+                delta_x,
+                delta_y,
+                phase,
+            });
+        }
+        intercepted
+    }
+
+    #[test]
+    fn wheel_over_header_and_footer_does_not_move_history() {
+        let (settings, handler) = window(6, 720.0);
+        let actions = ElementHandle::find_by_accessible_label(&settings, "Quick translation")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions.len(),
+            2,
+            "header and footer actions must both be rendered"
+        );
+        for item in actions {
+            settings.set_history_scroll_y(-120.0);
+            assert!(wheel(
+                &settings,
+                &handler,
+                center(item),
+                MouseScrollDelta::LineDelta(0.0, -1.0)
+            ));
+            settle(&settings);
+            assert_eq!(settings.get_history_scroll_y(), -120.0);
+        }
+    }
+
+    #[test]
+    fn wheel_over_sidebar_moves_navigation_without_moving_history() {
+        let (settings, handler) = window(6, 420.0);
+        settings.set_history_scroll_y(-120.0);
+        let navigation = center(
+            ElementHandle::find_by_accessible_label(&settings, "Overview")
+                .next()
+                .unwrap(),
+        );
+        for _ in 0..10 {
+            assert!(wheel(
+                &settings,
+                &handler,
+                navigation,
+                MouseScrollDelta::LineDelta(0.0, -1.0)
+            ));
+        }
+        settle(&settings);
+        assert_eq!(settings.get_history_scroll_y(), -120.0);
+        assert!(
+            ElementHandle::find_by_accessible_label(&settings, "About")
+                .next()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn production_whole_detent_moves_history_before_first_animation_frame() {
+        let (settings, handler) = window(6, 720.0);
+        let list = center(
+            ElementHandle::find_by_element_id(&settings, "HistoryPage::list")
+                .next()
+                .unwrap(),
+        );
+        let intercepted = wheel(
+            &settings,
+            &handler,
+            list,
+            MouseScrollDelta::LineDelta(0.0, -1.0),
+        );
+        assert!(
+            (settings.get_history_scroll_y() + 60.0).abs() < 1.0,
+            "one whole detent must apply immediately, before any animation frame; got {}",
+            settings.get_history_scroll_y()
+        );
+        assert!(
+            intercepted,
+            "the native backend must not apply the detent twice"
+        );
+    }
+
+    #[test]
+    fn whole_wheel_burst_applies_all_ten_detents_without_an_animation_tail() {
+        let (settings, handler) = window(6, 720.0);
+        let list = center(
+            ElementHandle::find_by_element_id(&settings, "HistoryPage::list")
+                .next()
+                .unwrap(),
+        );
+        for step in 1..=10 {
+            assert!(wheel(
+                &settings,
+                &handler,
+                list,
+                MouseScrollDelta::LineDelta(0.0, -1.0),
+            ));
+            assert!(
+                (settings.get_history_scroll_y() + step as f32 * 60.0).abs() < 1.0,
+                "whole detent {step} must apply immediately"
+            );
+        }
+        // A later frame must not reapply or reverse an already-consumed detent.
+        for _ in 0..13 {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            slint::platform::update_timers_and_animations();
+            settings.window().take_snapshot().unwrap();
+            assert!((settings.get_history_scroll_y() + 600.0).abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn whole_detent_moves_models_immediately_without_moving_navigation() {
+        let (settings, handler) = window(3, 420.0);
+        let navigation_y = ElementHandle::find_by_accessible_label(&settings, "Models")
+            .next()
+            .unwrap()
+            .absolute_position()
+            .y;
+        let list = center(
+            ElementHandle::find_by_element_id(&settings, "ModelsPage::list")
+                .next()
+                .unwrap(),
+        );
+        assert!(wheel(
+            &settings,
+            &handler,
+            list,
+            MouseScrollDelta::LineDelta(0.0, -1.0)
+        ));
+        assert!((settings.get_models_scroll_y() + 60.0).abs() < 1.0);
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&settings, "Models")
+                .next()
+                .unwrap()
+                .absolute_position()
+                .y,
+            navigation_y
+        );
+    }
+
+    #[test]
+    fn left_navigation_steps_immediately_on_overview_dictation_and_models() {
+        let (settings, handler) = window(0, 420.0);
+        let at = LogicalPosition::new(120.0, 230.0);
+        for page in [0, 1, 3] {
+            settings.set_active_page(page);
+            settle(&settings);
+            // Form pages share one viewport; list pages have their own sidebar.
+            assert!(wheel(
+                &settings,
+                &handler,
+                at,
+                MouseScrollDelta::LineDelta(0.0, 10.0)
+            ));
+            settings.window().take_snapshot().unwrap();
+            let marker_y = || {
+                ElementHandle::find_by_accessible_label(&settings, "Models")
+                    .next()
+                    .unwrap()
+                    .absolute_position()
+                    .y
+            };
+            let before = marker_y();
+            assert!(wheel(
+                &settings,
+                &handler,
+                at,
+                MouseScrollDelta::LineDelta(0.0, -1.0)
+            ));
+            settings.window().take_snapshot().unwrap();
+            assert!((marker_y() - before + 60.0).abs() < 1.0, "page {page}");
+            assert_eq!(settings.get_models_scroll_y(), 0.0);
+        }
+    }
+
+    #[test]
+    fn fractional_then_whole_wheel_preserves_the_queued_native_animation() {
+        let (settings, handler) = window(6, 720.0);
+        let list = center(
+            ElementHandle::find_by_element_id(&settings, "HistoryPage::list")
+                .next()
+                .unwrap(),
+        );
+        assert!(!wheel(
+            &settings,
+            &handler,
+            list,
+            MouseScrollDelta::LineDelta(0.0, -0.25)
+        ));
+        assert!(!wheel(
+            &settings,
+            &handler,
+            list,
+            MouseScrollDelta::LineDelta(0.0, -1.0)
+        ));
+        assert_eq!(settings.get_history_scroll_y(), 0.0);
+        let mut previous = 0.0;
+        for _ in 0..13 {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            slint::platform::update_timers_and_animations();
+            settings.window().take_snapshot().unwrap();
+            let next = settings.get_history_scroll_y();
+            assert!(
+                next <= previous + 0.1,
+                "queued animation reversed: {previous} -> {next}"
+            );
+            previous = next;
+        }
+        assert!(
+            (previous + 75.0).abs() < 1.0,
+            "mixed deltas ended at {previous}"
+        );
+    }
+
+    #[test]
+    fn whole_line_delta_inside_a_gesture_keeps_native_routing() {
+        let (settings, handler) = window(6, 720.0);
+        let list = center(
+            ElementHandle::find_by_element_id(&settings, "HistoryPage::list")
+                .next()
+                .unwrap(),
+        );
+        for (phase, y) in [
+            (TouchPhase::Started, 0.0),
+            (TouchPhase::Moved, -1.0),
+            (TouchPhase::Ended, 0.0),
+        ] {
+            assert!(!wheel_with_phase(
+                &settings,
+                &handler,
+                list,
+                MouseScrollDelta::LineDelta(0.0, y),
+                phase
+            ));
+        }
+        settle(&settings);
+        assert!((settings.get_history_scroll_y() + 60.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn touchpad_and_horizontal_wheels_reach_native_routing() {
+        let (settings, handler) = window(6, 720.0);
+        let list = center(
+            ElementHandle::find_by_element_id(&settings, "HistoryPage::list")
+                .next()
+                .unwrap(),
+        );
+        assert!(!wheel_with_phase(
+            &settings,
+            &handler,
+            list,
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 0.0)),
+            TouchPhase::Started,
+        ));
+        assert!(!wheel(
+            &settings,
+            &handler,
+            list,
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -24.0))
+        ));
+        assert!((settings.get_history_scroll_y() + 24.0).abs() < 1.0);
+        assert!(!wheel_with_phase(
+            &settings,
+            &handler,
+            list,
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 0.0)),
+            TouchPhase::Ended,
+        ));
+        settle(&settings);
+        let before = settings.get_history_scroll_y();
+        assert!(!wheel(
+            &settings,
+            &handler,
+            list,
+            MouseScrollDelta::LineDelta(-1.0, 0.0)
+        ));
+        settle(&settings);
+        assert_eq!(settings.get_history_scroll_y(), before);
+    }
+
+    #[test]
+    fn wheel_over_child_search_editor_does_not_scroll_the_sibling_list() {
+        let (settings, handler) = window(7, 720.0);
+        let field = center(
+            ElementHandle::find_by_element_type_name(&settings, "Field")
+                .next()
+                .unwrap(),
+        );
+        assert!(wheel(
+            &settings,
+            &handler,
+            field,
+            MouseScrollDelta::LineDelta(0.0, -1.0)
+        ));
+        settle(&settings);
+        assert_eq!(settings.get_glossary_scroll_y(), 0.0);
+    }
+
+    #[test]
+    fn nested_glossary_editor_preserves_its_parent_list_wheel_owner() {
+        let (settings, handler) = window(7, 720.0);
+        settings.set_glossary_editing_id("0".into());
+        settings.set_glossary_draft_source("editable source".into());
+        settings.set_glossary_draft_translation("editable translation".into());
+        settle(&settings);
+        let field = center(
+            ElementHandle::find_by_element_type_name(&settings, "Field")
+                .nth(1)
+                .unwrap(),
+        );
+        assert!(wheel(
+            &settings,
+            &handler,
+            field,
+            MouseScrollDelta::LineDelta(0.0, -1.0)
+        ));
+        settle(&settings);
+        assert!((settings.get_glossary_scroll_y() + 60.0).abs() < 1.0);
+        assert_eq!(settings.get_glossary_draft_source(), "editable source");
+    }
+
+    #[test]
+    fn horizontal_wheel_pans_the_rendered_form_workspace() {
+        let (settings, handler) = window(0, 720.0);
+        settings.window().set_size(LogicalSize::new(700.0, 720.0));
+        settle(&settings);
+        let navigation = ElementHandle::find_by_accessible_label(&settings, "Overview")
+            .next()
+            .unwrap();
+        let before = navigation.absolute_position().x;
+        let at = center(navigation);
+        assert!(!wheel(
+            &settings,
+            &handler,
+            at,
+            MouseScrollDelta::LineDelta(-1.0, 0.0)
+        ));
+        settle(&settings);
+        let after = ElementHandle::find_by_accessible_label(&settings, "Overview")
+            .next()
+            .unwrap()
+            .absolute_position()
+            .x;
+        assert!(
+            after < before - 30.0,
+            "workspace did not pan: {before} -> {after}"
+        );
     }
 }

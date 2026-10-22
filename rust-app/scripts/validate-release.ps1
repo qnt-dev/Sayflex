@@ -16,16 +16,24 @@ param(
     # Optional Store package produced from this exact staged directory.
     [string]$MsixPath,
     [string]$MsixIdentityName,
-    [string]$MsixPublisher
+    [string]$MsixPublisher,
+    [switch]$TestNvidia
 )
 
 $ErrorActionPreference = 'Stop'
+if ($TestNvidia -and ($RequireSignature -or -not [string]::IsNullOrWhiteSpace($MsixPath))) {
+    throw 'The local test validator cannot validate a public signed or Store release.'
+}
 Import-Module (Join-Path $PSScriptRoot 'release-validation.psm1') -Force
 if ([string]::IsNullOrWhiteSpace($AppDirectory)) {
-    $AppDirectory = Join-Path $PSScriptRoot '..\dist\app'
+    $relative = if ($TestNvidia) { '..\dist\test-nvidia\app' } else { '..\dist\app' }
+    $AppDirectory = Join-Path $PSScriptRoot $relative
 }
 $appRoot = [System.IO.Path]::GetFullPath($AppDirectory)
 $rustRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $TestNvidia -and (Test-Path -LiteralPath (Join-Path $appRoot 'sayflex-test-channel'))) {
+    throw 'An isolated test payload must be validated explicitly with -TestNvidia.'
+}
 $required = @(
     'SayFlex.exe',
     'SayFlex.InputHost.exe',
@@ -37,10 +45,13 @@ $required = @(
     'SayFlex.Companion.exe',
     'ocr-models\screen-ocr-ppocrv5-mobile-v3.9.2\bundle.verified.json',
     'build-manifest.json',
-    'speech-backends.json',
-    'runtimes\cuda\cublas64_13.dll',
-    'runtimes\cuda\cublasLt64_13.dll'
+    'speech-backends.json'
 )
+if ($TestNvidia) {
+    $required += @('sayflex-test-channel', 'TEST-BUILD-README.txt', 'THIRD_PARTY_NOTICES.md')
+} else {
+    $required += @('runtimes\cuda\cublas64_13.dll', 'runtimes\cuda\cublasLt64_13.dll')
+}
 
 $missing = $required | Where-Object {
     -not (Test-Path -LiteralPath (Join-Path $appRoot $_) -PathType Leaf)
@@ -85,6 +96,8 @@ $files = foreach ($name in $required) {
 $files | Format-Table -AutoSize
 
 $failures = New-Object System.Collections.Generic.List[string]
+Get-DesktopInferenceImportFailures -DesktopPath (Join-Path $appRoot 'SayFlex.exe') |
+    ForEach-Object { $failures.Add($_) }
 
 # Compact translation choices are downloaded language packages, not another
 # bundled execution stack. Validate every curated English pair embedded into
@@ -145,7 +158,26 @@ if ($unexpectedCompactPayload.Count -gt 0) {
 
 function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
     $out = [System.IO.Path]::GetTempFileName()
+    $previousPath = $env:PATH
     try {
+        if ($TestNvidia -and [IO.Path]::GetFileName($Path) -eq 'SayFlex.Speech.Cuda.exe') {
+            # Protocol/build-ID probes need the CUDA import resolved even
+            # though this package deliberately contains no NVIDIA DLLs. Use
+            # only the developer's trusted Toolkit, never a user data cache.
+            # This checks build identity, not managed-runtime installation.
+            $toolkits = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA'
+            $probeRuntime = Get-ChildItem -LiteralPath $toolkits -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { Join-Path $_.FullName 'bin\x64' } |
+                Where-Object {
+                    (Test-Path -LiteralPath (Join-Path $_ 'cublas64_13.dll')) -and
+                    (Test-Path -LiteralPath (Join-Path $_ 'cublasLt64_13.dll'))
+                } | Select-Object -First 1
+            if (-not $probeRuntime) {
+                throw 'The local test CUDA identity probe requires the trusted build-machine CUDA 13 Toolkit.'
+            }
+            $env:PATH = "$probeRuntime;$previousPath"
+        }
         $run = Start-Process -FilePath $Path -ArgumentList $Argument `
             -NoNewWindow -PassThru -RedirectStandardOutput $out
         $null = $run.Handle
@@ -159,6 +191,7 @@ function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
         }
         return $answer
     } finally {
+        $env:PATH = $previousPath
         Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
     }
 }
@@ -167,6 +200,14 @@ function Invoke-ReleaseProbe([string]$Path, [string]$Argument) {
 # one exact set of bytes. It is the authority used by every later comparison.
 $buildManifestPath = Join-Path $appRoot 'build-manifest.json'
 $buildManifest = Get-Content -LiteralPath $buildManifestPath -Raw | ConvertFrom-Json
+if ($TestNvidia) {
+    Import-Module (Join-Path $PSScriptRoot 'test-nvidia-packaging.psm1') -Force
+    Assert-TestNvidiaPayload -AppDirectory $appRoot -Manifest $buildManifest
+    Assert-TestNvidiaSourceUnchanged -RepositoryPath $rustRoot -Snapshot $buildManifest.source_snapshot
+} elseif ($buildManifest.PSObject.Properties.Name -contains 'official_release' -and
+    $buildManifest.official_release -eq $false) {
+    $failures.Add('an explicitly unofficial build cannot pass the normal release validator')
+}
 if ($buildManifest.schema_version -ne 1 -or $buildManifest.product -ne 'SayFlex') {
     $failures.Add('build-manifest.json has an unsupported identity or schema')
 }
@@ -251,7 +292,8 @@ if ($RequireSignature) {
 #    that point — and a gate that always fails is a gate nobody reads. Run this
 #    again after installing, which is when the question means something.
 if ($Installed) {
-    $installedRoot = Join-Path $env:LOCALAPPDATA 'Programs\SayFlex'
+    $installDirectory = if ($TestNvidia) { 'Programs\SayFlex-Test-Nvidia' } else { 'Programs\SayFlex' }
+    $installedRoot = Join-Path $env:LOCALAPPDATA $installDirectory
     if (-not (Test-Path -LiteralPath $installedRoot)) {
         $failures.Add('-Installed was asked for, and there is no installed copy')
     } else {
@@ -265,12 +307,9 @@ if ($Installed) {
             sha256 = (Get-FileHash -LiteralPath $buildManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }
         $expectedInstalledFiles = @($installedPayload | ForEach-Object path | Sort-Object)
-        $actualInstalledFiles = @(
-            Get-ChildItem -LiteralPath $installedRoot -File -Recurse |
-                Where-Object { $_.Name -notmatch '^unins\d+\.(exe|dat|msg)$' } |
-                ForEach-Object { $_.FullName.Substring($installedRoot.Length + 1).Replace('\', '/') } |
-                Sort-Object
-        )
+        # Inno owns one durable locale seed outside the versioned payload.
+        # The staged manifest comparison above still admits no extra files.
+        $actualInstalledFiles = @(Get-InstalledPayloadFilePaths -AppDirectory $installedRoot)
         if (Compare-Object $expectedInstalledFiles $actualInstalledFiles) {
             $failures.Add('the installed payload file set does not match the staged release')
         }
@@ -291,7 +330,8 @@ if ($Installed) {
         # name is versioned ("SayFlex version 0.6.1"), so discovering the key
         # through a presentation string made a correct installation look
         # absent. Address the exact product key and read its values explicitly.
-        $uninstallPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{BE541A7B-AF41-4F29-8D3F-D9F75AB68F66}_is1'
+        $appId = if ($TestNvidia) { '{62070119-61B5-41BE-A387-381D775B526B}' } else { '{BE541A7B-AF41-4F29-8D3F-D9F75AB68F66}' }
+        $uninstallPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$($appId)_is1"
         $uninstall = Get-ItemProperty -LiteralPath $uninstallPath -ErrorAction SilentlyContinue
         if (-not $uninstall) {
             $failures.Add('the installed copy has no SayFlex uninstall registration')
@@ -380,6 +420,7 @@ if ($failures.Count -gt 0) {
 }
 
 $checked = @('file set', 'build manifest', 'binary build identity', 'Cargo.lock', 'backend manifest', 'versions', "protocol $protocol")
+if ($TestNvidia) { $checked += 'isolated test marker, source snapshot and no bundled NVIDIA DLLs' }
 if ($installerChecked) { $checked += 'installer checksum' }
 if ($msixChecked) { $checked += 'MSIX identity, checksum and payload' }
 if ($RequireSignature) { $checked += 'Authenticode signatures' }

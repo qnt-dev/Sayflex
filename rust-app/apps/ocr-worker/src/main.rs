@@ -561,6 +561,7 @@ mod tests {
         ) -> Result<OcrDocument, OcrError> {
             Ok(OcrDocument {
                 lines: vec![OcrLine {
+                    quad: None,
                     text: "recognized".to_owned(),
                     bounds: PhysicalRect {
                         x: 1,

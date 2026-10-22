@@ -802,8 +802,8 @@ msgstr "Обзор"
 msgid "PALETTE"
 msgstr "ПАЛИТРА"
 
-msgid "Pasted; the target did not confirm it ({milliseconds} ms)"
-msgstr "Вставлено без подтверждения окна ({milliseconds} мс)"
+msgid "Paste requested; delivery not confirmed ({milliseconds} ms)"
+msgstr "Вставка отправлена, результат не подтверждён ({milliseconds} мс)"
 
 msgid "Paste the key"
 msgstr "Вставить ключ"
@@ -1684,3 +1684,111 @@ msgstr "SayFlex может выгружать неиспользуемые дв�
 
 msgid "The saved screen translation could not be restored."
 msgstr "Не удалось восстановить сохранённый перевод снимка экрана."
+
+msgid "Some parts could not be translated. The original text is marked."
+msgstr "Часть текста не переведена. Исходные фрагменты отмечены."
+
+msgid "Retry translation"
+msgstr "Повторить перевод"
+
+msgid "Not translated"
+msgstr "Не переведено"
+
+msgid "Another screen translation is running. Wait for it to finish."
+msgstr "Дождитесь завершения другого перевода с экрана."
+
+msgid "Checking NVIDIA components…"
+msgstr "Проверяем компоненты NVIDIA…"
+
+msgid "NVIDIA components are not installed."
+msgstr "Компоненты NVIDIA не установлены."
+
+msgid "Downloading from NVIDIA: {received} / {total} MB"
+msgstr "Загрузка с сайта NVIDIA: {received} / {total} МБ"
+
+msgid "Verifying the NVIDIA download…"
+msgstr "Проверяем загруженные компоненты NVIDIA…"
+
+msgid "Installing NVIDIA components…"
+msgstr "Устанавливаем компоненты NVIDIA…"
+
+msgid "Cancelling the NVIDIA download…"
+msgstr "Отменяем загрузку NVIDIA…"
+
+msgid "Installed. CUDA is not active with a ready speech model."
+msgstr "Компоненты установлены. CUDA с готовой речевой моделью пока не активна."
+
+msgid "CUDA is active and the speech model is ready."
+msgstr "CUDA активна, речевая модель готова."
+
+msgid "Download cancelled. You can try again."
+msgstr "Загрузка отменена. Можно повторить попытку."
+
+msgid "NVIDIA components could not be installed. You can retry."
+msgstr "Не удалось установить компоненты NVIDIA. Можно повторить попытку."
+
+msgid "Optional download: {size} MB from NVIDIA."
+msgstr "Дополнительная загрузка: {size} МБ с сайта NVIDIA."
+
+msgid "Could not complete this action: {error}"
+msgstr "Не удалось выполнить действие: {error}"
+
+msgid "Accept and download"
+msgstr "Принять и скачать"
+
+msgid "Retry download"
+msgstr "Повторить загрузку"
+
+msgid "Detected GPU: {gpu}. Compatibility is checked when you activate."
+msgstr "Обнаружена видеокарта: {gpu}. Совместимость проверяется при активации."
+
+msgid "No NVIDIA GPU was detected. A compatible NVIDIA GPU is required for activation."
+msgstr "Видеокарта NVIDIA не обнаружена. Для активации нужна совместимая видеокарта NVIDIA."
+
+msgid "GPU detection was unavailable. Activation checks NVIDIA compatibility."
+msgstr "Не удалось определить видеокарту. Совместимость NVIDIA проверяется при активации."
+
+msgid "NVIDIA acceleration"
+msgstr "Ускорение NVIDIA"
+
+msgid "Optional NVIDIA components require a compatible NVIDIA GPU and driver. Downloading means you accept the NVIDIA license."
+msgstr "Для дополнительных компонентов NVIDIA нужны совместимая видеокарта NVIDIA и драйвер. Загружая их, вы принимаете лицензию NVIDIA."
+
+msgid "NVIDIA license"
+msgstr "Лицензия NVIDIA"
+
+msgid "Activate NVIDIA"
+msgstr "Активировать NVIDIA"
+
+msgid "Have an NVIDIA GPU? After setup, open Settings → Dictation to download optional NVIDIA acceleration separately."
+msgstr "Есть видеокарта NVIDIA? После настройки откройте «Настройки → Диктовка», чтобы отдельно загрузить ускорение NVIDIA."
+
+msgid "NVIDIA is selected. A ready local speech model is required for CUDA dictation."
+msgstr "NVIDIA выбрана. Для диктовки через CUDA нужна готовая локальная речевая модель."
+
+msgid "Downloading speech model"
+msgstr "Загружаем речевую модель"
+
+msgid "{model} · {percent}% downloaded"
+msgstr "{model} · загружено {percent}%"
+
+msgid "{model} · Download size is not available yet."
+msgstr "{model} · Размер загрузки пока неизвестен."
+
+msgid "Checking and installing speech model"
+msgstr "Проверяем и устанавливаем речевую модель"
+
+msgid "{model} · Download complete. Checking and installing the model."
+msgstr "{model} · Загрузка завершена. Проверяем и устанавливаем модель."
+
+msgid "{model} · Preparing the installed speech model."
+msgstr "{model} · Подготавливаем установленную речевую модель."
+
+msgid "The selected speech model is not installed."
+msgstr "Выбранная речевая модель не установлена."
+
+msgid "View download"
+msgstr "Открыть загрузку"
+
+msgid "{model}: translation package not installed. Open Models to install it."
+msgstr "{model}: пакет перевода не установлен. Установите его в разделе «Модели»."

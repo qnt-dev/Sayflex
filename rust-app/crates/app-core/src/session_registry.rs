@@ -192,6 +192,17 @@ impl SessionRegistry {
         self.listening_session
     }
 
+    /// Worker replacement must also protect released recordings still being processed.
+    #[must_use]
+    pub fn has_pending_work(&self) -> bool {
+        self.sessions.values().any(|session| {
+            matches!(
+                session.phase,
+                SessionPhase::Listening | SessionPhase::Processing
+            )
+        })
+    }
+
     #[must_use]
     pub fn latest_session(&self) -> Option<SessionId> {
         self.latest_session
@@ -216,6 +227,23 @@ impl SessionRegistry {
 
     pub fn history(&self) -> impl Iterator<Item = &Transcript> {
         self.history.iter()
+    }
+
+    /// Erase retained text while keeping terminal identities as tombstones.
+    /// Active recording/processing may still finish after a history clear.
+    pub fn clear_completed_history(&mut self) {
+        self.history.clear();
+        for session in self.sessions.values_mut() {
+            session.transcript = None;
+        }
+        if self.latest_session.is_some_and(|id| {
+            !matches!(
+                self.phase(id),
+                Some(SessionPhase::Listening | SessionPhase::Processing)
+            )
+        }) {
+            self.latest_session = None;
+        }
     }
 
     fn prune_terminal_sessions(&mut self) {
@@ -254,6 +282,24 @@ mod tests {
     use super::{
         CompletionDisposition, EndDisposition, SessionError, SessionPhase, SessionRegistry,
     };
+
+    #[test]
+    fn worker_replacement_remains_blocked_by_an_older_processing_recording() {
+        let mut registry = SessionRegistry::default();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        assert!(!registry.has_pending_work());
+        registry.begin(first, 1).unwrap();
+        assert!(registry.has_pending_work());
+        registry.end(first).unwrap();
+        registry.begin(second, 2).unwrap();
+        registry.cancel(second).unwrap();
+        assert!(registry.has_pending_work());
+        registry
+            .complete(first, transcript(first, "finished"))
+            .unwrap();
+        assert!(!registry.has_pending_work());
+    }
 
     fn transcript(session_id: SessionId, text: &str) -> Transcript {
         Transcript {
@@ -368,5 +414,37 @@ mod tests {
             registry.begin(SessionId::new(), 2).unwrap_err(),
             SessionError::AnotherSessionListening
         );
+    }
+
+    #[test]
+    fn clearing_history_erases_text_without_resurrecting_duplicates_or_cancelling_active_work() {
+        let mut registry = SessionRegistry::default();
+        let completed = SessionId::new();
+        registry.begin(completed, 1).unwrap();
+        registry.end(completed).unwrap();
+        registry
+            .complete(completed, transcript(completed, "removed"))
+            .unwrap();
+        let active = SessionId::new();
+        registry.begin(active, 2).unwrap();
+        registry.clear_completed_history();
+        assert!(registry.latest_transcript().is_none());
+        assert!(registry.transcript(completed).is_none());
+        assert_eq!(
+            registry
+                .complete(completed, transcript(completed, "late duplicate"))
+                .unwrap(),
+            CompletionDisposition::DuplicateIgnored
+        );
+        assert_eq!(registry.history().count(), 0);
+        assert_eq!(registry.latest_session(), Some(active));
+        assert_eq!(registry.active_session(), Some(active));
+        registry.end(active).unwrap();
+        registry
+            .complete(active, transcript(active, "new result"))
+            .unwrap();
+        assert_eq!(registry.latest_transcript().unwrap().text, "new result");
+        registry.clear_completed_history();
+        assert!(registry.latest_session().is_none());
     }
 }

@@ -428,6 +428,8 @@ fn cancellation_probe(engine: &mut TranslationEngine) -> bool {
 
 fn structured_probe(engine: &mut TranslationEngine) -> Result<StructuredResult> {
     let block = ScreenTextBlock {
+        quad: None,
+        fragment_quads: Vec::new(),
         block_id: ScreenBlockId::from("glossary-probe"),
         source_text: "The cooldown is reduced by 2 seconds.".to_owned(),
         bounds: PhysicalRect {

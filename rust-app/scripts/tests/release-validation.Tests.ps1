@@ -275,7 +275,8 @@ Describe 'SayFlex installer artifact validation' {
         ) -Raw
 
         $installerScript | Should Match '(?m)^UsePreviousAppDir=yes\r?$'
-        $installerScript | Should Not Match '(?m)^UsePreviousAppDir=no\r?$'
+        # Both branches are compiled and checked in test-nvidia-packaging.Tests.ps1:
+        # the isolated test product deliberately does not reuse another directory.
     }
 
     It 'never removes a legacy path when it is the active install directory' {

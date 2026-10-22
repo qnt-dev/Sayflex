@@ -15,7 +15,7 @@ use std::{
     env,
     error::Error,
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -586,7 +586,7 @@ impl Workers {
             &self._job,
             WorkerKind::Companion,
             COMPANION_RENDERER_EXE,
-            RuntimeEvent::Companion,
+            RuntimeEvent::companion,
         )
         .map_err(|error| error.to_string())?;
         *self.companion_child.borrow_mut() = Some(child);
@@ -823,7 +823,7 @@ impl Workers {
                     &self._job,
                     WorkerKind::Input,
                     INPUT_WORKER_EXE,
-                    RuntimeEvent::Input,
+                    RuntimeEvent::input,
                 )
                 .map_err(|error| error.to_string())?;
                 self.input.replace_with(writer);
@@ -835,7 +835,7 @@ impl Workers {
                     &self._job,
                     WorkerKind::Translation,
                     TRANSLATION_WORKER_EXE,
-                    RuntimeEvent::Translation,
+                    RuntimeEvent::translation,
                 )
                 .map_err(|error| error.to_string())?;
                 self.translation.replace_with(writer);
@@ -853,7 +853,7 @@ impl Workers {
                     &self._job,
                     WorkerKind::Companion,
                     COMPANION_RENDERER_EXE,
-                    RuntimeEvent::Companion,
+                    RuntimeEvent::companion,
                 )
                 .map_err(|error| error.to_string())?;
                 *self.companion_child.borrow_mut() = Some(child);
@@ -954,30 +954,71 @@ fn ocr_command_requires_worker(command: &OcrWorkerCommand) -> bool {
 impl Drop for Workers {
     fn drop(&mut self) {
         self.shutdown();
-        std::thread::sleep(Duration::from_millis(80));
-        for child in [
-            &self.input_child,
-            &self.speech_child,
-            &self.translation_child,
-        ] {
-            let mut process = child.borrow_mut();
-            if process.child.try_wait().ok().flatten().is_none() {
-                let _ = process.child.kill();
+        let mut children = vec![
+            &mut self.input_child.get_mut().child,
+            &mut self.speech_child.get_mut().child,
+            &mut self.translation_child.get_mut().child,
+        ];
+        #[cfg(feature = "screen-translation")]
+        if let Some(process) = self.ocr_child.get_mut().as_mut() {
+            children.push(&mut process.child);
+        }
+        if let Some(process) = self.companion_child.get_mut().as_mut() {
+            children.push(&mut process.child);
+        }
+        finish_worker_children(&mut children, Duration::from_secs(3));
+    }
+}
+
+fn finish_worker_children(children: &mut [&mut Child], grace_period: Duration) {
+    // All workers received Shutdown before this starts. One shared deadline
+    // lets a history writer finish without multiplying the timeout by workers.
+    let deadline = Instant::now() + grace_period;
+    loop {
+        let mut all_exited = true;
+        for child in children.iter_mut() {
+            if child.try_wait().ok().flatten().is_none() {
+                all_exited = false;
             }
         }
-        #[cfg(feature = "screen-translation")]
-        if let Some(process) = self.ocr_child.get_mut().as_mut()
-            && process.child.try_wait().ok().flatten().is_none()
-        {
-            let _ = process.child.kill();
+        if all_exited {
+            return;
         }
-        if let Some(process) = self.companion_child.get_mut().as_mut()
-            && process.child.try_wait().ok().flatten().is_none()
-        {
-            let _ = process.child.kill();
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+    for child in children {
+        if child.try_wait().ok().flatten().is_some() {
+            continue;
+        }
+        match child.kill() {
+            Ok(()) => {
+                if let Err(error) = child.wait() {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "worker pid={} shutdown=reap_failed error={error}",
+                        child.id()
+                    ));
+                }
+            }
+            Err(error) => {
+                // A process may exit between try_wait and kill. Reap that
+                // race, but never block indefinitely if termination failed.
+                if child.try_wait().ok().flatten().is_none() {
+                    rust_app_core::diagnostics::log_line(&format!(
+                        "worker pid={} shutdown=kill_failed error={error}",
+                        child.id()
+                    ));
+                }
+            }
         }
     }
 }
+
+#[cfg(test)]
+#[path = "worker_shutdown_regression_tests.rs"]
+mod worker_shutdown_regression_tests;
 
 pub(crate) fn spawn_initial_workers(
     startup_gate: &StartupSessionGate,
@@ -993,7 +1034,7 @@ pub(crate) fn spawn_initial_workers(
         startup_gate,
         WorkerKind::Input,
         INPUT_WORKER_EXE,
-        RuntimeEvent::Input,
+        RuntimeEvent::input,
     )?
     else {
         return Ok(None);
@@ -1017,7 +1058,7 @@ pub(crate) fn spawn_initial_workers(
         startup_gate,
         WorkerKind::Translation,
         TRANSLATION_WORKER_EXE,
-        RuntimeEvent::Translation,
+        RuntimeEvent::translation,
     )?
     else {
         return Ok(None);
@@ -1042,7 +1083,7 @@ pub(crate) fn spawn_initial_worker<T>(
     startup_gate: &StartupSessionGate,
     kind: WorkerKind,
     executable: &str,
-    wrap: fn(T) -> RuntimeEvent,
+    wrap: fn(u64, T) -> RuntimeEvent,
 ) -> Result<Option<(WorkerProcess, JsonWriter)>, Box<dyn Error>>
 where
     T: DeserializeOwned + Send + 'static,
@@ -1091,15 +1132,20 @@ pub(crate) fn spawn_worker<T>(
     worker_job: &rust_platform_windows::WorkerJob,
     kind: WorkerKind,
     executable: &str,
-    wrap: fn(T) -> RuntimeEvent,
+    wrap: fn(u64, T) -> RuntimeEvent,
 ) -> Result<(WorkerProcess, JsonWriter), Box<dyn Error>>
 where
     T: DeserializeOwned + Send + 'static,
 {
     let path = worker_path(executable)?;
-    spawn_worker_at(worker_job, kind, executable, path, None, move |_, event| {
-        Some(wrap(event))
-    })
+    spawn_worker_at(
+        worker_job,
+        kind,
+        executable,
+        path,
+        None,
+        move |instance_id, event| Some(wrap(instance_id, event)),
+    )
 }
 
 pub(crate) fn spawn_speech_worker(
@@ -1249,7 +1295,7 @@ where
                     continue;
                 }
                 rust_app_core::diagnostics::log_line(&format!("worker={diagnostics_name} {line}"));
-                eprintln!("{diagnostics_name}: {line}");
+                mirror_worker_stderr(&mut std::io::stderr().lock(), &diagnostics_name, &line);
             }
         })?;
 
@@ -1257,6 +1303,58 @@ where
         WorkerProcess { child, instance_id },
         JsonWriter::start(stdin, executable)?,
     ))
+}
+
+fn mirror_worker_stderr(writer: &mut impl Write, diagnostics_name: &str, line: &str) {
+    // A GUI launcher may close its inherited stderr while the worker is still running.
+    let _ = writeln!(writer, "{diagnostics_name}: {line}");
+}
+
+#[cfg(test)]
+mod worker_stderr_mirror_tests {
+    use super::mirror_worker_stderr;
+    use std::io::{self, Write};
+
+    struct ClosedPipe {
+        attempts: usize,
+    }
+
+    impl Write for ClosedPipe {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            self.attempts += 1;
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "closed launcher pipe",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn closed_stderr_does_not_abort_subsequent_worker_diagnostics() {
+        let mut pipe = ClosedPipe { attempts: 0 };
+
+        mirror_worker_stderr(&mut pipe, "SayFlex.Speech.exe", "loading model");
+        mirror_worker_stderr(&mut pipe, "SayFlex.Speech.exe", "model ready");
+
+        assert_eq!(pipe.attempts, 2);
+    }
+
+    #[test]
+    fn available_stderr_keeps_worker_prefix_and_line_boundaries() {
+        let mut output = Vec::new();
+
+        mirror_worker_stderr(&mut output, "SayFlex.Speech.exe", "loading model");
+        mirror_worker_stderr(&mut output, "SayFlex.Speech.exe", "model ready");
+
+        assert_eq!(
+            output,
+            b"SayFlex.Speech.exe: loading model\nSayFlex.Speech.exe: model ready\n"
+        );
+    }
 }
 
 pub(crate) fn routine_native_worker_log(executable: &str, line: &str) -> bool {
@@ -1346,6 +1444,18 @@ pub(crate) fn speech_backend_plan(
 }
 
 pub(crate) fn trusted_cuda_runtime_directory() -> Option<PathBuf> {
+    let managed = rust_model_manager::CudaRuntimeManager::new(
+        rust_app_core::product::data_root().join("runtimes"),
+    );
+    if managed.is_installed() {
+        return managed.runtime_path().canonicalize().ok();
+    }
+    // A fresh trial must exercise the opt-in download even on a developer's
+    // machine with an existing Toolkit. The production install keeps its
+    // bundled/system compatibility paths below.
+    if rust_app_core::product::is_test_build() {
+        return None;
+    }
     let application_runtime = env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(PathBuf::from))

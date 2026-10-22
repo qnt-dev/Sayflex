@@ -50,6 +50,50 @@ impl Download {
     }
 }
 
+/// Overview uses the same in-flight bytes as Models. Complete bytes mean the
+/// worker still has to finish checking/installing, never that a model is ready.
+pub(crate) fn speech_download_overview_localized(
+    model_name: &str,
+    installed: bool,
+    download: Option<Download>,
+    locale: UiLocale,
+) -> Option<(String, String)> {
+    let download = download.filter(|_| !installed)?;
+    let (title, detail) =
+        if download.total_bytes > 0 && download.downloaded_bytes >= download.total_bytes {
+            (
+                UiText::OverviewSpeechInstalling,
+                render(
+                    locale,
+                    UiText::OverviewSpeechInstallDetail,
+                    &[("model", model_name)],
+                ),
+            )
+        } else if download.total_bytes == 0 {
+            (
+                UiText::OverviewSpeechDownloading,
+                render(
+                    locale,
+                    UiText::OverviewSpeechDownloadUnknown,
+                    &[("model", model_name)],
+                ),
+            )
+        } else {
+            (
+                UiText::OverviewSpeechDownloading,
+                render(
+                    locale,
+                    UiText::OverviewSpeechDownloadProgress,
+                    &[
+                        ("model", model_name),
+                        ("percent", &download.percent().to_string()),
+                    ],
+                ),
+            )
+        };
+    Some((text(locale, title).to_owned(), detail))
+}
+
 /// The five tones a row can carry. They are the same five everywhere, so a
 /// mark means one thing across the whole window.
 pub(crate) mod tone {
@@ -273,7 +317,7 @@ fn model_description_localized<'a>(
 fn model_action_key(installed: bool, selected: bool, download: Option<Download>) -> &'static str {
     if download.is_some() && !installed {
         "cancel"
-    } else if selected {
+    } else if selected && installed {
         ""
     } else if installed {
         "use"
@@ -330,7 +374,7 @@ fn model_progress_localized(
             download.fraction(),
         );
     }
-    if selected && loaded {
+    if selected && installed && loaded {
         return (
             text(locale, UiText::InUse).to_owned(),
             tone::ACTIVE,
@@ -338,7 +382,7 @@ fn model_progress_localized(
             0.0,
         );
     }
-    if selected {
+    if selected && installed {
         return (
             text(locale, UiText::SelectedUnloaded).to_owned(),
             tone::RESTING,
@@ -1300,6 +1344,60 @@ mod tests {
             ("43 %", "working", "Cancel")
         );
         assert!((progress - 0.43).abs() < 0.001);
+    }
+
+    #[test]
+    fn selected_missing_models_offer_install_for_speech_and_translation() {
+        use crate::localization::UiLocale;
+
+        let speech = ModelSummary {
+            catalog_id: "whisper-large-v3-turbo".into(),
+            display_name: "Whisper Turbo".into(),
+            description: String::new(),
+            size_bytes: 100,
+            installed: false,
+            selected: true,
+            recommended: true,
+            supports_speech_translation: true,
+        };
+        let translation = TranslationModelSummary {
+            catalog_id: "qwen35-4b-q4".into(),
+            display_name: "Qwen".into(),
+            description: String::new(),
+            tier: TranslationTier::Tiny,
+            languages: Vec::new(),
+            size_bytes: 100,
+            installed: false,
+            selected: true,
+            recommended: false,
+            license: "Apache-2.0".into(),
+        };
+        for (locale, label, missing) in [
+            (UiLocale::English, "Install", "Not installed"),
+            (UiLocale::Russian, "Установить", "Не установлено"),
+        ] {
+            for loaded in [false, true] {
+                // The catalog's missing-on-disk state must also dominate a
+                // retained readiness flag, without forgetting the selection.
+                let speech_row = speech_model_row_localized(&speech, None, loaded, false, locale);
+                let translation_row = translation_model_row_localized(
+                    &translation,
+                    true,
+                    None,
+                    loaded,
+                    false,
+                    locale,
+                );
+                for row in [speech_row, translation_row] {
+                    assert!(row.selected);
+                    assert!(!row.installed);
+                    assert_eq!(row.action_key, "install");
+                    assert_eq!(row.action, label);
+                    assert_eq!(row.state, missing);
+                    assert_eq!(row.tone, "off");
+                }
+            }
+        }
     }
 
     #[test]

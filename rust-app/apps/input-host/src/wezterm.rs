@@ -86,6 +86,16 @@ pub fn send_text(target_snapshot: TargetSnapshot, text: &str) -> Result<(), WezT
         ));
     }
 
+    // Discovery is asynchronous work. Recheck protection on the focused
+    // element immediately before the specialized transport, too.
+    crate::insertion_adapter::ensure_insertion_allowed(target_snapshot).map_err(|error| {
+        if matches!(error, inject::InjectionError::TargetChanged) {
+            WezTermError::superseded(error.to_string())
+        } else {
+            WezTermError::not_delivered(error.to_string())
+        }
+    })?;
+
     let pane_id = resolved.pane_id.to_string();
     let result = run_cli(
         &resolved.cli_path,

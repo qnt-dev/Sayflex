@@ -6,11 +6,13 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use rust_ocr_engine::{ReconstructedElement, reconstruct_visual_rows};
+use rust_ocr_engine::{
+    ReconstructedElement, reconstruct_visual_paragraphs, reconstruct_visual_rows,
+};
 use rust_platform_windows::screen_capture::RgbaFrame;
 use rust_protocol::{
-    BlockCompletion, PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock, SourceContext,
-    TranslatedScreenBlock,
+    BlockCompletion, PhysicalQuad, PhysicalRect, RequestId, ScreenBlockId, ScreenTextBlock,
+    SourceContext, TranslatedScreenBlock,
 };
 
 const LOW_CONFIDENCE_MILLI: u16 = 650;
@@ -18,10 +20,12 @@ pub(crate) const MIN_ADMITTED_OCR_CONFIDENCE_MILLI: u16 = 350;
 pub(crate) const DEFAULT_SCREENSHOT_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 pub(crate) fn screen_blocks_from_ocr(elements: Vec<ReconstructedElement>) -> Vec<ScreenTextBlock> {
-    reconstruct_visual_rows(&elements)
+    reconstruct_visual_paragraphs(&reconstruct_visual_rows(&elements))
         .into_iter()
         .enumerate()
         .map(|(index, row)| ScreenTextBlock {
+            quad: row.quad,
+            fragment_quads: row.fragment_quads,
             block_id: ScreenBlockId::from(format!("screen-block-{index:04}")),
             source_text: row.text,
             bounds: row.bounds,
@@ -44,6 +48,9 @@ pub(crate) enum DocumentError {
     MachineResultAlreadyApplied,
     EmptyUserEdit,
     IncompleteBlock,
+    TranslationInProgress,
+    PixelsExpired,
+    RetryUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +83,8 @@ pub(crate) struct ScreenBlockState {
     pub(crate) source: String,
     pub(crate) bounds: PhysicalRect,
     pub(crate) fragments: Vec<PhysicalRect>,
+    pub(crate) quad: Option<PhysicalQuad>,
+    pub(crate) fragment_quads: Vec<PhysicalQuad>,
     pub(crate) confidence_milli: u16,
     pub(crate) machine: Option<TranslatedScreenBlock>,
     pub(crate) user_edit: Option<UserTranslationEdit>,
@@ -91,6 +100,8 @@ pub(crate) struct ScreenResultBlockSnapshot {
     pub(crate) failure_message: Option<String>,
     pub(crate) bounds: PhysicalRect,
     pub(crate) fragments: Vec<PhysicalRect>,
+    pub(crate) quad: Option<PhysicalQuad>,
+    pub(crate) fragment_quads: Vec<PhysicalQuad>,
     pub(crate) confidence_milli: u16,
 }
 
@@ -142,7 +153,7 @@ impl ScreenBlockState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ScreenTranslationDocument {
     request_id: RequestId,
     revision: u64,
@@ -202,6 +213,17 @@ impl ScreenTranslationDocument {
             }) {
                 return Err(DocumentError::InvalidBlockBounds);
             }
+            if block.quad.is_some_and(|quad| !quad.is_within(block.bounds))
+                || (!block.fragment_quads.is_empty()
+                    && (block.fragment_quads.len() != block.fragments.len()
+                        || block
+                            .fragment_quads
+                            .iter()
+                            .zip(&block.fragments)
+                            .any(|(quad, bounds)| !quad.is_within(*bounds))))
+            {
+                return Err(DocumentError::InvalidBlockBounds);
+            }
             reading_order.push(block.block_id.clone());
             states.insert(
                 block.block_id,
@@ -209,6 +231,8 @@ impl ScreenTranslationDocument {
                     source: block.source_text,
                     bounds: block.bounds,
                     fragments: block.fragments,
+                    quad: block.quad,
+                    fragment_quads: block.fragment_quads,
                     confidence_milli: block.confidence_milli,
                     machine: None,
                     user_edit: None,
@@ -256,6 +280,26 @@ impl ScreenTranslationDocument {
         self.revision
     }
 
+    pub(crate) fn retry(
+        &self,
+        request_id: RequestId,
+        expected_revision: u64,
+    ) -> Result<Self, DocumentError> {
+        if expected_revision != self.revision {
+            return Err(DocumentError::RevisionMismatch);
+        }
+        if self.crop.is_none() {
+            return Err(DocumentError::PixelsExpired);
+        }
+        self.result_snapshot()?;
+        let mut retried = self.clone();
+        retried.request_id = request_id;
+        retried.revision = self.revision.saturating_add(1);
+        retried.machine_base_revision = retried.revision;
+        retried.machine_applied = false;
+        Ok(retried)
+    }
+
     pub(crate) fn crop_rect(&self) -> PhysicalRect {
         self.crop_rect
     }
@@ -274,6 +318,8 @@ impl ScreenTranslationDocument {
             .filter_map(|block_id| {
                 let state = self.blocks.get(block_id)?;
                 Some(ScreenTextBlock {
+                    quad: state.quad,
+                    fragment_quads: state.fragment_quads.clone(),
                     block_id: block_id.clone(),
                     source_text: state.source.clone(),
                     bounds: state.bounds,
@@ -390,26 +436,56 @@ impl ScreenTranslationDocument {
     }
 
     pub(crate) fn result_snapshot(&self) -> Result<ScreenResultSnapshot, DocumentError> {
+        self.snapshot_with_partials(None)
+    }
+
+    pub(crate) fn partial_snapshot(
+        &self,
+        partials: &HashMap<ScreenBlockId, String>,
+    ) -> Result<ScreenResultSnapshot, DocumentError> {
+        self.snapshot_with_partials(Some(partials))
+    }
+
+    fn snapshot_with_partials(
+        &self,
+        partials: Option<&HashMap<ScreenBlockId, String>>,
+    ) -> Result<ScreenResultSnapshot, DocumentError> {
         let mut blocks = Vec::with_capacity(self.reading_order.len());
         for block_id in &self.reading_order {
             let state = self
                 .blocks
                 .get(block_id)
                 .ok_or(DocumentError::UnknownBlockId)?;
-            let (completion, failure_message) = if state.user_edit.is_some() {
+            let partial = partials.and_then(|partials| partials.get(block_id));
+            let (completion, failure_message) = if state.user_edit.is_some() || partial.is_some() {
                 (BlockCompletion::Completed, None)
-            } else {
-                let machine = state
-                    .machine
-                    .as_ref()
-                    .ok_or(DocumentError::IncompleteBlock)?;
+            } else if let Some(machine) = state.machine.as_ref() {
                 (machine.completion, machine.failure_message.clone())
+            } else if partials.is_some() {
+                // A display-only pending row: the busy view retains its source
+                // pixels and suppresses failure markers. Never persisted or
+                // committed as a machine result.
+                (BlockCompletion::Failed, None)
+            } else {
+                return Err(DocumentError::IncompleteBlock);
             };
             blocks.push(ScreenResultBlockSnapshot {
+                quad: state.quad,
+                fragment_quads: state.fragment_quads.clone(),
                 block_id: block_id.clone(),
                 source: state.source.clone(),
                 translation: state
-                    .effective_translation()
+                    .user_edit
+                    .as_ref()
+                    .map(|edit| edit.text.as_str())
+                    .or_else(|| partial.map(String::as_str))
+                    .or_else(|| {
+                        state
+                            .machine
+                            .as_ref()
+                            .map(|machine| machine.translated_text.as_str())
+                    })
+                    .or_else(|| partials.map(|_| ""))
                     .ok_or(DocumentError::IncompleteBlock)?
                     .to_owned(),
                 completion,
@@ -519,7 +595,9 @@ fn number_tokens(text: &str) -> Vec<String> {
             let numeric_separator = matches!(next, '.' | ',' | ':' | '-' | '/')
                 && chars
                     .get(index + 1)
-                    .is_some_and(|(_, following)| following.is_ascii_digit());
+                    .is_some_and(|(_, following)| following.is_ascii_digit())
+                && !(next == ','
+                    && rust_app_core::text_values::named_month_date_comma(text, start, byte));
             if next.is_ascii_digit() || numeric_separator || next == '%' {
                 end = byte + next.len_utf8();
                 index += 1;
@@ -588,6 +666,8 @@ mod tests {
 
     fn block(id: &str, source: &str, confidence_milli: u16) -> ScreenTextBlock {
         ScreenTextBlock {
+            quad: None,
+            fragment_quads: Vec::new(),
             block_id: ScreenBlockId::from(id),
             source_text: source.to_owned(),
             bounds: PhysicalRect {
@@ -662,6 +742,7 @@ mod tests {
     fn ocr_reading_order_gets_stable_request_local_ids() {
         let blocks = screen_blocks_from_ocr(vec![
             rust_ocr_engine::ReconstructedElement {
+                quad: None,
                 text: "first".to_owned(),
                 bounds: PhysicalRect {
                     x: 0,
@@ -672,6 +753,7 @@ mod tests {
                 confidence_milli: 900,
             },
             rust_ocr_engine::ReconstructedElement {
+                quad: None,
                 text: "second".to_owned(),
                 bounds: PhysicalRect {
                     x: 20,
@@ -693,6 +775,7 @@ mod tests {
     #[test]
     fn merged_visual_row_keeps_stable_id_fragments_and_late_edit_target() {
         let damage_type = rust_ocr_engine::ReconstructedElement {
+            quad: None,
             text: "DAMAGE TYPE:I".to_owned(),
             bounds: PhysicalRect {
                 x: 30,
@@ -703,6 +786,7 @@ mod tests {
             confidence_milli: 990,
         };
         let magical = rust_ocr_engine::ReconstructedElement {
+            quad: None,
             text: "Magical".to_owned(),
             bounds: PhysicalRect {
                 x: 135,
@@ -759,6 +843,7 @@ mod tests {
     fn merged_visual_row_counts_each_numeric_fragment_once() {
         let blocks = screen_blocks_from_ocr(vec![
             rust_ocr_engine::ReconstructedElement {
+                quad: None,
                 text: "DAMAGE".to_owned(),
                 bounds: PhysicalRect {
                     x: 30,
@@ -769,6 +854,7 @@ mod tests {
                 confidence_milli: 990,
             },
             rust_ocr_engine::ReconstructedElement {
+                quad: None,
                 text: "25".to_owned(),
                 bounds: PhysicalRect {
                     x: 105,
@@ -919,6 +1005,86 @@ mod tests {
             warnings.iter().any(|warning| {
                 warning.kind == PreservationKind::Number && warning.token == "-7"
             })
+        );
+    }
+
+    #[test]
+    fn named_month_date_has_no_false_warning_after_translation_or_edit() {
+        let request_id = RequestId::new();
+        let block_id = ScreenBlockId::from("date");
+        let mut document = ScreenTranslationDocument::new(
+            request_id,
+            crop(),
+            vec![block(
+                "date",
+                "February 10,2026. Collect within 30 days.",
+                980,
+            )],
+            SourceContext::default(),
+            1_000,
+            2_000,
+        )
+        .unwrap();
+        document
+            .apply_machine_blocks(
+                request_id,
+                0,
+                vec![translated(
+                    "date",
+                    "10 февраля 2026 года. Получить в течение 30 дней.",
+                )],
+            )
+            .unwrap();
+        assert!(document.block(&block_id).unwrap().warnings().is_empty());
+        document
+            .save_user_edit(
+                &block_id,
+                document.revision(),
+                UserTranslationEdit::new("Получить в течение 30 дней. Дата: 10 февраля 2026 года."),
+            )
+            .unwrap();
+        assert!(document.block(&block_id).unwrap().warnings().is_empty());
+        document
+            .save_user_edit(
+                &block_id,
+                document.revision(),
+                UserTranslationEdit::new("Получить в течение 30 дней. Дата: 11 февраля 2026 года."),
+            )
+            .unwrap();
+        assert!(
+            document
+                .block(&block_id)
+                .unwrap()
+                .warnings()
+                .iter()
+                .any(|warning| {
+                    warning.kind == PreservationKind::Number && warning.token == "10"
+                })
+        );
+    }
+
+    #[test]
+    fn named_month_date_warning_exception_keeps_generic_numbers_exact() {
+        for source in [
+            "Cost 10,2026",
+            "February 10,2026%",
+            "February 1,234",
+            "February 10,2026s",
+            "February 10,2026/1",
+            "February -10,2026",
+        ] {
+            let changed = source.replace(',', ", ");
+            assert!(
+                preservation_warnings(source, &changed)
+                    .iter()
+                    .any(|warning| { warning.kind == PreservationKind::Number }),
+                "numeric spelling unexpectedly relaxed: {source}"
+            );
+        }
+        assert!(
+            preservation_warnings("February 10,2026; 30 30", "10 февраля 2026; 30")
+                .iter()
+                .any(|warning| warning.kind == PreservationKind::Number)
         );
     }
 

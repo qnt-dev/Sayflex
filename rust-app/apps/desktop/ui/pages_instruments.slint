@@ -45,11 +45,13 @@ export component OverviewPage inherits VerticalLayout {
             font-size: 27px;
             font-weight: 650;
             letter-spacing: -0.9px;
+            wrap: word-wrap;
         }
         Text {
             text: root.sub;
             color: Sheet.muted;
             font-size: Sheet.body-size;
+            wrap: word-wrap;
         }
     }
 
@@ -90,6 +92,15 @@ export component DictationPage inherits HorizontalLayout {
     in property <string> engine-note;
     in property <int> backend: 0;
     in property <bool> backend-verified: false;
+    in property <string> cuda-status;
+    in property <string> cuda-description;
+    in property <string> cuda-error;
+    in property <string> cuda-download-label;
+    in property <float> cuda-progress: 0;
+    in property <bool> cuda-busy: false;
+    in property <bool> cuda-can-download: false;
+    in property <bool> cuda-can-cancel: false;
+    in property <bool> cuda-can-activate: false;
     in property <string> output-mode;
     in property <string> output-mode-value;
     in property <bool> output-locked: false;
@@ -105,6 +116,10 @@ export component DictationPage inherits HorizontalLayout {
     in property <string> hotkey;
 
     callback select-backend(int);
+    callback download-cuda();
+    callback cancel-cuda();
+    callback activate-cuda();
+    callback open-cuda-license();
     callback set-output-mode(string);
     callback set-dictation-language(string);
     callback set-release-mode(string);
@@ -122,7 +137,7 @@ export component DictationPage inherits HorizontalLayout {
             subtitle: root.subtitle;
         }
 
-        Rectangle { height: 34px; }
+        Rectangle { height: 12px; }
 
         // Not a live meter. These thirty-two bars are the shape the recording
         // overlay draws, at rest, so the page shows which instrument is
@@ -131,7 +146,7 @@ export component DictationPage inherits HorizontalLayout {
         // speak; a settings page you are not looking at during a dictation is
         // the wrong place for it.
         Rectangle {
-            height: 116px;
+            height: 58px;
             HorizontalLayout {
                 alignment: center;
                 spacing: 3px;
@@ -170,6 +185,81 @@ export component DictationPage inherits HorizontalLayout {
             color: Sheet.muted;
             font-size: Sheet.detail-size;
             horizontal-alignment: center;
+        }
+
+        Rectangle { height: 16px; }
+        Rectangle {
+            background: Sheet.raised;
+            border-width: 1px;
+            border-color: Sheet.hairline;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text {
+                    text: @tr("NVIDIA acceleration");
+                    color: Sheet.ink;
+                    font-size: Sheet.body-size;
+                    font-weight: 650;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.cuda-status;
+                    color: Sheet.ink;
+                    font-size: Sheet.detail-size;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.cuda-description;
+                    color: Sheet.muted;
+                    font-size: Sheet.detail-size;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: @tr("Optional NVIDIA components require a compatible NVIDIA GPU and driver. Downloading means you accept the NVIDIA license.");
+                    color: Sheet.muted;
+                    font-size: Sheet.detail-size;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    RowAction {
+                        label: @tr("NVIDIA license");
+                        clicked => { root.open-cuda-license(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if root.cuda-busy : Rectangle {
+                    height: 3px;
+                    background: Sheet.hairline;
+                    Rectangle {
+                        height: parent.height;
+                        width: parent.width * max(0, min(1, root.cuda-progress));
+                        background: Sheet.signal;
+                    }
+                }
+                if root.cuda-error != "" : Text {
+                    text: root.cuda-error;
+                    color: Sheet.ink;
+                    font-size: Sheet.detail-size;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    if root.cuda-can-download : RowAction {
+                        label: root.cuda-download-label;
+                        primary: true;
+                        clicked => { root.download-cuda(); }
+                    }
+                    if root.cuda-can-cancel : RowAction {
+                        label: @tr("Cancel");
+                        clicked => { root.cancel-cuda(); }
+                    }
+                    if root.cuda-can-activate : RowAction {
+                        label: @tr("Activate NVIDIA");
+                        primary: true;
+                        clicked => { root.activate-cuda(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
         }
 
         Rectangle { vertical-stretch: 1; }

@@ -12,6 +12,11 @@
 
 use std::error::Error;
 
+#[path = "scroll_comparison.rs"]
+mod scroll_comparison;
+#[path = "scroll_comparison_models.rs"]
+mod scroll_comparison_models;
+
 use std::{cell::RefCell, rc::Rc};
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
@@ -281,6 +286,8 @@ pub(crate) fn requested_page() -> i32 {
 const HISTORY_PAGE: i32 = 6;
 
 pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
+    let compare_scroll =
+        std::env::args().any(|argument| argument == "--settings-scroll-comparison");
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.SettingsPreview")?;
     let settings = SettingsWindow::new()?;
@@ -310,17 +317,24 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     settings
         .set_today(rust_platform_windows::local_date_line_for_locale(preview_locale.code()).into());
     settings.set_runtime_status("SYSTEM READY".into());
-    settings.set_active_page(requested_page());
+    settings.set_active_page(if compare_scroll { 3 } else { requested_page() });
 
     fill_overview(&settings);
     fill_dictation(&settings);
     fill_translation(&settings);
     fill_models(&settings);
+    if compare_scroll {
+        scroll_comparison_models::fill(&settings, preview_locale)?;
+    }
     fill_providers(&settings);
     fill_visuals(&settings);
     fill_history(&settings);
     fill_hotkeys(&settings);
     fill_resources(&settings);
+    if compare_scroll {
+        settings.set_audio_leaves_device(false);
+        settings.set_text_leaves_device(false);
+    }
 
     wire(&settings);
     let animation = new_settings_preview(&settings);
@@ -330,6 +344,17 @@ pub(crate) fn run_settings_preview() -> Result<(), Box<dyn Error>> {
     // whole thing including its title bar rather than the page inside a piece
     // of chrome that belongs to a different design.
     crate::configure_standard_app_window(&settings, "Settings preview");
+    let _scroll_comparison = compare_scroll.then(|| {
+        settings
+            .window()
+            .set_size(slint::LogicalSize::new(1000.0, 600.0));
+        let path = std::env::args().find_map(|argument| {
+            argument
+                .strip_prefix("--scroll-comparison-log=")
+                .map(std::path::PathBuf::from)
+        });
+        scroll_comparison::install(&settings, path)
+    });
     slint::run_event_loop()?;
     animation_timer.stop();
     Ok(())

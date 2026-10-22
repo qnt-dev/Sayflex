@@ -57,6 +57,7 @@ pub enum FocusedTextOutcome {
     Text(String),
     Unavailable,
     Protected,
+    TargetChanged,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -189,6 +190,20 @@ impl TextAutomationActor {
                     SelectionError::ActorUnavailable("UI Automation text actor stopped".to_owned())
                 }
             })?
+    }
+}
+
+fn reconcile_focused_observation(
+    observed: Result<FocusedTextOutcome, SelectionError>,
+    protected_now: bool,
+    focus_changed: bool,
+) -> Result<FocusedTextOutcome, SelectionError> {
+    if protected_now {
+        Ok(FocusedTextOutcome::Protected)
+    } else if focus_changed {
+        Ok(FocusedTextOutcome::TargetChanged)
+    } else {
+        observed
     }
 }
 
@@ -388,15 +403,41 @@ impl UiAutomationClient {
     }
 
     fn focused_text(&self, target: TargetSnapshot) -> Result<FocusedTextOutcome, SelectionError> {
+        let before = unsafe { self.automation.GetFocusedElement() }.ok();
+        let observed = self.focused_text_current(target);
+        if matches!(observed, Ok(FocusedTextOutcome::Protected)) {
+            return observed;
+        }
+        let after = unsafe { self.automation.GetFocusedElement() }.ok();
+        let protected = after.as_ref().is_some_and(|element| {
+            unsafe { element.CurrentIsPassword() }.is_ok_and(|value| value.as_bool())
+        });
+        let changed = !inject::is_foreground(target)
+            || before
+                .as_ref()
+                .zip(after.as_ref())
+                .is_some_and(|(before, after)| {
+                    unsafe { self.automation.CompareElements(before, after) }
+                        .is_ok_and(|same| !same.as_bool())
+                });
+        reconcile_focused_observation(observed, protected, changed)
+    }
+
+    fn focused_text_current(
+        &self,
+        target: TargetSnapshot,
+    ) -> Result<FocusedTextOutcome, SelectionError> {
         if !inject::is_foreground(target) {
             return Ok(FocusedTextOutcome::Unavailable);
         }
 
-        for focused in focused_elements(&self.automation, target) {
+        let candidates = focused_elements(&self.automation, target);
+        for focused in &candidates {
             if unsafe { focused.CurrentIsPassword() }.is_ok_and(|value| value.as_bool()) {
                 return Ok(FocusedTextOutcome::Protected);
             }
-
+        }
+        for focused in candidates {
             let mut current = Some(focused);
             for _ in 0..MAX_PARENT_DEPTH {
                 let Some(element) = current.take() else {
@@ -610,5 +651,31 @@ impl Drop for ComApartment {
         unsafe {
             CoUninitialize();
         }
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::{FocusedTextOutcome, SelectionError, reconcile_focused_observation};
+
+    #[test]
+    fn a_password_focused_during_a_slow_read_blocks_delivery_even_after_provider_error() {
+        for observed in [
+            Ok(FocusedTextOutcome::Text("old editor".to_owned())),
+            Err(SelectionError::Timeout),
+        ] {
+            assert_eq!(
+                reconcile_focused_observation(observed, true, true),
+                Ok(FocusedTextOutcome::Protected)
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_focused_element_does_not_inherit_permission_from_the_old_editor() {
+        assert_eq!(
+            reconcile_focused_observation(Ok(FocusedTextOutcome::Unavailable), false, true),
+            Ok(FocusedTextOutcome::TargetChanged),
+        );
     }
 }

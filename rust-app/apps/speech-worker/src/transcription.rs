@@ -38,7 +38,11 @@ use rust_protocol::{
 use crate::transcription_mailbox::{
     MailboxItem, SessionCancellationSet, TranscriptionMailbox, TranscriptionMailboxReceiver,
 };
-use crate::{audio::RecordedAudio, history_actor::HistoryCommand, inference::InferenceHandle};
+use crate::{
+    audio::RecordedAudio,
+    history_actor::{HistoryCommand, queue_completion},
+    inference::InferenceHandle,
+};
 
 pub enum TranscriptionCommand {
     /// Replaces the ordered list.
@@ -267,6 +271,7 @@ impl NetworkJob {
         let session_id = self.recording.session_id;
         let watcher = self.cancelled.watcher(session_id);
         if watcher.is_cancelled() {
+            self.inference.finish_session(session_id);
             let _ = self
                 .events
                 .send(SpeechWorkerEvent::Cancelled { session_id });
@@ -292,6 +297,7 @@ impl NetworkJob {
                 // this shared session tombstone only after it finishes.
                 return;
             } else {
+                self.inference.finish_session(session_id);
                 if !watcher.try_publish(|| {
                     let _ = self.events.send(SpeechWorkerEvent::Failed {
                         session_id: Some(session_id),
@@ -336,6 +342,9 @@ impl NetworkJob {
         );
 
         report_attempts(&outcome, &self.secrets);
+        if !matches!(outcome, RouteOutcome::UseLocalEngine { .. }) {
+            self.inference.finish_session(session_id);
+        }
         let mut terminal_transferred = false;
         match outcome {
             RouteOutcome::Transcribed { provider, text, .. } => {
@@ -353,24 +362,13 @@ impl NetworkJob {
                         ..TranscriptionLatency::default()
                     },
                 };
-                if !watcher.try_publish(|| {
-                    let _ = self.events.send(SpeechWorkerEvent::TranscribedRemotely {
-                        session_id,
-                        provider_id: provider.to_string(),
-                    });
-                    let _ = self.events.send(SpeechWorkerEvent::Completed {
-                        transcript: transcript.clone(),
-                        created_unix_ms,
-                    });
-                    let _ = self.history.send(HistoryCommand::Append {
-                        transcript,
-                        created_unix_ms,
-                    });
-                }) {
-                    let _ = self
-                        .events
-                        .send(SpeechWorkerEvent::Cancelled { session_id });
-                }
+                terminal_transferred = queue_completion(
+                    transcript,
+                    created_unix_ms,
+                    &self.history,
+                    &watcher,
+                    &self.events,
+                );
             }
             RouteOutcome::UseLocalEngine { .. } => {
                 terminal_transferred = true;
@@ -697,6 +695,10 @@ fn describe(unavailable: &Option<rust_cloud_speech::Unavailable>) -> String {
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "transcription_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod language_policy_tests {

@@ -65,13 +65,13 @@ fn argmax_row(v: &[f32], row: usize, n: usize) -> usize {
 /// not a multiple of the register width).
 ///
 /// Weights are bounded to ±63 while activations span the full uint8 range. The
-/// AVX2 (and SSE/WASM) int8 kernels sum two `uint8 × int8` products into an int16
-/// lane (`maddubs`) before widening to int32, and that int16 lane saturates at
-/// ±32767; the exact scalar and ARM `usdot` kernels don't have that intermediate.
+/// legacy SSE int8 kernels sum two `uint8 × int8` products into an int16 lane
+/// (`maddubs`) before widening to int32, and that lane saturates; scalar, ARM,
+/// wasm SIMD128 and the corrected AVX2 shifted-dot path accumulate exactly.
 /// With `|weight| ≤ 63` the worst pair is `2 × 255 × 63 = 32130 < 32767`, so no
 /// backend saturates and the comparison is exact on every arch. The saturating
 /// regime (full-range weights) is characterized separately in
-/// `full_range_matches_only_on_exact_backends`. See gemm-backends.md.
+/// `full_range_matches_only_on_exact_backends`.
 fn check(m: usize, k: usize, n: usize, seed: u64) -> bool {
     let mut r = Lcg(seed);
     let a: Vec<u8> = (0..m * k).map(|_| r.byte()).collect();
@@ -217,15 +217,40 @@ fn simd_backend_is_live_when_required() {
 /// backends (ARM `usdot`, x86 VNNI `vpdpbusd`) agree on any input. Keep this in
 /// sync with the table in gemm-backends.md.
 fn backend_saturates(name: &str) -> bool {
-    matches!(name, "avx2" | "ssse3" | "sse2")
+    matches!(name, "ssse3" | "sse2")
+}
+
+// SayFlex regression: shifted activations span 0..254 in real inference, and
+// admitted models contain weights above +/-63. Adjacent products must widen
+// before addition can saturate an int16 lane. Include full uint8/int8 limits,
+// several rows and a padded output width; all exact totals fit f32 integers.
+wasm_test! {
+fn avx2_full_range_shifted_dot_matches_exact_scalar() {
+    let backend = gemm::backend();
+    if backend != "avx2" {
+        eprintln!("AVX2-specific regression not applicable to backend={backend}");
+        return;
+    }
+    let (m, k, n) = (5, 384, 13);
+    let a = [255u8, 254, 130, 128, 0].into_iter()
+        .flat_map(|value| std::iter::repeat_n(value, k)).collect::<Vec<_>>();
+    let b = (0..n).flat_map(|column| {
+        let weight = [127i8, -128, 100, -100, 64, -64, 0][column % 7];
+        std::iter::repeat_n(weight, k)
+    }).collect::<Vec<_>>();
+    let bias = vec![0.0; n];
+    let scalar = ops::intgemm_affine(&a, m, k, &b, n, 1.0, &bias);
+    let prepared = PreparedB::new(&b, n, k).expect("AVX2 kernel must accept aligned inner width");
+    let simd = prepared.matmul(&a, m, 1.0, &bias);
+    assert_eq!(simd, scalar, "AVX2 full-range integer dot product must not saturate");
+}
 }
 
 // Characterize the saturating vs. exact split on *full-range* inputs (the regime
-// `check` deliberately avoids). This is the test that documents *why* the AVX2
-// numbers differ from ARM/scalar — and, by extension, why Firefox's WASM engine
-// (same `maddubs` path) can differ from this one. Exact backends (including this
-// crate's wasm-simd128 kernel) must still match bit-close; saturating backends are
-// only reported, not required to match.
+// `check` deliberately avoids). AVX2 used to be exempt here despite full-range
+// model weights. The corrected shifted-dot path must match scalar just like
+// ARM and this crate's wasm-simd128 kernel. Only uncorrected legacy SSE backends
+// are reported without a match requirement.
 wasm_test! {
 fn full_range_matches_only_on_exact_backends() {
     let (m, k, n) = (1, 384, 32000); // vocab-scale output projection: saturation is easy to hit

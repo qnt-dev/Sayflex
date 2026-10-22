@@ -265,6 +265,9 @@ fn ensure_model(
 /// Reuses the model the earlier Windows application already verified, without
 /// copying or modifying it.
 fn try_adopt_existing_windows_model(installer: &ModelInstaller, model: &ModelDescriptor) {
+    if rust_app_core::product::is_test_build() {
+        return;
+    }
     let destination = installer.model_path(model);
     if destination.exists() {
         return;
