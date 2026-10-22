@@ -319,8 +319,10 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
         # Visual C++ runtime beside the executables (app-local deployment, as
         # the Visual Studio redistribution terms allow). A clean Windows has no
         # VCRUNTIME140.dll, and every SayFlex process imports it.
+        # Only numbered versions: Build Tools also ship a "v143" directory there.
         $crtRoot = Get-ChildItem -LiteralPath (Join-Path $visualStudioInstance 'VC\Redist\MSVC') -Directory |
-            Sort-Object { [version]($_.Name -replace '[^0-9.].*$', '') } -Descending |
+            Where-Object Name -match '^\d+(\.\d+){1,3}$' |
+            Sort-Object { [version]$_.Name } -Descending |
             ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'x64') -Directory -Filter 'Microsoft.VC14*.CRT' -ErrorAction SilentlyContinue } |
             Select-Object -First 1
         if (-not $crtRoot) {
