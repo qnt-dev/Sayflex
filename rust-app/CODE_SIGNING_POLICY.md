@@ -1,8 +1,5 @@
 # Code signing policy
 
-> **Draft for the SayFlex Foundation application to SignPath.** The items marked
-> *owner decision* must be completed by the project owner before submission.
-
 Free code signing for Windows releases is requested from
 [SignPath.io](https://about.signpath.io/), with a certificate by the
 [SignPath Foundation](https://signpath.org/). Until approval, released binaries
