@@ -1,14 +1,14 @@
 # Third-party notices
 
-The Rust application is distributed under the adjacent MIT license. The
+SayFlex.exe is distributed under GPL-3.0-only and the other SayFlex programs
+under the MIT License; both texts are in the adjacent LICENSE.txt. The
 dependency inventory below is generated from the exact locked Cargo graph;
 `cargo-deny` remains the authoritative SPDX policy check.
 
 ## Slint
 
-The user interface uses Slint 1.17 under the Slint Royalty-free Desktop,
-Mobile, and Web Applications License 2.0. Public distribution must also
-satisfy one of the attribution methods in section 2 of that license.
+The user interface uses Slint 1.17 under the GNU General Public License
+version 3 (GPL-3.0-only), one of the licenses Slint is offered under.
 
 Copyright © SixtyFPS GmbH <info@slint.dev>
 

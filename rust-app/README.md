@@ -188,6 +188,6 @@ existing C# installer or its application directory.
 
 ## License
 
-The workspace is MIT-licensed. Slint is consumed under its royalty-free
-desktop application license. A release must retain the required Slint
-attribution in the About surface or on the public download page.
+The workspace is MIT-licensed, except `apps/desktop` (`SayFlex.exe`), which is
+licensed under GPL-3.0-only (`apps/desktop/LICENSE`) because it links Slint
+under that license. The installed `LICENSE.txt` carries both texts.

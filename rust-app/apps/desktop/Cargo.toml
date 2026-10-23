@@ -3,7 +3,9 @@ name = "sayflex-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# Slint is used under GPL-3.0-only, so the program that links it is too.
+# The workers and libraries stay MIT (workspace license).
+license = "GPL-3.0-only"
 build = "build.rs"
 
 [dependencies]

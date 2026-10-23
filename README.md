@@ -80,11 +80,14 @@ in [rust-app/README.md](rust-app/README.md). The Store hand-off is documented in
 
 ## License
 
-SayFlex-owned source files are available under the [MIT License](LICENSE).
+SayFlex-owned source files are available under the [MIT License](LICENSE),
+except the user interface program `SayFlex.exe`
+([`rust-app/apps/desktop`](rust-app/apps/desktop)), which is licensed under the
+[GNU General Public License version 3](rust-app/apps/desktop/LICENSE)
+(GPL-3.0-only) because it is built with [Slint](https://slint.dev/) under that
+license. The other programs of the installed application (input host, speech,
+translation, OCR and companion workers) remain MIT-licensed.
+
 Third-party components and optional downloaded models keep their respective
 licenses; see [third-party notices](rust-app/THIRD_PARTY_NOTICES.md) and
 [model licenses](rust-app/docs/THIRD_PARTY_MODELS.md).
-
-The current release configuration consumes Slint under its royalty-free desktop
-application license. That distribution choice may change before public release
-to meet the requirements of the selected open-source signing program.

@@ -22,14 +22,12 @@ workflow on GitHub-hosted runners:
 ## What the installer contains
 
 All components are open source under OSI-approved licenses, listed with their
-full texts in `THIRD_PARTY_NOTICES.md`, except:
+full texts in `THIRD_PARTY_NOTICES.md`, except the Microsoft Visual C++ runtime
+DLLs (`vcruntime140*.dll`, `msvcp140*.dll`), redistributed unmodified under the
+Visual Studio redistribution terms.
 
-- the Microsoft Visual C++ runtime DLLs (`vcruntime140*.dll`, `msvcp140*.dll`),
-  redistributed unmodified under the Visual Studio redistribution terms;
-- the Slint UI toolkit, used under the Slint Royalty-free Desktop License 2.0.
-  *Owner decision:* SignPath Foundation accepts OSI licenses only; the options
-  are a Slint license compatible with the Foundation's rules (for example the
-  GPL-3.0 option for the whole application) or a confirmation from SignPath.
+The Slint UI toolkit is used under GPL-3.0-only, so `SayFlex.exe` is licensed
+under GPL-3.0-only; the other SayFlex programs are MIT-licensed.
 
 ### NVIDIA CUDA
 

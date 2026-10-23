@@ -361,8 +361,28 @@ only %LOCALAPPDATA%\SayFlex-Test-Nvidia. Do not delete %LOCALAPPDATA%\SayFlex.
         New-Item -ItemType Directory -Force -Path $vadOutput | Out-Null
         Copy-Item -LiteralPath $vadCache -Destination (Join-Path $vadOutput $vadFile)
 
-        Copy-Item -LiteralPath (Join-Path $rustRoot '..\LICENSE') `
-            -Destination (Join-Path $output 'LICENSE.txt')
+        # SayFlex.exe links Slint under GPL-3.0-only; the workers are MIT.
+        # One file carries both texts and where the source code is.
+        $licenseText = @(
+            'SayFlex is free software. Source code: https://github.com/qnt-dev/Sayflex'
+            ''
+            'SayFlex.exe, the user interface, is licensed under the GNU General Public'
+            'License version 3 (GPL-3.0-only), because it is built with Slint under that'
+            'license. The other programs (SayFlex.InputHost.exe, SayFlex.Speech.*.exe,'
+            'SayFlex.Translation.exe, SayFlex.Ocr.exe, SayFlex.Companion.exe) are licensed'
+            'under the MIT License. Third-party components are listed in'
+            'THIRD_PARTY_NOTICES.md.'
+            ''
+            '=============================================================================='
+            ''
+            (Get-Content -LiteralPath (Join-Path $rustRoot 'apps\desktop\LICENSE') -Raw).TrimEnd()
+            ''
+            '=============================================================================='
+            ''
+            (Get-Content -LiteralPath (Join-Path $rustRoot '..\LICENSE') -Raw).TrimEnd()
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText((Join-Path $output 'LICENSE.txt'), $licenseText + "`r`n",
+            [System.Text.UTF8Encoding]::new($false))
         foreach ($document in @('THIRD_PARTY_NOTICES.md', 'SECURITY.md', 'PRIVACY.md')) {
             Copy-Item -LiteralPath (Join-Path $rustRoot $document) `
                 -Destination (Join-Path $output $document)
