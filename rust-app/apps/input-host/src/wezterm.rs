@@ -525,7 +525,9 @@ mod tests {
                 &expected,
             ],
             Some(&input),
-            Duration::from_secs(2),
+            // A deadlock never ends; this only has to outlast a cold start of
+            // Windows PowerShell, which took over 2 s on a CI runner.
+            Duration::from_secs(15),
             None,
         )
         .expect("concurrent pipe service must not deadlock");

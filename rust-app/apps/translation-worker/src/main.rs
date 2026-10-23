@@ -3157,8 +3157,10 @@ mod keep_warm_release_tests {
         state.keep_warm = true;
         let (events, received) = mpsc::channel();
         let writer = EventWriter { events };
-        let now = std::time::Instant::now();
-        let long_ago = now - super::CONTEXTUAL_MODEL_IDLE_RELEASE;
+        // Forward, not back: an Instant ten minutes before now does not exist
+        // on a machine that started less than ten minutes ago (a CI runner).
+        let long_ago = std::time::Instant::now();
+        let now = long_ago + super::CONTEXTUAL_MODEL_IDLE_RELEASE;
 
         state.engine = Some(engine_for(false));
         state.engine_last_used = Some(long_ago);
