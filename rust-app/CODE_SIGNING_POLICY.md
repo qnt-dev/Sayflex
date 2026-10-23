@@ -59,10 +59,12 @@ by SayFlex. Without them SayFlex uses its CPU or Vulkan speech workers.
 
 ## Team roles
 
-*Owner decision:* fill in the people and their accounts.
+SayFlex has one maintainer, who holds every role:
 
-- Committers and reviewers: …
-- Approvers (approve each signing request): …
+- Committer and reviewer: Nail ([@qnt-dev](https://github.com/qnt-dev)). Changes
+  from anyone else are merged only after his review.
+- Approver (approves each signing request): Nail
+  ([@qnt-dev](https://github.com/qnt-dev)).
 
 All accounts with these roles use multi-factor authentication. Every release
 signing request is approved manually.
