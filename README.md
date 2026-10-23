@@ -45,15 +45,24 @@ Provider keys are protected with Windows DPAPI for the current user.
 See [Security and privacy](rust-app/SECURITY.md) for the complete data-handling
 and trust-boundary description.
 
-## Release status
+## Download
 
-Version 0.8.12 is undergoing release hardening. A public installer is not ready
-until the exact installed artifact passes the Windows interaction matrix and
-carries a valid Authenticode signature. Do not treat files from a local `dist`
-directory as an official release.
-
-The current release notes are in
+SayFlex for Windows 10/11 (x64) is published on the
+[Releases](https://github.com/qnt-dev/Sayflex/releases) page, with the SHA-256
+of each installer. The current release notes are in
 [rust-app/RELEASE_0.8.12.md](rust-app/RELEASE_0.8.12.md).
+
+The installer is not code-signed yet, so Windows SmartScreen may warn about an
+unknown publisher. Do not treat files from a local `dist` directory as an
+official release.
+
+## Code signing policy
+
+Free code signing through [SignPath.io](https://about.signpath.io/) with a
+certificate by the [SignPath Foundation](https://signpath.org/) has been
+requested. What is signed, by whom and how is described in the
+[code signing policy](rust-app/CODE_SIGNING_POLICY.md); data handling is
+described in the [privacy policy](rust-app/PRIVACY.md).
 
 ## Build and test
 
