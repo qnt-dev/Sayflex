@@ -25,6 +25,9 @@ component ActionButton inherits Rectangle {
     in property <bool> accent: false;
     in property <bool> danger: false;
     in property <bool> enabled: true;
+    // The width the label needs without eliding, for a button sized to its
+    // text: "CANCEL" is "ABBRECHEN" in German and "СКАСУВАТИ" in Ukrainian.
+    out property <length> natural-width: caption.preferred-width + 24px;
     callback clicked();
 
     forward-focus: focus;
@@ -63,7 +66,7 @@ component ActionButton inherits Rectangle {
                     ? Theme.red
                     : Theme.panel);
 
-    Text {
+    caption := Text {
         x: 8px;
         width: parent.width - 16px;
         text: root.label;
@@ -478,7 +481,7 @@ export component ActionPalette inherits Window {
                     clicked => { root.correct-layout(); }
                 }
                 ActionButton {
-                    width: 74px;
+                    width: max(74px, self.natural-width);
                     height: 40px;
                     label: @tr("CANCEL");
                     clicked => { root.cancel(); }
@@ -490,11 +493,13 @@ export component ActionPalette inherits Window {
 
 // Shown when a dictation could not be inserted. It never takes the keyboard
 // focus: the user can click into the field they want and then press Insert.
+// The same card as ActionPalette (material, colours, spacing, buttons), so
+// every floating SayFlex surface reads as one family.
 export component InsertionNotice inherits Window {
     title: @tr("Text was not inserted");
     icon: @image-url("../assets/tray-icon.svg");
-    width: 440px;
-    height: 196px;
+    width: 460px;
+    height: 236px;
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -518,45 +523,16 @@ export component InsertionNotice inherits Window {
         opacity: root.prepared ? 1 : 0;
 
         VerticalLayout {
-            padding: 14px;
-            spacing: 7px;
+            padding: 17px;
+            spacing: 9px;
 
-            HorizontalLayout {
-                height: 24px;
+            Text {
+                height: 23px;
                 vertical-stretch: 0;
-                Text {
-                    text: @tr("Text was not inserted");
-                    color: Theme.text;
-                    font-size: 15px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                }
-                Rectangle { horizontal-stretch: 1; }
-                Rectangle {
-                    width: 26px;
-                    height: 24px;
-                    border-radius: 5px;
-                    border-width: close-touch.has-hover ? 1px : 0px;
-                    border-color: Theme.line;
-                    background: close-touch.has-hover ? Theme.panel-raised : transparent;
-                    accessible-role: button;
-                    accessible-label: @tr("Close");
-                    accessible-enabled: true;
-                    accessible-action-default => { root.dismiss(); }
-
-                    Text {
-                        text: "×";
-                        color: close-touch.has-hover ? Theme.text : Theme.text-muted;
-                        font-size: 17px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
-                    close-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.dismiss(); }
-                    }
-                }
+                text: @tr("Text was not inserted");
+                color: Theme.text;
+                font-size: 16px;
+                font-weight: 720;
             }
 
             Text {
@@ -569,15 +545,15 @@ export component InsertionNotice inherits Window {
             }
 
             Rectangle {
-                height: 26px;
+                height: 30px;
                 vertical-stretch: 0;
                 border-radius: 4px;
                 border-width: 1px;
                 border-color: Theme.line;
                 background: Theme.panel;
                 Text {
-                    x: 9px;
-                    width: parent.width - 18px;
+                    x: 10px;
+                    width: parent.width - 20px;
                     text: root.preview;
                     color: Theme.text-muted;
                     font-size: 11px;
@@ -597,19 +573,27 @@ export component InsertionNotice inherits Window {
             Rectangle { vertical-stretch: 1; }
 
             HorizontalLayout {
-                height: 34px;
+                height: 40px;
                 vertical-stretch: 0;
                 spacing: 7px;
                 ActionButton {
                     horizontal-stretch: 1;
+                    height: 40px;
                     label: @tr("INSERT");
                     accent: true;
                     clicked => { root.insert(); }
                 }
                 ActionButton {
                     horizontal-stretch: 1;
+                    height: 40px;
                     label: @tr("COPY");
                     clicked => { root.copy(); }
+                }
+                ActionButton {
+                    width: max(74px, self.natural-width);
+                    height: 40px;
+                    label: @tr("CANCEL");
+                    clicked => { root.dismiss(); }
                 }
             }
         }

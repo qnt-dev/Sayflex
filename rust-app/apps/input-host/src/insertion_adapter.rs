@@ -151,7 +151,10 @@ pub fn deliver(
     let mut last_observation = Instant::now() - Duration::from_millis(75);
     clipboard::dispatch_paste(
         clipboard_host,
-        || inject::is_foreground(target_snapshot),
+        // The same grace as the precheck at every check of this route: on
+        // 2026-10-24 one instant without the target in front cancelled a paste
+        // into a window that never changed, and the notice said it had.
+        || target_is_foreground_with_grace(target_snapshot),
         verification_available,
         || {
             let Some(baseline) = baseline.as_deref() else {
@@ -169,7 +172,7 @@ pub fn deliver(
         || {
             // Snapshotting/publishing can take time; protection and focus
             // must be checked again at the actual fallback dispatch.
-            ensure_insertion_allowed(target_snapshot)
+            ensure_insertion_allowed_with_grace(target_snapshot)
                 .map(|_| ())
                 .map_err(|error| match error {
                     inject::InjectionError::Protected => clipboard::ClipboardError::Protected,
@@ -266,6 +269,34 @@ fn ensure_insertion_allowed_with_grace(
     )
 }
 
+/// Whether the target is in front now, or the same top-level window takes the
+/// foreground back within [`FOREGROUND_RETURN_GRACE`].
+fn target_is_foreground_with_grace(target: TargetSnapshot) -> bool {
+    holds_within_grace(
+        || inject::is_foreground(target),
+        FOREGROUND_RETURN_GRACE,
+        FOREGROUND_RETURN_POLL,
+    )
+}
+
+fn holds_within_grace(
+    mut condition: impl FnMut() -> bool,
+    grace: Duration,
+    poll: Duration,
+) -> bool {
+    if condition() {
+        return true;
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        std::thread::sleep(poll);
+        if condition() {
+            return true;
+        }
+    }
+    false
+}
+
 fn ensure_with_grace<T>(
     mut check: impl FnMut() -> Result<T, inject::InjectionError>,
     mut target_is_foreground: impl FnMut() -> bool,
@@ -341,8 +372,8 @@ fn payload_was_inserted(baseline: &str, current: &str, payload: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_insertion_allowed_using, ensure_with_grace, observed_focused_text_result,
-        payload_was_inserted,
+        ensure_insertion_allowed_using, ensure_with_grace, holds_within_grace,
+        observed_focused_text_result, payload_was_inserted,
     };
     use crate::inject::InjectionError;
     use crate::uia_selection::{FocusedTextOutcome, SelectionError};
@@ -470,6 +501,44 @@ mod tests {
         );
         assert!(matches!(result, Ok("baseline")));
         assert_eq!(checks.get(), 2, "the full check runs again before delivery");
+    }
+
+    #[test]
+    fn a_target_in_front_is_accepted_without_waiting() {
+        let checks = Cell::new(0);
+        let held = holds_within_grace(
+            || {
+                checks.set(checks.get() + 1);
+                true
+            },
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        assert!(held);
+        assert_eq!(checks.get(), 1);
+    }
+
+    #[test]
+    fn a_target_back_within_the_grace_period_keeps_the_paste() {
+        let checks = Cell::new(0);
+        let held = holds_within_grace(
+            || {
+                checks.set(checks.get() + 1);
+                checks.get() >= 3
+            },
+            Duration::from_millis(200),
+            Duration::from_millis(1),
+        );
+        assert!(held);
+    }
+
+    #[test]
+    fn a_target_that_stays_away_cancels_the_paste() {
+        assert!(!holds_within_grace(
+            || false,
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+        ));
     }
 
     #[test]

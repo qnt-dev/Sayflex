@@ -24,7 +24,7 @@ use slint::{
 };
 
 use crate::{
-    ActionPalette, SelectionChooser, TranslationPair, TranslationPreview,
+    ActionPalette, InsertionNotice, SelectionChooser, TranslationPair, TranslationPreview,
     adaptive_text_panel_height, apply_translation_preview_layout,
     configure_indicator_native_window, flow_sphere, native_window_handle,
     overlay_presenter::{OverlayContract, OverlayPresenter},
@@ -706,9 +706,75 @@ error={error}"
     Ok(())
 }
 
+/// `--insertion-notice-preview [--ui-locale=ru]`: the notice shown when a
+/// dictation could not be inserted, beside the pointer as in use.
+pub(crate) fn run_insertion_notice_preview() -> Result<(), Box<dyn Error>> {
+    let _single_instance = rust_platform_windows::SingleInstanceGuard::acquire(
+        "Local\\SayFlex.InsertionNoticePreview",
+    )?;
+    let locale = env::args()
+        .find_map(|argument| argument.strip_prefix("--ui-locale=").map(str::to_owned))
+        .and_then(|code| crate::localization::UiLocale::from_code(&code))
+        .unwrap_or(crate::localization::UiLocale::English);
+    let system_locale = rust_platform_windows::user_locale_name();
+    let catalog_seed = InsertionNotice::new()?;
+    slint::select_bundled_translation(locale.resolved_code(&system_locale))?;
+    let notice = InsertionNotice::new()?;
+    drop(catalog_seed);
+    notice.set_reason(
+        crate::localization::text(
+            locale,
+            crate::localization::UiText::InsertFailedTargetChanged,
+        )
+        .into(),
+    );
+    notice.set_preview("Send the report to Anna before the meeting on Friday.".into());
+    notice.set_prepared(true);
+    notice.on_insert(|| {
+        let _ = slint::quit_event_loop();
+    });
+    notice.on_copy(|| {
+        let _ = slint::quit_event_loop();
+    });
+    notice.on_dismiss(|| {
+        let _ = slint::quit_event_loop();
+    });
+    notice.show()?;
+    let notice_weak = notice.as_weak();
+    slint::spawn_local(async move {
+        if let Some(notice) = notice_weak.upgrade() {
+            let handle = notice
+                .window()
+                .winit_window()
+                .await
+                .ok()
+                .as_deref()
+                .and_then(native_window_handle);
+            if let Err(error) = handle
+                .ok_or_else(|| "native notice window is unavailable".to_owned())
+                .and_then(rust_platform_windows::configure_notice_window)
+            {
+                eprintln!("could not configure insertion notice preview: {error}");
+            }
+        }
+    })?;
+    slint::run_event_loop()?;
+    Ok(())
+}
+
 pub(crate) fn run_action_palette_preview() -> Result<(), Box<dyn Error>> {
     let _single_instance =
         rust_platform_windows::SingleInstanceGuard::acquire("Local\\SayFlex.ActionPreview")?;
+    if let Some(locale) = env::args()
+        .find_map(|argument| argument.strip_prefix("--ui-locale=").map(str::to_owned))
+        .and_then(|code| crate::localization::UiLocale::from_code(&code))
+    {
+        let catalog_seed = ActionPalette::new()?;
+        slint::select_bundled_translation(
+            locale.resolved_code(&rust_platform_windows::user_locale_name()),
+        )?;
+        drop(catalog_seed);
+    }
     let palette = ActionPalette::new()?;
     let source =
         "A compact command surface should fit the selected text and preserve editor focus.";

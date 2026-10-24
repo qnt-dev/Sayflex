@@ -1030,9 +1030,10 @@ pub fn configure_action_window_for_target(
     position_action_window(window_handle, target_window_handle)
 }
 
-/// Places a notice in the lower-right corner of the work area of the monitor
-/// with the pointer, where Windows shows its own notifications. It does not
-/// cover the text the user is working on and never takes the keyboard focus.
+/// Places a notice beside the pointer, where the user is looking, on the side
+/// where it fits, so it never covers the spot under the pointer. In the corner
+/// by the tray it was easy to miss, and over the dark taskbar its translucent
+/// material looked like an ordinary window. It never takes the keyboard focus.
 pub fn configure_notice_window(window_handle: u64) -> Result<(), String> {
     configure_action_window(window_handle)?;
     let hwnd = window_handle as usize as HWND;
@@ -1052,12 +1053,13 @@ pub fn configure_notice_window(window_handle: u64) -> Result<(), String> {
         {
             return Err("Windows could not measure the notice window".to_owned());
         }
-        let width = window_rect.right - window_rect.left;
-        let height = window_rect.bottom - window_rect.top;
-        let work = monitor_info.rcWork;
-        let margin = 16 * GetDpiForWindow(hwnd).max(96) as i32 / 96;
-        let x = (work.right - width - margin).max(work.left);
-        let y = (work.bottom - height - margin).max(work.top);
+        let (x, y) = notice_position(
+            anchor,
+            window_rect.right - window_rect.left,
+            window_rect.bottom - window_rect.top,
+            monitor_info.rcWork,
+            GetDpiForWindow(hwnd).max(96) as i32,
+        );
         if SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -1373,6 +1375,33 @@ fn cursor_anchor() -> Option<POINT> {
         let mut cursor = POINT::default();
         (GetCursorPos(&mut cursor) != 0).then_some(cursor)
     }
+}
+
+/// Where a notice of this size goes next to the pointer: below and to the
+/// right when it fits, otherwise on the other side of the pointer on that
+/// axis, and inside the work area. Distances are scaled for `dpi`.
+fn notice_position(pointer: POINT, width: i32, height: i32, work: RECT, dpi: i32) -> (i32, i32) {
+    let scaled = |value: i32| value.saturating_mul(dpi) / 96;
+    let (gap_x, gap_y, margin) = (scaled(18), scaled(22), scaled(8));
+    // On one axis: after the pointer, else before it, else as far from the
+    // pointer as the work area allows.
+    let beside = |pointer: i32, size: i32, gap: i32, low: i32, high: i32| {
+        let min = low.saturating_add(margin);
+        let max = high.saturating_sub(margin).saturating_sub(size).max(min);
+        let after = pointer.saturating_add(gap);
+        let before = pointer.saturating_sub(gap).saturating_sub(size);
+        if after <= max {
+            after.max(min)
+        } else if before >= min {
+            before
+        } else {
+            max
+        }
+    };
+    (
+        beside(pointer.x, width, gap_x, work.left, work.right),
+        beside(pointer.y, height, gap_y, work.top, work.bottom),
+    )
 }
 
 /// Puts the window just below and right of an anchor, kept inside the work area
@@ -2083,9 +2112,74 @@ mod backdrop_tests {
 #[cfg(test)]
 mod placement_tests {
     use super::{
-        POINT, RECT, fit_window_to_work_area, offer_position, offer_position_for_region,
-        selection_anchor,
+        POINT, RECT, fit_window_to_work_area, notice_position, offer_position,
+        offer_position_for_region, selection_anchor,
     };
+
+    fn full_hd() -> RECT {
+        RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        }
+    }
+
+    fn covers(position: (i32, i32), size: (i32, i32), pointer: POINT) -> bool {
+        pointer.x >= position.0
+            && pointer.x < position.0 + size.0
+            && pointer.y >= position.1
+            && pointer.y < position.1 + size.1
+    }
+
+    #[test]
+    fn a_notice_opens_below_and_right_of_the_pointer_when_it_fits() {
+        let pointer = POINT { x: 600, y: 400 };
+        assert_eq!(
+            notice_position(pointer, 440, 196, full_hd(), 96),
+            (618, 422)
+        );
+    }
+
+    #[test]
+    fn a_notice_near_the_lower_right_corner_moves_to_the_other_side() {
+        let pointer = POINT { x: 1800, y: 1000 };
+        let position = notice_position(pointer, 440, 196, full_hd(), 96);
+        assert_eq!(position, (1800 - 18 - 440, 1000 - 22 - 196));
+        assert!(!covers(position, (440, 196), pointer));
+    }
+
+    #[test]
+    fn notice_distances_follow_the_display_scale() {
+        let pointer = POINT { x: 600, y: 400 };
+        assert_eq!(
+            notice_position(pointer, 660, 294, full_hd(), 144),
+            (627, 433)
+        );
+    }
+
+    #[test]
+    fn a_notice_wider_than_the_work_area_stays_at_its_left_edge() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 300,
+            bottom: 200,
+        };
+        assert_eq!(
+            notice_position(POINT { x: 150, y: 100 }, 440, 196, work, 96),
+            (8, 8)
+        );
+    }
+
+    #[test]
+    fn a_notice_on_a_second_screen_stays_on_that_screen() {
+        let pointer = POINT { x: 7600, y: 2100 };
+        let position = notice_position(pointer, 660, 294, second_screen(), 144);
+        assert!(position.0 >= 3840 && position.0 + 660 <= 7680);
+        assert!(position.1 >= 0 && position.1 + 294 <= 2160);
+        assert!(!covers(position, (660, 294), pointer));
+    }
 
     /// A second monitor to the right of the first, as Windows lays them out.
     fn second_screen() -> RECT {

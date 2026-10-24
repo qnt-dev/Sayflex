@@ -1365,6 +1365,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if env::args().any(|argument| argument == "--action-preview") {
         return run_action_palette_preview();
     }
+    if env::args().any(|argument| argument == "--insertion-notice-preview") {
+        return preview_modes::run_insertion_notice_preview();
+    }
     if let Some(long_text) = translation_preview_mode() {
         return run_translation_preview(long_text);
     }
